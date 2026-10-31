@@ -1,0 +1,2326 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FluSight Sandbox Lab</title>
+  <meta name="description"
+    content="Minimalist forecast visualizer and evaluation dashboard for the Reich Lab 2025-2026 forecast sandbox.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <script src="vendor/plotly-2.35.2.min.js"></script>
+  <script>
+    if (!window.Plotly) {
+      const s = document.createElement("script");
+      s.src = "https://cdn.plot.ly/plotly-2.35.2.min.js";
+      document.head.appendChild(s);
+    }
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <!-- Top Navigation Bar -->
+  <header class="top-nav">
+    <div class="nav-brand">
+      <div class="brand-switcher-wrap">
+        <button type="button" class="brand-switcher" id="btn-brand-menu" aria-haspopup="menu" aria-expanded="false"
+          aria-controls="brand-menu" title="Data sources: this repository and live forecast hubs">
+          <span class="brand-name">FluSight Sandbox</span>
+          <span class="brand-status-dot" id="brand-status-dot" aria-hidden="true"></span>
+          <svg class="brand-chevron" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+        </button>
+        <div class="brand-menu" id="brand-menu" role="menu" aria-label="Data sources"></div>
+      </div>
+      <span class="brand-divider">/</span>
+      <button type="button" class="theme-pill-slider" id="btn-theme-toggle" role="switch"
+        aria-checked="false" title="Toggle Solarized Light / Dark Mode (T)" aria-label="Toggle Solarized Light or Dark Mode">
+        <span class="pill-thumb" id="theme-pill-thumb" aria-hidden="true"></span>
+        <span class="pill-icon pill-sun" aria-hidden="true" title="Solarized Light Mode">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="4.5"></circle>
+            <line x1="12" y1="1" x2="12" y2="3.5"></line>
+            <line x1="12" y1="20.5" x2="12" y2="23"></line>
+            <line x1="4.22" y1="4.22" x2="6" y2="6"></line>
+            <line x1="18" y1="18" x2="19.78" y2="19.78"></line>
+            <line x1="1" y1="12" x2="3.5" y2="12"></line>
+            <line x1="20.5" y1="12" x2="23" y2="12"></line>
+            <line x1="4.22" y1="19.78" x2="6" y2="18"></line>
+            <line x1="18" y1="6" x2="19.78" y2="4.22"></line>
+          </svg>
+        </span>
+        <span class="pill-icon pill-moon" aria-hidden="true" title="Dark Mode">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+        </span>
+      </button>
+    </div>
+
+    <div class="nav-actions">
+
+      <div class="nav-keyhints-group" title="Global keyboard shortcuts: / to search models, ← / → to scrub dates, T for theme">
+        <span class="nav-keyhint"><kbd>/</kbd> search</span>
+        <span class="nav-keyhint-sep">&bull;</span>
+        <span class="nav-keyhint"><kbd>&larr;</kbd><kbd>&rarr;</kbd> dates</span>
+      </div>
+
+      <div class="divider-vertical nav-divider"></div>
+
+      <button type="button" class="nav-action-btn" id="btn-copy-cli"
+        title="Copy CLI evaluation command for current view">
+        <span class="nav-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg></span>
+        <span class="nav-btn-text">Copy CLI</span>
+      </button>
+
+      <button type="button" class="nav-action-btn" id="btn-share-link" title="Copy permalink to current view">
+        <span class="nav-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg></span>
+        <span class="nav-btn-text">Share</span>
+      </button>
+
+      <button type="button" class="nav-action-btn" id="btn-focus-mode"
+        title="Toggle Presentation / Fullscreen Focus Mode (F)">
+        <span class="nav-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg></span>
+        <span class="nav-btn-text">Presentation</span>
+      </button>
+
+      <button type="button" class="nav-action-btn ensemble-nav-btn" id="btn-open-ensemble-studio"
+        title="Open Synthetic Ensemble Studio to create, backtest, and compare custom quantile ensembles">
+        <span class="nav-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="9" height="9" rx="1.5"></rect><rect x="13" y="3" width="9" height="9" rx="1.5"></rect><rect x="2" y="14" width="9" height="9" rx="1.5"></rect><rect x="13" y="14" width="9" height="9" rx="1.5"></rect></svg></span>
+        <span class="nav-btn-text">Ensemble Studio</span>
+        <span class="nav-ensemble-badge" id="nav-ensemble-badge" style="display:none;">0</span>
+      </button>
+
+      <button type="button" class="nav-action-btn" id="btn-open-methodology-nav"
+        title="Open In-Depth Statistical Methodology & Research Guide">
+        <span class="nav-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></span>
+        <span class="nav-btn-text">Guide &amp; Methods</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main class="workspace">
+    <!-- Command Toolbar Ribbon -->
+    <section class="command-bar" aria-label="Forecast Command Bar">
+      <!-- Row 1: Primary Dimensions (Target, Location, Date, Display Toggles) -->
+      <div class="command-row">
+        <!-- Target Segmented Switcher -->
+        <div class="segmented-control" id="target-segmented">
+          <button type="button" class="segment-btn active" data-target="wk inc flu hosp">Flu Hosp (inc)</button>
+          <button type="button" class="segment-btn" data-target="wk inc flu prop ed visits">ED Visits (prop)</button>
+        </div>
+
+        <div class="divider-vertical"></div>
+
+        <!-- Location Controls -->
+        <div class="location-control-group">
+          <div class="segmented-control" id="quick-loc-segmented">
+            <button type="button" class="segment-btn active" data-loc="US">US</button>
+            <button type="button" class="segment-btn" data-loc="06">CA</button>
+            <button type="button" class="segment-btn" data-loc="36">NY</button>
+            <button type="button" class="segment-btn" data-loc="48">TX</button>
+            <button type="button" class="segment-btn" data-loc="12">FL</button>
+            <button type="button" class="segment-btn" data-loc="25">MA</button>
+          </div>
+
+          <div class="select-wrapper">
+            <select id="location-select" class="minimal-select" aria-label="Select location">
+              <option value="US">US National (US)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="divider-vertical"></div>
+
+        <!-- Date Stepper -->
+        <div class="date-stepper-group">
+          <button type="button" id="prev-date-btn" class="stepper-arrow-btn" title="Previous week (Left Arrow key)"
+            aria-label="Previous week">
+            <svg class="stepper-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+          <div class="custom-date-picker-wrap" id="custom-date-picker-wrap">
+            <button type="button" id="custom-date-btn" class="custom-date-trigger" aria-haspopup="dialog" aria-expanded="false" title="Click to browse all forecast and historical surveillance dates">
+              <svg class="date-trigger-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+              <span id="custom-date-display" class="date-trigger-label">Loading...</span>
+              <span id="custom-date-badge" class="date-trigger-badge">--</span>
+              <span class="date-trigger-arrow">▾</span>
+            </button>
+
+            <!-- Keep date-select in DOM for backward compatibility and automated tests -->
+            <select id="date-select" class="sr-only-date-select" aria-label="Select forecast date" tabindex="-1">
+              <option value="">Loading dates...</option>
+            </select>
+
+            <!-- Purpose-Built Date Picker Popover -->
+            <div id="custom-date-popover" class="date-picker-popover hidden" role="dialog" aria-label="Select Reference Date">
+              <div class="date-popover-header">
+                <div class="date-popover-search-wrap">
+                  <svg class="search-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                  <input type="text" id="date-picker-search" class="date-popover-search-input" placeholder="Search dates (e.g. 2024, Jan 13)..." autocomplete="off" spellcheck="false" />
+                  <button type="button" id="date-picker-clear-search" class="date-search-clear-btn hidden" title="Clear search">&times;</button>
+                </div>
+                <div class="date-popover-shortcuts">
+                  <button type="button" id="date-quick-recent" class="date-shortcut-btn" title="Jump to most recent date">Recent</button>
+                </div>
+              </div>
+
+              <!-- Season Filter Tabs -->
+              <div class="date-popover-tabs" id="date-popover-tabs">
+                <!-- Dynamically populated season tabs -->
+              </div>
+
+              <!-- Date Picker Items Scroll Container -->
+              <div class="date-popover-list" id="date-popover-list">
+                <!-- Dynamically populated dates grouped by season/month -->
+              </div>
+            </div>
+          </div>
+          <button type="button" id="next-date-btn" class="stepper-arrow-btn" title="Next week (Right Arrow key)"
+            aria-label="Next week">
+            <svg class="stepper-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
+          <button type="button" class="info-trigger-btn" data-term="ref_date"
+            title="Definition: Reference Date & Data Cutoff" aria-label="Reference date definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+        </div>
+
+        <div class="divider-vertical"></div>
+
+        <!-- Display Toggles -->
+        <div class="display-toggles-group">
+          <div class="season-dropdown-wrapper pi-dropdown-wrapper">
+            <button type="button" class="toggle-pill pi-menu-btn" id="btn-pi-menu" aria-haspopup="true"
+              aria-expanded="false" title="Prediction intervals and width rulers shown on the fan chart">95% PI</button>
+            <div class="season-dropdown-menu pi-dropdown-menu" id="pi-dropdown-menu" role="menu"
+              aria-label="Prediction interval display"></div>
+          </div>
+          <button type="button" class="toggle-pill active" id="btn-toggle-truth"
+            title="Toggle Actual Oracle Outcome">Truth</button>
+        </div>
+
+        <div class="divider-vertical"></div>
+
+        <!-- Shuffle Colors -->
+        <button type="button" id="btn-shuffle-colors" class="toggle-pill shuffle-colors-btn" aria-label="Shuffle model colors"
+          title="Shuffle model colors for distinct visual contrast (Hotkey: C)">
+          <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
+          <span>Shuffle Colors</span>
+        </button>
+      </div>
+
+      <!-- Row 2: Models Carousel & Unified Control Toolbar -->
+      <div class="models-bar" id="models-bar">
+        <div class="models-filters-bar">
+          <div class="models-title-wrap">
+            <span class="models-bar-title">MODELS</span>
+            <span class="models-count-badge" id="models-count-badge">3 / 25 active</span>
+          </div>
+
+          <!-- Quick Search Filter -->
+          <div class="model-search-wrap">
+            <span class="search-icon"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg></span>
+            <input type="text" id="model-search-input" class="model-search-input"
+              placeholder="Search models... [ / ]" autocomplete="off" spellcheck="false"
+              aria-label="Filter models">
+            <button type="button" id="model-search-clear" class="search-clear-btn hidden"
+              title="Clear search">&times;</button>
+          </div>
+
+          <div class="facet-separator"></div>
+
+          <!-- Family Dropdown Filter -->
+          <div class="filter-facet-section">
+            <span class="facet-title">FAMILY</span>
+            <div class="family-select-wrap">
+              <select id="models-family-select" class="models-family-dropdown" aria-label="Filter models by family">
+                <option value="all">All Families</option>
+                <option value="selected">Selected Only</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="facet-separator"></div>
+
+          <!-- Season Dropdown Filter -->
+          <div class="filter-facet-section">
+            <span class="facet-title">SEASON</span>
+            <div class="season-select-wrap">
+              <select id="models-season-select" class="models-season-dropdown" aria-label="Filter models by season">
+                <option value="all">All Seasons</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Selection Actions: Select All & Clear -->
+          <div class="models-selection-actions">
+            <button type="button" id="btn-filter-select-all" class="micro-btn"
+              title="Select all repository models in current view (live hub models have their own Select all)">Select All</button>
+            <button type="button" id="btn-filter-clear" class="micro-btn" title="Deselect all models">Clear</button>
+          </div>
+        </div>
+
+        <div class="models-chip-strip collapsed" id="models-chip-strip">
+          <!-- Dynamically populated model toggle chips -->
+        </div>
+
+        <!-- Expand / Collapse Drawer Footer -->
+        <div class="models-strip-footer" id="models-strip-footer">
+          <button type="button" class="models-expand-btn" id="btn-toggle-expand-models" aria-expanded="false"
+            title="Toggle model drawer">
+            <span id="models-expand-text">Show all models (25)</span>
+            <span class="expand-arrow" id="models-expand-arrow">▾</span>
+          </button>
+        </div>
+
+        <!-- Live hub models (shown only when a hub is synced): a compact shelf per hub -->
+        <div class="models-hub-strip hidden" id="models-hub-strip" aria-label="Live hub models"></div>
+      </div>
+    </section>
+
+    <!-- Forecast Fan Chart Canvas -->
+    <section class="plot-panel" id="plot-panel" aria-label="Forecast Plot Panel">
+      <div class="plot-header">
+        <div class="plot-title-group">
+          <h2 class="plot-heading" id="plot-heading">US National</h2>
+          <div class="plot-meta-sub-row">
+            <span class="plot-meta-sub" id="plot-subheading"><span class="plot-sub-date-part">Reference Date: 2024-01-13</span><span class="plot-sub-target-part"> &bull; Target: wk inc flu hosp</span></span>
+            <span class="plot-sub-active-badge hidden" id="plot-sub-active-badge"></span>
+          </div>
+        </div>
+
+        <!-- Surveillance & Indicator Controls -->
+        <button type="button" class="indicators-toggle-btn" id="btn-indicators-toggle" aria-expanded="false" title="Toggle Surveillance Signals & Technical Indicators">
+          <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+          <span>Signals &amp; Indicators</span>
+          <span class="indicator-active-badge hidden" id="indicator-active-badge">0</span>
+          <span class="expand-arrow" id="indicators-expand-arrow">▾</span>
+        </button>
+
+        <!-- View Mode Switcher: Fan Chart vs Spatial Map -->
+        <div class="view-mode-segmented segmented-control" id="view-mode-segmented">
+          <button type="button" class="segment-btn active" data-view="timeline" id="btn-view-timeline" title="Timeline Fan Chart">
+            <span class="view-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg></span>
+            <span>Timeline Fan</span>
+          </button>
+          <button type="button" class="segment-btn" data-view="spatial" id="btn-view-spatial" title="US Spatial Map (Beta)">
+            <span class="view-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg></span>
+            <span>US Spatial Map</span>
+            <span class="new-badge beta-badge">BETA</span>
+          </button>
+          <button type="button" class="segment-btn" data-view="heatmap" id="btn-view-heatmap" title="Epidemic &amp; Model Heatmap (H)">
+            <span class="view-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg></span>
+            <span>Heatmap</span>
+          </button>
+          <button type="button" class="segment-btn" data-view="peak" id="btn-view-peak" title="Season peak forecasts: timing &amp; size (P)">
+            <span class="view-btn-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 20 L9 8 L13 14 L16 9 L22 20"></path><circle cx="9" cy="5" r="1.4" fill="currentColor" stroke="none"></circle></svg></span>
+            <span>Season Peak</span>
+          </button>
+        </div>
+
+        <!-- Presentation Mode Header Controls -->
+        <div class="presentation-controls" id="presentation-controls">
+          <div class="presentation-date-stepper">
+            <button type="button" class="micro-btn" id="pres-prev-date" title="Previous week (&larr;)">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -1px; margin-right: 2px;">
+                <polyline points="15 18 9 12 15 6"></polyline>
+              </svg>
+              Prev</button>
+            <span class="pres-date-label" id="pres-date-label">--</span>
+            <button type="button" class="micro-btn" id="pres-next-date" title="Next week (&rarr;)">Next
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -1px; margin-left: 2px;">
+                <polyline points="9 18 15 12 9 6"></polyline>
+              </svg>
+            </button>
+          </div>
+          <div class="divider-micro"></div>
+          <div class="season-dropdown-wrapper pi-dropdown-wrapper">
+            <button type="button" class="micro-btn pi-menu-btn" id="pres-pi-menu" aria-haspopup="true"
+              aria-expanded="false" title="Prediction intervals and width rulers shown on the fan chart">95% PI</button>
+            <div class="season-dropdown-menu pi-dropdown-menu" id="pres-pi-dropdown-menu" role="menu"
+              aria-label="Prediction interval display"></div>
+          </div>
+          <button type="button" class="micro-btn active" id="pres-toggle-truth"
+            title="Toggle Oracle Ground Truth">Truth</button>
+          <button type="button" class="micro-btn" id="pres-shuffle-colors" title="Shuffle model colors (C)">
+            <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r=".5" fill="currentColor"></circle><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"></circle><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"></circle><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.563-2.512 5.563-5.563C22 6.5 17.5 2 12 2z"></path></svg>
+            <span>Colors</span>
+          </button>
+          <div class="divider-micro"></div>
+          <button type="button" class="micro-btn pres-exit-btn" id="pres-btn-exit"
+            title="Exit Presentation Mode (Esc)">
+            <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            <span>Exit Focus</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Collapsible Indicators & Surveillance Drawer -->
+      <div class="indicators-drawer collapsed" id="indicators-drawer" aria-label="Surveillance Signals and Indicators Panel">
+        <div class="indicators-drawer-inner">
+          <div class="indicators-drawer-header">
+            <div class="indicators-title-group">
+              <span class="indicators-panel-title">SIGNALS &amp; TECHNICAL INDICATORS</span>
+              <span class="indicators-panel-hint">Overlay multi-source surveillance streams and computed epidemic dynamics</span>
+            </div>
+            <div class="indicators-header-right">
+              <div class="indicator-mode-segmented segmented-control" id="indicator-mode-segmented">
+                <span class="indicator-mode-label">Display Mode:</span>
+                <button type="button" class="segment-btn active" data-mode="dual" id="btn-mode-dual" title="Plot auxiliary signals on a dedicated right-hand axis">
+                  Dual Y-Axis (Right)
+                </button>
+                <button type="button" class="segment-btn" data-mode="normalized" id="btn-mode-normalized" title="Normalize all curves to 0–100% of seasonal peak for direct lead/lag wave timing inspection">
+                  Normalized Wave Timing (0–100%)
+                </button>
+                <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_display_modes" title="View display mode methodology">ⓘ</button>
+              </div>
+              <button type="button" class="micro-btn reset-indicators-btn" id="btn-reset-indicators" title="Clear all active indicators">Reset All</button>
+            </div>
+          </div>
+
+          <div class="indicators-grid">
+            <!-- 1. Surveillance Streams -->
+            <div class="indicator-column">
+              <div class="indicator-column-header">
+                <span class="indicator-column-title">SURVEILLANCE STREAMS</span>
+                <span class="indicator-source-tag">iddata / CDC</span>
+              </div>
+              <div class="indicator-options-list">
+                <label class="indicator-item" data-indicator="nssp">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-nssp" value="nssp">
+                  <span class="indicator-color-pip pip-nssp"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">NSSP Emergency Dept</span>
+                    <span class="indicator-item-sub">% ED Visits with Flu</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_nssp" title="View NSSP methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="ilinet">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-ilinet" value="ilinet">
+                  <span class="indicator-color-pip pip-ilinet"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">ILINet (ILI × % Lab-Pos)</span>
+                    <span class="indicator-item-sub">Scaled Outpatient ILI+</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_ilinet" title="View ILINet methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="flusurvnet">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-flusurvnet" value="flusurvnet">
+                  <span class="indicator-color-pip pip-flusurvnet"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">FluSurv-NET Lab Rate</span>
+                    <span class="indicator-item-sub">Hospitalizations per 100k</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_flusurvnet" title="View FluSurv-NET methodology">ⓘ</button>
+                </label>
+              </div>
+            </div>
+
+            <!-- 2. Trend Smoothing -->
+            <div class="indicator-column">
+              <div class="indicator-column-header">
+                <span class="indicator-column-title">TREND SMOOTHING</span>
+                <span class="indicator-source-tag">Moving Averages</span>
+              </div>
+              <div class="indicator-options-list">
+                <label class="indicator-item" data-indicator="ma2">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-ma2" value="ma2">
+                  <span class="indicator-color-pip pip-ma2"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">2-Week Moving Avg</span>
+                    <span class="indicator-item-sub">Smooths single-week jitter</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_ma2" title="View 2-Week MA methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="ma4">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-ma4" value="ma4">
+                  <span class="indicator-color-pip pip-ma4"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">4-Week Moving Avg</span>
+                    <span class="indicator-item-sub">Monthly trend trajectory</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_ma4" title="View 4-Week MA methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="ema3">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-ema3" value="ema3">
+                  <span class="indicator-color-pip pip-ema3"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">3-Week Exponential MA</span>
+                    <span class="indicator-item-sub">Fast turning point response</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_ema3" title="View 3-Week EMA methodology">ⓘ</button>
+                </label>
+              </div>
+            </div>
+
+            <!-- 3. Epidemic Velocity & Growth -->
+            <div class="indicator-column">
+              <div class="indicator-column-header">
+                <span class="indicator-column-title">EPIDEMIC DYNAMICS</span>
+                <span class="indicator-source-tag">Derivatives</span>
+              </div>
+              <div class="indicator-options-list">
+                <label class="indicator-item" data-indicator="velocity">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-velocity" value="velocity">
+                  <span class="indicator-color-pip pip-velocity"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">WoW Case Velocity</span>
+                    <span class="indicator-item-sub">Weekly Net Δ Cases (t - t-1)</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_velocity" title="View Case Velocity methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="growth">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-growth" value="growth">
+                  <span class="indicator-color-pip pip-growth"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">WoW Growth Rate (%)</span>
+                    <span class="indicator-item-sub">Relative expansion rate (%/wk)</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_growth" title="View Growth Rate methodology">ⓘ</button>
+                </label>
+              </div>
+            </div>
+
+            <!-- 4. Historical Benchmarks -->
+            <div class="indicator-column">
+              <div class="indicator-column-header">
+                <span class="indicator-column-title">BENCHMARKS</span>
+                <span class="indicator-source-tag">Historical Baseline</span>
+              </div>
+              <div class="indicator-options-list">
+                <!-- Aligned Historical Seasons Multi-Picker -->
+                <div class="benchmark-seasons-block">
+                  <div class="benchmark-seasons-header">
+                    <div class="benchmark-subhead-wrap">
+                      <span class="benchmark-subhead">ALIGNED SEASONS</span>
+                      <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_prior_seasons" title="View historical waves methodology">ⓘ</button>
+                    </div>
+                    <div class="season-palette-control" id="season-palette-control" role="group" aria-label="Season line palette">
+                      <button type="button" class="season-palette-btn active" data-palette="mono" id="btn-palette-mono" title="Monochrome recency gradient (faint)">Mono</button>
+                      <button type="button" class="season-palette-btn" data-palette="tints" id="btn-palette-tints" title="Distinct pastel color tints">Tints</button>
+                    </div>
+                  </div>
+                  <div class="season-waves-pills" id="season-waves-pills" data-palette="mono">
+                    <label class="season-wave-pill" data-season="2023/24" title="2023–24 Season Wave (Aligned)">
+                      <input type="checkbox" class="indicator-checkbox season-wave-checkbox" value="season_2023/24" id="ind-season-23-24">
+                      <span class="season-pill-pip pip-s1"></span>
+                      <span class="season-pill-text">'23–'24</span>
+                    </label>
+                    <label class="season-wave-pill" data-season="2022/23" title="2022–23 Season Wave (Aligned)">
+                      <input type="checkbox" class="indicator-checkbox season-wave-checkbox" value="season_2022/23" id="ind-season-22-23">
+                      <span class="season-pill-pip pip-s2"></span>
+                      <span class="season-pill-text">'22–'23</span>
+                    </label>
+                    <label class="season-wave-pill" data-season="2021/22" title="2021–22 Season Wave (Aligned)">
+                      <input type="checkbox" class="indicator-checkbox season-wave-checkbox" value="season_2021/22" id="ind-season-21-22">
+                      <span class="season-pill-pip pip-s3"></span>
+                      <span class="season-pill-text">'21–'22</span>
+                    </label>
+                    <label class="season-wave-pill" data-season="2020/21" title="2020–21 Season Wave (Aligned)">
+                      <input type="checkbox" class="indicator-checkbox season-wave-checkbox" value="season_2020/21" id="ind-season-20-21">
+                      <span class="season-pill-pip pip-s4"></span>
+                      <span class="season-pill-text">'20–'21</span>
+                    </label>
+                  </div>
+                </div>
+
+                <label class="indicator-item" data-indicator="season_peak">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-season_peak" value="season_peak">
+                  <span class="indicator-color-pip pip-peak"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">Season Peak Level</span>
+                    <span class="indicator-item-sub">Observed season-to-date max</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_season_peak" title="View season peak methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="peak_forecasts" id="ind-item-peak-forecasts">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-peak_forecasts" value="peak_forecasts">
+                  <span class="indicator-color-pip pip-peakfc"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">Peak Forecasts</span>
+                    <span class="indicator-item-sub" id="ind-peak-forecasts-sub">Each model's peak week × size (▲)</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="peak_forecasts" title="View peak forecast methodology">ⓘ</button>
+                </label>
+                <label class="indicator-item" data-indicator="unrevised">
+                  <input type="checkbox" class="indicator-checkbox" id="ind-unrevised" value="unrevised">
+                  <span class="indicator-color-pip pip-unrevised"></span>
+                  <div class="indicator-item-text">
+                    <span class="indicator-item-name">As-of Reports</span>
+                    <span class="indicator-item-sub">Data as published at forecast date</span>
+                  </div>
+                  <button type="button" class="info-trigger-btn indicator-info-btn" data-term="ind_unrevised" title="View As-of Reports methodology">ⓘ</button>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Presentation Mode Active Signals Ribbon (Shown only in fullscreen mode) -->
+      <div class="pres-active-features-bar hidden" id="pres-active-features-bar">
+        <span class="pres-active-features-label">ACTIVE SIGNALS:</span>
+        <div class="pres-active-features-chips" id="pres-active-features-chips"></div>
+      </div>
+
+      <div id="forecast-plot" class="forecast-plot-canvas"></div>
+
+      <!-- Spatial Map Container (Choropleth View) -->
+      <div id="spatial-container" class="spatial-container hidden">
+        <!-- Spatial Toolbar Ribbon -->
+        <div class="spatial-toolbar">
+          <div class="spatial-toolbar-group">
+            <span class="spatial-toolbar-label">MODEL:</span>
+            <div class="select-wrapper">
+              <select id="spatial-model-select" class="minimal-select spatial-select"
+                aria-label="Select model for spatial map">
+                <option value="">Loading models...</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="divider-vertical"></div>
+
+          <div class="spatial-toolbar-group">
+            <span class="spatial-toolbar-label">LAYER:</span>
+            <button type="button" class="info-trigger-btn" data-term="spatial_layers" title="Definition: Spatial Layers"
+              aria-label="Spatial layers definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            <div class="select-wrapper">
+              <select id="spatial-layer-select" class="minimal-select spatial-select spatial-layer-select"
+                aria-label="Select spatial forecast layer">
+                <option value="rate" selected>Rate / 100k (Incidence)</option>
+                <option value="count">Admissions (Volume)</option>
+                <option value="trend">Trend (% Growth)</option>
+                <option value="wis">WIS Error (Evaluation)</option>
+                <optgroup label="Season Peak" class="spatial-peak-group">
+                  <option value="peak_week">Peak Week (Median)</option>
+                  <option value="peak_size">Peak Size / 100k (Median)</option>
+                </optgroup>
+              </select>
+            </div>
+          </div>
+
+          <div class="divider-vertical"></div>
+
+          <div class="spatial-toolbar-group spatial-player-group">
+            <span class="spatial-toolbar-label">HORIZON:</span>
+            <button type="button" class="info-trigger-btn" data-term="forecast_horizons"
+              title="Definition: Forecast Horizons" aria-label="Horizons definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            <div class="segmented-control" id="spatial-horizon-segmented">
+              <button type="button" class="segment-btn" data-h="0" title="Horizon 0 (Nowcast Baseline)">h=0</button>
+              <button type="button" class="segment-btn active" data-h="1"
+                title="Horizon 1 (+1 Week Projection)">h=1</button>
+              <button type="button" class="segment-btn" data-h="2" title="Horizon 2 (+2 Weeks Projection)">h=2</button>
+              <button type="button" class="segment-btn" data-h="3" title="Horizon 3 (+3 Weeks Projection)">h=3</button>
+            </div>
+
+            <button type="button" class="spatial-play-btn" id="btn-spatial-play"
+              title="Animate through weekly horizons">
+              <span id="spatial-play-icon"><svg class="ui-icon" width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg></span>
+              <span id="spatial-play-text">Play</span>
+            </button>
+
+            <div class="divider-vertical"></div>
+
+            <button type="button" class="spatial-guide-btn" id="btn-spatial-guide"
+              title="Open In-Depth Spatial Epidemiology &amp; Wave Tracking Methodology Guide">
+              <span class="spatial-guide-icon"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg></span>
+              <span>Guide</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="spatial-h0-notice" class="spatial-h0-notice hidden">
+          <div class="h0-notice-content">
+            <span class="h0-notice-icon"><svg class="ui-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></span>
+            <div class="h0-notice-text">
+              <strong>Horizon 0 is the Nowcast Baseline (0.0% Growth):</strong>
+              <span>Relative trend at h=0 is 0.0% by definition because it evaluates the reference week itself. Step
+                forward to <em>h=1 (+1 Wk)</em>, <em>h=2</em>, or <em>h=3</em> (or click <strong>Play</strong>) to
+                visualize forward epidemic growth!</span>
+            </div>
+          </div>
+          <button type="button" class="h0-jump-btn" id="btn-h0-jump-h1">
+            <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            <span>Jump to h=1 (+1 Wk)</span>
+          </button>
+        </div>
+
+        <!-- Spatial Main Work Area (Map + Side Inspector) -->
+        <div class="spatial-workspace-layout">
+          <div id="spatial-map-plot" class="spatial-map-canvas"></div>
+
+          <!-- State Quick Inspector Card -->
+          <div class="spatial-inspector-panel" id="spatial-inspector-panel">
+            <div class="inspector-header">
+              <div class="inspector-title-wrap">
+                <span class="inspector-badge" id="insp-state-code">US</span>
+                <div class="inspector-name-group">
+                  <h3 class="inspector-state-name" id="insp-state-name">Select a State</h3>
+                  <span class="inspector-state-meta" id="insp-state-pop">Click any state on map</span>
+                </div>
+              </div>
+              <button type="button" class="insp-toggle-btn" id="btn-toggle-inspector"
+                title="Collapse Inspector to expand Map width (I)">⇤</button>
+            </div>
+
+            <div class="inspector-body">
+              <div class="inspector-metric-grid">
+                <!-- Row 1: Projected Admissions vs Actual Truth (Side by Side) -->
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">PROJECTED</span>
+                    <button type="button" class="info-trigger-btn" data-term="projected_admissions"
+                      title="Projected Admissions Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val highlight" id="insp-val-admissions">--</span>
+                  <span class="insp-metric-sub" id="insp-val-interval">95% PI: [-- – --]</span>
+                </div>
+
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">ACTUAL TRUTH</span>
+                    <button type="button" class="info-trigger-btn" data-term="actual_truth"
+                      title="Observed Ground Truth Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val" id="insp-val-truth">--</span>
+                  <span class="insp-metric-sub" id="insp-val-truth-sub">Observed truth</span>
+                </div>
+
+                <!-- Row 2: Incidence Rate vs Epidemic Trajectory (Side by Side) -->
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">INCIDENCE RATE</span>
+                    <button type="button" class="info-trigger-btn" data-term="incidence_rate"
+                      title="Population-adjusted Rate Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val" id="insp-val-rate">--</span>
+                  <span class="insp-metric-sub">Per 100k residents</span>
+                </div>
+
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">TRAJECTORY</span>
+                    <button type="button" class="info-trigger-btn" data-term="epidemic_trajectory"
+                      title="Epidemic Trajectory Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val" id="insp-val-trend">--</span>
+                  <span class="insp-metric-sub" id="insp-val-trend-sub">vs Nowcast (h=0)</span>
+                </div>
+
+                <!-- Row 3: Dedicated WIS Evaluation Box -->
+                <div class="insp-metric-card insp-metric-card-wide">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">WIS EVALUATION & CALIBRATION</span>
+                    <button type="button" class="info-trigger-btn" data-term="wis_evaluation"
+                      title="Weighted Interval Score Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <div class="insp-metric-split">
+                    <div>
+                      <span class="insp-metric-val highlight-amber" id="insp-val-wis">--</span>
+                      <span class="insp-metric-sub" id="insp-val-wis-label">Weighted Interval Score</span>
+                    </div>
+                    <div class="insp-wis-status">
+                      <span class="badge-micro" id="insp-wis-badge">Pending</span>
+                      <span class="insp-metric-sub" id="insp-wis-desc">Unscored horizon</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="inspector-actions">
+                <button type="button" class="insp-action-btn primary" id="btn-insp-jump-timeline"
+                  title="Jump to single-state timeline fan chart">
+                  <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                  <span>Open State Timeline Fan</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Collapsed Inspector Rail Button (Click to Expand) -->
+          <button type="button" class="spatial-collapsed-rail hidden" id="btn-expand-inspector"
+            title="Expand State Inspector (I)">
+            <span class="rail-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg></span>
+            <span class="rail-text" id="rail-state-text">State Inspector</span>
+            <span class="rail-arrow">⇥</span>
+          </button>
+        </div>
+
+        <!-- Spatial Insights Strip -->
+        <div class="spatial-insights-strip" id="spatial-insights-strip">
+          <div class="spatial-insight-card">
+            <div class="insight-label-row">
+              <span class="insight-label">
+                <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"></path></svg>
+                <span>HIGHEST INCIDENCE STATE</span>
+              </span>
+              <button type="button" class="info-trigger-btn" data-term="highest_incidence"
+                title="Highest Incidence Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            </div>
+            <span class="insight-val" id="insight-top-rate">--</span>
+            <span class="insight-sub" id="insight-top-rate-sub">Admissions per 100k</span>
+          </div>
+
+          <div class="spatial-insight-card">
+            <div class="insight-label-row">
+              <span class="insight-label">
+                <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                <span>FASTEST EPIDEMIC SURGE</span>
+              </span>
+              <button type="button" class="info-trigger-btn" data-term="fastest_surge"
+                title="Fastest Epidemic Surge Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            </div>
+            <span class="insight-val" id="insight-top-surge">--</span>
+            <span class="insight-sub" id="insight-top-surge-sub">Largest % weekly growth</span>
+          </div>
+
+          <div class="spatial-insight-card">
+            <div class="insight-label-row">
+              <span class="insight-label">
+                <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 21h18"></path><path d="M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16"></path><path d="M9 10h6"></path><path d="M12 7v6"></path></svg>
+                <span>NATIONAL TOTAL (STATES)</span>
+              </span>
+              <button type="button" class="info-trigger-btn" data-term="national_sum"
+                title="National Sum Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            </div>
+            <span class="insight-val" id="insight-national-sum">--</span>
+            <span class="insight-sub" id="insight-national-sum-sub">Sum of state medians</span>
+          </div>
+
+          <div class="spatial-insight-card">
+            <div class="insight-label-row">
+              <span class="insight-label">
+                <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0"></path><path d="M2 17c2-3 4-3 6 0s4 3 6 0 4-3 6 0"></path></svg>
+                <span>WAVE SPREAD STATUS</span>
+              </span>
+              <button type="button" class="info-trigger-btn" data-term="wave_spread_status"
+                title="Wave Spread Status Definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            </div>
+            <span class="insight-val" id="insight-spread-status">--</span>
+            <span class="insight-sub" id="insight-spread-sub">State trajectory balance</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Heatmap Container (Cross-Sectional Heatmap View) -->
+      <div id="heatmap-container" class="heatmap-container hidden">
+        <!-- Heatmap Toolbar Ribbon -->
+        <div class="heatmap-toolbar" id="heatmap-toolbar">
+          <!-- Row A: What is shown (axes, jurisdictions, time scope) -->
+          <div class="heatmap-toolbar-row">
+            <!-- Group 1: Directly Selectable Axes (ROWS & COLS) -->
+            <div class="heatmap-toolbar-group" id="heatmap-axes-group">
+              <span class="heatmap-toolbar-label">ROWS:</span>
+              <div class="select-wrapper">
+                <select id="heatmap-rows-select" class="minimal-select heatmap-select heatmap-axis-select" aria-label="Select Y-Axis rows">
+                  <option value="location" selected>Location</option>
+                  <option value="model">Model</option>
+                  <option value="date">Date</option>
+                  <option value="horizon">Horizon</option>
+                </select>
+              </div>
+
+              <button type="button" class="micro-btn icon-only-btn" id="heatmap-swap-axes-btn" title="Swap Rows and Columns (⇄)" aria-label="Swap axes">
+                <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 5h18"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 19H3"></path></svg>
+              </button>
+
+              <span class="heatmap-toolbar-label">COLS:</span>
+              <div class="select-wrapper">
+                <select id="heatmap-cols-select" class="minimal-select heatmap-select heatmap-axis-select" aria-label="Select X-Axis columns">
+                  <option value="date" selected>Date</option>
+                  <option value="horizon">Horizon</option>
+                  <option value="model">Model</option>
+                  <option value="location">Location</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Group 2: LOC Scope (Leaderboard Parity) -->
+            <div class="heatmap-toolbar-group" id="heatmap-loc-group">
+              <span class="heatmap-toolbar-label">LOC:</span>
+              <div class="segmented-control loc-segmented" id="heatmap-loc-segmented">
+                <button type="button" class="segment-btn active" data-loc="states" title="Display all 50 states + DC + territories">All States</button>
+                <button type="button" class="segment-btn" data-loc="current" title="Display currently selected location">Current</button>
+              </div>
+            </div>
+
+            <!-- Group 3: TIME Scope (Leaderboard Parity) -->
+            <div class="heatmap-toolbar-group" id="heatmap-time-group">
+              <span class="heatmap-toolbar-label">TIME:</span>
+              <div class="segmented-control horizon-segmented" id="heatmap-time-segmented">
+                <button type="button" class="segment-btn" data-time="date" title="Strictly on the selected reference date">Date</button>
+                <button type="button" class="segment-btn active" data-time="season" id="btn-hm-season" title="Focal season rounds">Season (24-25)</button>
+                <div class="season-dropdown-wrapper">
+                  <button type="button" class="segment-btn season-pick-btn" id="btn-hm-custom-season" data-time="custom" title="Select one or more seasons to aggregate">Seasons ▾</button>
+                  <div class="season-dropdown-menu" id="hm-season-dropdown-menu" role="menu" aria-label="Select seasons to aggregate">
+                    <div class="season-menu-header">
+                      <span>HEATMAP SEASONS</span>
+                      <button type="button" class="season-menu-link" id="btn-hm-season-select-all" title="Select all seasons">Select All</button>
+                    </div>
+                    <div class="season-menu-list" id="hm-season-menu-list">
+                      <!-- Populated dynamically -->
+                    </div>
+                    <div class="season-menu-footer">
+                      <button type="button" class="micro-btn" id="btn-hm-season-apply">Apply</button>
+                    </div>
+                  </div>
+                </div>
+                <button type="button" class="segment-btn" data-time="all" title="All recorded rounds across all seasons">All Time</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Row B: How cells are computed and styled -->
+          <div class="heatmap-toolbar-row">
+            <!-- Group 4: Contextual Model Selector (when Model is NOT an axis) -->
+            <div class="heatmap-toolbar-group hidden" id="heatmap-model-group">
+              <span class="heatmap-toolbar-label">MODEL:</span>
+              <div class="select-wrapper">
+                <select id="heatmap-model-select" class="minimal-select heatmap-select" aria-label="Select model or ground truth">
+                  <option value="truth" selected>Observed Ground Truth</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Group 4b: Forecast Horizon (Location x Date cells for a single model) -->
+            <div class="heatmap-toolbar-group hidden" id="heatmap-horizon-group">
+              <span class="heatmap-toolbar-label">HORIZON:</span>
+              <div class="segmented-control" id="heatmap-horizon-segmented">
+                <button type="button" class="segment-btn" data-h="0" title="Horizon 0 (Nowcast)">h=0</button>
+                <button type="button" class="segment-btn active" data-h="1" title="Horizon 1 (+1 Week Projection)">h=1</button>
+                <button type="button" class="segment-btn" data-h="2" title="Horizon 2 (+2 Weeks Projection)">h=2</button>
+                <button type="button" class="segment-btn" data-h="3" title="Horizon 3 (+3 Weeks Projection)">h=3</button>
+              </div>
+            </div>
+
+            <!-- Group 5: Cell Metric -->
+            <div class="heatmap-toolbar-group">
+              <span class="heatmap-toolbar-label">METRIC:</span>
+              <button type="button" class="info-trigger-btn" data-term="heatmap_layers" title="Definition: Heatmap Metrics"
+                aria-label="Heatmap metrics definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+              <div class="select-wrapper">
+                <select id="heatmap-metric-select" class="minimal-select heatmap-select" aria-label="Select heatmap cell metric">
+                  <option value="rate" selected>Rate / 100k (Incidence)</option>
+                  <option value="count">Admissions (Volume)</option>
+                  <option value="trend">Trend (% Weekly Change)</option>
+                  <option value="wis">WIS Error (Calibration)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Display options popover: set-and-forget sorting, scaling and palette -->
+            <div class="season-dropdown-wrapper">
+              <button type="button" class="micro-btn hm-display-btn" id="heatmap-display-btn" aria-haspopup="true"
+                aria-expanded="false" title="Row sorting, scaling and color palette">
+                <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+                <span>Display</span> <span aria-hidden="true">▾</span>
+              </button>
+              <div class="season-dropdown-menu hm-display-menu" id="heatmap-display-menu" role="menu" aria-label="Heatmap display options">
+                <div class="season-menu-header"><span>DISPLAY OPTIONS</span></div>
+                <!-- Group 6: Row Sorting -->
+                <div class="heatmap-toolbar-group" id="heatmap-sort-group">
+                  <span class="heatmap-toolbar-label">SORT:</span>
+                  <button type="button" class="info-trigger-btn" data-term="wave_cascade" title="Definition: Epidemic Sorting"
+                    aria-label="Epidemic sorting definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  <div class="select-wrapper">
+                    <select id="heatmap-sort-select" class="minimal-select heatmap-select" aria-label="Sort heatmap rows">
+                      <option value="hhs_region" selected>HHS Region (1–10)</option>
+                      <option value="peak_timing">Peak Timing (Wave Cascade)</option>
+                      <option value="magnitude">Incidence Magnitude</option>
+                      <option value="population">Population</option>
+                      <option value="alphabetical">Alphabetical (A–Z)</option>
+                    </select>
+                  </div>
+                </div>
+                <!-- Group 7: Scaling / Normalization (Percentile Rank removed) -->
+                <div class="heatmap-toolbar-group" id="heatmap-norm-group">
+                  <span class="heatmap-toolbar-label">SCALE:</span>
+                  <button type="button" class="info-trigger-btn" data-term="row_normalization" title="Definition: Row Normalization"
+                    aria-label="Row normalization definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  <div class="select-wrapper">
+                    <select id="heatmap-norm-select" class="minimal-select heatmap-select" aria-label="Heatmap normalization">
+                      <option value="none" selected>None (Raw Values)</option>
+                      <option value="row_min_max">Row Min-Max (0 &rarr; 1 Peak Timing)</option>
+                    </select>
+                  </div>
+                </div>
+                <!-- Group 8: Palette & Style -->
+                <div class="heatmap-toolbar-group">
+                  <span class="heatmap-toolbar-label">PALETTE:</span>
+                  <div class="select-wrapper">
+                    <select id="heatmap-palette-select" class="minimal-select heatmap-select heatmap-palette-select" aria-label="Select color palette">
+                      <!-- Dynamically populated from HEATMAP_PALETTES -->
+                    </select>
+                  </div>
+                  <button type="button" class="micro-btn" id="heatmap-reverse-palette-btn" title="Invert color palette direction">
+                    <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+                    <span>Invert</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Heatmap Main Work Area (Heatmap Plot + Side Inspector) -->
+        <div class="heatmap-workspace-layout" id="heatmap-workspace-layout">
+          <!-- Heatmap Canvas Plot -->
+          <div class="heatmap-plot-wrapper">
+            <div id="heatmap-loading-overlay" class="heatmap-loading-overlay hidden">
+              <div class="loading-spinner-ring"></div>
+              <span>Computing heatmap data...</span>
+            </div>
+            <div id="heatmap-plot" class="heatmap-plot-canvas"></div>
+
+            <!-- Non-Reporting Models in Scope Tray -->
+            <div id="heatmap-inactive-models-tray" class="heatmap-inactive-models-tray hidden">
+              <div class="inactive-tray-header">
+                <div class="inactive-tray-title-group">
+                  <span class="inactive-tray-icon">
+                    <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                  </span>
+                  <span class="inactive-tray-title" id="hm-inactive-title">Non-Reporting Models in Scope</span>
+                  <span class="inactive-tray-badge" id="hm-inactive-badge">0</span>
+                  <span class="inactive-tray-subtitle" id="hm-inactive-subtitle">Excluded from plot to preserve continuous rows</span>
+                </div>
+                <div class="inactive-tray-actions">
+                  <button type="button" class="micro-btn" id="btn-toggle-inactive-in-plot" title="Toggle displaying non-reporting models in the heatmap grid">
+                    <span id="label-toggle-inactive-in-plot">Show in Heatmap</span>
+                  </button>
+                  <button type="button" class="micro-btn" id="btn-collapse-inactive-tray" title="Toggle chip list visibility">
+                    <span id="label-collapse-inactive-tray">Hide List</span>
+                  </button>
+                </div>
+              </div>
+              <div class="inactive-tray-chips" id="hm-inactive-chips-container">
+                <!-- Dynamically populated chips -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Heatmap Data Inspector Panel -->
+          <div class="heatmap-inspector-panel" id="heatmap-inspector-panel">
+            <div class="inspector-header">
+              <div class="inspector-title-wrap">
+                <span class="inspector-badge" id="hm-insp-badge">US</span>
+                <div class="inspector-name-group">
+                  <h3 class="inspector-state-name" id="hm-insp-title">Select a Cell</h3>
+                  <span class="inspector-state-meta" id="hm-insp-meta">Click any cell on the heatmap</span>
+                </div>
+              </div>
+              <button type="button" class="insp-toggle-btn" id="btn-toggle-heatmap-inspector" title="Collapse Inspector (I)">&rarr;</button>
+            </div>
+
+            <div class="inspector-body">
+              <!-- Row Trend Sparkline Card -->
+              <div class="insp-sparkline-card">
+                <div class="insp-sparkline-header">
+                  <span class="insp-metric-label">SEASON TRAJECTORY</span>
+                </div>
+                <div class="insp-sparkline-canvas-wrap">
+                  <canvas id="heatmap-insp-sparkline" class="heatmap-sparkline-canvas"></canvas>
+                </div>
+              </div>
+
+              <!-- Metric Grid -->
+              <div class="inspector-metric-grid">
+                <!-- Cell Metric Value -->
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">CELL VALUE</span>
+                    <button type="button" class="info-trigger-btn" data-term="heatmap_layers" title="Definition: Cell Metric Value"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val highlight" id="hm-insp-val-primary">--</span>
+                  <span class="insp-metric-sub" id="hm-insp-sub-primary">Active metric</span>
+                </div>
+
+                <!-- Observed Admissions -->
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">OBSERVED ADMISSIONS</span>
+                    <button type="button" class="info-trigger-btn" data-term="actual_truth" title="Observed Ground Truth"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val" id="hm-insp-val-truth">--</span>
+                  <span class="insp-metric-sub" id="hm-insp-sub-truth">Observed admissions</span>
+                </div>
+
+                <!-- Weekly Change -->
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">WEEKLY CHANGE</span>
+                    <button type="button" class="info-trigger-btn" data-term="epidemic_trajectory" title="Weekly Change"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="insp-metric-val" id="hm-insp-val-trend">--</span>
+                  <span class="insp-metric-sub">Week-over-week velocity</span>
+                </div>
+
+                <!-- Model Evaluation -->
+                <div class="insp-metric-card">
+                  <div class="insp-metric-header">
+                    <span class="insp-metric-label">MODEL EVALUATION</span>
+                    <button type="button" class="info-trigger-btn" data-term="wis_evaluation" title="Weighted Interval Score"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <div class="insp-metric-split">
+                    <span class="insp-metric-val highlight-amber" id="hm-insp-val-wis">--</span>
+                    <span class="badge-micro" id="hm-insp-wis-badge">Status</span>
+                  </div>
+                  <span class="insp-metric-sub">Weighted Interval Score</span>
+                </div>
+              </div>
+
+              <!-- Cross-Navigation Action Buttons -->
+              <div class="inspector-actions heatmap-inspector-actions">
+                <button type="button" class="insp-action-btn primary" id="btn-hm-jump-timeline" title="Jump to single-state timeline fan chart">
+                  <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+                  <span>Open State Timeline Fan</span>
+                </button>
+                <button type="button" class="insp-action-btn secondary" id="btn-hm-jump-spatial" title="Jump to nationwide US Spatial Map for this week">
+                  <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>
+                  <span>View on US Spatial Map</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Collapsed Rail Button -->
+          <button type="button" class="heatmap-collapsed-rail hidden" id="btn-expand-heatmap-inspector" title="Expand Data Inspector (I)">
+            <span class="rail-icon"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg></span>
+            <span class="rail-text">Data Inspector</span>
+            <span class="rail-arrow">&larr;</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Season Peak Container (peak timing pmf + peak size quantiles) -->
+      <div id="peak-container" class="peak-container hidden" aria-label="Season peak forecasts">
+        <div class="peak-toolbar">
+          <div class="peak-round-chip" id="peak-round-chip"></div>
+          <div class="peak-key" aria-hidden="true">
+            <span class="peak-key-item"><span class="peak-key-tri"></span>median</span>
+            <span class="peak-key-item"><span class="peak-key-box"></span>50% × 50%</span>
+            <span class="peak-key-item"><span class="peak-key-whisker"></span>90%</span>
+            <span class="peak-key-item"><span class="peak-key-star">★</span>observed peak</span>
+          </div>
+          <button type="button" class="info-trigger-btn" data-term="peak_forecasts" title="Definition: Season peak forecasts" aria-label="Season peak forecasts definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+        </div>
+        <div class="peak-notice hidden" id="peak-notice" role="status"></div>
+
+        <div class="peak-card peak-card-outlook">
+          <div class="peak-card-head">
+            <span class="peak-card-title">PEAK OUTLOOK</span>
+            <span class="peak-card-sub">When will the season peak, and how high? Boxes span each model's middle 50% for timing and size; lanes below show its full peak-week distribution.</span>
+          </div>
+          <div id="peak-outlook-plot" class="peak-plot"></div>
+        </div>
+
+        <div class="peak-grid">
+          <div class="peak-card">
+            <div class="peak-card-head">
+              <span class="peak-card-title">SCORECARD</span>
+              <div class="segmented-control peak-seg" id="peak-score-mode">
+                <button type="button" class="segment-btn active" data-mode="round" title="Each model's peak call for the selected round">This Round</button>
+                <button type="button" class="segment-btn" data-mode="skill" title="Peak scores over the season, once the observed peak is final">Season Skill</button>
+              </div>
+              <div class="segmented-control peak-seg hidden" id="peak-skill-scope">
+                <button type="button" class="segment-btn active" data-scope="location" title="Score the shown location">Location</button>
+                <button type="button" class="segment-btn" data-scope="states" title="Pool every state with a final peak">All States</button>
+              </div>
+              <button type="button" class="info-trigger-btn" data-term="peak_scores" title="Definition: Peak scores" aria-label="Peak scores definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            </div>
+            <div id="peak-scorecard" class="peak-scorecard"></div>
+          </div>
+          <div class="peak-card">
+            <div class="peak-card-head">
+              <span class="peak-card-title">PEAK CALL BY ROUND</span>
+              <div class="select-wrapper peak-model-select-wrap">
+                <select id="peak-evolution-model" class="minimal-select" aria-label="Model shown round by round"></select>
+              </div>
+              <button type="button" class="info-trigger-btn" data-term="peak_evolution" title="Definition: Peak call by round" aria-label="Peak call by round definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+              <span class="peak-card-sub" id="peak-evolution-sub"></span>
+            </div>
+            <div id="peak-evolution-plot" class="peak-plot"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Telemetry Metric Strip -->
+    <section class="telemetry-strip" id="telemetry-strip">
+      <div class="telemetry-cell cell-top-performer">
+        <div class="telemetry-label-row">
+          <span class="telemetry-label">TOP PERFORMER</span>
+          <button type="button" class="info-trigger-btn" data-term="top_performer" title="Definition: Top Performer"
+            aria-label="Top Performer definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+        </div>
+        <div class="performer-divided-container">
+          <div class="performer-model-block">
+            <div class="performer-model-name" id="tel-best-model" title="--">--</div>
+          </div>
+          <div class="performer-divider"></div>
+          <div class="performer-score-block">
+            <span class="performer-score-tag">TOP MODEL WIS</span>
+            <span class="performer-score-value" id="tel-best-wis">--</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="telemetry-cell">
+        <div class="telemetry-label-row">
+          <span class="telemetry-label">COHORT AVG WIS</span>
+          <button type="button" class="info-trigger-btn" data-term="mean_wis" title="Definition: Cohort Average WIS"
+            aria-label="Cohort Average WIS definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+        </div>
+        <div class="telemetry-metric-body">
+          <span class="telemetry-value" id="tel-mean-wis">--</span>
+          <span class="telemetry-sub" id="tel-mean-sub">Mean across selected models</span>
+        </div>
+      </div>
+
+      <div class="telemetry-cell">
+        <div class="telemetry-label-row">
+          <span class="telemetry-label">95% COVERAGE</span>
+          <button type="button" class="info-trigger-btn" data-term="cov95" title="Definition: 95% Coverage"
+            aria-label="95% Coverage definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+        </div>
+        <div class="telemetry-metric-body">
+          <span class="telemetry-value" id="tel-coverage-95">--</span>
+          <span class="telemetry-sub">Nominal Target: 95.0%</span>
+        </div>
+      </div>
+
+      <div class="telemetry-cell">
+        <div class="telemetry-label-row">
+          <span class="telemetry-label">MEDIAN MAE</span>
+          <button type="button" class="info-trigger-btn" data-term="mae" title="Definition: Mean Absolute Error"
+            aria-label="Median MAE definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+        </div>
+        <div class="telemetry-metric-body">
+          <span class="telemetry-value" id="tel-mae">--</span>
+          <span class="telemetry-sub">Mean Absolute Error</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Detailed Evaluation & Comparative Leaderboard -->
+    <section class="leaderboard-panel" aria-label="Leaderboard and Horizon Breakdown">
+      <div class="panel-header">
+        <div class="panel-tabs">
+          <button type="button" class="tab-trigger active" id="tab-btn-table" data-tab="tab-table">Leaderboard</button>
+          <button type="button" class="tab-trigger" id="tab-btn-decomp" data-tab="tab-decomp">Error Anatomy</button>
+          <button type="button" class="tab-trigger" id="tab-btn-calibration" data-tab="tab-calibration" title="Calibration &amp; Reliability Curves">Calibration</button>
+          <button type="button" class="tab-trigger" id="tab-btn-horizon" data-tab="tab-horizon">Horizon Decay</button>
+          <button type="button" class="info-badge-btn" id="btn-open-methodology"
+            title="Open In-Depth Research Reference Guide & Methodology">
+            <svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+            <span>Guide</span>
+          </button>
+        </div>
+
+        <div class="panel-scope">
+          <div class="panel-divider-vertical" aria-hidden="true"></div>
+          <div class="fair-pill-wrap">
+            <button type="button" class="fair-pill" id="btn-toggle-fair"
+              title="Fair Evaluation: Score models strictly on common (date, location, horizon) tasks shared across all selected models">Common
+              Tasks: OFF</button>
+            <button type="button" class="info-trigger-btn" data-term="common_tasks"
+              title="Definition: Common Tasks Intersection" aria-label="Common Tasks definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+          </div>
+
+          <div class="scope-group">
+            <span class="scope-label">LOC:</span>
+            <div class="segmented-control loc-segmented" id="eval-loc-segmented">
+              <button type="button" class="segment-btn active" data-loc="current" title="Evaluate for currently selected location">Current</button>
+              <button type="button" class="segment-btn" data-loc="states" title="Evaluate across all 50 states + territories">All States</button>
+            </div>
+          </div>
+
+          <div class="scope-group eval-window-group">
+            <span class="scope-label">TIME:</span>
+            <div class="segmented-control horizon-segmented" id="eval-horizon-segmented">
+              <button type="button" class="segment-btn active" data-horizon="date" title="Evaluate strictly on the selected reference date">Date</button>
+              <div class="scope-split" id="eval-season-split">
+                <button type="button" class="segment-btn scope-split-main" data-horizon="window" id="btn-eval-window"
+                  title="Evaluate a span of the season (seasons, weeks, or phase)">Season</button>
+                <button type="button" class="segment-btn scope-split-caret" id="btn-eval-window-menu" aria-haspopup="dialog"
+                  aria-expanded="false" aria-controls="eval-window-popover" title="Choose seasons, weeks, and phase"><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+              </div>
+            </div>
+            <div class="eval-window-popover" id="eval-window-popover" role="dialog" aria-label="Evaluation window"></div>
+          </div>
+
+          <div class="panel-divider-vertical" aria-hidden="true"></div>
+
+          <div class="scope-group">
+            <span class="scope-label">SCALE:</span>
+            <button type="button" class="info-trigger-btn" data-term="log_scale"
+              title="Definition: Log-Scale Evaluation ln(y + 1)" aria-label="Log scale definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+            <div class="segmented-control scale-segmented" id="eval-scale-segmented">
+              <button type="button" class="segment-btn active" data-scale="natural" id="btn-scale-natural" title="Natural count scale: Standard WIS, Rel WIS, and MAE">Natural</button>
+              <button type="button" class="segment-btn" data-scale="log" id="btn-scale-log" title="Log transformation scale ln(max(y,0)+1): Log WIS, Log Rel WIS, and Log MAE">Log (ln)</button>
+            </div>
+          </div>
+
+
+          <div class="export-dropdown-wrapper">
+            <button type="button" class="table-micro-btn" id="btn-export-csv" title="Export evaluation data (CSV, TSV, XLSX)"
+              aria-haspopup="true" aria-expanded="false" aria-label="Export evaluation data">
+              <span class="table-micro-icon"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></span>
+              <span class="table-micro-text" id="export-btn-label">CSV</span>
+              <span class="table-micro-caret">▾</span>
+            </button>
+            <div class="export-dropdown-menu" id="export-dropdown-menu" role="menu" aria-label="Export format options">
+              <button type="button" class="export-menu-item active" data-format="csv" role="menuitem">
+                <span class="export-item-check"><svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg></span>
+                <span class="export-format-name">CSV</span>
+                <span class="export-format-desc">Comma-separated</span>
+              </button>
+              <button type="button" class="export-menu-item" data-format="tsv" role="menuitem">
+                <span class="export-item-check"></span>
+                <span class="export-format-name">TSV</span>
+                <span class="export-format-desc">Tab-separated</span>
+              </button>
+              <button type="button" class="export-menu-item" data-format="xlsx" role="menuitem">
+                <span class="export-item-check"></span>
+                <span class="export-format-name">XLSX</span>
+                <span class="export-format-desc">Excel workbook</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Evaluation Context & Scope Details Banner -->
+      <div class="eval-context-banner" id="eval-context-banner">
+        <div class="eval-banner-left">
+          <span class="eval-banner-icon" id="eval-banner-icon">
+            <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          </span>
+          <span class="eval-banner-text" id="eval-banner-text">Loading scope details...</span>
+        </div>
+        <div class="eval-banner-right" id="eval-banner-right">
+        </div>
+      </div>
+
+      <!-- Loading Overlay for Leaderboard & Diagnostics -->
+      <div class="metrics-loading-overlay hidden" id="metrics-loading-overlay" aria-live="polite">
+        <div class="loading-overlay-content">
+          <div class="loading-spinner-ring"></div>
+          <div class="loading-text-group">
+            <div class="loading-title">Calculating Statistics...</div>
+            <div class="loading-sub" id="loading-sub-text">Evaluating common tasks and weighted interval scores</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 1: Leaderboard Table -->
+      <div class="panel-body tab-content active" id="tab-table">
+        <div class="table-wrap">
+          <table class="data-table" id="leaderboard-table">
+            <thead>
+              <tr>
+                <th class="th-rank">#</th>
+                <th class="th-model sortable" data-sort="model_id">Model</th>
+                <th class="th-type">Type <button type="button" class="info-trigger-btn" data-term="model_type"
+                    title="Definition: Model Type" aria-label="Model Type definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="count">Tasks (N) <button type="button" class="info-trigger-btn"
+                    data-term="tasks" title="Definition: Evaluated Tasks" aria-label="Tasks definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="wis"><span class="th-label-text">Overall WIS</span> <button type="button" class="info-trigger-btn"
+                    data-term="mean_wis" title="Definition: Weighted Interval Score"
+                    aria-label="Overall WIS definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="relative_wis"><span class="th-label-text">Rel WIS</span> <button type="button"
+                    class="info-trigger-btn" data-term="relative_wis" title="Definition: Pairwise Tournament Relative WIS (Hubverse Standard)"
+                    aria-label="Relative WIS definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="weeks_won"><span class="th-label-text">Wins</span> <button type="button"
+                    class="info-trigger-btn" data-term="weekly_wins" title="Definition: Wins (weeks ranked #1)"
+                    aria-label="Wins definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="pct_diff_vs_baseline"><span class="th-label-text">&Delta;% Base</span> <button type="button"
+                    class="info-trigger-btn" data-term="delta_base" title="Definition: Relative Difference vs Baseline"
+                    aria-label="Delta Base definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="wis_per_100k"><span class="th-label-text">WIS/100k</span> <button type="button"
+                    class="info-trigger-btn" data-term="wis_per_100k" title="Definition: Population-standardized Rate WIS per 100k"
+                    aria-label="Rate WIS definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="mae"><span class="th-label-text">MAE</span> <button type="button" class="info-trigger-btn"
+                    data-term="mae" title="Definition: Mean Absolute Error" aria-label="MAE definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="cov95">95% Cov <button type="button" class="info-trigger-btn"
+                    data-term="cov95" title="Definition: 95% Coverage" aria-label="95% Coverage definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                </th>
+                <th class="th-num sortable" data-sort="cov50">50% Cov <button type="button" class="info-trigger-btn"
+                    data-term="cov50" title="Definition: 50% Coverage" aria-label="50% Coverage definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                </th>
+                <th class="th-num sortable" data-sort="sharpness">Sharpness <button type="button"
+                    class="info-trigger-btn" data-term="sharpness" title="Definition: Sharpness / Interval Width"
+                    aria-label="Sharpness definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="h0">h=0 (Nowcast) <button type="button" class="info-trigger-btn" data-term="h0"
+                    title="Definition: Horizon 0 Nowcast" aria-label="Nowcast definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="h1">h=1 <button type="button" class="info-trigger-btn" data-term="h1"
+                    title="Definition: Horizon 1 (1-Wk Ahead)" aria-label="Horizon 1 definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="h2">h=2 <button type="button" class="info-trigger-btn" data-term="h2"
+                    title="Definition: Horizon 2 (2-Wks Ahead)" aria-label="Horizon 2 definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+                <th class="th-num sortable" data-sort="h3">h=3 <button type="button" class="info-trigger-btn" data-term="h3"
+                    title="Definition: Horizon 3 (3-Wks Ahead)" aria-label="Horizon 3 definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></th>
+              </tr>
+            </thead>
+            <tbody id="leaderboard-tbody">
+              <tr>
+                <td colspan="17" class="td-empty">Loading evaluation scores...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Tab 2: WIS Error Anatomy & Decomposition -->
+      <div class="panel-body tab-content" id="tab-decomp">
+        <div class="stats-suite-wrap">
+          <!-- Statistical Sample Size Guard Banner -->
+          <div id="decomp-sample-guard" class="stats-sample-guard"></div>
+
+          <!-- Decomp Controls & Sub-metrics Toolbar -->
+          <div class="stats-suite-toolbar">
+            <div class="stats-toolbar-left">
+              <span class="stats-toolbar-label">VIEW SCALE:</span>
+              <div class="segmented-control stats-segmented" id="decomp-scale-segmented">
+                <button type="button" class="segment-btn active" data-scale="absolute">Absolute WIS</button>
+                <button type="button" class="segment-btn" data-scale="relative">Relative % Anatomy</button>
+              </div>
+            </div>
+            <div class="stats-legend-summary" id="decomp-legend-summary">
+              <span class="decomp-legend-item"><span class="legend-swatch swatch-spread"></span> Spread (Sharpness) <button type="button" class="info-trigger-btn" data-term="decomp_sharpness" title="Definition: Sharpness / Spread" aria-label="Sharpness definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></span>
+              <span class="decomp-legend-item"><span class="legend-swatch swatch-overpred"></span> Overprediction Penalty <button type="button" class="info-trigger-btn" data-term="decomp_overpred" title="Definition: Overprediction Penalty" aria-label="Overprediction definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></span>
+              <span class="decomp-legend-item"><span class="legend-swatch swatch-underpred"></span> Underprediction Penalty <button type="button" class="info-trigger-btn" data-term="decomp_underpred" title="Definition: Underprediction Penalty" aria-label="Underprediction definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button></span>
+            </div>
+          </div>
+
+          <!-- Decomp Plot Canvas -->
+          <div id="decomp-plot" class="stats-plot-canvas"></div>
+
+          <!-- Decomp Diagnostic Cards -->
+          <div class="decomp-cards-grid" id="decomp-cards"></div>
+        </div>
+      </div>
+
+      <!-- Tab 3: Calibration & Reliability Diagram -->
+      <div class="panel-body tab-content" id="tab-calibration">
+        <div class="stats-suite-wrap">
+          <!-- Statistical Sample Size Guard Banner -->
+          <div id="calib-sample-guard" class="stats-sample-guard"></div>
+
+          <div class="calibration-grid-layout">
+            <div class="calibration-plot-panel">
+              <div class="stats-panel-subhead">
+                <span class="subhead-title">Probabilistic Reliability Diagram</span>
+                <span class="subhead-subtitle">Nominal vs. Empirical Prediction Interval Coverage</span>
+                <button type="button" class="info-trigger-btn" data-term="reliability_diagram" title="Definition: Reliability Diagram" aria-label="Reliability definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+              </div>
+              <div id="calibration-plot" class="stats-plot-canvas"></div>
+            </div>
+
+            <div class="calibration-stats-panel">
+              <div class="stats-panel-subhead">
+                <span class="subhead-title">Calibration Scorecard</span>
+                <span class="subhead-subtitle">Coverage Deviations &amp; Dispersion Diagnosis</span>
+              </div>
+              <div id="calibration-table-container" class="calibration-table-wrap">
+                <!-- Dynamically populated -->
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab 4: Horizon Breakdown Plot -->
+      <div class="panel-body tab-content" id="tab-horizon">
+        <div class="stats-suite-wrap">
+          <div class="stats-panel-subhead">
+            <span class="subhead-title">Lookahead Skill Degradation</span>
+            <span class="subhead-subtitle">Performance over Lead-Time Horizons h=0 (Nowcast) to h=1..3 Weeks</span>
+            <button type="button" class="info-trigger-btn" data-term="horizon_decay" title="Definition: Horizon Decay" aria-label="Horizon Decay definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+          </div>
+          <div id="horizon-plot" class="horizon-plot-canvas"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Methodology & Backtesting Principles Modal -->
+  <div id="methodology-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true"
+    aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <h3 id="modal-title" class="modal-title">Methodology &amp; Evaluation Reference Guide</h3>
+        </div>
+        <div class="modal-nav-pills" id="modal-nav-pills">
+          <button type="button" class="modal-nav-pill active" id="modal-tab-timeline">
+            <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <span>Timeline &amp; Scoring</span>
+          </button>
+          <button type="button" class="modal-nav-pill" id="modal-tab-spatial">
+            <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>
+            <span>Spatial &amp; Waves</span>
+          </button>
+          <button type="button" class="modal-nav-pill" id="modal-tab-signals">
+            <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="2"></circle><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"></path></svg>
+            <span>Signals &amp; Indicators</span>
+          </button>
+          <button type="button" class="modal-nav-pill" id="modal-tab-heatmap">
+            <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+            <span>Heatmap Matrix</span>
+          </button>
+        </div>
+        <button type="button" class="modal-close" id="btn-close-methodology" aria-label="Close modal">&times;</button>
+      </div>
+
+      <!-- Methodology Interactive Search Ribbon -->
+      <div class="methodology-search-ribbon">
+        <div class="methodology-search-box">
+          <svg class="ui-icon search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="methodology-search-input" class="methodology-search-input" placeholder="Search methodology (e.g. WIS, Nowcast, NSSP, EMA, Velocity, Normalized)..." aria-label="Search methodology documentation">
+          <button type="button" id="methodology-search-clear" class="search-clear-btn hidden" title="Clear search">&times;</button>
+        </div>
+      </div>
+
+      <div class="methodology-scroll-body">
+        <div class="methodology-divider-banner" id="methodology-part1-heading">
+          <span class="part-badge">PART I</span>
+          <h3>Probabilistic Forecasting &amp; Benchmark Evaluation Standards</h3>
+          <p>Scoring rules, reporting lags, and evaluation standards.</p>
+        </div>
+
+        <div class="methodology-section" id="methodology-lags">
+          <div class="section-badge">TEMPORAL ALIGNMENT</div>
+          <h4>1. Temporal Alignment &amp; Reporting Lags (h=0 Nowcast)</h4>
+          <p>
+            In infectious disease surveillance, operational reporting schedules introduce standard delays. Hospitals report laboratory-confirmed influenza admissions weekly to the CDC National Healthcare Safety Network (NHSN), with data published after a 5 to 10 day verification period.
+          </p>
+          <div class="methodology-callout">
+            <strong>Timeline Rule:</strong> On forecast reference date <code class="code-badge">T</code> (a Saturday), official hospitalization counts for the week ending on <code class="code-badge">T</code> are not yet compiled or published.
+          </div>
+          <ul class="methodology-list">
+            <li><strong>Reported History:</strong> Strictly cuts off at week <code class="code-badge">T &minus; 7d</code>, representing the latest data available to a model at forecast submission time.</li>
+            <li><strong>Horizon 0 (h=0):</strong> Serves as an operational <em>nowcast</em> of the week ending on <code class="code-badge">T</code>.</li>
+            <li><strong>Horizons 1, 2, 3:</strong> Represent forward projections for <code class="code-badge">T + 7d</code>, <code class="code-badge">T + 14d</code>, and <code class="code-badge">T + 21d</code>.</li>
+            <li><strong>Ground Truth Verification:</strong> Final observed counts begin at <code class="code-badge">T &minus; 7d</code> and overlay observed values against both the nowcast and forward projections.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-wis">
+          <div class="section-badge">SCORING RULE</div>
+          <h4>2. Weighted Interval Score (WIS) &amp; Quantile Loss</h4>
+          <p>
+            FluSight models submit probabilistic forecasts across 23 standard quantile levels:
+            <code class="code-badge">&tau; &isin; {0.01, 0.025, 0.05, 0.10, &hellip;, 0.50, &hellip;, 0.90, 0.95, 0.975, 0.99}</code>.
+          </p>
+          <p>
+            Probabilistic performance is scored using the <strong>Weighted Interval Score (WIS)</strong>, mathematically equivalent to average quantile pinball loss across symmetric quantile levels (the median plus <code class="code-badge">K</code> central intervals with <code class="code-badge">&alpha;_k = 2&tau;</code>):
+          </p>
+          <div class="methodology-equation">
+            <code>Pinball Loss: L_&tau;(y, q_&tau;) = 2 &middot; (1(y &lt; q_&tau;) &minus; &tau;) &middot; (q_&tau; &minus; y)</code><br>
+            <code>WIS = 1/(2K + 1) &middot; &sum;_&tau; L_&tau; = 1/(K + &frac12;) &middot; [&frac12;|y &minus; m| + &sum;_k (&alpha;_k / 2) &middot; IS_&alpha;_k(y)]</code>
+          </div>
+          <ul class="methodology-list">
+            <li><strong>Median Point Accuracy (MAE):</strong> Absolute error between observation <code class="code-badge">y</code> and median prediction <code class="code-badge">q_0.50</code>.</li>
+            <li><strong>Dispersion:</strong> Weighted widths of the prediction intervals (<code class="code-badge">(&alpha;_k / 2) &middot; (u_k &minus; l_k)</code>). Tighter intervals yield lower scores.</li>
+            <li><strong>Miss Penalties:</strong> Linear penalties incurred when observed outcomes fall outside interval bounds, scaled by <code class="code-badge">2/&alpha;</code>.</li>
+          </ul>
+          <p class="subtext">
+            <em>Fast Local Testing:</em> Models run with <code class="code-badge">--short_run</code> produce 7 quantiles. The suite evaluates standardized WIS-7 across shared quantiles.
+          </p>
+        </div>
+
+        <div class="methodology-section" id="methodology-relative-wis">
+          <div class="section-badge">BENCHMARK COMPARISON</div>
+          <h4>3. Pairwise Tournament Relative WIS</h4>
+          <p>
+            When comparing models that submitted across overlapping but non-identical task sets, the pairwise tournament relative WIS (Cramer et al., 2022) adjusts for differences in task coverage:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Pairwise Ratio:</strong> For each pair of models <code class="code-badge">(m, m')</code>, compute the ratio of mean WIS on their shared tasks: <code class="code-badge">&theta;_{m, m'} = mean(WIS_m) &divide; mean(WIS_{m'})</code>.</li>
+            <li><strong>Geometric Mean:</strong> Compute geometric mean across all models: <code class="code-badge">&theta;_m = (&prod;_{m'=1}^M &theta;_{m, m'})^{1/M}</code>.</li>
+            <li><strong>Baseline Scaling:</strong> Normalize against baseline: <code class="code-badge">Rel WIS_m = &theta;_m &divide; &theta;_{baseline}</code>. Values &lt; 1.0 indicate outperformance relative to baseline. If the configured baseline has no forecasts in scope, scores are scaled to a fallback model, which is named in the leaderboard and flagged in the dataset warnings.</li>
+            <li><strong>Pairwise &Delta;% vs Baseline:</strong> Percentage difference in mean WIS computed directly on tasks shared between a model and the reference baseline: <code class="code-badge">((WIS_m &minus; WIS_{base}) &divide; WIS_{base}) &times; 100%</code>.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-common">
+          <div class="section-badge">EVALUATION SCOPE</div>
+          <h4>4. Common Tasks Evaluation (Fair Comparison)</h4>
+          <p>
+            Epidemic intensity changes across weeks and locations. Evaluating models across different subsets of tasks can bias results when one model only forecasts during lower-incidence periods.
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Unconstrained (Default):</strong> Scores each model on all available tasks within the current filter.</li>
+            <li><strong>Common Tasks (<code class="code-badge">fair=True</code>):</strong> Restricts scoring strictly to the intersection of <code class="code-badge">(reference_date, location, horizon)</code> tuples where all selected models submitted forecasts (<code class="code-badge">S = &Intersection;_m S_m</code>).</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-spatial">
+          <div class="section-badge">GEOGRAPHIC SCALING</div>
+          <h4>5. Geographic Aggregation &amp; Population Standardization</h4>
+          <p>
+            National hospitalization counts (20,000–35,000 weekly) are orders of magnitude larger than individual state counts (20–3,000 weekly). Pooling state and national counts together without separation would allow national errors to dominate overall scores.
+          </p>
+          <ul class="methodology-list">
+            <li><strong>State Benchmarks (<code class="code-badge">location &ne; 'US'</code>):</strong> Evaluates state-level performance independently from national totals.</li>
+            <li><strong>National Benchmarks (<code class="code-badge">location == 'US'</code>):</strong> Evaluates direct national forecasts.</li>
+            <li><strong>Standardized Rate WIS (<code class="code-badge">wis_per_100k</code>):</strong> Normalizes WIS per 100,000 residents: <code class="code-badge">(WIS &divide; Population) &times; 100,000</code>. Not reported for targets that are already rates or proportions (e.g. % of ED visits).</li>
+          </ul>
+          <p class="subtext">
+            When a scope includes both states and the US, every leaderboard score (WIS, Rel WIS, &Delta;%, coverage) is computed on the state pool only; the national value is reported separately.
+          </p>
+        </div>
+
+        <div class="methodology-section" id="methodology-coverage">
+          <div class="section-badge">CALIBRATION</div>
+          <h4>6. Empirical Prediction Interval Coverage</h4>
+          <p>
+            Empirical coverage evaluates whether stated uncertainty intervals contain observed outcomes at nominal rates:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>95% Interval Coverage:</strong> Percentage of observations falling inside <code class="code-badge">[q_0.025, q_0.975]</code>. Nominal target is 95.0%.</li>
+            <li><strong>50% Interval Coverage:</strong> Percentage of observations falling inside <code class="code-badge">[q_0.25, q_0.75]</code> (IQR). Nominal target is 50.0%.</li>
+            <li><strong>Interpretation:</strong> Coverage below nominal rates indicates overconfidence (prediction intervals too narrow); coverage above nominal rates indicates underconfidence (prediction intervals wider than necessary).</li>
+            <li><strong>95% Interval Width (leaderboard "Sharpness" column):</strong> Average width <code class="code-badge">q_0.975 &minus; q_0.025</code>. Narrower intervals are preferred only when nominal coverage is maintained.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-wis-decomp">
+          <div class="section-badge">ERROR DECOMPOSITION</div>
+          <h4>7. WIS Error Decomposition (Bracher et al., 2021)</h4>
+          <p>
+            The Weighted Interval Score decomposes additively into three components, each sharing the WIS normalization <code class="code-badge">1/(K + &frac12;)</code>:
+          </p>
+          <div class="methodology-equation">
+            <code>WIS(F, y) = 1/(K + &frac12;) &middot; [Dispersion + Overprediction + Underprediction]</code>
+          </div>
+          <ul class="methodology-list">
+            <li><strong>Dispersion (Sharpness component):</strong> <code class="code-badge">&sum; (&alpha;_k / 2) &middot; (u_k &minus; l_k)</code>. Measures the intrinsic uncertainty spread of the forecast distribution.</li>
+            <li><strong>Overprediction Penalty:</strong> <code class="code-badge">&sum; (l_k &minus; y) &middot; 1(y &lt; l_k) + 0.5 &middot; (m &minus; y) &middot; 1(y &lt; m)</code>. Incurred when observed outcomes fall below lower forecast quantiles or below the median.</li>
+            <li><strong>Underprediction Penalty:</strong> <code class="code-badge">&sum; (y &minus; u_k) &middot; 1(y &gt; u_k) + 0.5 &middot; (y &minus; m) &middot; 1(y &gt; m)</code>. Incurred when observed outcomes exceed upper forecast quantiles or exceed the median.</li>
+          </ul>
+          <div class="methodology-callout">
+            <strong>Sample Size Note:</strong> Evaluating error decompositions over small sample sizes (<code class="code-badge">N &le; 4</code> horizons on a single date and location) exhibits high variance. Multi-date or multi-location aggregations provide more reliable estimates.
+          </div>
+        </div>
+
+        <div class="methodology-section" id="methodology-overview">
+          <a id="methodology-staging"></a>
+          <div class="section-badge">MODEL REGISTRY &amp; STAGING</div>
+          <h4>8. Model Classification &amp; Sandbox Staging</h4>
+          <p>
+            The sandbox evaluates models across source tiers and designations:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>[REPO] Production Models:</strong> Stored in <code class="code-badge">model-output/</code> and tracked in version control.</li>
+            <li><strong>[LOCAL] Sandbox Staging:</strong> Development runs placed in <code class="code-badge">local-output/</code> (ignored by git). Evaluated side-by-side with repository models.</li>
+            <li><strong>Model Designations:</strong> Classified as <em>Baseline</em> (reference benchmark), <em>Primary</em> (designated hub team model), or <em>Component</em> (standalone ensemble contributor).</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-log-scale">
+          <div class="section-badge">SCALE TRANSFORMATION</div>
+          <h4>9. Log-Scale Scoring &amp; Transformed Evaluation (ln(y + 1))</h4>
+          <p>
+            Epidemic counts vary widely across jurisdictions of differing population size and between epidemic wave peaks and troughs. Absolute scale metrics like standard WIS can be dominated by high-incidence peaks in large states (e.g., California or Texas), obscuring predictive skill in smaller jurisdictions.
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Mathematical Transformation:</strong> Follows standard Hubverse methodology (Bosse et al., 2023) by transforming observations and forecast quantiles: <code class="code-badge">y_{log} = \ln(\max(y, 0) + 1)</code> and <code class="code-badge">q_{log} = \ln(\max(q, 0) + 1)</code>.</li>
+            <li><strong>Log WIS &amp; MAE:</strong> Pinball loss and median absolute errors are evaluated directly on the transformed scale, ensuring multiplicative percentage deviations are weighted equitably across both high- and low-transmission environments.</li>
+            <li><strong>Log Tournament Relative WIS:</strong> Pairwise tournament ratios and baseline normalization (<code class="code-badge">Rel WIS &lt; 1.0</code> = outperformance) are computed independently on the log scale, providing a standardized evaluation that balances small-state and peak-surge accuracy.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-ensemble-studio">
+          <div class="section-badge">SYNTHETIC ENSEMBLES</div>
+          <h4>10. Synthetic Ensemble Studio &amp; Quantile Vincentization</h4>
+          <p>
+            The suite features a built-in Synthetic Ensemble Studio allowing researchers to construct, test, and persist on-the-fly custom ensembles without modifying upstream code:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Vincentization:</strong> Averages predictive quantiles across constituent models per forecast task: <code class="code-badge">q_{ens}(\alpha) = \text{Aggregate}(q_1(\alpha), ..., q_M(\alpha))</code> using either the median or arithmetic mean across models.</li>
+            <li><strong>Quantile Rearrangement:</strong> Enforces strict monotonicity across all 23 quantile levels within each forecast task, ensuring predictions never cross (<code class="code-badge">q_{\alpha_1} \le q_{\alpha_2}</code> for <code class="code-badge">\alpha_1 &lt; \alpha_2</code>).</li>
+            <li><strong>Spatial Split Routing:</strong> Permits separate constituent model pools for State jurisdictions (50 states + DC + PR) versus US National aggregate forecasts, matching operational architectures of top Hubverse ensembles such as <code class="code-badge">UMass-flusion_spatial2_prod</code>.</li>
+          </ul>
+        </div>
+
+        <!-- PART II: SPATIAL VIEW & WAVE TRACKING -->
+        <div class="methodology-section" id="methodology-eval-window">
+          <div class="section-badge">EVALUATION SCOPE</div>
+          <h4>11. Evaluation Windows, Season Phases &amp; Weekly Wins</h4>
+          <p>
+            The leaderboard's <strong>TIME</strong> control switches between a single reference <strong>Date</strong> and a <strong>Season</strong> window. The window menu combines any set of seasons, a week range dragged across the mini season chart, and a phase preset. The window applies to the <em>forecast (target) week</em>: a task is scored when the week being forecast falls inside it.
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Week range:</strong> season weeks are aligned across seasons (week 1 = MMWR week 31, early August), so "mid-November to early February" means the same stretch of every selected season.</li>
+            <li><strong>Peak:</strong> for each location and season, the contiguous run of weeks around the season maximum where observed values stay at or above <code class="code-badge">60%</code> of that maximum (typically 3&ndash;6 weeks).</li>
+            <li><strong>Pre-peak / Post-peak:</strong> the weeks before and after that location's peak. A season whose highest week is still among its latest observations has not peaked yet, so all of its weeks count as pre-peak.</li>
+            <li><strong>Per location:</strong> with <em>All States</em>, every state is scored on its own peak, not the national one. The mini chart then shows the national curve for orientation.</li>
+            <li><strong>Wins:</strong> for each round in scope, the model with the lowest mean WIS on the tasks every selected model forecast that week wins it (ties count for each tied model), shown as <code class="code-badge">won/competed</code>. A model can lead on total WIS through a few large weeks while rarely being the best week to week; Wins shows that. It depends on which models are selected.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-season-peak">
+          <div class="section-badge">SEASON PEAK</div>
+          <h4>12. Season Peak Forecasts: Timing, Size &amp; Scoring</h4>
+          <p>
+            Hubs such as FluSight pair weekly hospital admissions with two season-level targets that have no horizon: <code class="code-badge">peak week inc flu hosp</code>, a probability for each candidate week of being the season's highest (a pmf over Saturdays), and <code class="code-badge">peak inc flu hosp</code>, quantiles of that highest weekly count. They are stored apart from the weekly forecasts, so the fan chart, leaderboard, heatmap and diagnostics are unchanged by them.
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Summaries:</strong> the peak-week median and central 50% / 90% windows are read off the cumulative probabilities (the 50% window runs from the week where it first reaches 25% to where it reaches 75%). A pmf that does not sum exactly to 1 is renormalized and flagged in the hub's data-quality list. Peak size uses the submitted quantiles directly.</li>
+            <li><strong>Where they appear:</strong> the <em>Season Peak</em> view (the Outlook's target-zone boxes and peak-week ridgelines, Peak Call by Round, and the Scorecard); the <em>Peak Forecasts</em> signal on the fan chart (▲ at both medians, a 50% × 50% box, 90% whiskers); and the spatial map's <em>Peak Week</em> and <em>Peak Size</em> layers.</li>
+            <li><strong>Observed peak:</strong> the highest reported week inside the forecast window, using the same merged truth as the rest of the dashboard. It is <em>provisional</em> (◇ peak so far) until observations reach the window's last candidate week, then <em>final</em> (★). Peak scores are only computed for final peaks.</li>
+            <li><strong>Timing scores:</strong> the ranked probability score <code class="code-badge">RPS = Σ (F(w) − 1[w ≥ observed])²</code> over ordered weeks, in weeks (a forecast certain of one week scores its absolute error, so near misses are rewarded); the log score <code class="code-badge">−ln P(observed week)</code>, floored at P = 0.001 so one confident miss cannot dominate an average; and the signed error of the median week. Weeks tied at the maximum all count for the log score; the earliest is used for RPS and the median error.</li>
+            <li><strong>Size scores:</strong> the leaderboard's WIS, reported as a percentage of the observed peak so states can be pooled, plus the median's percentage error and 50% / 90% interval coverage.</li>
+            <li><strong>Chance the peak is past:</strong> the probability a forecast put on weeks up to its own data cutoff, that is, weeks that were already observed when it was made.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-divider-banner" id="methodology-part2-heading">
+          <span class="part-badge">PART II</span>
+          <h3>Spatial View &amp; Epidemic Wave Tracking</h3>
+          <p>Geographic normalization, wave trajectories, prediction corridors, and aggregation.</p>
+        </div>
+
+        <div class="methodology-section" id="methodology-spatial-layers">
+          <div class="section-badge">POPULATION NORMALIZATION</div>
+          <h4>11. Spatial Normalization &amp; Per-Capita Rates (Rate / 100k)</h4>
+          <p>
+            Raw patient admission counts scale with population size. The spatial dashboard supports two viewing modes:
+          </p>
+          <div class="methodology-equation">
+            <code>Incidence Rate: R_s = (Projected Admissions_s &divide; Census Population_s) &times; 100,000</code>
+          </div>
+          <ul class="methodology-list">
+            <li><strong>Rate / 100k:</strong> Standardizes admissions by population to reflect relative epidemic intensity across states.</li>
+            <li><strong>Admissions:</strong> Raw expected patient volume for resource and capacity planning.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-spatial-trend">
+          <div class="section-badge">WAVE TRAJECTORY</div>
+          <h4>12. Horizon Dynamics &amp; Trajectory Phases</h4>
+          <p>
+            Spatial trajectory indicates projected direction and magnitude relative to the reference week:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Horizon 0 (h=0) — Nowcast Baseline:</strong> Represents the reference week ending on Saturday <code class="code-badge">T</code> (<code class="code-badge">&Delta;% = 0.0%</code> by definition).</li>
+            <li><strong>Horizons 1, 2, 3:</strong> Forward projections for 1, 2, and 3 weeks ahead (<code class="code-badge">T + 7d</code>, <code class="code-badge">T + 14d</code>, <code class="code-badge">T + 21d</code>).</li>
+          </ul>
+          <div class="methodology-equation">
+            <code>Growth: &Delta;% = ((Median_h &minus; Median_h0) &divide; Median_h0) &times; 100%</code>
+          </div>
+          <ul class="methodology-list">
+            <li><strong>Rising (&gt; +5%):</strong> Increasing admissions trajectory.</li>
+            <li><strong>Plateau (&minus;5% to +5%):</strong> Stable trajectory near peak or steady state.</li>
+            <li><strong>Receding (&lt; &minus;5%):</strong> Declining admissions trajectory.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-spatial-calibration">
+          <div class="section-badge">CALIBRATION</div>
+          <h4>13. State-Level Prediction Corridors &amp; WIS</h4>
+          <p>
+            When selecting any state on the map, the dashboard evaluates state-specific probabilistic performance:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>95% Prediction Corridor:</strong> The interval bounded by <code class="code-badge">[q_0.025, q_0.975]</code>.
+              <br>&bull; <strong style="color:var(--pastel-mint)">Within 95% PI:</strong> Observed value falls inside the interval.
+              <br>&bull; <strong style="color:var(--pastel-coral)">Interval Miss:</strong> Observed value falls outside the interval (underprediction if truth &gt; q_0.975; overprediction if truth &lt; q_0.025).
+            </li>
+            <li><strong>State WIS:</strong> Quantile score evaluated specifically for the selected state.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-spatial-aggregation">
+          <div class="section-badge">SPATIAL COHERENCE</div>
+          <h4>14. Bottom-Up State Sums vs. Direct National Models</h4>
+          <p>
+            Models in FluSight produce both individual state forecasts and an independent national forecast for the United States.
+          </p>
+          <div class="methodology-callout">
+            <strong>Quantile Aggregation:</strong> Quantiles are not additive: the median of a sum generally differs from the sum of medians <code class="code-badge">&sum; Median_s</code>. The two coincide when every state distribution (and hence the sum) is symmetric; correlation between states changes the spread of the national distribution, not this identity.
+          </div>
+          <p>
+            The direct national forecast <code class="code-badge">Median_US</code> is also a separately fitted model output, so it can differ from any bottom-up aggregate even when quantile arithmetic is not a factor.
+          </p>
+          <p>
+            Comparing the bottom-up sum against direct national models provides insight into spatial coherence across model outputs.
+          </p>
+        </div>
+
+        <div class="methodology-section" id="methodology-spatial-insights">
+          <div class="section-badge">SPATIAL METRICS</div>
+          <h4>15. Spatial Summary Statistics</h4>
+          <p>
+            Summary indicators computed across state-level projections:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Highest Incidence State:</strong> Jurisdiction with <code class="code-badge">max(Rate per 100k)</code>.</li>
+            <li><strong>Fastest Surge:</strong> Jurisdiction with <code class="code-badge">max(&Delta;% Growth)</code>.</li>
+            <li><strong>Wave Spread Status:</strong> Proportion of jurisdictions with growing trajectories (&gt; +5%) versus receding trajectories (&lt; &minus;5%).</li>
+          </ul>
+        </div>
+
+        <!-- PART III: SURVEILLANCE SIGNALS, TECHNICAL INDICATORS & DISPLAY MODES -->
+        <div class="methodology-divider-banner" id="methodology-part3-heading">
+          <span class="part-badge">PART III</span>
+          <h3>Surveillance Signals, Technical Indicators &amp; Display Modes</h3>
+          <p>Surveillance stream definitions, smoothing filters, dynamic indicators, and visual modes.</p>
+        </div>
+
+        <div class="methodology-section" id="methodology-signals-surveillance">
+          <div class="section-badge">SURVEILLANCE INTEGRATION</div>
+          <h4>16. Surveillance Data Streams: NSSP, ILINet &amp; FluSurv-NET</h4>
+          <p>
+            The visualizer incorporates multi-source surveillance data alongside forecast targets:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>NHSN Hospital Admissions:</strong> Weekly laboratory-confirmed influenza admissions (<code class="code-badge">wk inc flu hosp</code>), serving as the primary evaluation target.</li>
+            <li><strong>NSSP Flu Emergency Department (% ED Visits):</strong> CDC National Syndromic Surveillance Program data reporting the percentage of emergency department visits diagnosed with influenza. This signal typically leads hospital admissions by 1 to 2 weeks.</li>
+            <li><strong>ILINet (Scaled ILI+):</strong> Outpatient Influenza-like Illness Surveillance Network data multiplied by laboratory test positivity percent (<code class="code-badge">wILI &times; % positive / 100</code>), aligned by MMWR week across seasons 2010–2023.</li>
+            <li><strong>FluSurv-NET Laboratory Rate (Rate / 100k):</strong> Population-based laboratory-confirmed hospitalizations per 100,000 residents across 14 network states (2010–2023).</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-signals-smoothing">
+          <div class="section-badge">TREND SMOOTHING</div>
+          <h4>17. Trend Smoothing Filters: MA-2, MA-4 &amp; EMA-3</h4>
+          <p>
+            Filters reduce weekly reporting noise and holiday-related data irregularities:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>2-Week Moving Average (MA-2):</strong> <code class="code-badge">MA_2(t) = (y_t + y_{t-1}) / 2</code>. Fast 2-point smoothing with minimal phase lag.</li>
+            <li><strong>4-Week Moving Average (MA-4):</strong> <code class="code-badge">MA_4(t) = 0.25 &middot; &sum;_{i=0}^3 y_{t-i}</code>. Four-week smoothing representing monthly trend.</li>
+            <li><strong>3-Week Exponential Moving Average (EMA-3):</strong> <code class="code-badge">EMA_t = &alpha; y_t + (1 &minus; &alpha;) EMA_{t-1}</code> with smoothing weight <code class="code-badge">&alpha; = 2 / (3 + 1) = 0.50</code>. Weights recent data more heavily while attenuating high-frequency noise.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-signals-dynamics">
+          <div class="section-badge">EPIDEMIC DYNAMICS</div>
+          <h4>18. Epidemic Velocity &amp; Week-over-Week Growth</h4>
+          <p>
+            Rate-of-change indicators provide leading signals before absolute volume peaks:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Net Case Velocity (WoW Velocity):</strong> First difference <code class="code-badge">v_t = y_t &minus; y_{t-1}</code> (net admissions per week). Positive values indicate expanding admissions; negative values indicate contraction.</li>
+            <li><strong>Week-over-Week Growth Rate (% WoW):</strong> Relative growth <code class="code-badge">g_t = ((y_t &minus; y_{t-1}) / y_{t-1}) &times; 100%</code>. Reflects relative acceleration or deceleration of the epidemic curve.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-signals-benchmarks">
+          <div class="section-badge">HISTORICAL BENCHMARKS</div>
+          <h4>19. Aligned Historical Seasons</h4>
+          <p>
+            Enables overlaying historical seasons ('23–'24, '22–'23, '21–'22, and '20–'21) aligned week-for-week against the active forecast horizon.
+          </p>
+          <ul class="methodology-list">
+            <li><strong>MMWR Epiweek Alignment:</strong> Aligned by CDC MMWR <code class="code-badge">season_week</code> (Week 1 through 52/53) to preserve calendar alignment for Thanksgiving, Christmas, and New Year holidays across seasons.</li>
+            <li><strong>Rendering Modes:</strong> Toggle between monochrome recency gradient (older seasons rendered with higher opacity) and chromatic tints (distinct colors per season).</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-signals-peak">
+          <div class="section-badge">REFERENCE BOUNDS</div>
+          <h4>20. Season Peak Level Reference</h4>
+          <p>
+            Draws a horizontal reference line at the highest weekly admissions count observed to date in the current flu season, providing context on whether model projections anticipate new seasonal peaks or post-peak declines.
+          </p>
+        </div>
+
+        <div class="methodology-section" id="methodology-modes-mechanics">
+          <div class="section-badge">DISPLAY MODES</div>
+          <h4>21. Display Modes: Dual Y-Axis vs. Normalized (0–100%)</h4>
+          <p>
+            Supports two display modes for comparing surveillance streams with differing units:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Dual Y-Axis Mode (Right Axis):</strong> Displays hospital admissions on the primary left axis and secondary streams (% ED visits, rate per 100k, velocity) on the right axis (<code class="code-badge">yaxis2</code>), preserving absolute values.</li>
+            <li><strong>Normalized Mode (0–100% of Peak):</strong> Rescales admissions, forecast quantiles, and active surveillance streams to <code class="code-badge">v_{norm} = (v / v_{max}) &times; 100%</code>, enabling direct visual comparison of relative timing and peaks. Velocity and growth keep their own right axis.</li>
+            <li><strong>Axis Scaling:</strong> Every axis always contains every value drawn on it in the visible window (truth, medians, each displayed prediction interval, width rulers, indicators, and the season-peak line), so nothing is clipped. When stepping between dates, the previous scale is held while it is at most 1.5&times; looser than needed and otherwise eases halfway toward the fitted scale, so the axis does not jump after a wide peak-week forecast.</li>
+            <li><strong>Interval Width Rulers:</strong> Optional solid bars beside the fan that redraw each model's last-horizon prediction intervals side by side (thin = 95%, medium = 80%, thick = 50%), so interval widths can be compared directly.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-divider-banner" id="methodology-part4-heading">
+          <span class="part-badge">PART IV</span>
+          <h3>Heatmap Matrix Analytics &amp; Cross-Sectional Surveillance</h3>
+          <p>Multi-jurisdiction wave progression, peak-timing sorting, and cross-model performance matrices.</p>
+        </div>
+
+        <div class="methodology-section" id="methodology-heatmap-overview">
+          <div class="section-badge">MATRIX ARCHITECTURE</div>
+          <h4>22. Cross-Sectional Matrix Principles &amp; Analytical Presets</h4>
+          <p>
+            The Heatmap Matrix view complements the single-location Timeline Fan and single-week Spatial Choropleth by projecting high-density multidimensional surveillance and forecast data onto a 2D cross-sectional grid:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Spatio-Temporal Wave Matrix (Location &times; Date):</strong> Renders nationwide temporal progression across all 52 jurisdictions over the entire season.</li>
+            <li><strong>Forward Outlook Matrix (Location &times; Horizon):</strong> Evaluates near-term trajectories (<code class="code-badge">h=0</code> to <code class="code-badge">h=3</code>) across states for operational readiness.</li>
+            <li><strong>Model Breakdown Matrix (Model &times; Location):</strong> Identifies localized modeling strengths and regional biases across models.</li>
+            <li><strong>Horizon Error Decay Matrix (Model &times; Horizon):</strong> Quantifies how uncertainty and interval error accumulate as forecast lead time extends.</li>
+            <li><strong>Error &amp; Shock Timeline Matrix (Model &times; Date):</strong> Detects reporting anomalies, holiday backlog artifacts, and systemic turning-point errors.</li>
+          </ul>
+        </div>
+
+        <div class="methodology-section" id="methodology-wave-cascade">
+          <div class="section-badge">WAVE RECONSTRUCTION</div>
+          <h4>23. Peak-Timing Sorting Algorithm &amp; Epidemic Wavefronts</h4>
+          <p>
+            Standard alphabetical ordering hides physical epidemiological propagation. The <strong>Peak-Timing Sort</strong> reorganizes geographic jurisdictions along the Y-axis chronologically according to the epidemiological week of their maximum observed incidence:
+          </p>
+          <div class="methodology-callout">
+            <strong>Argmax Ordering:</strong> For jurisdiction <code class="code-badge">i</code>, compute <code class="code-badge">t^*_i = \arg\max_{t} v_{i,t}</code>. Sort rows by <code class="code-badge">(t^*_i, -\max_t v_{i,t})</code>.
+          </div>
+          <p>
+            This mathematical reconstruction aligns the diagonal <em>wavefront</em> across the matrix, exposing transmission corridors (e.g. initial southern surges followed weeks later by midwestern and northeastern peaks).
+          </p>
+        </div>
+
+        <div class="methodology-section" id="methodology-row-normalization">
+          <div class="section-badge">NORMALIZATION MATH</div>
+          <h4>24. Row-Relative Min-Max Peak Scaling</h4>
+          <p>
+            Due to population scale and healthcare capacity disparities, absolute metrics can obscure timing in smaller states. The <strong>Row Min-Max Normalization</strong> rescales each state's time series onto a unit interval <code class="code-badge">[0.0, 1.0]</code>:
+          </p>
+          <div class="methodology-callout">
+            <code class="code-badge">v'_{i,t} = \frac{v_{i,t} - \min_t(v_{i,t})}{\max_t(v_{i,t}) - \min_t(v_{i,t})}</code>
+          </div>
+          <p>
+            Where <code class="code-badge">1.0</code> represents that jurisdiction's localized seasonal crest and <code class="code-badge">0.0</code> represents its baseline nadir. This allows epidemiologists to compare wave shape, crest duration, and lead-lag dynamics independent of baseline population magnitude.
+          </p>
+        </div>
+
+        <div class="methodology-section" id="methodology-hhs-regions">
+          <div class="section-badge">PUBLIC HEALTH CLUSTERS</div>
+          <h4>25. HHS Federal Health Regions (1–10)</h4>
+          <p>
+            The matrix supports hierarchical grouping by the 10 official US Department of Health and Human Services (HHS) administrative regions:
+          </p>
+          <ul class="methodology-list">
+            <li><strong>Region 1 (New England):</strong> CT, ME, MA, NH, RI, VT</li>
+            <li><strong>Region 2 (NY / NJ / Caribbean):</strong> NJ, NY, PR, VI</li>
+            <li><strong>Region 3 (Mid-Atlantic):</strong> DE, DC, MD, PA, VA, WV</li>
+            <li><strong>Region 4 (Southeast):</strong> AL, FL, GA, KY, MS, NC, SC, TN</li>
+            <li><strong>Region 5 (Great Lakes / Midwest):</strong> IL, IN, MI, MN, OH, WI</li>
+            <li><strong>Region 6 (South Central):</strong> AR, LA, NM, OK, TX</li>
+            <li><strong>Region 7 (Central):</strong> IA, KS, MO, NE</li>
+            <li><strong>Region 8 (Mountain):</strong> CO, MT, ND, SD, UT, WY</li>
+            <li><strong>Region 9 (Pacific Southwest):</strong> AZ, CA, HI, NV, AS, GU, MP</li>
+            <li><strong>Region 10 (Pacific Northwest):</strong> AK, ID, OR, WA</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model Inspection & Temporal Coverage Modal -->
+  <div id="model-detail-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="model-detail-title">
+    <div class="modal-card model-detail-card">
+      <!-- Header -->
+      <div class="modal-header model-detail-header">
+        <div class="model-detail-identity">
+          <div class="model-title-meta">
+            <div class="model-title-row">
+              <h3 id="model-detail-title" class="model-detail-title">Model Name</h3>
+              <span class="md-badge" id="md-badge-type">REPO</span>
+              <span class="md-badge" id="md-badge-designated">PRIMARY</span>
+              <span class="md-badge" id="md-badge-license">CC-BY-4.0</span>
+            </div>
+            <div class="model-subtitle" id="md-subtitle">
+              <span id="md-team-name">Team Name</span> &bull; 
+              <span id="md-model-name">Model Abbr</span> &bull; 
+              <span id="md-version">v1.0</span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-header-actions">
+          <button type="button" class="btn-toggle-select-model" id="md-btn-toggle-select" title="Toggle selection in visualizer">
+            <span id="md-btn-select-icon">+</span>
+            <span id="md-btn-select-text">Compare in Visualizer</span>
+          </button>
+          <button type="button" class="modal-close" id="btn-close-model-detail" aria-label="Close model details">&times;</button>
+        </div>
+      </div>
+
+      <!-- Modal Telemetry Ribbon -->
+      <div class="model-telemetry-ribbon" id="md-telemetry-ribbon">
+        <div class="md-stat-card">
+          <span class="md-stat-label">ACTIVE SEASONS</span>
+          <span class="md-stat-val" id="md-stat-seasons">--</span>
+          <span class="md-stat-sub" id="md-stat-seasons-sub">--</span>
+        </div>
+        <div class="md-stat-card">
+          <span class="md-stat-label">TOTAL ROUNDS</span>
+          <span class="md-stat-val" id="md-stat-rounds">--</span>
+          <span class="md-stat-sub" id="md-stat-rounds-sub">--</span>
+        </div>
+        <div class="md-stat-card">
+          <span class="md-stat-label">EVALUATION HORIZONS</span>
+          <span class="md-stat-val" id="md-stat-horizons">--</span>
+          <span class="md-stat-sub" id="md-stat-horizons-sub">--</span>
+        </div>
+        <div class="md-stat-card">
+          <span class="md-stat-label">GEOGRAPHIC SCOPE</span>
+          <span class="md-stat-val" id="md-stat-locs">--</span>
+          <span class="md-stat-sub" id="md-stat-locs-sub">--</span>
+        </div>
+        <div class="md-stat-card">
+          <span class="md-stat-label">DATASET FOOTPRINT</span>
+          <span class="md-stat-val" id="md-stat-volume">--</span>
+          <span class="md-stat-sub" id="md-stat-volume-sub">--</span>
+        </div>
+      </div>
+
+      <!-- Model Modal Navigation Tabs -->
+      <div class="model-detail-tabs" id="md-tabs">
+        <button type="button" class="model-tab-btn active" data-tab="coverage">
+          Coverage &amp; Schedule
+        </button>
+        <button type="button" class="model-tab-btn" data-tab="methodology">
+          Architecture &amp; Methods
+        </button>
+        <button type="button" class="model-tab-btn" data-tab="specs">
+          Data Specs &amp; Schema
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="modal-body model-detail-body" id="md-modal-body">
+        <!-- Injected dynamically -->
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="modal-footer model-detail-footer">
+        <div class="md-footer-legend">
+          <span class="legend-cell submitted"></span>
+          <span class="legend-text">Submitted Forecast</span>
+          <span class="legend-cell missing"></span>
+          <span class="legend-text">Not Submitted</span>
+          <span class="legend-hint">&bull; Click any green date tile to load that forecast in the visualizer</span>
+        </div>
+        <div class="md-footer-actions">
+          <button type="button" class="btn-modal-close-action" id="btn-close-model-detail-bottom">Close (Esc)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Synthetic Ensemble Studio Modal -->
+  <div id="ensemble-studio-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="ensemble-studio-title">
+    <div class="modal-card ensemble-studio-card">
+      <!-- Header -->
+      <div class="modal-header ensemble-studio-header">
+        <div class="ensemble-identity">
+          <div class="ensemble-title-row">
+            <h3 id="ensemble-studio-title" class="ensemble-studio-title">Synthetic Ensemble Studio</h3>
+            <span class="ensemble-badge-synth">[SYNTHETIC ENSEMBLE]</span>
+          </div>
+          <div class="ensemble-subtitle">
+            Combine existing model forecasts into custom quantile ensembles to compare against benchmarks and constituent models.
+          </div>
+        </div>
+        <div class="modal-header-actions">
+          <button type="button" class="modal-close" id="btn-close-ensemble-studio" aria-label="Close Ensemble Studio">&times;</button>
+        </div>
+      </div>
+
+      <!-- Studio Navigation Tabs -->
+      <div class="model-detail-tabs ensemble-studio-tabs" id="ensemble-studio-tabs">
+        <button type="button" class="model-tab-btn active" data-tab="builder" id="tab-btn-builder">
+          <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          Ensemble Builder
+        </button>
+        <button type="button" class="model-tab-btn" data-tab="active" id="tab-btn-active">
+          <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+          Active Ensembles (<span id="studio-active-count-tab">0</span>)
+        </button>
+      </div>
+
+      <!-- Modal Body -->
+      <div class="modal-body ensemble-studio-body" id="ensemble-studio-body">
+        <!-- TAB 1: BUILDER -->
+        <div class="ensemble-tab-pane active" id="pane-ensemble-builder">
+          <div class="ensemble-builder-grid">
+            <!-- Left Column: Specs & Settings -->
+            <div class="ensemble-config-col">
+              <!-- Name & Description -->
+              <div class="ensemble-card-section">
+                <div class="section-title-wrap">
+                  <span class="section-num">01</span>
+                  <label class="section-label" for="ensemble-name-input">Identity</label>
+                </div>
+                <div class="form-group">
+                  <input type="text" id="ensemble-name-input" class="studio-text-input" placeholder="e.g. Flusion + AR6 Equal Median" maxlength="64" />
+                </div>
+                <div class="form-group">
+                  <input type="text" id="ensemble-desc-input" class="studio-text-input secondary" placeholder="Optional description / experiment notes" maxlength="140" />
+                </div>
+              </div>
+
+              <!-- Combination Method -->
+              <div class="ensemble-card-section">
+                <div class="section-title-wrap">
+                  <span class="section-num">02</span>
+                  <span class="section-label">Combination Method</span>
+                  <button type="button" class="info-trigger-btn" data-term="synth_vincentization" title="View Quantile Vincentization definition" aria-label="Vincentization definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                </div>
+                <div class="method-cards-grid">
+                  <label class="method-card active" id="lbl-method-median">
+                    <input type="radio" name="ensemble-method" value="median" checked />
+                    <div class="method-card-content">
+                      <div class="method-card-title">Quantile Median (Hubverse Standard)</div>
+                      <div class="method-card-desc">Pointwise median across constituent quantiles. Robust to extreme outlier models; standard for FluSight.</div>
+                    </div>
+                  </label>
+                  <label class="method-card" id="lbl-method-mean">
+                    <input type="radio" name="ensemble-method" value="mean" />
+                    <div class="method-card-content">
+                      <div class="method-card-title">Quantile Mean (Equal-Weighted)</div>
+                      <div class="method-card-desc">Pointwise arithmetic mean across constituent quantiles with monotonic rearrangement.</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Spatial Routing -->
+              <div class="ensemble-card-section">
+                <div class="section-title-wrap">
+                  <span class="section-num">03</span>
+                  <span class="section-label">Spatial Routing</span>
+                  <button type="button" class="info-trigger-btn" data-term="synth_spatial_routing" title="View Spatial Split Routing definition" aria-label="Spatial routing definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                </div>
+                <div class="routing-toggle-wrap">
+                  <label class="routing-option active" id="lbl-routing-uniform">
+                    <input type="radio" name="ensemble-routing" value="uniform" checked />
+                    <span>Uniform Pool (Same models for National &amp; States)</span>
+                  </label>
+                  <label class="routing-option" id="lbl-routing-split">
+                    <input type="radio" name="ensemble-routing" value="split" />
+                    <span>Spatial Split (States vs. US National Separate Pools)</span>
+                  </label>
+                </div>
+                <div class="routing-explanation-box" id="routing-explanation-box">
+                  Uniform: All selected models are combined across both US national and state locations.
+                </div>
+              </div>
+
+              <!-- Missing Task Policy -->
+              <div class="ensemble-card-section">
+                <div class="section-title-wrap">
+                  <span class="section-num">04</span>
+                  <span class="section-label">Missing Submissions</span>
+                  <button type="button" class="info-trigger-btn" data-term="synth_missing_policy" title="View Missing Submissions policy definition" aria-label="Missing submissions definition"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                </div>
+                <div class="routing-toggle-wrap">
+                  <label class="routing-option active" id="lbl-policy-flexible">
+                    <input type="radio" name="ensemble-policy" value="flexible" checked />
+                    <span>Flexible (Average available models on partial rounds; flag warnings)</span>
+                  </label>
+                  <label class="routing-option" id="lbl-policy-strict">
+                    <input type="radio" name="ensemble-policy" value="strict" />
+                    <span>Strict (Drop forecast rounds where any constituent model is missing)</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Column: Model Selection & Coverage Audit -->
+            <div class="ensemble-models-col">
+              <!-- Constituent Model Selection -->
+              <div class="ensemble-card-section models-picker-section">
+                <div class="section-title-wrap">
+                  <span class="section-num">05</span>
+                  <span class="section-label">Constituent Models</span>
+                  <span class="models-selected-counter" id="studio-selected-models-count">0 selected</span>
+                </div>
+
+                <div class="models-filter-bar">
+                  <input type="text" id="studio-model-search" class="studio-search-input" placeholder="Filter models by name..." />
+                  <div class="quick-select-btns">
+                    <button type="button" class="quick-sel-btn" id="btn-studio-sel-all">All</button>
+                    <button type="button" class="quick-sel-btn" id="btn-studio-sel-none">Clear</button>
+                  </div>
+                </div>
+
+                <!-- Uniform Pool Selector -->
+                <div class="models-picker-container" id="studio-uniform-container">
+                  <div class="models-grid" id="studio-uniform-models-grid">
+                    <!-- Populated dynamically -->
+                  </div>
+                </div>
+
+                <!-- Spatial Split Selectors (hidden by default) -->
+                <div class="models-picker-container spatial-split-grid hidden" id="studio-split-container">
+                  <div class="split-column">
+                    <div class="split-col-header">
+                      <span>50 States + DC + PR Pool</span>
+                      <span class="col-count-badge" id="studio-state-models-count">0</span>
+                    </div>
+                    <div class="models-grid" id="studio-state-models-grid"></div>
+                  </div>
+                  <div class="split-column">
+                    <div class="split-col-header">
+                      <span>US National Pool</span>
+                      <span class="col-count-badge" id="studio-nat-models-count">0</span>
+                    </div>
+                    <div class="models-grid" id="studio-nat-models-grid"></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Forecast Overlap & Coverage Audit Box -->
+              <div class="ensemble-preflight-card" id="studio-preflight-card">
+                <div class="preflight-header">
+                  <div class="preflight-title-wrap">
+                    <span class="preflight-title">Forecast Overlap &amp; Coverage Audit</span>
+                    <button type="button" class="info-trigger-btn" data-term="synth_integrity" title="View Quantile Monotonicity and Integrity details" aria-label="Integrity details"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg></button>
+                  </div>
+                  <span class="audit-status-badge valid" id="preflight-status-badge">Ready</span>
+                </div>
+
+                <div class="preflight-stats-grid">
+                  <div class="preflight-stat">
+                    <span class="pf-label">CONSTITUENT MODELS</span>
+                    <span class="pf-val" id="pf-model-count">0</span>
+                  </div>
+                  <div class="preflight-stat">
+                    <span class="pf-label">COMMON ROUNDS</span>
+                    <span class="pf-val" id="pf-common-rounds">--</span>
+                  </div>
+                  <div class="preflight-stat">
+                    <span class="pf-label">UNION ROUNDS</span>
+                    <span class="pf-val" id="pf-union-rounds">--</span>
+                  </div>
+                  <div class="preflight-stat">
+                    <span class="pf-label">DATE OVERLAP</span>
+                    <span class="pf-val highlight" id="pf-overlap-pct">--%</span>
+                  </div>
+                </div>
+
+                <div class="preflight-bar-track">
+                  <div class="preflight-bar-fill" id="pf-bar-fill" style="width: 0%;"></div>
+                </div>
+
+                <div class="preflight-integrity-tags">
+                  <span class="integrity-tag success" title="Guaranteed non-decreasing quantiles via quantile rearrangement">
+                    <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    Monotonic Quantiles (No Crossings)
+                  </span>
+                  <span class="integrity-tag success" title="Evaluated strictly on matching observation dates without leakage">
+                    <svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                    Strict Date Alignment (No Leakage)
+                  </span>
+                </div>
+
+                <div class="preflight-warning-banner hidden" id="pf-warning-banner">
+                  <!-- Injected dynamically -->
+                </div>
+              </div>
+
+              <!-- Creation CTA Ribbon -->
+              <div class="ensemble-create-ribbon">
+                <div class="ensemble-create-hint">
+                  Created ensembles compute in-session immediately and can be persisted to <code>local-output/</code> anytime.
+                </div>
+                <button type="button" class="btn-create-ensemble-cta" id="btn-submit-create-ensemble">
+                  <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                  <span>Create Ensemble &amp; Compare</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 2: ACTIVE ENSEMBLES -->
+        <div class="ensemble-tab-pane hidden" id="pane-ensemble-active">
+          <div class="active-ensembles-header">
+            <h4>Active &amp; Persisted Synthetic Ensembles</h4>
+            <p class="text-dim">Synthetic ensembles available for multi-model evaluation, fan chart comparison, and spatial mapping.</p>
+          </div>
+          <div class="active-ensembles-list" id="studio-active-list">
+            <!-- Rendered dynamically -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="modal-footer ensemble-studio-footer">
+        <div class="ensemble-footer-hint">
+          &bull; Synthetic ensembles are calculated in-session and evaluated alongside repository models. Persist to local-output/ anytime from Active Ensembles.
+        </div>
+        <button type="button" class="btn-modal-close-action" id="btn-close-ensemble-studio-bottom">Close (Esc)</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- Live Hub Data Modal (opened from the brand menu) -->
+  <div id="remote-hub-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="remote-hub-title">
+    <div class="modal-card remote-hub-card">
+      <div class="modal-header">
+        <div class="remote-title-group">
+          <h3 id="remote-hub-title" class="modal-title">Live Hub Data</h3>
+          <span class="remote-title-sub">Copy forecasts from public Hubverse hubs into the local cache. Nothing is downloaded until you press Sync.</span>
+        </div>
+        <button type="button" class="modal-close" id="btn-close-remote-hub" aria-label="Close live hub data">&times;</button>
+      </div>
+      <div class="modal-body remote-hub-body" id="remote-hub-body"></div>
+      <div class="modal-footer remote-hub-footer">
+        <span class="remote-footer-note">Flu hubs only for now &bull; copies live in viz/.cache/remote &bull; the CLI ignores hub data</span>
+        <button type="button" class="btn-modal-close-action" id="btn-remote-done">Done (Esc)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interactive Definition Popover (Glossary Card) -->
+  <div id="definition-popover" class="definition-popover hidden" role="tooltip" aria-hidden="true">
+    <div class="popover-arrow"></div>
+    <div class="popover-header">
+      <div class="popover-title-row">
+        <span class="popover-tag" id="popover-tag">SCORING RULE</span>
+        <h4 class="popover-title" id="popover-title">Metric Title</h4>
+      </div>
+      <button type="button" class="popover-close-btn" id="popover-close-btn"
+        aria-label="Close definition">&times;</button>
+    </div>
+    <div class="popover-body">
+      <p class="popover-desc" id="popover-desc">Definition explanation goes here...</p>
+
+      <!-- Smart Calculation & Intuition Block -->
+      <div class="popover-calc-wrap" id="popover-calc-wrap">
+        <span class="calc-label">HOW IT'S CALCULATED</span>
+        <div class="popover-calc-text" id="popover-calc">Calculation breakdown...</div>
+        <div class="popover-intuition-text" id="popover-intuition">Intuitive explanation...</div>
+      </div>
+
+      <!-- Target & Benchmark Block -->
+      <div class="popover-target-wrap" id="popover-target-wrap">
+        <span class="target-icon" id="popover-target-icon"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg></span>
+        <span class="popover-target" id="popover-target">Target guideline</span>
+      </div>
+    </div>
+    <div class="popover-footer">
+      <button type="button" class="popover-methodology-btn" id="popover-methodology-btn">
+        <span>Open In-Depth Methodology Guide</span>
+        <span class="link-arrow">&rarr;</span>
+      </button>
+    </div>
+  </div>
+
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,4 @@
+# FluSight Sandbox Visualization & Evaluation Suite - Developer Dependencies
+# Install: pip install -r viz/requirements-dev.txt
+-r requirements.txt
+pytest>=8.0.0

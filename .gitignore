@@ -1,0 +1,15 @@
+# FluSight Sandbox Visualization & Evaluation Suite
+# Ignore local Parquet cache tables, compiled bytecode, and test scratch
+.cache/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.DS_Store
+
+# Surveillance data is rebuilt by rebuild_surveillance.py. Only the ILINet and
+# FluSurv-NET history is kept: the script updates those files in place but
+# cannot recreate the 2010-2023 archive from scratch.
+data/surveillance/*
+!data/surveillance/ilinet.csv
+!data/surveillance/flusurvnet.csv
