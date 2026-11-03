@@ -17,10 +17,10 @@ from typing import List, Optional, Any
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from viz.config import VizConfig
-from viz.data_loader import SandboxDataLoader
-from viz.evaluation import EvaluationEngine, EvaluationParams
-from viz.synthetic_ensemble import SyntheticEnsembleConfig
+from viz.core.config import VizConfig
+from viz.core.data_loader import SandboxDataLoader
+from viz.core.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.synthetic_ensemble import SyntheticEnsembleConfig
 from viz.remote.s3 import S3Error
 from viz.remote.sync import RemoteManager, current_season
 

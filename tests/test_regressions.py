@@ -11,10 +11,10 @@ import unittest
 
 import polars as pl
 
-from viz.data_loader import SandboxDataLoader
-from viz.evaluation import EvaluationEngine, EvaluationParams
-from viz.metrics import compute_pairwise_relative_wis, score_forecasts
-from viz.synthetic_ensemble import SyntheticEnsembleConfig
+from viz.core.data_loader import SandboxDataLoader
+from viz.core.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.metrics import compute_pairwise_relative_wis, score_forecasts
+from viz.core.synthetic_ensemble import SyntheticEnsembleConfig
 
 TARGET = "wk inc flu hosp"
 ED_TARGET = "wk inc flu prop ed visits"

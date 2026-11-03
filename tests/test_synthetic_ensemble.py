@@ -13,11 +13,11 @@ import unittest
 
 import polars as pl
 
-from viz.cache_manager import ParquetCacheManager
-from viz.data_loader import SandboxDataLoader
-from viz.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.cache_manager import ParquetCacheManager
+from viz.core.data_loader import SandboxDataLoader
+from viz.core.evaluation import EvaluationEngine, EvaluationParams
 from viz.server import SandboxRequestHandler
-from viz.synthetic_ensemble import (
+from viz.core.synthetic_ensemble import (
     SyntheticEnsembleConfig,
     SyntheticEnsembleManager,
     enforce_quantile_monotonicity,

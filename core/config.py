@@ -122,7 +122,7 @@ class VizConfig:
         return ["wk inc flu hosp"]
 
     def get_weekly_targets(self, discovered_targets: Optional[List[str]] = None) -> List[str]:
-        """Targets shown in the target selector: everything except season peak targets (see viz.peaks)."""
+        """Targets shown in the target selector: everything except season peak targets (see viz.core.peaks)."""
         return [t for t in self.get_targets(discovered_targets) if not t.strip().lower().startswith("peak ")]
 
     def get_default_target(self, discovered_targets: Optional[List[str]] = None) -> str:

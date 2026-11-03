@@ -21,6 +21,8 @@ except ModuleNotFoundError:
     if "VIRTUAL_ENV" in os.environ:
         candidate_pythons.append(Path(os.environ["VIRTUAL_ENV"]) / "bin" / "python")
     candidate_pythons.extend([
+        Path(__file__).resolve().parent / ".venv" / "bin" / "python",
+        Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe",
         repo_root / ".venv" / "bin" / "python",
         repo_root / "venv" / "bin" / "python",
         repo_root / ".venv" / "Scripts" / "python.exe",
@@ -36,8 +38,8 @@ except ModuleNotFoundError:
         "\n[FluSight Scorer CLI] ERROR: Dependency 'polars' is required but not found in:\n"
         f"  {sys.executable}\n\n"
         "To run the CLI evaluation tool, please either:\n"
-        "  1. Activate the repository virtual environment:\n"
-        "       source .venv/bin/activate\n"
+        "  1. Run the one-time setup script:\n"
+        "       ./viz/setup.sh   (Windows: viz\\setup.bat)\n"
         "  2. Or install dependencies via requirements file:\n"
         "       pip install -r viz/requirements.txt\n\n"
     )
@@ -46,8 +48,8 @@ except ModuleNotFoundError:
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from viz.data_loader import SandboxDataLoader
-from viz.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.data_loader import SandboxDataLoader
+from viz.core.evaluation import EvaluationEngine, EvaluationParams
 
 
 import csv

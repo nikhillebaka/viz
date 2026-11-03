@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import polars as pl
 
-from viz.peaks import (
+from viz.core.peaks import (
     default_window, observed_peak, peak_targets_for, score_size, score_timing, summarize_size, summarize_timing,
 )
 

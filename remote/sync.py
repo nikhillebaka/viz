@@ -54,7 +54,7 @@ def _parse_s3_time(ts: str) -> Optional[datetime]:
 
 
 def season_for_date(d: str) -> str:
-    from viz.data_loader import SandboxDataLoader
+    from viz.core.data_loader import SandboxDataLoader
     return SandboxDataLoader.get_flu_season_for_date(d)
 
 

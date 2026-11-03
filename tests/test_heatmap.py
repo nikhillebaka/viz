@@ -13,7 +13,7 @@ import time
 import unittest
 import urllib.parse
 
-from viz.data_loader import SandboxDataLoader, HHS_REGIONS, STATE_TO_HHS_REGION
+from viz.core.data_loader import SandboxDataLoader, HHS_REGIONS, STATE_TO_HHS_REGION
 from viz.server import SandboxRequestHandler
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent

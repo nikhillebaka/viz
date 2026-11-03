@@ -1,0 +1,11 @@
+# Live hub data (CDC FluSight on S3)
+
+Click **FluSight Sandbox** in the top-left corner to open the data-sources menu. From there you can copy live forecasts from the public [CDC FluSight hub](https://github.com/cdcepi/FluSight-forecast-hub) S3 mirror (`cdcepi-flusight-forecast-hub`) and compare them with your own models.
+
+- **Nothing is downloaded until you press Sync.** Opening the Live Hub Data dialog only lists the hub, so you can see what is available per season. The default selection is the current season, which is a few MB.
+- **Syncs are incremental.** Only files whose S3 ETag or size changed are fetched. Upstream deletions are mirrored, and resubmissions are recorded as revisions. Use *Check for new forecasts* in the menu to see what changed upstream.
+- **Each file is validated before it is stored.** Schema drift (e.g. `int64` vs `int32` horizons, `date32` dates) is normalized and only quantile rows are kept. Crossing quantiles, negative counts, unknown locations, duplicate rows, and mismatched `model_id`s are reported under *Data quality*. Unreadable files are skipped, never partially loaded.
+- **Hub models are namespaced** (e.g. `flusight:UMass-flusion`), so they never collide with repository models of the same name. In the model bar they live in their own collapsible row with *This round* and *Designated only* filters.
+- **Truth uses the newest available source (Auto).** The hub's `oracle-output`, admissions series, and newer as-of snapshots are merged with the repository's truth. For every observation the newest vintage wins and older sources only fill gaps. Each week appears exactly once, so charts, indicators, and scores stay continuous across seasons. Rounds whose target weeks have not been observed yet are marked *Pending truth* on the leaderboard.
+- **Viz only supports flu hubs for now.** *Connect another hub…* accepts any public Hubverse bucket. Hubs with non-flu targets (e.g. COVID-19, RSV) or non-state locations (e.g. city-level hubs) are rejected with a warning.
+- **Copies live in `viz/.cache/remote/`.** Hide a hub from the menu (its data stays on disk), or use *Remove local copy* to delete it. **The CLI (`score_cli.py`) ignores hub data and scores repository models only.**

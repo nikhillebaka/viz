@@ -14,10 +14,10 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 
 import polars as pl
 
-from viz.peaks import is_peak_target
-from viz.config import VizConfig
-from viz.data_loader import SandboxDataLoader, date_to_season_and_week
-from viz.metrics import score_forecasts, find_common_tasks, compute_pairwise_relative_wis
+from viz.core.peaks import is_peak_target
+from viz.core.config import VizConfig
+from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
+from viz.core.metrics import score_forecasts, find_common_tasks, compute_pairwise_relative_wis
 
 logger = logging.getLogger("viz.evaluation")
 
