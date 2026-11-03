@@ -4,7 +4,7 @@ The internal HTTP server provides the following endpoints:
 
 | Endpoint | Method | Parameters | Description |
 | :--- | :---: | :--- | :--- |
-| `/api/status` | `GET` | None | Server status and loaded model inventory |
+| `/api/status` | `GET` | None | Server status, the hub folder being served (`hub`), and loaded model inventory |
 | `/api/metadata` | `GET` | None | Models, locations, targets, and available reference dates |
 | `/api/forecast` | `GET` | `models`, `target`, `location`, `date` | Quantile fan predictions and ground truth observations |
 | `/api/surveillance` | `GET` | `target`, `location`, `date` | Surveillance signals (NHSN, NSSP, ILINet, FluSurv-NET) |

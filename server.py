@@ -3,11 +3,13 @@ Self-contained, multi-threaded HTTP server for the Sandbox Visualization and Eva
 Built on Python standard library http.server + socketserver with zero external web framework dependencies.
 """
 
+import errno
 import http.server
 import json
 import logging
 from pathlib import Path
 import shutil
+import socket
 import socketserver
 import sys
 import threading
@@ -243,6 +245,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         warnings = DATA_LOADER.get_validation_warnings()
         self._send_json({
             "status": "ok",
+            "hub": BASE_DIR.name,
             "models_count": len(models),
             "production_models": [m for m, v in models.items() if not v["is_local"] and v.get("source") != "hub"],
             "local_test_models": [m for m, v in models.items() if v["is_local"]],
@@ -694,13 +697,47 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
 
 
+def _port_is_free(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _next_free_port(host: str, start: int) -> Optional[int]:
+    for candidate in range(start, min(start + 100, 65536)):
+        if _port_is_free(host, candidate):
+            return candidate
+    return None
+
+
 def run_server(port: Optional[int] = None, host: Optional[str] = None):
     """Launch the threaded HTTP server with transparent cache warmup."""
-    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    # SO_REUSEADDR lets a restart reuse a port stuck in TIME_WAIT on macOS/Linux. On Windows it
+    # would instead let a second server bind a port that is already in use, so it stays off there.
+    socketserver.ThreadingTCPServer.allow_reuse_address = sys.platform != "win32"
 
     server_cfg = VIZ_CONFIG.get_server_config()
     final_port = port if port is not None else server_cfg["port"]
     final_host = host if host is not None else server_cfg["host"]
+
+    try:
+        httpd = socketserver.ThreadingTCPServer((final_host, final_port), SandboxRequestHandler)
+    except OSError as exc:
+        if exc.errno not in (errno.EADDRINUSE, 10048):  # 10048 = WSAEADDRINUSE
+            raise
+        suggestion = _next_free_port(final_host, final_port + 1)
+        launcher = "viz\\run.bat" if sys.platform == "win32" else "./viz/run.sh"
+        sys.stderr.write(
+            f"\nERROR: port {final_port} on {final_host} is already in use, probably by another viz server.\n"
+            f"Nothing was started. Anything answering at http://{final_host}:{final_port} is that other server,\n"
+            f"not this hub ({BASE_DIR}).\n"
+        )
+        if suggestion:
+            sys.stderr.write(f"Start on a free port instead:  {launcher} {suggestion}\n\n")
+        sys.exit(1)
 
     # Warm up Parquet cache in background thread
     def _warmup_background():
@@ -711,14 +748,15 @@ def run_server(port: Optional[int] = None, host: Optional[str] = None):
 
     threading.Thread(target=_warmup_background, daemon=True).start()
 
-    with socketserver.ThreadingTCPServer((final_host, final_port), SandboxRequestHandler) as httpd:
+    with httpd:
         print(f"\n========================================================")
         print(f"  Sandbox Visualization & Evaluation Server Online")
         print(f"  URL: http://{final_host}:{final_port}")
+        print(f"  Hub: {BASE_DIR}")
         print(f"  Engine: Polars (Vectorized SIMD) + Parquet Acceleration")
         print(f"  Serving: {STATIC_DIR}")
         print(f"  Press Ctrl+C to terminate.")
-        print(f"========================================================\n")
+        print(f"========================================================\n", flush=True)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

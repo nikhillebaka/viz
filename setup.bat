@@ -6,7 +6,7 @@ rem   2. Installs the Python dependencies
 rem   3. Builds the surveillance data (NHSN admissions, as-of snapshots)
 rem   4. Creates the hub's local-output\ folder for uncommitted model runs
 rem   5. Hides viz/ and local-output/ from the hub's git status via .git\info\exclude
-rem Safe to re-run.
+rem Safe to re-run. Stops if the parent folder isn't a hub (override with --force).
 rem ==============================================================================
 
 setlocal enabledelayedexpansion
@@ -22,10 +22,40 @@ if /I not "%DIRNAME%"=="viz" (
     exit /b 1
 )
 
-if not exist "%ROOT_DIR%\model-output" if not exist "%ROOT_DIR%\target-data" (
-    echo WARNING: %ROOT_DIR% does not look like a Hubverse hub ^(no model-output\ or target-data\^).
-    echo          viz reads forecasts from the folder that contains it.
+rem viz reads hub data from its parent folder, so it must be cloned directly inside the hub.
+rem Pass --force to skip this check (e.g. for a hub whose model-output\ doesn't exist yet).
+if /I "%~1"=="--force" goto :hub_ok
+if exist "%ROOT_DIR%\model-output" goto :hub_ok
+if exist "%ROOT_DIR%\target-data" goto :hub_ok
+echo ERROR: viz must be inside a Hubverse hub, but %ROOT_DIR%
+echo        has no model-output\ or target-data\ folder.
+set "HUB_COUNT=0"
+for /d %%H in ("%ROOT_DIR%\*") do (
+    if /I not "%%~fH"=="%DIR%" (
+        set "IS_HUB="
+        if exist "%%~fH\model-output" set "IS_HUB=1"
+        if exist "%%~fH\target-data" set "IS_HUB=1"
+        if defined IS_HUB (
+            set /a HUB_COUNT+=1
+            if !HUB_COUNT!==1 (
+                echo.
+                echo Found a hub next to it. Move viz into it ^(pick one if several are listed^), then re-run setup:
+            )
+            echo   move "%DIR%" "%%~fH\viz"
+        )
+    )
 )
+if %HUB_COUNT%==0 (
+    echo.
+    echo Clone it from inside your hub instead:
+    echo   cd path\to\your-hub
+    echo   git clone https://github.com/nikhillebaka/viz.git viz
+)
+echo.
+echo ^(To set up here anyway, run: "%DIR%\setup.bat" --force^)
+exit /b 1
+
+:hub_ok
 
 rem 1. Python environment
 if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\python.exe" (

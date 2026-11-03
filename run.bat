@@ -60,5 +60,5 @@ if "%PORT%"=="" set "PORT=8501"
 set "HOST=%~2"
 if "%HOST%"=="" set "HOST=127.0.0.1"
 
-echo Starting Sandbox Visualization Server on http://%HOST%:%PORT%...
+echo Starting viz on port %PORT% ^(the server prints its URL once it is listening^)...
 "%PYTHON_BIN%" "%DIR%server.py" --port %PORT% --host %HOST%

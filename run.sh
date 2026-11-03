@@ -37,5 +37,5 @@ fi
 PORT="${1:-8501}"
 HOST="${2:-127.0.0.1}"
 
-echo "Starting Sandbox Visualization Server on http://${HOST}:${PORT}..."
+echo "Starting viz on port ${PORT} (the server prints its URL once it is listening)..."
 exec "$PYTHON_BIN" "$DIR/server.py" --port "$PORT" --host "$HOST"
