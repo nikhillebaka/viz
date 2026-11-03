@@ -112,11 +112,12 @@ Your `config.json`, `.venv/`, cache, and downloaded data are all git-ignored, so
 | Symptom | Fix |
 | :--- | :--- |
 | `viz dependencies are not installed` | Run `./viz/setup.sh` (or `viz\setup.bat`). |
+| `viz must be inside a Hubverse hub` | Setup stopped because `viz/` was cloned outside a hub. Run the `mv` command it prints, or re-clone from inside the hub. |
 | `ModuleNotFoundError: No module named 'viz'` | The folder isn't named `viz`. Rename it, or re-clone with `git clone … viz`. |
 | No models in the dashboard | viz must sit directly inside the hub, next to `model-output/`. |
 | Surveillance panels are empty | Run `python viz/rebuild_surveillance.py --force`. |
 | Scores look stale after editing forecasts | Restart `run.sh`; changed files are re-cached automatically. As a last resort, delete `viz/.cache/`. |
-| Port 8501 already in use | `./viz/run.sh 8600` |
+| `port 8501 … is already in use` | Another viz server (often for a different hub) is running there. Use the free port the error suggests, e.g. `./viz/run.sh 8600`. `/api/status` reports which hub a running server belongs to. |
 
 ---
 

@@ -6,7 +6,7 @@
 #   3. Builds the surveillance data (NHSN admissions, as-of snapshots)
 #   4. Creates the hub's local-output/ folder for uncommitted model runs
 #   5. Hides viz/ and local-output/ from the hub's git status via .git/info/exclude
-# Safe to re-run.
+# Safe to re-run. Stops if the parent folder isn't a hub (override with --force).
 # ==============================================================================
 
 set -e
@@ -20,9 +20,33 @@ if [ "$(basename "$DIR")" != "viz" ]; then
     exit 1
 fi
 
-if [ ! -d "$ROOT_DIR/model-output" ] && [ ! -d "$ROOT_DIR/target-data" ]; then
-    echo "WARNING: $ROOT_DIR does not look like a Hubverse hub (no model-output/ or target-data/)."
-    echo "         viz reads forecasts from the folder that contains it."
+# viz reads hub data from its parent folder, so it must be cloned directly inside the hub.
+# Pass --force to skip this check (e.g. for a hub whose model-output/ doesn't exist yet).
+is_hub() { [ -d "$1/model-output" ] || [ -d "$1/target-data" ]; }
+if ! is_hub "$ROOT_DIR" && [ "$1" != "--force" ]; then
+    echo "ERROR: viz must be inside a Hubverse hub, but $ROOT_DIR"
+    echo "       has no model-output/ or target-data/ folder."
+    HUBS=()
+    for d in "$ROOT_DIR"/*/; do
+        d="${d%/}"
+        [ "$d" != "$DIR" ] && is_hub "$d" && HUBS+=("$d")
+    done
+    if [ ${#HUBS[@]} -eq 1 ]; then
+        echo
+        echo "Found a hub next to it. Move viz into that hub and re-run setup:"
+        echo "  mv \"$DIR\" \"${HUBS[0]}/viz\" && \"${HUBS[0]}/viz/setup.sh\""
+    elif [ ${#HUBS[@]} -gt 1 ]; then
+        echo
+        echo "Found several hubs next to it. Move viz into the one you want, then re-run setup:"
+        for h in "${HUBS[@]}"; do echo "  mv \"$DIR\" \"$h/viz\""; done
+    else
+        echo
+        echo "Clone it from inside your hub instead:"
+        echo "  cd path/to/your-hub && git clone https://github.com/nikhillebaka/viz.git viz"
+    fi
+    echo
+    echo "(To set up here anyway, run: $DIR/setup.sh --force)"
+    exit 1
 fi
 
 # 1. Python environment
