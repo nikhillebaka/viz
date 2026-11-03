@@ -56,6 +56,8 @@ viz/
 ├── data/surveillance/       # (Generated) Working surveillance data, rebuilt by setup
 ├── tests/                   # pytest / unittest suite
 ├── docs/                    # Reference documentation
+├── LICENSE                  # MIT
+├── THIRD_PARTY_NOTICES.md   # Bundled Plotly / SheetJS licenses (texts in licenses/)
 └── .cache/                  # (Generated) Parquet cache, safe to delete
 ```
 
