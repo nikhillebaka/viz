@@ -4,7 +4,8 @@ rem One-time setup for viz (Windows). Run from anywhere:  viz\setup.bat
 rem   1. Creates viz\.venv (skipped if a virtual environment is already active)
 rem   2. Installs the Python dependencies
 rem   3. Builds the surveillance data (NHSN admissions, as-of snapshots)
-rem   4. Hides viz/ from the hub's git status via .git\info\exclude
+rem   4. Creates the hub's local-output\ folder for uncommitted model runs
+rem   5. Hides viz/ and local-output/ from the hub's git status via .git\info\exclude
 rem Safe to re-run.
 rem ==============================================================================
 
@@ -62,12 +63,20 @@ echo ==^> Building surveillance data ^(falls back to local target-data\ if offli
 "%PYTHON_BIN%" "%DIR%\rebuild_surveillance.py" --force
 if errorlevel 1 echo WARNING: surveillance rebuild failed; the dashboard still runs without those streams.
 
-rem 4. Keep viz/ out of the hub's git status
+rem 4. Staging folder for uncommitted model runs (shown as [LOCAL] in the dashboard)
+if not exist "%ROOT_DIR%\local-output" (
+    mkdir "%ROOT_DIR%\local-output"
+    echo ==^> Created local-output\ ^(put uncommitted runs in local-output\^<model_id^>\^)
+)
+
+rem 5. Keep viz/ and local-output/ out of the hub's git status
 if exist "%ROOT_DIR%\.git\info" (
-    findstr /x /c:"viz/" "%ROOT_DIR%\.git\info\exclude" >nul 2>nul
-    if errorlevel 1 (
-        echo viz/>> "%ROOT_DIR%\.git\info\exclude"
-        echo ==^> Added viz/ to .git\info\exclude
+    for %%E in (viz/ local-output/) do (
+        findstr /x /c:"%%E" "%ROOT_DIR%\.git\info\exclude" >nul 2>nul
+        if errorlevel 1 (
+            echo %%E>> "%ROOT_DIR%\.git\info\exclude"
+            echo ==^> Added %%E to .git\info\exclude
+        )
     )
 )
 

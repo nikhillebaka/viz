@@ -45,7 +45,6 @@ cp viz/config.example.json viz/config.json
 ## Staging Local Experiments (`local-output/`)
 Uncommitted model runs can be placed in `local-output/<model_id>/<date>-<model_id>.csv`. The suite tags them as `[LOCAL]` and scores them side-by-side with Git-tracked `[REPO]` models in `model-output/`.
 
-Recommended hub `.gitignore` addition (all of `viz/`, including its `.cache/`, is already excluded by `setup.sh`):
-```gitignore
-local-output/
-```
+`setup.sh` / `setup.bat` create this folder and add both `viz/` and `local-output/` to the hub's `.git/info/exclude`, so nothing in it shows up in `git status`. To ignore it for everyone who clones the hub, add `local-output/` to the hub's `.gitignore` as well.
+
+Saved Ensemble Studio ensembles are written to `local-output/synthetic/<ensemble_id>/`.

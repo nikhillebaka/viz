@@ -38,11 +38,12 @@ viz\run.bat
 
 Then open **http://127.0.0.1:8501**.
 
-`setup` is safe to re-run. It does four things:
+`setup` is safe to re-run. It does five things:
 1. Creates `viz/.venv`, or uses your active virtual environment if one is on.
 2. Installs the dependencies (`polars`, `pyarrow`, `numpy`, `pyyaml`).
 3. Downloads the latest hospital-admissions surveillance data. If you're offline, it builds this from your hub's `target-data/`.
-4. Adds `viz/` to your hub's `.git/info/exclude`, so the folder never appears in `git status` or gets committed to the hub.
+4. Creates `local-output/` in your hub, for model runs you want to compare before committing.
+5. Adds `viz/` and `local-output/` to your hub's `.git/info/exclude`, so neither appears in `git status` or gets committed to the hub.
 
 > **The folder must be named `viz` and sit directly inside the hub.** viz reads hub data from its parent folder, and its Python modules import each other as `viz.*`.
 
@@ -55,7 +56,7 @@ your-hub/
 ├── viz/               ← this repo
 ├── model-output/      Forecasts: <model_id>/<YYYY-MM-DD>-<model_id>.csv or .parquet   (required)
 ├── target-data/       Truth: oracle-output.csv or .parquet                           (required for scoring)
-├── local-output/      Uncommitted model runs, same layout as model-output/            (optional)
+├── local-output/      Uncommitted model runs, same layout as model-output/            (created by setup)
 ├── auxiliary-data/    locations.csv: FIPS codes, names, populations                    (optional)
 ├── hub-config/        tasks.json: targets, horizons, rounds                            (optional)
 └── model-metadata/    <model_id>.yml                                                   (optional)
@@ -63,7 +64,7 @@ your-hub/
 
 Targets, baseline model, locations, and horizons are discovered from these files automatically, so no config is needed. To override the defaults, see [docs/configuration.md](docs/configuration.md).
 
-**Try a model without committing it:** put its files in `local-output/<model_id>/`. They show up tagged `[LOCAL]` next to the hub's `[REPO]` models, and the scoring is identical.
+**Try a model without committing it:** put its files in `local-output/<model_id>/<YYYY-MM-DD>-<model_id>.csv`. They show up tagged `[LOCAL]` next to the hub's `[REPO]` models, and the scoring is identical. Setup creates the folder; ensembles you save in the Ensemble Studio also land there, under `local-output/synthetic/`.
 
 ---
 

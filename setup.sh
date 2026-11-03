@@ -4,7 +4,8 @@
 #   1. Creates viz/.venv (skipped if a virtual environment is already active)
 #   2. Installs the Python dependencies
 #   3. Builds the surveillance data (NHSN admissions, as-of snapshots)
-#   4. Hides viz/ from the hub's git status via .git/info/exclude
+#   4. Creates the hub's local-output/ folder for uncommitted model runs
+#   5. Hides viz/ and local-output/ from the hub's git status via .git/info/exclude
 # Safe to re-run.
 # ==============================================================================
 
@@ -55,14 +56,22 @@ echo "==> Building surveillance data (falls back to local target-data/ if offlin
 "$PYTHON_BIN" "$DIR/rebuild_surveillance.py" --force || \
     echo "WARNING: surveillance rebuild failed; the dashboard still runs without those streams."
 
-# 4. Keep viz/ out of the hub's git status
+# 4. Staging folder for uncommitted model runs (shown as [LOCAL] in the dashboard)
+if [ ! -d "$ROOT_DIR/local-output" ]; then
+    mkdir -p "$ROOT_DIR/local-output"
+    echo "==> Created local-output/ (put uncommitted runs in local-output/<model_id>/)"
+fi
+
+# 5. Keep viz/ and local-output/ out of the hub's git status
 if [ -d "$ROOT_DIR/.git" ]; then
     EXCLUDE="$ROOT_DIR/.git/info/exclude"
     mkdir -p "$(dirname "$EXCLUDE")"
-    if ! grep -qxF "viz/" "$EXCLUDE" 2>/dev/null; then
-        echo "viz/" >> "$EXCLUDE"
-        echo "==> Added viz/ to .git/info/exclude"
-    fi
+    for entry in "viz/" "local-output/"; do
+        if ! grep -qxF "$entry" "$EXCLUDE" 2>/dev/null; then
+            echo "$entry" >> "$EXCLUDE"
+            echo "==> Added $entry to .git/info/exclude"
+        fi
+    done
 fi
 
 echo
