@@ -38,8 +38,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import polars as pl
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from viz.cache_manager import ParquetCacheManager
-from viz.data_loader import date_to_season_and_week
+from viz.core.cache_manager import ParquetCacheManager
+from viz.core.data_loader import date_to_season_and_week
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("rebuild_surveillance")
@@ -570,6 +570,21 @@ def fetch_and_update_as_of_admissions(
     return {"updated": False, "error": "No snapshot data available"}
 
 
+def seed_surveillance_history(paths: Dict[str, Path]) -> None:
+    """Copy the bundled 2010-2023 ILINet / FluSurv-NET history into surveillance/ on first use.
+
+    data/seed/ is tracked and never written, so updating the working copies in data/surveillance/
+    (git-ignored) never leaves the viz checkout dirty or blocks `git pull`.
+    """
+    seed_dir = paths["viz_dir"] / "data" / "seed"
+    for name in ("ilinet.csv", "flusurvnet.csv"):
+        dest = paths["surveillance_dir"] / name
+        seed = seed_dir / name
+        if not dest.exists() and seed.exists():
+            shutil.copy2(seed, dest)
+            logger.info("Seeded %s from %s", dest.name, seed)
+
+
 def rebuild_surveillance_data(
     base_dir: Optional[Path] = None,
     admissions_url: str = DEFAULT_CDC_ADMISSIONS_URL,
@@ -582,6 +597,7 @@ def rebuild_surveillance_data(
     paths = get_viz_paths(base_dir)
     surv_dir = paths["surveillance_dir"]
     surv_dir.mkdir(parents=True, exist_ok=True)
+    seed_surveillance_history(paths)
 
     dest_adm = surv_dir / "target-hospital-admissions.csv"
     dest_init = surv_dir / "initial-hospital-admissions.csv"
@@ -674,6 +690,8 @@ def check_surveillance_freshness(base_dir: Optional[Path] = None) -> Dict[str, A
     # ILINet
     ili_csv = surv_dir / "ilinet.csv"
     if not ili_csv.exists():
+        ili_csv = paths["viz_dir"] / "data" / "seed" / "ilinet.csv"
+    if not ili_csv.exists():
         ili_csv = paths["repo_root"] / "auxiliary-data" / "surveillance" / "ilinet.csv"
     if ili_csv.exists():
         try:
@@ -694,6 +712,8 @@ def check_surveillance_freshness(base_dir: Optional[Path] = None) -> Dict[str, A
 
     # FluSurv-NET
     fsn_csv = surv_dir / "flusurvnet.csv"
+    if not fsn_csv.exists():
+        fsn_csv = paths["viz_dir"] / "data" / "seed" / "flusurvnet.csv"
     if not fsn_csv.exists():
         fsn_csv = paths["repo_root"] / "auxiliary-data" / "surveillance" / "flusurvnet.csv"
     if fsn_csv.exists():

@@ -6,7 +6,7 @@ custom baseline override, and output parity.
 
 import unittest
 from pathlib import Path
-from viz.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.evaluation import EvaluationEngine, EvaluationParams
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 

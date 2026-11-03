@@ -17,9 +17,9 @@ import urllib.parse
 
 import polars as pl
 
-from viz.cache_manager import merge_truth_frames
-from viz.data_loader import SandboxDataLoader
-from viz.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.cache_manager import merge_truth_frames
+from viz.core.data_loader import SandboxDataLoader
+from viz.core.evaluation import EvaluationEngine, EvaluationParams
 from viz.remote.hubs import assess_compatibility, hub_id_from_bucket
 from viz.remote.normalize import normalize_forecast
 from viz.remote.s3 import S3Client, validate_bucket_name

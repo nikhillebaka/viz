@@ -10,8 +10,8 @@ import tempfile
 import unittest
 
 import polars as pl
-from viz.cache_manager import ParquetCacheManager
-from viz.data_loader import SandboxDataLoader
+from viz.core.cache_manager import ParquetCacheManager
+from viz.core.data_loader import SandboxDataLoader
 
 
 class TestValidationWarnings(unittest.TestCase):

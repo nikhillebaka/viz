@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 import polars as pl
-from viz.cache_manager import ParquetCacheManager
+from viz.core.cache_manager import ParquetCacheManager
 
 
 class TestCacheManager(unittest.TestCase):

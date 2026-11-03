@@ -1,0 +1,26 @@
+{
+  "default_target": "wk inc flu hosp",
+  "targets": [
+    "wk inc flu hosp",
+    "wk flu hosp rate change"
+  ],
+  "default_baseline": "FluSight-baseline",
+  "recommended_models": [
+    "FluSight-baseline"
+  ],
+  "port": 8501,
+  "host": "127.0.0.1",
+  "allowed_origins": [
+    "http://127.0.0.1:8501",
+    "http://localhost:8501"
+  ],
+  "target_metadata": {
+    "wk inc flu hosp": {
+      "display_name": "Incident Flu Admissions",
+      "unit": "Patients / Wk",
+      "is_rate": false,
+      "is_categorical": false,
+      "non_negative": true
+    }
+  }
+}

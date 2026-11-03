@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 
 import polars as pl
 
-from viz.cache_manager import NULL_VALUES
+from viz.core.cache_manager import NULL_VALUES
 
 logger = logging.getLogger("viz.synthetic_ensemble")
 

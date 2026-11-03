@@ -4,7 +4,7 @@ Schema normalization and data-quality checks for forecast and truth files downlo
 Hub files drift in schema across seasons (horizon int32 vs int64, null horizons for peak targets, date32 vs
 string dates, varying column order), so every file is coerced to the same canonical schema the local Parquet
 cache uses before it is stored. Weekly quantile rows go to the forecast table the suite plots and scores;
-season peak rows (peak size quantiles, peak-week pmfs) are split off into their own table (see viz.peaks).
+season peak rows (peak size quantiles, peak-week pmfs) are split off into their own table (see viz.core.peaks).
 """
 
 import io
@@ -12,8 +12,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import polars as pl
 
-from viz.cache_manager import NULL_VALUES, filter_quantile_rows
-from viz.peaks import extract_peak_rows, peak_quality_warnings
+from viz.core.cache_manager import NULL_VALUES, filter_quantile_rows
+from viz.core.peaks import extract_peak_rows, peak_quality_warnings
 
 FORECAST_COLUMNS = [
     "reference_date", "target", "horizon", "location", "target_end_date",

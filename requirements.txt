@@ -1,6 +1,6 @@
 # FluSight Sandbox Visualization & Evaluation Suite
 # Python 3.10+ required (Python 3.11+ recommended)
-# Install: pip install -r viz/requirements.txt
+# Install: ./viz/setup.sh  (or: pip install -r viz/requirements.txt)
 polars>=1.0.0
 pyarrow>=14.0.0
 numpy>=1.24.0

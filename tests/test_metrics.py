@@ -8,7 +8,7 @@ import unittest
 import polars as pl
 import numpy as np
 
-from viz.metrics import (
+from viz.core.metrics import (
     compute_pinball_loss,
     score_forecasts,
     find_common_tasks,
@@ -233,7 +233,7 @@ class TestMetrics(unittest.TestCase):
 
     def test_pairwise_tournament_relative_wis(self):
         """Verify pairwise tournament relative WIS calculation (Cramer et al. 2022)."""
-        from viz.metrics import compute_pairwise_relative_wis
+        from viz.core.metrics import compute_pairwise_relative_wis
 
         # Create 3 models with known task WIS scores:
         # Task 1: m1=10, m2=20, base=20 -> m1 is 2x better than base and m2
@@ -270,7 +270,7 @@ class TestMetrics(unittest.TestCase):
         across the complete 23-quantile grid (Bracher et al., 2021).
         Tests multiple scenarios: well-calibrated, underpredicting, and overpredicting.
         """
-        from viz.metrics import STANDARD_23_QUANTILES
+        from viz.core.metrics import STANDARD_23_QUANTILES
 
         # Quantile values for a synthetic symmetric forecast distribution centered at 50
         q_spread = [
@@ -419,7 +419,7 @@ class TestMetrics(unittest.TestCase):
 
     def test_log_pairwise_relative_wis(self):
         """Verify that compute_pairwise_relative_wis correctly scores models on the log scale."""
-        from viz.metrics import compute_pairwise_relative_wis
+        from viz.core.metrics import compute_pairwise_relative_wis
         task1 = ("US", "2025-01-11", 1)
         task2 = ("US", "2025-01-18", 1)
 

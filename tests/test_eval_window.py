@@ -11,8 +11,8 @@ import unittest
 
 import polars as pl
 
-from viz.data_loader import SandboxDataLoader, date_to_season_and_week
-from viz.evaluation import EvaluationEngine, EvaluationParams, parse_phase, parse_week_range
+from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
+from viz.core.evaluation import EvaluationEngine, EvaluationParams, parse_phase, parse_week_range
 
 TARGET = "wk inc flu hosp"
 QUANTILES = [0.025, 0.25, 0.5, 0.75, 0.975]

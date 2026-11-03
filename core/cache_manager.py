@@ -387,7 +387,7 @@ class ParquetCacheManager:
             hit = fresh()
             if hit is not None:
                 return hit[1]
-            from viz.peaks import extract_peak_rows
+            from viz.core.peaks import extract_peak_rows
             frames = []
             for f in source_files:
                 try:
@@ -578,7 +578,7 @@ class ParquetCacheManager:
     def get_admissions_parquet(self, target: Optional[str] = None) -> Optional[Path]:
         """Get or create cached Parquet for target-hospital-admissions.csv atomically."""
         if not target:
-            from viz.config import VizConfig
+            from viz.core.config import VizConfig
             target = VizConfig(self.base_dir).get_default_target()
 
         # 1. Prefer self-contained viz/data/surveillance/
@@ -671,7 +671,7 @@ class ParquetCacheManager:
     def get_initial_admissions_parquet(self, target: Optional[str] = None) -> Optional[Path]:
         """Get or create cached Parquet for initial-hospital-admissions.csv atomically."""
         if not target:
-            from viz.config import VizConfig
+            from viz.core.config import VizConfig
             target = VizConfig(self.base_dir).get_default_target()
 
         init_csv = self.surveillance_dir / "initial-hospital-admissions.csv"
@@ -762,11 +762,13 @@ class ParquetCacheManager:
         """Get or create cached Parquet for ilinet.csv atomically."""
         ili_csv = self.surveillance_dir / "ilinet.csv"
         if not ili_csv.exists():
+            ili_csv = self.viz_dir / "data" / "seed" / "ilinet.csv"
+        if not ili_csv.exists():
             legacy_csv = self.auxiliary_data_dir / "surveillance" / "ilinet.csv"
             if legacy_csv.exists():
                 ili_csv = legacy_csv
             else:
-                self._log_missing_surveillance(ili_csv)
+                self._log_missing_surveillance(self.surveillance_dir / "ilinet.csv")
                 return None
 
         def _build_ilinet():
@@ -794,11 +796,13 @@ class ParquetCacheManager:
         """Get or create cached Parquet for flusurvnet.csv atomically."""
         fsn_csv = self.surveillance_dir / "flusurvnet.csv"
         if not fsn_csv.exists():
+            fsn_csv = self.viz_dir / "data" / "seed" / "flusurvnet.csv"
+        if not fsn_csv.exists():
             legacy_csv = self.auxiliary_data_dir / "surveillance" / "flusurvnet.csv"
             if legacy_csv.exists():
                 fsn_csv = legacy_csv
             else:
-                self._log_missing_surveillance(fsn_csv)
+                self._log_missing_surveillance(self.surveillance_dir / "flusurvnet.csv")
                 return None
 
         def _build_flusurvnet():

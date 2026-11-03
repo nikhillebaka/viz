@@ -7,9 +7,11 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
-# Surveillance data is rebuilt by rebuild_surveillance.py. Only the ILINet and
-# FluSurv-NET history is kept: the script updates those files in place but
-# cannot recreate the 2010-2023 archive from scratch.
-data/surveillance/*
-!data/surveillance/ilinet.csv
-!data/surveillance/flusurvnet.csv
+# Surveillance data is rebuilt by rebuild_surveillance.py (setup.sh runs it). The 2010-2023
+# ILINet / FluSurv-NET history it cannot recreate is tracked read-only in data/seed/.
+data/surveillance/
+
+# Per-user environment and settings (setup.sh creates .venv; copy config.example.json to config.json)
+.venv/
+config.json
+config.toml
