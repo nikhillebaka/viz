@@ -5,6 +5,7 @@ Pure-Polars implementation with zero stale in-memory dictionary caching.
 """
 
 from datetime import datetime, date, timedelta
+import functools
 import json
 import logging
 from pathlib import Path
@@ -98,6 +99,20 @@ def date_to_season_and_week(dt: Any) -> Tuple[str, int]:
 
     season_str = f"{season_start}/{str(season_start + 1)[-2:]}"
     return season_str, season_week
+
+
+def _flu_season_for_date(date_str: Any) -> str:
+    try:
+        s_str, _ = date_to_season_and_week(date_str)
+        start_yr = int(s_str.split("/")[0])
+        return f"{start_yr}-{start_yr + 1}"
+    except Exception:
+        return "Unknown"
+
+
+@functools.lru_cache(maxsize=65536)
+def _flu_season_for_date_str(date_str: str) -> str:
+    return _flu_season_for_date(date_str)
 
 
 def _safe_to_pandas(df: Optional[pl.DataFrame]) -> Any:
@@ -2738,12 +2753,9 @@ class SandboxDataLoader:
     @classmethod
     def get_flu_season_for_date(cls, date_str: str) -> str:
         """Map YYYY-MM-DD to flu season format 'YYYY-YYYY' using standard MMWR week 31 boundary."""
-        try:
-            s_str, _ = date_to_season_and_week(date_str)
-            start_yr = int(s_str.split("/")[0])
-            return f"{start_yr}-{start_yr + 1}"
-        except Exception:
-            return "Unknown"
+        if isinstance(date_str, str):
+            return _flu_season_for_date_str(date_str)  # pure function of the string: memoized
+        return _flu_season_for_date(date_str)
 
     def get_model_metadata(self, model_id: str) -> Dict[str, Any]:
         """

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import hashlib
 import logging
+import math
 from pathlib import Path
 import threading
 from typing import Dict, List, Optional, Any, Set, Tuple
@@ -17,7 +18,15 @@ import polars as pl
 from viz.core.peaks import is_peak_target
 from viz.core.config import VizConfig
 from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
-from viz.core.metrics import score_forecasts, find_common_tasks, compute_pairwise_relative_wis
+from viz.core.metrics import (
+    TASK_KEY_COLS,
+    compute_pairwise_relative_wis,
+    find_common_tasks,
+    intersect_task_keys,
+    model_task_keys,
+    score_forecasts,
+)
+from viz.core.parallel import ordered_map, ordered_map_outcomes
 
 logger = logging.getLogger("viz.evaluation")
 
@@ -39,6 +48,52 @@ class EvaluationParams:
 
 
 PHASES = ("pre", "peak", "post")
+
+
+def _common_tasks_frame(common_task_set: Optional[Set[Tuple[str, str, int]]]) -> Optional[Any]:
+    """The frame score_forecasts builds from a common-task set, built once instead of once per model.
+
+    list(set) iterates the same set object in the same order every time, so this is row-for-row the
+    frame each score_forecasts call would have built. An empty set is passed through unchanged.
+    """
+    if not common_task_set:
+        return common_task_set
+    task_list = list(common_task_set)
+    return pl.DataFrame({
+        "reference_date": [str(t[0]) for t in task_list],
+        "location": [str(t[1]) for t in task_list],
+        "horizon": [int(t[2]) for t in task_list],
+    })
+
+
+def _finite_or_none(v: Any) -> Optional[float]:
+    return float(v) if v is not None and not math.isnan(v) else None
+
+
+def _shared_task_wis(task_df: pl.DataFrame, shared: pl.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Overall (WIS, log WIS) of one model restricted to a set of (reference_date, location, horizon) tasks:
+    what score_forecasts(model_df, oracle, common_tasks=shared)["overall"] returns, read from the model's
+    unrestricted per-task scores. Per-task WIS is computed within each task, so restricting the tasks
+    afterwards gives the same task rows and values as restricting them before scoring. The pool rule is
+    score_forecasts's: states when any state is present, else national.
+    """
+    sub = task_df.join(shared, on=TASK_KEY_COLS, how="semi")
+    if sub.is_empty():
+        return None, None
+    has_states = bool((sub.get_column("location") != "US").any())
+    primary = sub.filter(pl.col("location") != "US") if has_states else sub.filter(pl.col("location") == "US")
+    if primary.is_empty():
+        return None, None
+    wis, wis_log = primary.select(pl.col("wis").mean(), pl.col("wis_log").mean()).row(0)
+    return _finite_or_none(wis), _finite_or_none(wis_log)
+
+
+def _overall_wis_on_tasks(df, oracle, target, tasks, non_negative) -> Tuple[Optional[float], Optional[float]]:
+    sc = score_forecasts(df, oracle, target=target, common_tasks=tasks, non_negative=non_negative)
+    if not sc:
+        return None, None
+    return sc.get("overall", {}).get("wis"), sc.get("overall", {}).get("wis_log")
 
 
 def parse_week_range(weeks: Optional[str]) -> Optional[Tuple[int, int]]:
@@ -366,6 +421,7 @@ class EvaluationEngine:
         model_meta_stats: Dict[str, Dict[str, Any]] = {}
         total_scope_dates_count = len(dates_filter) if dates_filter else 0
 
+        to_load: List[Tuple[str, List[str]]] = []
         for mid in models_to_load:
             if mid not in all_models:
                 continue
@@ -387,12 +443,18 @@ class EvaluationEngine:
                 "has_scope_data": len(eval_dates) > 0,
             }
 
-            if not eval_dates:
-                continue
+            if eval_dates:
+                to_load.append((mid, eval_dates))
 
+        def _load(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
+            mid, eval_dates = item
             m_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
             if m_df is not None and window_filter is not None:
                 m_df = window_filter.apply(m_df)
+            return m_df
+
+        # Loaded on threads, inserted in the original order
+        for (mid, _), m_df in zip(to_load, ordered_map(_load, to_load)):
             if m_df is not None and not m_df.is_empty():
                 model_dfs[mid] = m_df
 
@@ -458,18 +520,23 @@ class EvaluationEngine:
         pop_map = self._population_map(target)
 
         if common_task_status != "empty_disjoint":
-            for mid, df in model_dfs.items():
-                sc = score_forecasts(
+            # Built once, exactly as score_forecasts would build it from the set on every call
+            common_tasks_arg = _common_tasks_frame(common_task_set)
+
+            def _score(df: pl.DataFrame) -> Dict[str, Any]:
+                return score_forecasts(
                     df,
                     oracle,
                     target=target,
                     locations=locations_filter,
                     reference_dates=dates_filter,
-                    common_tasks=common_task_set,
+                    common_tasks=common_tasks_arg,
                     non_negative=target_non_neg,
                     population_map=pop_map,
                     return_task_df=True,
                 )
+
+            for mid, sc in zip(list(model_dfs.keys()), ordered_map(_score, list(model_dfs.values()))):
                 if sc:
                     scores_by_model[mid] = sc
 
@@ -510,14 +577,27 @@ class EvaluationEngine:
         pairwise_tournament_rel_wis: Dict[str, Any] = {}
         pairwise_tournament_rel_wis_log: Dict[str, Any] = {}
         if task_scores_by_model:
-            pairwise_tournament_rel_wis = compute_pairwise_relative_wis(task_scores_by_model, effective_baseline, metric_col="wis")
-            pairwise_tournament_rel_wis_log = compute_pairwise_relative_wis(task_scores_by_model, effective_baseline, metric_col="wis_log")
+            pairwise_tournament_rel_wis, pairwise_tournament_rel_wis_log = ordered_map(
+                lambda col: compute_pairwise_relative_wis(task_scores_by_model, effective_baseline, metric_col=col),
+                ["wis", "wis_log"],
+            )
 
         # 8. Compute relative delta % vs baseline (strictly on identical task subsets)
         comparisons: List[Dict[str, Any]] = []
-        baseline_wis_cache: Dict[Tuple[str, Any], Optional[float]] = {}
-        baseline_wis_log_cache: Dict[Tuple[str, Any], Optional[float]] = {}
         ref_baseline_id = effective_baseline
+
+        # Unconstrained mode compares each model with the baseline on their pairwise shared tasks. Each
+        # model's task keys are extracted once (on threads) instead of once per pair; the shared-task WIS
+        # means then come from the per-task scores already computed above (see _shared_task_wis).
+        task_key_outcomes: Dict[str, Tuple[bool, Any]] = {}
+        if ref_baseline_id and not (fair_flag and ref_baseline_id in scores_by_model):
+            key_models = [ref_baseline_id] + [
+                m for m in requested_model_ids if m != ref_baseline_id and m in scores_by_model
+            ]
+            key_models = list(dict.fromkeys(key_models))
+            task_key_outcomes = dict(zip(key_models, ordered_map_outcomes(
+                lambda m: model_task_keys(model_dfs[m], target, locations_filter, dates_filter), key_models,
+            )))
 
         for mid in requested_model_ids:
             if mid not in all_models:
@@ -619,48 +699,26 @@ class EvaluationEngine:
                             pct_diff_log = ((wis_log - base_wis_shared_log) / base_wis_shared_log) * 100.0
                     else:
                         # Unconstrained mode: evaluate BOTH mid and baseline strictly on their pairwise shared tasks
-                        shared_with_baseline = find_common_tasks(
-                            {mid: model_dfs[mid], ref_baseline_id: model_dfs[ref_baseline_id]},
-                            target=target,
-                            locations=locations_filter,
-                            reference_dates=dates_filter,
+                        # (same tasks find_common_tasks({mid, baseline}) returns, same early exits and errors)
+                        shared_with_baseline = intersect_task_keys(
+                            [task_key_outcomes[mid], task_key_outcomes[ref_baseline_id]]
                         )
-                        if shared_with_baseline:
-                            shared_task_key = frozenset(shared_with_baseline)
-
-                            # Evaluate baseline on shared tasks
-                            if (ref_baseline_id, shared_task_key) in baseline_wis_cache:
-                                base_wis_shared = baseline_wis_cache[(ref_baseline_id, shared_task_key)]
-                                base_wis_shared_log = baseline_wis_log_cache.get((ref_baseline_id, shared_task_key))
-                            else:
-                                base_sc = score_forecasts(
-                                    model_dfs[ref_baseline_id],
-                                    oracle,
-                                    target=target,
-                                    common_tasks=shared_with_baseline,
-                                    non_negative=target_non_neg,
+                        if shared_with_baseline is not None and not shared_with_baseline.is_empty():
+                            if not fair_flag:
+                                base_wis_shared, base_wis_shared_log = _shared_task_wis(
+                                    scores_by_model[ref_baseline_id]["task_df"], shared_with_baseline
                                 )
-                                base_wis_shared = base_sc.get("overall", {}).get("wis") if base_sc else None
-                                base_wis_shared_log = base_sc.get("overall", {}).get("wis_log") if base_sc else None
-                                baseline_wis_cache[(ref_baseline_id, shared_task_key)] = base_wis_shared
-                                baseline_wis_log_cache[(ref_baseline_id, shared_task_key)] = base_wis_shared_log
-
-                            # Evaluate THIS model strictly on the same shared tasks
-                            if (mid, shared_task_key) in baseline_wis_cache:
-                                model_wis_shared = baseline_wis_cache[(mid, shared_task_key)]
-                                model_wis_shared_log = baseline_wis_log_cache.get((mid, shared_task_key))
-                            else:
-                                mid_sc = score_forecasts(
-                                    model_dfs[mid],
-                                    oracle,
-                                    target=target,
-                                    common_tasks=shared_with_baseline,
-                                    non_negative=target_non_neg,
+                                model_wis_shared, model_wis_shared_log = _shared_task_wis(
+                                    scores_by_model[mid]["task_df"], shared_with_baseline
                                 )
-                                model_wis_shared = mid_sc.get("overall", {}).get("wis") if mid_sc else None
-                                model_wis_shared_log = mid_sc.get("overall", {}).get("wis_log") if mid_sc else None
-                                baseline_wis_cache[(mid, shared_task_key)] = model_wis_shared
-                                baseline_wis_log_cache[(mid, shared_task_key)] = model_wis_shared_log
+                            else:
+                                # Unreachable today (in fair mode the effective baseline is always scored), but if it
+                                # were reached the main task scores are restricted to the common tasks, so re-score.
+                                shared_set = {(str(r[0]), str(r[1]), int(r[2])) for r in shared_with_baseline.iter_rows()}
+                                base_wis_shared, base_wis_shared_log = _overall_wis_on_tasks(
+                                    model_dfs[ref_baseline_id], oracle, target, shared_set, target_non_neg)
+                                model_wis_shared, model_wis_shared_log = _overall_wis_on_tasks(
+                                    model_dfs[mid], oracle, target, shared_set, target_non_neg)
 
                             if model_wis_shared is not None and base_wis_shared and base_wis_shared > 0:
                                 pct_diff = ((model_wis_shared - base_wis_shared) / base_wis_shared) * 100.0
@@ -785,27 +843,30 @@ class EvaluationEngine:
         pop_map = self._population_map(target)
         target_non_neg = self.config.is_target_non_negative(target)
 
-        dfs = []
-        for mid in active_mids:
+        common_tasks_arg = _common_tasks_frame(result.common_task_set)
+
+        def _task_scores(mid: str) -> Optional[pl.DataFrame]:
             df = self.loader.load_combined_forecasts(mid, result.scope_dates, as_polars=True)
             if df is not None and result.window_filter is not None:
                 df = result.window_filter.apply(df)
             if df is None or df.is_empty():
-                continue
+                return None
             sc = score_forecasts(
                 df,
                 oracle,
                 target=target,
                 locations=result.locations_filter,
                 reference_dates=result.scope_dates,
-                common_tasks=result.common_task_set,
+                common_tasks=common_tasks_arg,
                 non_negative=target_non_neg,
                 population_map=pop_map,
                 return_task_df=True,
             )
             if sc and "task_df" in sc and sc["task_df"] is not None:
-                t_df = sc["task_df"].with_columns(pl.lit(mid).alias("model_id"))
-                dfs.append(t_df)
+                return sc["task_df"].with_columns(pl.lit(mid).alias("model_id"))
+            return None
+
+        dfs = [t_df for t_df in ordered_map(_task_scores, active_mids) if t_df is not None]
 
         if not dfs:
             return None
