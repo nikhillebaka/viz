@@ -22,9 +22,12 @@ Implements CDC FluSight and Hubverse evaluation methodology (Bracher et al. 2021
 """
 
 import math
+import threading
 from typing import Dict, List, Optional, Tuple, Any, Set, Union
 import numpy as np
 import polars as pl
+
+from viz.core.parallel import ordered_map_outcomes
 
 STANDARD_7_QUANTILES = [0.025, 0.10, 0.25, 0.50, 0.75, 0.90, 0.975]
 STANDARD_23_QUANTILES = [
@@ -88,6 +91,74 @@ def _to_polars_df(data: Any) -> Optional[pl.DataFrame]:
             return None
     return None
 
+
+def _prepare_oracle(o: pl.DataFrame, target: str) -> Tuple[pl.DataFrame, List[str]]:
+    """Truth rows for one target, one value per join key, plus the keys to join forecasts on."""
+    if "target" in o.columns:
+        o = o.filter(pl.col("target") == target)
+
+    cast_oracle = [
+        pl.col("location").cast(pl.String),
+        pl.col("target_end_date").cast(pl.String),
+        pl.col("oracle_value").cast(pl.Float64),
+    ]
+    if "horizon" in o.columns:
+        cast_oracle.append(pl.col("horizon").cast(pl.Int32))
+
+    o = o.with_columns([c for c in cast_oracle if c.meta.output_name() in o.columns])
+
+    # Check if oracle has distinct values across horizons for the same (location, target_end_date)
+    has_meaningful_horizon = False
+    if "horizon" in o.columns:
+        valid_h = o.filter(pl.col("horizon").is_not_null())
+        if valid_h.height > 0:
+            n_loc_date = valid_h.select(["location", "target_end_date"]).n_unique()
+            n_loc_date_h = valid_h.select(["location", "target_end_date", "horizon"]).n_unique()
+            if n_loc_date_h > n_loc_date:
+                n_with_vals = valid_h.select(["location", "target_end_date", "oracle_value"]).n_unique()
+                if n_with_vals > n_loc_date:
+                    has_meaningful_horizon = True
+
+    if has_meaningful_horizon:
+        if "as_of" in o.columns:
+            o = o.sort("as_of").group_by(["target_end_date", "location", "horizon"]).last()
+        o = (
+            o.select(["target_end_date", "location", "horizon", "oracle_value"])
+            .drop_nulls()
+            .unique(subset=["target_end_date", "location", "horizon"])
+        )
+        join_keys = ["target_end_date", "location", "horizon"]
+    else:
+        if "as_of" in o.columns:
+            o = o.sort("as_of").group_by(["target_end_date", "location"]).last()
+        o = (
+            o.select(["target_end_date", "location", "oracle_value"])
+            .drop_nulls()
+            .unique(subset=["target_end_date", "location"])
+        )
+        join_keys = ["target_end_date", "location"]
+    return o, join_keys
+
+
+# (oracle object, target) -> prepared truth. Keyed on object identity; the entry keeps a reference to the
+# oracle frame so its id() can never be reused by another object while the entry exists.
+_ORACLE_MEMO: Dict[Tuple[int, str], Tuple[pl.DataFrame, pl.DataFrame, List[str]]] = {}
+_ORACLE_MEMO_LOCK = threading.Lock()
+_ORACLE_MEMO_MAX = 8
+
+
+def _prepared_oracle(o: pl.DataFrame, target: str) -> Tuple[pl.DataFrame, List[str]]:
+    key = (id(o), target)
+    with _ORACLE_MEMO_LOCK:
+        hit = _ORACLE_MEMO.get(key)
+    if hit is not None and hit[0] is o:
+        return hit[1], list(hit[2])
+    prepared, join_keys = _prepare_oracle(o, target)
+    with _ORACLE_MEMO_LOCK:
+        if len(_ORACLE_MEMO) >= _ORACLE_MEMO_MAX:
+            _ORACLE_MEMO.clear()
+        _ORACLE_MEMO[key] = (o, prepared, list(join_keys))
+    return prepared, join_keys
 
 
 def score_forecasts(
@@ -196,50 +267,8 @@ def score_forecasts(
     has_std_7 = set(STANDARD_7_QUANTILES).issubset(set(present_quantiles))
     has_std_23 = set(STANDARD_23_QUANTILES).issubset(set(present_quantiles))
 
-    # Clean and filter oracle truth
-    if "target" in o.columns:
-        o = o.filter(pl.col("target") == target)
-
-    cast_oracle = [
-        pl.col("location").cast(pl.String),
-        pl.col("target_end_date").cast(pl.String),
-        pl.col("oracle_value").cast(pl.Float64),
-    ]
-    if "horizon" in o.columns:
-        cast_oracle.append(pl.col("horizon").cast(pl.Int32))
-
-    o = o.with_columns([c for c in cast_oracle if c.meta.output_name() in o.columns])
-
-    # Check if oracle has distinct values across horizons for the same (location, target_end_date)
-    has_meaningful_horizon = False
-    if "horizon" in o.columns:
-        valid_h = o.filter(pl.col("horizon").is_not_null())
-        if valid_h.height > 0:
-            n_loc_date = valid_h.select(["location", "target_end_date"]).n_unique()
-            n_loc_date_h = valid_h.select(["location", "target_end_date", "horizon"]).n_unique()
-            if n_loc_date_h > n_loc_date:
-                n_with_vals = valid_h.select(["location", "target_end_date", "oracle_value"]).n_unique()
-                if n_with_vals > n_loc_date:
-                    has_meaningful_horizon = True
-
-    if has_meaningful_horizon:
-        if "as_of" in o.columns:
-            o = o.sort("as_of").group_by(["target_end_date", "location", "horizon"]).last()
-        o = (
-            o.select(["target_end_date", "location", "horizon", "oracle_value"])
-            .drop_nulls()
-            .unique(subset=["target_end_date", "location", "horizon"])
-        )
-        join_keys = ["target_end_date", "location", "horizon"]
-    else:
-        if "as_of" in o.columns:
-            o = o.sort("as_of").group_by(["target_end_date", "location"]).last()
-        o = (
-            o.select(["target_end_date", "location", "oracle_value"])
-            .drop_nulls()
-            .unique(subset=["target_end_date", "location"])
-        )
-        join_keys = ["target_end_date", "location"]
+    # Clean and filter oracle truth (identical for every model scored against the same oracle, so memoized)
+    o, join_keys = _prepared_oracle(o, target)
 
     # Merge forecasts with oracle truth
     merged = f.join(o, on=join_keys, how="inner")
@@ -553,12 +582,172 @@ def score_forecasts(
     return result_dict
 
 
+_INT_DTYPES = (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32)
+
+
+def _canonical_task_frame(val: Any, metric_col: str) -> Optional[pl.DataFrame]:
+    """
+    One model's task scores as columns (loc, rd, h, w), keyed exactly as the reference loop keys them:
+    str(location), str(reference_date or else target_end_date), int(horizon), last value wins on repeats,
+    null / NaN scores dropped. Returns None for any input the reference loop would treat differently
+    (dicts, unusual dtypes, null horizons), so the caller falls back to the reference implementation.
+    """
+    if not isinstance(val, pl.DataFrame):
+        return None
+    schema = val.schema
+    if schema.get("location") != pl.String:
+        return None
+    rd_col = "reference_date" if "reference_date" in schema else ("target_end_date" if "target_end_date" in schema else None)
+    if rd_col is None or schema[rd_col] != pl.String:
+        return None
+    if schema.get("horizon") not in _INT_DTYPES or val.get_column("horizon").null_count():
+        return None
+    empty = pl.DataFrame(schema={"loc": pl.String, "rd": pl.String, "h": pl.Int64, "w": pl.Float64})
+    if metric_col not in schema:
+        return empty  # row.get(metric_col) is None for every row: the model has no scores
+    w_dtype = schema[metric_col]
+    if not (w_dtype.is_float() or w_dtype in _INT_DTYPES):
+        return None
+    if val.is_empty():
+        return empty
+    return (
+        val.select(
+            pl.col("location").fill_null("None").alias("loc"),  # str(None) == "None"
+            pl.col(rd_col).fill_null("None").alias("rd"),
+            pl.col("horizon").cast(pl.Int64).alias("h"),
+            pl.col(metric_col).cast(pl.Float64).alias("w"),
+        )
+        .filter(pl.col("w").is_not_null() & pl.col("w").is_not_nan())
+        .unique(subset=["loc", "rd", "h"], keep="last", maintain_order=True)
+    )
+
+
 def compute_pairwise_relative_wis(
     model_task_wis: Dict[str, Any],
     baseline_model: Optional[str] = None,
     metric_col: str = "wis",
 ) -> Dict[str, Dict[str, Optional[float]]]:
     """
+    Pairwise tournament relative WIS (Cramer et al. 2022 / Hubverse standard). Same inputs and output as
+    `_pairwise_relative_wis_reference`, which defines the method; this computes every pair at once.
+
+    For each pair (i, j) the reference takes the mean WIS of each model over their shared tasks. With a
+    tasks x models matrix V of scores (0 where a model has no score) and M of presence flags (1/0):
+        C = M^T M   shared-task counts,   S = V^T M   S[i, j] = sum of i's WIS over tasks j also has,
+    so mean_i_on_shared(i, j) = S[i, j] / C[i, j], and the ratio is (S[i, j] / C) / (S[j, i] / C).
+    Everything after the ratios (geometric mean in the same model order, baseline scaling, rounding) is
+    the reference code path. Inputs it cannot represent exactly (dict inputs, unusual dtypes, null
+    horizons, non-finite scores) are handed to the reference implementation unchanged.
+    """
+    models = list(model_task_wis.keys())
+    if not models:
+        return {}
+    frames: List[pl.DataFrame] = []
+    for m in models:
+        f = _canonical_task_frame(model_task_wis[m], metric_col)
+        if f is None:
+            return _pairwise_relative_wis_reference(model_task_wis, baseline_model, metric_col)
+        frames.append(f)
+
+    n = len(models)
+    long = pl.concat(
+        [f.with_columns(pl.lit(i, dtype=pl.Int64).alias("m")) for i, f in enumerate(frames) if f.height],
+        how="vertical",
+    ) if any(f.height for f in frames) else None
+    if long is None:
+        return _pairwise_relative_wis_reference(model_task_wis, baseline_model, metric_col)
+    w = long.get_column("w").to_numpy()
+    if not np.isfinite(w).all():
+        # inf / -inf make the reference raise or produce 0-ratios; keep its exact behaviour
+        return _pairwise_relative_wis_reference(model_task_wis, baseline_model, metric_col)
+
+    task_ids = long.select(pl.struct("loc", "rd", "h").rank("dense").cast(pl.Int64) - 1).to_series().to_numpy()
+    model_ids = long.get_column("m").to_numpy()
+    n_tasks = int(task_ids.max()) + 1
+    V = np.zeros((n_tasks, n), dtype=np.float64)
+    P = np.zeros((n_tasks, n), dtype=np.float64)
+    V[task_ids, model_ids] = w
+    P[task_ids, model_ids] = 1.0
+    C = P.T @ P  # exact: integer counts far below 2**53
+    S = V.T @ P
+
+    has_tasks = [bool(C[i, i] > 0) for i in range(n)]
+    pairwise_ratios: Dict[str, Dict[str, float]] = {m: {} for m in models}
+    ratio_rows: List[List[Tuple[int, float]]] = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                if has_tasks[i]:
+                    ratio_rows[i].append((j, 1.0))
+                continue
+            c = C[i, j]
+            if c <= 0:
+                continue
+            mean_i = float(S[i, j]) / float(c)
+            mean_j = float(S[j, i]) / float(c)
+            if mean_i > 0 and mean_j > 0:
+                ratio_rows[i].append((j, mean_i / mean_j))
+    for i, m in enumerate(models):
+        # ascending model order == the reference's dict insertion order, so the log-sum adds in the same order
+        pairwise_ratios[m] = {models[j]: r for j, r in ratio_rows[i]}
+
+    return _relative_wis_from_ratios(models, pairwise_ratios, baseline_model, baseline_model in model_task_wis)
+
+
+def _relative_wis_from_ratios(
+    models: List[str],
+    pairwise_ratios: Dict[str, Dict[str, float]],
+    baseline_model: Optional[str],
+    baseline_present: bool,
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Geometric-mean skill, baseline scaling, direct % vs baseline and rounding (the reference's tail)."""
+    n = len(models)
+    unscaled_theta: Dict[str, Optional[float]] = {}
+    for m in models:
+        ratios = pairwise_ratios[m]
+        if len(ratios) > 1 or (n == 1 and ratios):
+            log_sum = sum(math.log(r) for r in ratios.values())
+            unscaled_theta[m] = math.exp(log_sum / len(ratios))
+        else:
+            unscaled_theta[m] = None
+
+    base_theta = unscaled_theta.get(baseline_model) if baseline_model else None
+
+    results: Dict[str, Dict[str, Optional[float]]] = {}
+    for m in models:
+        theta_m = unscaled_theta.get(m)
+        if not baseline_model:
+            rel_wis = theta_m
+        elif theta_m is not None and base_theta is not None and base_theta > 0:
+            rel_wis = theta_m / base_theta
+        else:
+            rel_wis = None
+
+        direct_pct: Optional[float] = None
+        if baseline_model and baseline_present:
+            if m == baseline_model:
+                direct_pct = 0.0
+            elif baseline_model in pairwise_ratios.get(m, {}):
+                direct_ratio = pairwise_ratios[m][baseline_model]
+                direct_pct = (direct_ratio - 1.0) * 100.0
+
+        results[m] = {
+            "relative_wis": round(rel_wis, 4) if rel_wis is not None else None,
+            "unscaled_skill": round(theta_m, 4) if theta_m is not None else None,
+            "direct_pct_vs_baseline": round(direct_pct, 2) if direct_pct is not None else None,
+        }
+    return results
+
+
+def _pairwise_relative_wis_reference(
+    model_task_wis: Dict[str, Any],
+    baseline_model: Optional[str] = None,
+    metric_col: str = "wis",
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """
+    Reference (original) implementation, kept verbatim: the definition the fast path is tested against,
+    and the fallback for inputs the fast path does not handle.
+
     Compute pairwise tournament relative WIS (Cramer et al. 2022 / Hubverse standard):
     For every pair of models (m, m'), calculate theta_{m, m'} = mean(WIS_m) / mean(WIS_m')
     on their shared tasks T_{m, m'}.
@@ -672,55 +861,80 @@ def find_common_tasks(
     if not model_dfs:
         return set()
 
-    common_df: Optional[pl.DataFrame] = None
-
-    for mid, df_raw in model_dfs.items():
-        df = _to_polars_df(df_raw)
-        if df is None or df.is_empty():
-            return set()
-
-        sub = df.filter(pl.col("target") == target)
-        if "output_type" in sub.columns:
-            sub = sub.filter(pl.col("output_type") == "quantile")
-
-        if locations is not None and len(locations) > 0 and "all" not in locations:
-            sub = sub.filter(pl.col("location").is_in(locations))
-
-        if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates:
-            sub = sub.filter(pl.col("reference_date").is_in(reference_dates))
-
-        if sub.is_empty():
-            return set()
-
-        # Fast task extraction: median (0.50) if present, else distinct task tuples
-        if "output_type_id" in sub.columns:
-            has_med = (sub.select((pl.col("output_type_id") == 0.50).any()).to_series()[0])
-            if has_med:
-                sub = sub.filter(pl.col("output_type_id") == 0.50)
-
-        tasks = (
-            sub.select([
-                pl.col("reference_date").cast(pl.String),
-                pl.col("location").cast(pl.String),
-                pl.col("horizon").fill_null(0).cast(pl.Int32),
-            ])
-            .drop_nulls()
-            .unique()
-        )
-
-        if tasks.is_empty():
-            return set()
-
-        if common_df is None:
-            common_df = tasks
-        else:
-            common_df = common_df.join(tasks, on=["reference_date", "location", "horizon"], how="inner")
-
-        if common_df.is_empty():
-            return set()
-
+    # Task extraction runs per model on threads; the intersection below replays the sequential loop
+    # exactly (stops at the first model with no tasks, raises only what that loop would have reached).
+    outcomes = ordered_map_outcomes(
+        lambda df_raw: model_task_keys(df_raw, target, locations, reference_dates),
+        list(model_dfs.values()),
+    )
+    common_df = intersect_task_keys(outcomes)
     if common_df is None or common_df.is_empty():
         return set()
 
     rows = common_df.iter_rows()
     return set((str(r[0]), str(r[1]), int(r[2])) for r in rows)
+
+
+TASK_KEY_COLS = ["reference_date", "location", "horizon"]
+
+
+def model_task_keys(
+    df_raw: Any,
+    target: str,
+    locations: Optional[List[str]] = None,
+    reference_dates: Optional[List[str]] = None,
+) -> Optional[pl.DataFrame]:
+    """
+    One model's distinct (reference_date, location, horizon) tasks as find_common_tasks defines them,
+    or None when the model contributes no tasks (which makes any intersection containing it empty).
+    """
+    df = _to_polars_df(df_raw)
+    if df is None or df.is_empty():
+        return None
+
+    sub = df.filter(pl.col("target") == target)
+    if "output_type" in sub.columns:
+        sub = sub.filter(pl.col("output_type") == "quantile")
+
+    if locations is not None and len(locations) > 0 and "all" not in locations:
+        sub = sub.filter(pl.col("location").is_in(locations))
+
+    if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates:
+        sub = sub.filter(pl.col("reference_date").is_in(reference_dates))
+
+    if sub.is_empty():
+        return None
+
+    # Fast task extraction: median (0.50) if present, else distinct task tuples
+    if "output_type_id" in sub.columns:
+        has_med = (sub.select((pl.col("output_type_id") == 0.50).any()).to_series()[0])
+        if has_med:
+            sub = sub.filter(pl.col("output_type_id") == 0.50)
+
+    tasks = (
+        sub.select([
+            pl.col("reference_date").cast(pl.String),
+            pl.col("location").cast(pl.String),
+            pl.col("horizon").fill_null(0).cast(pl.Int32),
+        ])
+        .drop_nulls()
+        .unique()
+    )
+
+    if tasks.is_empty():
+        return None
+    return tasks
+
+
+def intersect_task_keys(outcomes: List[Tuple[bool, Any]]) -> Optional[pl.DataFrame]:
+    """Intersect per-model task keys in order, exactly like the original sequential loop (None = empty)."""
+    common_df: Optional[pl.DataFrame] = None
+    for ok, tasks in outcomes:
+        if not ok:
+            raise tasks
+        if tasks is None:
+            return None
+        common_df = tasks if common_df is None else common_df.join(tasks, on=TASK_KEY_COLS, how="inner")
+        if common_df.is_empty():
+            return None
+    return common_df

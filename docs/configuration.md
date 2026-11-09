@@ -42,6 +42,16 @@ cp viz/config.example.json viz/config.json
 
 *Note: For security on shared multi-user environments, keep `host` bound to `127.0.0.1`.*
 
+## Scoring threads (`VIZ_THREADS`)
+
+Leaderboard scoring loads and scores models on a small thread pool. Each Polars operation already uses every core, so the pool mainly fills the gaps between operations; by default it uses one thread per CPU core, up to 4. Set the `VIZ_THREADS` environment variable to change that, for example when the server shares a machine or runs in a container with a CPU limit:
+
+```bash
+VIZ_THREADS=2 ./viz/run.sh        # Windows: set VIZ_THREADS=2 && viz\run.bat
+```
+
+`VIZ_THREADS=1` scores one model at a time. Results are the same at any setting.
+
 ## Staging Local Experiments (`local-output/`)
 Uncommitted model runs can be placed in `local-output/<model_id>/<date>-<model_id>.csv`. The suite tags them as `[LOCAL]` and scores them side-by-side with Git-tracked `[REPO]` models in `model-output/`.
 

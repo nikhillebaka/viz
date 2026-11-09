@@ -25,6 +25,7 @@ PYTHONPATH=. python3 -m unittest discover viz/tests
 - `test_validation_warnings.py`: Checks for empty files, missing columns, and data anomalies.
 - `test_regressions.py`: Small, self-contained fixture tests (no repository data) for scoring edge cases, ensemble safety and caching, heatmap metrics, and export scope.
 - `test_eval_window.py`: Per-location season phases (including seasons that have not peaked yet), week-range and phase scoping of scores and task exports, and weekly wins.
+- `test_fast_paths.py`: Equivalence of the fast scoring paths with the original algorithms on randomized and edge-case inputs: matrix relative WIS vs the original pair loop, % vs baseline from per-task scores vs re-scoring, threaded vs sequential evaluations, and the memoized truth preparation.
 - `test_remote_hubs.py`: Live hub sync against a local fake S3 server. Covers the flu-only compatibility check, schema-drift normalization, truth merging, incremental sync (revisions and deletions), skipping corrupt files, and keeping hub data out of the CLI.
 
 ## File Layout
