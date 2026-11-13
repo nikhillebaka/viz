@@ -166,7 +166,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.focus 
 timeKeys((d) => stepper.step(d));
 const GL = { source: "#chart-src", container: view };
 for (const id of ["back", "theme", "c-rulers", "c-misses"]) new LiquidGlass($(id), GL);
-tooltip($("back"), "Back to the six options", { placement: "bottom" });
+tooltip($("back"), "Back to the design system", { placement: "bottom" });
 $("theme").addEventListener("click", () => {
   root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
   store.set("viz-ds-theme", root.dataset.theme);
