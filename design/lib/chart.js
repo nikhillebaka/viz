@@ -133,7 +133,7 @@ export function fanChart(svgSel, data, opts = {}) {
   const area = d3.area().x((p) => x(p.date)).y0((p) => y(p.lo)).y1((p) => y(p.hi));
   for (const b of order(B)) {
     const bg = plot.append("g");
-    if (!dim(b.m)) bg.append("path").attr("d", area(b.pts)).attr("fill", b.c).style("fill-opacity", hasFocus ? "var(--band-focus)" : "var(--band-whisper)");
+    if (!dim(b.m)) bg.append("path").attr("d", area(b.pts)).attr("fill", b.c).style("fill-opacity", hasFocus ? "var(--band-focus, 0.15)" : "var(--band-whisper, 0.075)");
     const strength = hasFocus ? (b.m === f ? 1.5 : 0.7) : 1;
     for (const k of ["lo", "hi"]) bg.append("path").attr("d", d3.line().x((p) => x(p.date)).y((p) => y(p[k]))(b.pts)).attr("fill", "none").attr("stroke", b.c)
       .attr("stroke-width", 0.75).attr("stroke-opacity", Math.min(1, 0.55 * strength)).attr("stroke-linejoin", "round");

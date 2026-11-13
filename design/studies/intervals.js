@@ -3,7 +3,7 @@
  * readout (exact numbers), optional width rulers, optional miss marks. Only the band drawing differs. */
 import { LiquidGlass } from "../lib/glass.js";
 import { loadData, seriesVar, short, WEEK } from "../lib/chart.js";
-import { Segmented, Stepper } from "../lib/controls.js";
+import { Segmented, Stepper, timeKeys } from "../lib/controls.js";
 
 const root = document.documentElement;
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -279,7 +279,7 @@ build();
 const keep = (seg) => { seg.fit = () => {}; seg.el.classList.remove("collapsed"); return seg; };
 keep(new Segmented($("t-set"), { label: "Models", value: S.set, items: [{ value: "close", label: "Close" }, { value: "apart", label: "Apart" }, { value: "skewed", label: "Skewed" }, { value: "baseline", label: "+ Baseline" }], onChange: (v) => { S.set = v; S.focus = null; drawAll(); } }));
 keep(new Segmented($("t-count"), { label: "How many models", value: "3", items: [{ value: "1", label: "1" }, { value: "3", label: "3" }, { value: "8", label: "8" }], onChange: (v) => { S.count = +v; drawAll(); } }));
-new Stepper($("t-date"), { values: DATES, index: DI0, label: "Forecast date", format: { long: fmtLong, short: fmtShort }, onChange: (i) => { S.di = i; drawAll(); } });
+const stepper = new Stepper($("t-date"), { values: DATES, index: DI0, label: "Forecast date", format: { long: fmtLong, short: fmtShort }, onChange: (i) => { S.di = i; drawAll(); } });
 keep(new Segmented($("t-anchor"), { label: "Band starts at", value: S.anchor, items: [{ value: "observed", label: "From observed" }, { value: "h0", label: "From week 0" }], onChange: (v) => { S.anchor = v; drawAll(); } }));
 keep(new Segmented($("t-size"), { label: "Width", value: "full", items: [{ value: "full", label: "Full" }, { value: "phone", label: "Phone" }], onChange: (v) => { S.phone = v === "phone"; document.body.classList.toggle("phone", S.phone); drawAll(); } }));
 for (const [id, key] of [["t-rulers", "rulers"], ["t-calib", "calib"]]) {
@@ -288,6 +288,7 @@ for (const [id, key] of [["t-rulers", "rulers"], ["t-calib", "calib"]]) {
   b.addEventListener("click", () => { S[key] = !S[key]; b.setAttribute("aria-pressed", S[key]); drawAll(); });
 }
 
+timeKeys((d) => stepper.step(d));
 drawAll();
 let rt = 0;
 new ResizeObserver(() => { cancelAnimationFrame(rt); rt = requestAnimationFrame(drawAll); }).observe($("studies"));
