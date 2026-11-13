@@ -29,6 +29,11 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
   first frame, because the frame timestamp was earlier than the key press, and surged on every press.)
 - **The dotted observed line is pinned to the data.** It starts at the first observed week and is
   clipped at the cutoff, so its dots travel with the data instead of crawling as the cutoff moves.
+- **The date label rolls** (`rollText` in `lib/controls.js`, from study 07). Each digit is a 0–9 strip
+  that rolls to its new value (ones digit first); a changed word, like the month, slides up when going
+  forward and down when going back. If the shape changes (Dec 27 → Jan 3), the whole label slides.
+  300 ms, no overshoot, clipped to the pill; fast stepping retargets mid-roll. While scrubbing, the
+  label rolls to each week as it's crossed (`Stepper.show`), without announcing every one.
 - **Performance:** at most one redraw per animation frame, with label text measurement cached. Reduced
   motion switches instantly. The hover readout hides while dragging, and misses only show on whole weeks.
 

@@ -366,6 +366,61 @@ export class Segmented {
   }
 }
 
+/* ---------------------------------------------------------------- rolling text
+ * Changes a label's text so you see the direction and size of the change, not just a swap (from study
+ * 07, "rolling figures"). Each digit is a 0–9 strip that rolls to its new value; a changed word (a month)
+ * slides out and the new one slides in, up when moving forward (dir > 0) and down when moving back. Fast
+ * repeated changes retarget smoothly. If the shape of the text changes (e.g. "Dec 6" → "Dec 13"), the
+ * whole label slides instead. No overshoot. Instant with reduced motion. */
+const ROLL_MS = 300;
+export function rollText(el, text, dir = 1, animate = true) {
+  const parts = (t) => t.match(/\d|[^\d]+/g) || [];
+  const shape = (t) => parts(t).map((p) => (/\d/.test(p) ? "d" : "w")).join("");
+  const prev = el.__roll;
+  animate = animate && prev != null && !reducedMotion();
+  if (!prev || shape(prev) !== shape(text)) {
+    const build = (t) => parts(t).map((p) => /\d/.test(p)
+      ? `<span class="d"><span style="transform:translateY(${-p * 1.3}em)">${"0123456789".split("").map((n) => `<i>${n}</i>`).join("")}</span></span>`
+      : `<span class="w"><span>${p.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</span></span>`).join("");
+    if (animate) { slide(el, build(text), dir); }
+    else el.innerHTML = `<span class="c-roll">${build(text)}</span>`;
+    el.__roll = text; return;
+  }
+  const roll = el.querySelector(".c-roll"), ps = parts(text);
+  [...roll.children].forEach((c, i) => {
+    const p = ps[i];
+    if (c.classList.contains("d")) {
+      const strip = c.firstElementChild;
+      strip.style.transition = animate ? `transform ${ROLL_MS}ms var(--ease-spring-soft)` : "none";
+      strip.style.transitionDelay = animate ? `${(ps.length - i) * 14}ms` : "0ms"; // ones digit leads
+      strip.style.transform = `translateY(${-p * 1.3}em)`;
+    } else if (c.textContent !== p) {
+      if (animate) slideWord(c, p, dir); else c.innerHTML = `<span>${p}</span>`;
+    }
+  });
+  el.__roll = text;
+}
+function slideWord(box, text, dir) {
+  box.querySelectorAll(".out").forEach((n) => n.remove());           // a fast repeat: drop the one still leaving
+  const old = box.firstElementChild, neu = document.createElement("span");
+  neu.textContent = text;
+  old.classList.add("out"); old.style.position = "absolute"; old.style.left = "0"; old.style.top = "0";
+  box.appendChild(neu);
+  const o = { duration: ROLL_MS, easing: "cubic-bezier(0.2, 0, 0, 1)", fill: "both" };
+  old.animate([{ transform: "translateY(0)", opacity: 1 }, { transform: `translateY(${-dir * 100}%)`, opacity: 0 }], o).onfinish = () => old.remove();
+  neu.animate([{ transform: `translateY(${dir * 100}%)`, opacity: 0 }, { transform: "translateY(0)", opacity: 1 }], o);
+}
+function slide(el, html, dir) {
+  el.querySelectorAll(".c-roll.out").forEach((n) => n.remove());
+  const old = el.querySelector(".c-roll"), neu = document.createElement("span");
+  neu.className = "c-roll"; neu.innerHTML = html;
+  if (old) { old.classList.add("out"); old.style.position = "absolute"; old.style.left = "50%"; old.style.translate = "-50% 0"; }
+  el.appendChild(neu);
+  const o = { duration: ROLL_MS, easing: "cubic-bezier(0.2, 0, 0, 1)", fill: "both" };
+  old?.animate([{ transform: "translateY(0)", opacity: 1 }, { transform: `translateY(${-dir * 100}%)`, opacity: 0 }], o).finished.then(() => old.remove(), () => {});
+  neu.animate([{ transform: `translateY(${dir * 100}%)`, opacity: 0 }, { transform: "translateY(0)", opacity: 1 }], o);
+}
+
 /* ---------------------------------------------------------------- date stepper
  * values: Date[] in order. format: { long: fn, short: fn }. Previous/next step one value; holding
  * repeats and accelerates; the label opens a menu of every value. The label keeps a fixed width
@@ -422,15 +477,21 @@ export class Stepper {
   go(i) {
     const n = Math.max(0, Math.min(this.values.length - 1, i));
     if (n === this.index) { this.el.animate([{ transform: "translateX(0)" }, { transform: `translateX(${i < 0 ? -3 : 3}px)` }, { transform: "translateX(0)" }], { duration: reducedMotion() ? 0 : 180 }); return; }
-    this.index = n; this.render(); this.onChange?.(n, this.values[n]);
+    const dir = Math.sign(n - this.index); this.index = n; this.render(false, dir); this.onChange?.(n, this.values[n]);
   }
-  render(initial) {
+  /* show a value without firing onChange (e.g. a chart scrubbing the date): the label rolls to it */
+  show(i) {
+    i = Math.max(0, Math.min(this.values.length - 1, i));
+    if (i === this.index) return;
+    const dir = Math.sign(i - this.index); this.index = i; this.render(false, dir, false);
+  }
+  render(initial, dir = 1, announce = true) {
     const v = this.values[this.index];
-    this.el.querySelector(".long").textContent = this.format.long(v);
-    this.el.querySelector(".short").textContent = this.format.short(v);
+    rollText(this.el.querySelector(".long"), this.format.long(v), dir, !initial);
+    rollText(this.el.querySelector(".short"), this.format.short(v), dir, !initial);
     this.lab.setAttribute("aria-label", `${this.label}: ${this.format.long(v)}. Open list`);
     this.prev.setAttribute("aria-disabled", this.index === 0); this.next.setAttribute("aria-disabled", this.index === this.values.length - 1);
-    if (!initial) this.live.textContent = this.format.long(v);
+    if (!initial && announce) this.live.textContent = this.format.long(v);
   }
 }
 

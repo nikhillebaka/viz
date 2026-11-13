@@ -100,10 +100,19 @@
 .c-step-label:hover::before { background: var(--fill-hover); }
 .c-step-label span { position: relative; z-index: 4; }
 .c-step-label .short { display: none; }
+/* rolling text (rollText): digits are 0–9 strips, words slide; clipped to one line */
+.c-step-label .long, .c-step-label .short { position: relative; justify-content: center; height: 1.3em; line-height: 1.3em; overflow: hidden; vertical-align: middle; }
+.c-step-label .long { display: inline-flex; }
+.c-roll { display: inline-flex; height: 1.3em; line-height: 1.3em; overflow: hidden; vertical-align: middle; white-space: pre; }
+.c-roll .d { display: inline-block; height: 1.3em; overflow: hidden; }
+.c-roll .d > span { display: flex; flex-direction: column; }
+.c-roll .d i { font-style: normal; height: 1.3em; display: block; text-align: center; }
+.c-roll .w { display: inline-block; position: relative; height: 1.3em; }
+.c-roll .w > span { display: inline-block; }
 @container view (max-width: 599px) {
   .c-step-label { min-width: var(--short-w); }
   .c-step-label .long { display: none; }
-  .c-step-label .short { display: inline; }
+  .c-step-label .short { display: inline-flex; }
 }
 
 /* ---------- search ---------- */

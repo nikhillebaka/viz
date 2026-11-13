@@ -145,7 +145,7 @@ const nav = new TimeNav({
   scale: () => G.x,
   ignore: (e) => !!e.target.closest(".fc-label"),
   onFrame: draw,
-  onWeek: (i) => { S.di = i; if (stepper.index !== i) { stepper.index = i; stepper.render(true); } $("hint").style.opacity = 0; },
+  onWeek: (i) => { S.di = i; stepper.show(i); $("hint").style.opacity = 0; },
 });
 window.__nav = nav; // for testing from the console
 $("recenter").addEventListener("click", () => nav.recenter());
