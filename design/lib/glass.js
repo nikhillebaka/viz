@@ -422,6 +422,14 @@ class Compositor {
     addEventListener("resize", () => this.watch());
     // the page scrolls (scores under the chart): fixed glass moves relative to the chart
     addEventListener("scroll", () => this.watch(), { passive: true });
+    // a page scroll is about to start (it arrives before the page moves): hand fixed glass to the browser now,
+    // so even the first scrolled frame has no trailing image
+    addEventListener("wheel", (e) => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      this.pageScroll = performance.now();
+      for (const g of this.glass) if (g.fixed) g.setPaper(true);
+      this.watch();
+    }, { passive: true, capture: true });
   }
   add(g) { this.glass.add(g); this.watch(); }
   remove(g) { this.glass.delete(g); this.watch(); }
@@ -464,8 +472,12 @@ class Compositor {
       if (!el.isConnected) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) continue;
-      // scrolled off the chart (fixed glass over the page below it): frosted by CSS instead of refracted here
-      const offChart = r.top + r.height / 2 >= sr.bottom || r.bottom <= sr.top;
+      // Fixed glass (it stays put while the page scrolls) is refracted by the browser as a backdrop filter
+      // whenever the page is scrolled at all, and always once it's off the chart. This pass only redraws after
+      // a scroll has happened, so over a scrolling chart its image would trail a frame behind the button.
+      // At the top, nothing scrolls, and this pass draws it (cheaper while the chart animates).
+      if (g.fixed == null) { g.fixed = false; for (let n = el; n; n = n.parentElement) if (getComputedStyle(n).position === "fixed") { g.fixed = true; break; } }
+      const offChart = r.top + r.height / 2 >= sr.bottom || r.bottom <= sr.top || (g.fixed && (scrollY > 0 || performance.now() - (this.pageScroll || 0) < 300));
       g.setPaper(offChart);
       if (offChart) { key += "p;"; continue; }
       // the glass's own opacity, and its ancestors' up to the container (fades, the picker hiding chrome)

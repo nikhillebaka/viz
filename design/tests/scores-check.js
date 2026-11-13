@@ -59,6 +59,14 @@ export async function run() {
       hit?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true })); await sleep(60);
       check("hovering a figure line lights that model's leaderboard row", !!document.querySelector(`#scores .ev-row.hot[data-m="${CSS.escape(sel.selected[2])}"]`));
       document.querySelector("#scores .ev-figs").dispatchEvent(new PointerEvent("pointerleave")); await sleep(60); }
+    // fixed glass never trails a scroll: once the page is scrolled at all (chart still under it), the browser refracts it
+    await go(60); LiquidGlass.frame(); await sleep(50);
+    { const m = document.getElementById("c-models"), back = document.getElementById("back");
+      check("scrolled a little, with the chart still under them, the fixed bubbles use the browser's refraction", m.classList.contains("lg--paper") && /url\(/.test(m.style.backdropFilter) && back.classList.contains("lg--paper"));
+      const rb = document.getElementById("c-rulers");
+      check("…while the chart's own bubbles (which scroll with it) stay in the WebGL pass", !rb.classList.contains("lg--paper")); }
+    await go(0); await sleep(350); LiquidGlass.frame(); await sleep(50);
+    check("at the top again, the fixed bubbles go back to the WebGL pass", !document.getElementById("c-models").classList.contains("lg--paper"));
     // the lift, the tuck, frosted glass
     await go(document.getElementById("view").offsetHeight + 40);
     const bubble = document.getElementById("scope-bubble");

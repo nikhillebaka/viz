@@ -432,6 +432,10 @@ Built on the fan chart page (`studies/intervals-refine.html`), with the section 
   it's over the chart. Once it's over the page below, the compositor skips it and the same refraction (the
   SVG displacement filter the shader was built to match) is applied to the page behind it as a backdrop
   filter, so text bends at the rim exactly as the chart does. The scope bubble uses the same glass.
+  Fixed bubbles switch as soon as the page scrolls at all (on the wheel event, before the page moves),
+  not only once they're off the chart: the WebGL pass redraws a frame after a scroll, so its image
+  trailed behind the fixed buttons like a lagging shadow. At the top of the page nothing scrolls, and
+  the WebGL pass is used (it's cheaper while the chart animates).
 - **The lift.** When the scope line passes under the top bubbles, it fades out and the same fragments fade
   in as a bubble at the top centre (both are live buttons). The leaderboard's column titles ride the
   bottom of the screen instead (see the leaderboard).
