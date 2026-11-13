@@ -217,14 +217,11 @@ function openModelPicker() {
       el.querySelector(".pk-base").addEventListener("click", (e) => { sel.setBaseline(!sel.baseline); e.currentTarget.setAttribute("aria-checked", sel.baseline); });
       let lastClicked = null;
       const week = DATES[nav.week], weekKey = d3.utcFormat("%Y-%m-%d")(week);
-      const has = (m, d) => !!data.FC[m]?.[d3.utcFormat("%Y-%m-%d")(d)];
-      const strip = (m) => DATES.map((d) => `<i class="${has(m, d) ? "on" : ""}${+d === +week ? " now" : ""}"></i>`).join("");
       const row = (m) => {
         const slot = sel.slotOf(m), chosen = sel.has(m), ctx = sel.showAll && chosen && slot == null;
         return `<div class="pk-row${chosen ? " sel" : ""}" data-m="${m}">
           <button type="button" class="pk-dot${ctx ? " ctx" : ""}" aria-pressed="${slot != null}" aria-label="${slot != null ? "On the chart. Take off" : "Put on the chart"}: ${short(m)}" style="--c:${slot != null ? seriesVar(slot) : "transparent"}"><i></i></button>
           <button type="button" class="pk-name" role="checkbox" aria-checked="${chosen}"><span class="nm">${short(m)}</span><span class="sub">${[teamOf(m), familyTag(m) !== teamOf(m) ? familyTag(m) : null, provenance(m)].filter(Boolean).join(" · ")}${data.FC[m]?.[weekKey] ? "" : ` · <span class="miss">no forecast ${fmtShort(week)}</span>`}</span></button>
-          <span class="pk-strip" title="Forecasts submitted this season">${strip(m)}</span>
           <span class="pk-check" aria-hidden="true">${icon.check}</span></div>`;
       };
       const chev = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';

@@ -174,9 +174,8 @@ Only facts, nothing computed over an arbitrary window:
   iteration in the sandbox), **Local** (from `local-output/`).
 - **This week's availability**: if the model has no forecast for the date and location on screen, the
   row says "no forecast Dec 27". Contextual, but the context already on screen, not an arbitrary one.
-- **A submission strip**: one tiny cell per forecast date this season, filled where the model
-  submitted. When it started, whether it's still running, how complete it is: exactly what you need to
-  know before evaluating it, and the same in every view.
+- (A submission strip was tried and removed: nearly every model has all weeks or none, so it said
+  nothing. The space stays empty; nothing replaces it.)
 - Hover or expand: methods, data inputs, license, the designated-model flag, from metadata.
 
 ## Organizing 100+ models
