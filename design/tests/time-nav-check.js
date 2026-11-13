@@ -98,10 +98,12 @@ export async function run({ rulers = false } = {}) {
     // --- reset and double-click
     await pinch(10, 8); await pan(5, -20); await settle(); key("0"); await settle();
     check("0 returns to 11 weeks, unpanned", near(nav.span, 11, 0.01) && nav.P === 0, { span: nav.span, P: nav.P });
+    nav.setHeight(2.5); await settle();
     el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await settle();
-    const full = near(nav.span, nav.seasonSpan, 0.01);
+    const full = near(nav.span, nav.seasonSpan, 0.01) && near(nav.heightZoom, 1, 1e-6);
+    nav.setHeight(2.5); await settle();
     el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await settle();
-    check("double-click: fully out, then back home", full && near(nav.span, 11, 0.01), { span: nav.span });
+    check("double-click: fully out, then back home, at normal height both times", full && near(nav.span, 11, 0.01) && near(nav.heightZoom, 1, 1e-6), { span: nav.span, z: nav.heightZoom });
     await reset();
     // --- drag
     { const T0 = nav.T, w = pxw(); await drag(-w); await settle();

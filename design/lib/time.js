@@ -29,6 +29,7 @@
  *    (Shift no longer turns a vertical wheel into side scroll: macOS already sends shift + trackpad swipes
  *    sideways, so the two can't be told apart.)
  *  - double-click: zoom fully out to the season; when fully out, zoom back in on the date you clicked.
+ *    Either way, height returns to normal.
  *  - left / right: step a week (timeKeys).
  * Past the first and last date, and below minSpan, the gesture rubber-bands and springs back. */
 import { timeKeys } from "./controls.js";
@@ -337,6 +338,7 @@ export class TimeNav {
       if (this.ignore(e)) return;
       const full = this.tZ >= Math.log(this.seasonSpan) - 1e-3;
       this.zoomTo(full ? this.home : this.seasonSpan, { recenter: true });
+      this.setHeight(1); // both directions land at normal height
     });
 
     timeKeys((d) => this.step(d));
