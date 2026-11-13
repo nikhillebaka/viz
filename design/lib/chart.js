@@ -130,7 +130,7 @@ export function fanChart(svgSel, data, opts = {}) {
 
   // cutoff shade, then the axis on top of it
   const xc = x(cutoff), xr = x(ref);
-  if (opts.marks !== false) g.append("rect").attr("x", xc).attr("width", Math.max(0, w - xc)).attr("height", ay).attr("fill", "var(--fill-hover)");
+  if (opts.marks !== false) g.append("rect").attr("x", xc).attr("width", Math.max(0, w - xc)).attr("height", ay).attr("fill", "var(--shade-forecast, var(--fill-hover))");
   g.append("line").attr("x1", 0).attr("x2", w).attr("y1", ay).attr("y2", ay).attr("stroke", "var(--line-axis)");
   const markL = xc - 84, markR = xr + 104;
   const months = d3.utcMonth.range(d3.utcMonth.ceil(x.invert(0)), x.invert(w))

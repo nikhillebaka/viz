@@ -48,6 +48,8 @@ export const color = {
     "series-baseline": "#9a9a9a",
     // interval band fill strength: default (every model) and focused. Dark needs a touch more.
     "band-whisper": "0.075", "band-focus": "0.15",
+    // tint over everything after the data cutoff (unknown when the forecast was made)
+    "shade-forecast": "rgba(255, 255, 255, 0.035)",
     "heat-better": "#38bdf8",
     "heat-neutral": "#2b2b2b",
     "heat-worse": "#fb7185",
@@ -80,6 +82,7 @@ export const color = {
     "series-5": "#d6a20a", "series-6": "#ec0050", "series-7": "#8738f8", "series-8": "#72ad04",
     "series-baseline": "#8a8a8f",
     "band-whisper": "0.06", "band-focus": "0.13",
+    "shade-forecast": "rgba(0, 0, 0, 0.045)",
     "heat-better": "#268bd2",
     "heat-neutral": "#e6e6ea",
     "heat-worse": "#cb4b16",
