@@ -45,10 +45,10 @@ function draw() {
     pad: { l: 64, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
     focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: S.rulers && u < 0.001, misses: S.misses,
     onLabel: toggleFocus,
-    onLabelHover: (m) => { if (S.preview !== m) { S.preview = m; draw(); } },
   });
   G = { ...P, compact, w };
   readout();
+  previewUnderPointer();
   // panned so far that the forecast is off-screen: show which way it is, and bring it back on click
   const xr = P.x(P.ref), off = xr < 0 ? "left" : xr > w ? "right" : null, rc = $("recenter"), wrap = $("recenter-wrap");
   if (wrap.hidden !== !off) { wrap.hidden = !off; if (off) requestAnimationFrame(() => rcGlass?.update()); }
@@ -106,7 +106,23 @@ function hoverAt(clientX) {
 }
 chartEl.addEventListener("pointermove", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
 chartEl.addEventListener("pointerdown", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
-chartEl.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") setHover(null); });
+chartEl.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") { mouse = null; setHover(null); previewUnderPointer(); } });
+
+/* Focus preview follows whatever label is under the mouse, checked after every frame. Enter/leave
+ * events can't do this: the chart is redrawn each frame, so a label that moves under or away from a
+ * still mouse (while the date changes) never gets a leave event, and its highlight used to stick. */
+let mouse = null;
+chartEl.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") { mouse = { x: e.clientX, y: e.clientY }; previewUnderPointer(); } });
+function previewUnderPointer() {
+  let m = null;
+  if (mouse && !nav.moving) {
+    for (const g of chartEl.querySelectorAll(".fc-label")) {
+      const r = g.getBoundingClientRect();
+      if (mouse.x >= r.left && mouse.x <= r.right && mouse.y >= r.top && mouse.y <= r.bottom) { m = d3.select(g).datum().s.m; break; }
+    }
+  }
+  if (m !== S.preview) { S.preview = m; frame(); }
+}
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.focus && !document.querySelector(".c-float")) { S.focus = null; draw(); } });
 
 /* ---------------- chrome ---------------- */
