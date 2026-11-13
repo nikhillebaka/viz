@@ -256,7 +256,7 @@ function openModelPicker() {
         list.scrollTop = top;
         if (keepM) list.querySelector(`.pk-row[data-m="${CSS.escape(keepM)}"] .${keepCls?.split(" ")[0]}`)?.focus({ preventScroll: true });
         const n = sel.selected.length, on = sel.charted.length;
-        foot.textContent = `${n} selected, ${on} on the chart${n > on ? (sel.showAll ? `, ${n - on} as grey context` : "") : ""}. Click a name to select it for evaluation; click its circle to put it on the chart.`;
+        foot.textContent = [`${n} selected`, `${on} charted`, sel.showAll && n > on ? `${n - on} grey` : null].filter(Boolean).join(" · ");
       };
       list.addEventListener("click", (e) => {
         const r = e.target.closest(".pk-row"), sec = e.target.closest(".pk-sec");
