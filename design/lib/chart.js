@@ -232,7 +232,9 @@ export function fanChart(svgSel, data, opts = {}) {
     const lx = opts.rulers ? rx0 + models.length * rulerStep + 8 : fanEnd + 14; // labels ride with the fan (zoomed out it sits mid-chart)
     const labs = S.map((s) => ({ s, x: lx, y: y(Math.min(s.pts.at(-1).med, top)) })).sort((a, b) => a.y - b.y);
     for (let i = 1; i < labs.length; i++) labs[i].y = Math.max(labs[i].y, labs[i - 1].y + 18);
-    const lg = g.append("g").selectAll("g").data(labs).join("g").attr("class", "fc-label").attr("transform", (d) => `translate(${d.x},${d.y})`);
+    // labels pushed off-screen (when the view is panned into the past) are skipped entirely: fitting a
+    // name into negative room measured the text once per dropped letter, every frame
+    const lg = g.append("g").selectAll("g").data(labs.filter((d) => d.x < w - 24)).join("g").attr("class", "fc-label").attr("transform", (d) => `translate(${d.x},${d.y})`);
     if (opts.onLabel) {
       lg.style("cursor", "pointer").attr("role", "button").attr("tabindex", 0).attr("aria-pressed", (d) => d.s.m === f)
         .attr("aria-label", (d) => `${d.s.m}. ${d.s.m === f ? "Focused. Activate to clear focus" : "Activate to focus"}`)

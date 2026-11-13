@@ -53,9 +53,17 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **Pan: ⌘ + side scroll** moves the view without moving the forecast (a camera offset in weeks), 1:1
   with the scroll, within the season, rubber-banding at its ends. Trackpad pinch (which arrives as
   ctrl + wheel) always zooms; ⌘ + vertical wheel zooms; ⌘ + horizontal pans. While panned, zoom keeps
-  the middle of the view still. Changing the date with keys or the stepper, going to Season, double-
-  clicking or pressing 0 glides the view back to the forecast; scrubbing keeps the pan. When the
-  forecast is off-screen, a "← Dec 27 forecast" pill at that edge points to it and brings it back.
+  the middle of the view still.
+- **The pan is kept.** While the forecast is on screen (its reference line and whole 3-week fan),
+  scrubbing, arrow keys and the stepper change the date around it, and the reference line stays
+  exactly where it was left. While it is off-screen, plain side scroll and drag pan as well, as if ⌘
+  were held, until it is fully back on screen; from that moment the same gesture scrubs. Arrow keys and
+  the stepper with the forecast off-screen bring it back to its home position, as do Season,
+  double-click and 0. A "← Dec 27 forecast" pill at the edge points to an off-screen forecast and
+  brings it back.
+- **Panning into the past was slow** because the model labels, pushed off the right edge, were being
+  fitted into negative room one dropped letter (and one text measurement) at a time, every frame.
+  Off-screen labels are now skipped; a frame costs under 1 ms in every pan position.
 - **In Season,** the model labels ride at the fan's end, rulers are hidden, and the right margin
   shrinks from 168px to 56px with the blend.
 - Season is where the evaluation window brush should live, so time selection is one concept

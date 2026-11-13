@@ -43,7 +43,7 @@ function draw() {
     id: "chart-src", models: models(), t: nav.T, domain: nav.domain(),
     // the right margin holds the model labels close up; in Season they sit at the fan's end instead
     pad: { l: 64, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
-    focus: focused(), hover: nav.busy ? null : S.hoverH, rulers: S.rulers && u < 0.001, misses: S.misses,
+    focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: S.rulers && u < 0.001, misses: S.misses,
     onLabel: toggleFocus,
     onLabelHover: (m) => { if (S.preview !== m) { S.preview = m; draw(); } },
   });
@@ -68,7 +68,7 @@ function toggleFocus(m) {
 /* ---------------- readout ---------------- */
 function readout() {
   const el = $("readout");
-  if (S.hoverH == null || nav.busy) { el.hidden = true; return; }
+  if (S.hoverH == null || nav.moving) { el.hidden = true; return; }
   const hp = { h: S.hoverH, date: new Date(+G.ref + S.hoverH * WEEK) }, f = G.focus, hasFocus = f != null;
   const rows = G.bands.map((b) => ({ b, p: b.pts.find((p) => p.h === hp.h) })).filter((d) => d.p);
   if (hasFocus) rows.sort((a, b) => (b.b.m === f) - (a.b.m === f));
@@ -95,7 +95,7 @@ function frame() { if (!frameQueued) frameQueued = requestAnimationFrame(() => {
 /* ---------------- hover ---------------- */
 function setHover(h) { if (h === S.hoverH) return; S.hoverH = h; if (h != null) $("hint").style.opacity = 0; frame(); }
 function hoverAt(clientX) {
-  if (!G || nav.busy) return;
+  if (!G || nav.moving) return;
   const px = clientX - chartEl.getBoundingClientRect().left;
   const weeks = [0, 1, 2, 3];
   const near = weeks.reduce((a, b) => (Math.abs(G.x(new Date(+G.ref + b * WEEK)) - px) < Math.abs(G.x(new Date(+G.ref + a * WEEK)) - px) ? b : a));

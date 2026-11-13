@@ -17,8 +17,12 @@
  *  - pinch (trackpad, Safari gestures), ⌘ + vertical wheel, = / - / 0 keys: zoom. Zoom pivots on the
  *    forecast, never the cursor (when panned, on the middle of the view).
  *  - ⌘ + side scroll: pan the view without moving the forecast (P, weeks of camera offset), within the
- *    season, rubber-banding at its ends. Changing the date with keys or the stepper, going to Season, or
- *    pressing 0 glides the view back to the forecast; scrubbing keeps the pan.
+ *    season, rubber-banding at its ends.
+ *  - The pan is kept: while the reference date is on screen, scrubbing and stepping change the date
+ *    around it, and its line stays exactly where it was left. While it is off-screen, plain side scroll
+ *    and drag pan too (as if ⌘ were held) until it comes back on screen, and from that moment the same
+ *    gesture scrubs again. Keys and the stepper with the forecast off-screen bring it back to its home
+ *    position; so do Season, double-click and 0.
  *  - double-click: close up → Season; in Season → zoom back in on the date you clicked.
  *  - left / right: step a week (timeKeys).
  * Past the first and last date, and below minSpan, the gesture rubber-bands and springs back. */
@@ -72,9 +76,9 @@ export class TimeNav {
   }
 
   /* ---- commands ---- */
-  goTo(i, { w = 38, v = null, recenter = true } = {}) {
+  goTo(i, { w = 38, v = null, recenter = "auto" } = {}) {
     i = Math.max(0, Math.min(this.N - 1, Math.round(i)));
-    if (recenter) this.tP = 0;
+    if (recenter === true || (recenter === "auto" && !this.refVisible())) this.tP = 0;
     if (i !== this.tT) { this.tT = i; this.onWeek(i); }
     this.wT = w; if (v != null) this.vT = v;
     this.#run();
@@ -97,6 +101,18 @@ export class TimeNav {
     const ref = (+this.dates[0] + this.tT * WEEK), fw = this.forecastWeeks;
     const lo = (this.season[0] - ref) / WEEK + (E - fw), hi = (this.season[1] - ref) / WEEK - fw;
     return lo <= hi ? [Math.min(lo, 0), Math.max(hi, 0)] : [0, 0];
+  }
+  /* any gesture in progress (the page hides hover while this is true) */
+  get moving() { return !!(this.busy || this.panning || this.pinching); }
+  /* the reference date's x on screen, from the live camera (not the last drawn frame) */
+  refX() {
+    const [r0, r1] = this.scale().range(), [d0, d1] = this.domain();
+    return r0 + ((+this.ref - d0) / (d1 - d0)) * (r1 - r0);
+  }
+  /* "the forecast is on screen": the reference line and its whole fan (forecastWeeks to its right) */
+  refVisible(margin = 24) {
+    const x = this.refX(), fan = this.forecastWeeks * this.#pxPerWeek();
+    return x >= margin && x + fan <= this.surface.clientWidth - margin;
   }
   request() { if (!this.queued) this.queued = requestAnimationFrame(() => { this.queued = 0; this.onFrame(); }); }
 
@@ -125,7 +141,12 @@ export class TimeNav {
   #stop() { cancelAnimationFrame(this.raf); this.raf = 0; }
   #clampT(T) { const n = this.N - 1; return T < 0 ? -rubber(-T) : T > n ? n + rubber(T - n) : T; }
   #rawT(T) { const n = this.N - 1; return T < 0 ? -unrubber(-T) : T > n ? n + unrubber(T - n) : T; }
-  #pxPerWeek() { const x = this.scale(); return x(new Date(+this.ref + WEEK)) - x(this.ref); }
+  #pxPerWeek() { const [r0, r1] = this.scale().range(), [d0, d1] = this.domain(); return (r1 - r0) / ((d1 - d0) / WEEK); }
+  /* a scroll or drag moved the content by a weeks: scrub the date if the forecast is on screen, else pan */
+  #advance(a) {
+    if (this.refVisible()) { this.#stop(); this.vT = 0; this.busy = true; this.#setT(this.#clampT(this.#rawT(this.T) + a)); return "scrub"; }
+    this.#panBy(a); return "pan";
+  }
   #placeAt(clientX) { // Season: the date under the pointer
     const x = this.scale(), px = clientX - this.surface.getBoundingClientRect().left;
     return Math.max(0, Math.min(this.N - 1, (x.invert(px) - this.dates[0]) / WEEK));
@@ -172,16 +193,17 @@ export class TimeNav {
       const season = this.mix > 0.999, close = this.mix < 0.001;
       if (!season && !close) return;                            // mid zoom: hands off
       this.#stop(); this.vT = 0;
-      drag = { id: e.pointerId, x0: e.clientX, T0: this.T, pxw: this.#pxPerWeek(), season, moved: false, hist: [{ t: e.timeStamp, T: this.T }] };
+      drag = { id: e.pointerId, x0: e.clientX, lastX: e.clientX, season, moved: false, scrubbed: false, hist: [{ t: e.timeStamp, T: this.T }] };
     });
     el.addEventListener("pointermove", (e) => {
       if (!drag || e.pointerId !== drag.id) return;
       const dx = e.clientX - drag.x0;
       if (!drag.moved && Math.abs(dx) < 4) return;
-      if (!drag.moved) { drag.moved = true; this.busy = true; try { el.setPointerCapture(e.pointerId); } catch {} el.style.cursor = "grabbing"; }
-      const T = drag.season ? this.#placeAt(e.clientX) : this.#clampT(drag.T0 - dx / drag.pxw);
-      drag.hist.push({ t: e.timeStamp, T }); if (drag.hist.length > 6) drag.hist.shift();
-      this.#setT(T);
+      if (!drag.moved) { drag.moved = true; try { el.setPointerCapture(e.pointerId); } catch {} el.style.cursor = "grabbing"; }
+      if (drag.season) { this.busy = true; drag.scrubbed = true; this.#setT(this.#placeAt(e.clientX)); }
+      else if (this.#advance(-(e.clientX - drag.lastX) / this.#pxPerWeek()) === "scrub") drag.scrubbed = true; // drag right = earlier
+      drag.lastX = e.clientX;
+      drag.hist.push({ t: e.timeStamp, T: this.T }); if (drag.hist.length > 6) drag.hist.shift();
     });
     const end = (e) => {
       if (!drag || e.pointerId !== drag.id) return;
@@ -191,6 +213,7 @@ export class TimeNav {
         else this.#run();                                       // resume anything the press interrupted
         return;
       }
+      if (!d.scrubbed) return;                                  // it only panned: the pan settles itself
       const a = d.hist[0], z = d.hist.at(-1), dt = Math.max(1, z.t - a.t);
       const v = z.t - a.t < 120 ? ((z.T - a.T) / dt) * 1000 : 0; // weeks per second, only if still moving
       this.#settleT(d.season ? 0 : v);
@@ -220,9 +243,9 @@ export class TimeNav {
       if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || this.pinching) return;
       if (this.mix > 0.001 && this.mix < 0.999) return;
       e.preventDefault();
-      this.#stop(); this.vT = 0; this.busy = true;
-      this.#setT(this.#clampT(this.#rawT(this.T) + (dx * unit) / this.#pxPerWeek()));
-      clearTimeout(wheelIdle); wheelIdle = setTimeout(() => this.#settleT(0), 140);
+      const did = this.mix > 0.999 ? (this.#stop(), this.vT = 0, this.busy = true, this.#setT(this.#clampT(this.#rawT(this.T) + (dx * unit) / this.#pxPerWeek())), "scrub")
+        : this.#advance((dx * unit) / this.#pxPerWeek());
+      if (did === "scrub") { clearTimeout(wheelIdle); wheelIdle = setTimeout(() => this.#settleT(0), 140); }
     }, { passive: false });
 
     // Safari sends pinches as gesture events
