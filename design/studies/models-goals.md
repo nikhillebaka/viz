@@ -220,3 +220,24 @@ Only facts, nothing computed over an arbitrary window:
   any grey line can be named with one hover and charted with one click, and nothing about hover,
   focus, scrub or pan behaves differently from before.
 - Everything works from the keyboard; a shared URL restores selection, the charted five and Show all.
+
+## Prototype status (Nov 13, 2026)
+
+Built on the fan chart page (`studies/intervals-refine.html`), with the logic in `lib/selection.js` and
+the drawing in `lib/chart.js`:
+
+- Selection with five charted and color slots, queue-of-five swapping, explicit take-off, auto-fill
+  rules, bulk select. Checked by `tests/selection-check.mjs` (14 rules, run with node).
+- The picker: search (name, team, family, provenance), Baseline switch, sections (Selected, Local,
+  families, By team) with select-all checkboxes and collapse, circle vs name clicks, shift-click ranges,
+  ↑/↓ and Enter, submission strips, "no forecast" notes, family and provenance tags.
+- The Models pill (charted colors and count) and a Baseline toggle in the chrome.
+- "Showing 5 of 13 · Show all" note; Show all draws grey context medians, labels all or nothing.
+- One hover/click rule for labels and lines: charted lines preview focus, grey lines lift and join the
+  readout, clicking a grey line charts and focuses it; taps on lines don't move the date.
+- Dimmed "no forecast" labels for charted models that have none this week.
+- The time-navigation check still passes (34/34), also with Show all and rulers on.
+
+Not built yet: recent selections, sort options, the metadata hover (methods, inputs, license), the
+selection in the URL, Escape-to-clear for hover state inside the picker. Provenance in the prototype is
+sample data (two "Local" stand-ins), since the prototype's data files carry no metadata.

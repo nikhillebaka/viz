@@ -45,7 +45,9 @@ export class TimeNav {
    *  surface: element for drag, wheel and double-click; dates: Date[] (weekly, ascending); index: start
    *  season: [Date, Date] extent of the Season view; forecastWeeks (3), span (11), minSpan (6), maxSpan (20)
    *  scale(): the chart's current x scale (d3), used to turn pixels into weeks
-   *  ignore(event): true for targets that handle their own pointer (e.g. labels)
+   *  ignore(event): true for targets that handle their own pointer entirely (e.g. labels)
+   *  tapTarget(event): true when a tap (no movement) lands on something the page handles (e.g. a line);
+   *    drags starting there still scrub and pan
    *  onFrame(): redraw; onWeek(i): the week T is heading to changed; onZoom(mode): "close" | "season" */
   constructor(o) {
     Object.assign(this, { forecastWeeks: 3, minSpan: 6, maxSpan: 20, ignore: () => false, onWeek() {}, onZoom() {} }, o);
@@ -254,6 +256,7 @@ export class TimeNav {
       if (!drag || e.pointerId !== drag.id) return;
       const d = drag; drag = null; el.style.cursor = "";
       if (!d.moved) {                                           // a tap
+        if (this.tapTarget?.(e)) { this.#run(); return; }        // the page handles taps on its own targets (lines)
         if (d.fan && e.type === "pointerup") { this.busy = false; this.goTo(this.#placeAt(e.clientX), { w: 30 }); }
         else this.#run();                                       // resume anything the press interrupted
         return;

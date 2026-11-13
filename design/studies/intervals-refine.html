@@ -39,6 +39,59 @@ svg { display: block; }
 .readout .obs { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-hairline); color: var(--ink-secondary); display: flex; justify-content: space-between; gap: 12px; }
 .readout .out { display: inline-block; margin-left: 6px; color: var(--ink-tertiary); }
 
+/* "Showing 5 of 12 · Show all": under the top chrome, at the right, above the model labels */
+#more-wrap { position: absolute; z-index: var(--z-chrome); top: calc(var(--chrome-top, 70px) + 6px); right: var(--layout-inset-regular); }
+#more { gap: 6px; font-size: 12.5px; color: var(--ink-secondary); cursor: default; }
+#more .t, #more .link { position: relative; z-index: 4; }
+#more .link { color: var(--accent); font-weight: 500; padding: 0; background: none; border: 0; font: inherit; cursor: pointer; }
+#more .link:hover { text-decoration: underline; }
+#c-models .dots { display: inline-flex; gap: 3px; position: relative; z-index: 4; }
+#c-models .dots i { width: 8px; height: 8px; border-radius: 50%; }
+#c-models .label { position: relative; z-index: 4; }
+#c-models > svg:not(.lg-layer) { width: 14px; height: 14px; position: relative; z-index: 4; color: var(--ink-tertiary); }
+
+/* model picker */
+.pk-head { display: flex; gap: 8px; align-items: center; margin: 0 4px 6px; }
+.pk-head .pop-search { flex: 1; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: var(--radius-field); background: var(--fill-field); }
+.pk-head .pop-search svg { width: 14px; height: 14px; color: var(--ink-tertiary); }
+.pk-head input { flex: 1; border: 0; outline: 0; background: none; color: var(--ink-primary); font: 14px var(--font-sans); min-width: 0; }
+.pk-head .pk-base { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 10px; border-radius: var(--radius-field); background: var(--fill-field); color: var(--ink-secondary); font: 500 12.5px var(--font-sans); border: 0; cursor: pointer; }
+.pk-base i { width: 26px; height: 16px; border-radius: 8px; background: var(--ink-faint); position: relative; transition: background var(--dur-fade); }
+.pk-base i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; transition: transform var(--dur-fade) var(--ease-fade); }
+.pk-base[aria-checked="true"] i { background: var(--series-baseline); }
+.pk-base[aria-checked="true"] i::after { transform: translateX(10px); }
+.pk-list { max-height: min(460px, 60vh); overflow: auto; scrollbar-width: thin; padding: 0 2px; }
+.pk-sec { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; margin-top: 6px; position: sticky; top: 0; z-index: 2; background: var(--surface-raised); }
+.pk-sec .pk-all { width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--ink-tertiary); border: 0; background: none; padding: 0; cursor: pointer; display: grid; place-items: center; flex: none; }
+.pk-sec .pk-all[aria-checked="true"], .pk-sec .pk-all[aria-checked="mixed"] { background: var(--ink-secondary); box-shadow: none; }
+.pk-sec .pk-all[aria-checked="true"]::after { content: ""; width: 7px; height: 4px; border: solid var(--surface-raised); border-width: 0 0 1.75px 1.75px; transform: translateY(-1px) rotate(-45deg); }
+.pk-sec .pk-all[aria-checked="mixed"]::after { content: ""; width: 7px; height: 1.75px; background: var(--surface-raised); }
+.pk-sec .pk-sec-t { flex: 1; display: flex; align-items: center; gap: 6px; border: 0; background: none; padding: 0; cursor: pointer; color: var(--ink-tertiary); font: 600 11px var(--font-sans); letter-spacing: 0.04em; text-transform: uppercase; text-align: left; }
+.pk-sec .n { font-weight: 500; color: var(--ink-faint); }
+.pk-sec svg { width: 12px; height: 12px; margin-left: auto; transition: transform var(--dur-fade); }
+.pk-sec.collapsed svg { transform: rotate(-90deg); }
+.pk-team { padding: 4px 8px 0 30px; color: var(--ink-tertiary); font-size: 11.5px; }
+.pk-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: 34px; padding: 0 6px 0 2px; border-radius: 9px; }
+.pk-row:hover, .pk-row:focus-within { background: var(--fill-hover); }
+.pk-row.sel { background: var(--fill-selected); }
+.pk-dot { width: 26px; height: 26px; border: 0; background: none; padding: 0; display: grid; place-items: center; cursor: pointer; border-radius: 50%; }
+.pk-dot i { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ink-tertiary); display: grid; place-items: center; transition: background var(--dur-fade), box-shadow var(--dur-fade); }
+.pk-dot:hover i { box-shadow: inset 0 0 0 1.5px var(--ink-secondary); }
+.pk-dot[aria-pressed="true"] i { background: var(--c); box-shadow: none; }
+.pk-dot.ctx i::after { content: ""; width: 4px; height: 4px; border-radius: 50%; background: var(--ink-tertiary); }
+.pk-name { display: flex; align-items: baseline; gap: 6px; min-width: 0; border: 0; background: none; padding: 8px 0; cursor: pointer; text-align: left; color: var(--ink-secondary); font: 500 13px var(--font-sans); }
+.pk-row.sel .pk-name { color: var(--ink-primary); }
+.pk-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk-name .tm, .pk-name .miss { color: var(--ink-tertiary); font-weight: 400; font-size: 11.5px; white-space: nowrap; }
+.pk-name .miss { color: var(--ink-tertiary); }
+.pk-strip { display: flex; gap: 1px; }
+.pk-strip i { width: 2px; height: 10px; border-radius: 1px; background: var(--line-axis); }
+.pk-strip i.on { background: var(--ink-tertiary); }
+.pk-strip i.now { outline: 1px solid var(--ink-secondary); outline-offset: 1px; }
+.pk-tags { display: flex; gap: 4px; }
+.pk-tags span { font: 500 10.5px var(--font-sans); color: var(--ink-tertiary); padding: 1px 6px; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--line-axis); white-space: nowrap; }
+.pk-foot { padding: 8px 10px 2px; color: var(--ink-tertiary); font-size: 12px; }
+
 /* shown when the view is panned away from the forecast: points at it, and brings it back */
 #recenter-wrap { position: absolute; z-index: var(--z-chrome); top: 50%; transform: translateY(-50%); }
 #recenter-wrap.left { left: var(--layout-inset-regular); } #recenter-wrap.right { right: var(--layout-inset-regular); }
@@ -52,12 +105,14 @@ svg { display: block; }
   <svg id="chart" role="img" aria-label="Forecast chart with 95% intervals. Left and right arrow keys change the forecast date."></svg>
   <div class="readout" id="readout" hidden></div>
   <div id="recenter-wrap" hidden><button class="c-pill sm" id="recenter"><span class="arr"></span><span class="lb"></span></button></div>
+  <div id="more-wrap" hidden><div class="c-pill sm" id="more"><span class="t"></span><button type="button" class="link" id="more-btn"></button></div></div>
   <div class="hint" id="hint">Click a model to focus it · drag or ← → to change date · pinch to zoom</div>
 
   <div class="c-chrome" id="chrome">
     <div class="c-zone" data-zone="tl">
       <a class="c-pill icon" id="back" href="../components.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></a>
-      <div id="c-set"></div>
+      <button class="c-pill" id="c-models" aria-haspopup="dialog"><span class="dots"></span><span class="label"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+      <button class="c-pill" id="c-baseline" aria-pressed="true"><span class="tick"></span><span>Baseline</span></button>
     </div>
     <div class="c-zone" data-zone="tr">
       <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
@@ -67,7 +122,7 @@ svg { display: block; }
       <button class="c-pill" id="c-misses" aria-pressed="true" data-compact-hide><span class="tick"></span><span>Misses</span></button>
     </div>
     <div class="c-zone" data-zone="bc"><div id="c-date"></div></div>
-    <div class="c-zone" data-zone="br"><div id="c-count"></div></div>
+    <div class="c-zone" data-zone="br"></div>
   </div>
 </div>
 

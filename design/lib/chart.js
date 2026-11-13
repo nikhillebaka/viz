@@ -88,6 +88,8 @@ export function bandsAt(data, models, t, level = 0.95) {
  *  marks: false to skip the cutoff shade and date labels
  *  topClear: y above which y-axis labels are hidden (the bottom of the top chrome); default pad.t - 32
  *  labels: false to skip direct labels
+ *  context: model ids drawn as grey context medians (Show all); hot: a context id to highlight and name
+ *  The returned { series, context } carry each drawn line's points, for hit-testing hovers and clicks.
  */
 export function fanChart(svgSel, data, opts = {}) {
   const { DATES, truth, DI0, YMAX } = data;
@@ -111,6 +113,10 @@ export function fanChart(svgSel, data, opts = {}) {
   const level = opts.band === null || opts.band === 0 ? 0 : opts.band ?? 0.95;
   const B = level ? bandsAt(data, models, t, level) : [];
   const S = level === 0.95 ? B : bandsAt(data, models, t, 0.95); // medians are drawn even with no band
+  // charted models with no forecast this week keep their slot; they get a dimmed label (below)
+  const missing = models.filter((o) => !S.some((b) => b.m === o.m));
+  // context (Show all): every other selected model, as a thin grey median; no band, no dots
+  const C = (opts.context || []).length ? bandsAt(data, opts.context.map((m) => ({ m, slot: 0 })), t, 0.95) : [];
   const f = opts.focus, hasFocus = S.some((b) => b.m === f);
   const dim = (m) => hasFocus && m !== f;
 
@@ -171,6 +177,14 @@ export function fanChart(svgSel, data, opts = {}) {
     g.append("line").attr("x1", hx).attr("x2", hx).attr("y1", 0).attr("y2", ay).attr("stroke", "var(--ink-faint)");
   }
 
+  // context medians sit under the observed data and the charted models
+  if (C.length) {
+    const cl = d3.line().x((p) => x(p.date)).y((p) => y(p.med));
+    g.append("g").attr("clip-path", clip).selectAll("path").data(C.filter((c) => c.m !== opts.hot)).join("path")
+      .attr("d", (c) => cl(c.pts)).attr("fill", "none").attr("stroke", "var(--ink-tertiary)").attr("stroke-opacity", hasFocus ? 0.3 : 0.45)
+      .attr("stroke-width", 1).attr("stroke-linejoin", "round");
+  }
+
   // observed: whole season, solid through the cutoff, dotted after
   // split the observed line exactly at the cutoff (between weeks while scrubbing)
   let known = truth.filter((d) => d.date <= cutoff), after = truth.filter((d) => d.date >= cutoff);
@@ -215,6 +229,11 @@ export function fanChart(svgSel, data, opts = {}) {
   mg.selectAll("circle").data((b) => b.pts.filter((p) => !p.anchor).map((p) => ({ ...p, c: b.c }))).join("circle").attr("r", 2.9)
     .attr("cx", (p) => x(p.date)).attr("cy", (p) => y(p.med)).attr("fill", (p) => p.c).attr("stroke", "var(--surface-chart)").attr("stroke-width", 1.75);
 
+  // a hovered context line is lifted above everything else, so you can see which one it is
+  const hotC = C.find((c) => c.m === opts.hot);
+  if (hotC) g.append("path").attr("clip-path", clip).attr("d", d3.line().x((p) => x(p.date)).y((p) => y(p.med))(hotC.pts))
+    .attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5).attr("stroke-linejoin", "round");
+
   // width rulers beside the fan, at the hovered week (default 3 weeks ahead)
   const fanEnd = x(new Date(+ref + 3 * WEEK)); // the last forecast week; equals the plot's right edge close up
   const rx0 = fanEnd + 18;
@@ -236,6 +255,21 @@ export function fanChart(svgSel, data, opts = {}) {
     const lx = fanEnd + 14 + rk * (rulerW - 6); // labels ride with the fan (zoomed out it sits mid-chart), and step aside for rulers
     const labs = S.map((s) => ({ s, x: lx, y: y(Math.min(s.pts.at(-1).med, top)) })).sort((a, b) => a.y - b.y);
     for (let i = 1; i < labs.length; i++) labs[i].y = Math.max(labs[i].y, labs[i - 1].y + 18);
+    // charted models with no forecast this week: dimmed, at the bottom of the stack
+    const dayLabel = d3.utcFormat("%b %-d")(DATES[di]);
+    let gy = labs.length ? labs.at(-1).y + 18 : (pad.t + ay) / 2;
+    for (const o of missing) { labs.push({ s: { m: o.m, c: seriesVar(o.slot) }, x: lx, y: gy, ghost: `no forecast ${dayLabel}` }); gy += 18; }
+    // context labels, all or nothing: shown only if every one fits at its own height without touching
+    // another label; a mix of labelled and unlabelled grey lines would suggest some matter more
+    const ctxLabs = C.map((c) => ({ s: { m: c.m, c: "var(--ink-tertiary)" }, x: lx, y: y(Math.min(c.pts.at(-1).med, top)), ctx: true }));
+    const taken = labs.map((d) => d.y);
+    const fits = ctxLabs.length > 0 && ctxLabs.every((d, i) => taken.every((ty) => Math.abs(ty - d.y) >= 16) && ctxLabs.every((e, j) => i === j || Math.abs(e.y - d.y) >= 16));
+    if (fits) labs.push(...ctxLabs);
+    else if (hotC) { // only the hovered one, nudged clear of the labels already there
+      const d = ctxLabs.find((c) => c.s.m === hotC.m);
+      while (taken.some((ty) => Math.abs(ty - d.y) < 16)) d.y += 8;
+      d.hot = true; labs.push(d);
+    }
     // labels pushed off-screen (when the view is panned into the past) are skipped entirely: fitting a
     // name into negative room measured the text once per dropped letter, every frame
     const lg = g.append("g").selectAll("g").data(labs.filter((d) => d.x < w - 24)).join("g").attr("class", "fc-label").attr("transform", (d) => `translate(${d.x},${d.y})`);
@@ -247,12 +281,13 @@ export function fanChart(svgSel, data, opts = {}) {
         .on("pointerenter", (e, d) => { if (e.pointerType === "mouse") opts.onLabelHover?.(d.s.m); })
         .on("pointerleave", (e) => { if (e.pointerType === "mouse") opts.onLabelHover?.(null); });
     }
-    lg.append("circle").attr("r", 3.5).attr("fill", (d) => d.s.c).attr("opacity", (d) => (dim(d.s.m) ? 0.55 : 1));
+    lg.append("circle").attr("r", (d) => (d.ctx ? 2.5 : 3.5)).attr("fill", (d) => d.s.c).attr("opacity", (d) => (d.ghost ? 0.4 : dim(d.s.m) ? 0.55 : 1));
     lg.append("text").attr("class", "t-label-chart").attr("x", 10).attr("dy", "0.34em")
       .attr("stroke", "var(--surface-chart)").attr("stroke-width", 4).attr("stroke-linejoin", "round").attr("paint-order", "stroke")
-      .attr("fill", (d) => (!hasFocus ? "var(--ink-secondary)" : d.s.m === f ? "var(--ink-primary)" : "var(--ink-tertiary)"))
+      .attr("fill", (d) => (d.hot ? "var(--ink-primary)" : d.ctx || d.ghost ? "var(--ink-tertiary)" : !hasFocus ? "var(--ink-secondary)" : d.s.m === f ? "var(--ink-primary)" : "var(--ink-tertiary)"))
       .attr("font-weight", (d) => (hasFocus && d.s.m === f ? 600 : null))
-      .text((d) => short(d.s.m))
+      .attr("font-size", (d) => (d.ctx && !d.hot ? "11px" : null))
+      .text((d) => short(d.s.m) + (d.ghost ? ` · ${d.ghost}` : ""))
       // never let a label run off the chart: shorten it with an ellipsis, full name in a <title>
       .each(function (d) {
         // measuring text forces layout, so remember the result per name and width: scrubbing redraws
@@ -276,5 +311,5 @@ export function fanChart(svgSel, data, opts = {}) {
     if (opts.onLabel) lg.insert("rect", ":first-child").attr("x", -9).attr("y", -11).attr("height", 22).attr("rx", 6)
       .attr("width", (d) => 10 + (d.len || 0) + 14).attr("fill", "transparent");
   }
-  return { x, y, g, w, h, pad, ref, di, cutoff, series: S, bands: B, focus: hasFocus ? f : null };
+  return { x, y, g, w, h, pad, ref, di, cutoff, series: S, bands: B, context: C, missing, focus: hasFocus ? f : null };
 }
