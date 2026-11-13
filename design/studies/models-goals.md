@@ -9,11 +9,11 @@ One selection drives two different things, with different limits:
 
 | Job | Where | How many work well |
 |---|---|---|
-| **Look closely** | Fan chart (and later the map's detail view) | 2–3; precise interval reading falls apart beyond that |
+| **Look closely** | Fan chart (and later the map's detail view) | Up to 5 in color; reading intervals precisely is easiest at 2–3 |
 | **Compare performance** | Leaderboard, heatmap, any evaluation | Any number; 10–30 is normal, "all hub models" is valid |
 
 Most of the design follows from not forcing one limit onto the other. You select freely for
-evaluation; the chart shows a small, stable subset of that selection, and says so.
+evaluation; the chart shows a small, stable subset of that selection in color, and says so.
 
 ## Who picks, and what they're after
 
@@ -27,143 +27,196 @@ All of them come back repeatedly, often to the same sets.
 ## Decisions (Nov 13, 2026)
 
 1. **Keep the picker's look and opening animation** (the morphing popover from the components page).
-2. **One selection, two uses.** Everything selected is evaluated. The fan chart shows **the first three
-   selected** (selection order). Beyond three, the chart shows a small note (see below).
-3. **The baseline is a toggle, not a model in the list.** It never counts toward the three, and it's
+2. **One selection, two uses.** Everything selected is evaluated. The fan chart shows up to **five**
+   selected models in color, by default the first five selected. Beyond five, the chart shows a small
+   note (see below).
+3. **The baseline is a toggle, not a model in the list.** It never counts toward the five, and it's
    always grey.
 4. **No special treatment for ensembles.** They're models like any other; ensembles vary too much to
    group meaningfully.
 5. **No context-free numbers in the list.** Scores like WIS only mean something for a chosen set of
    dates and locations, would be arbitrary in a picker, and wouldn't cover every model, so the list
    can't be sorted or labelled by them.
-6. **Categories, yes.** How they look is open (see color, below).
-7. **Two click targets per row** (Nov 13). Every row has an empty circle beside the name. Clicking the
-   **name** selects the model (for evaluation). Clicking the **circle** puts it on the chart: the circle
-   fills with the model's series color, and another charted model comes off. A charted model is always
-   selected too.
+6. **Categories, yes**, carried by grouping and text, not color (below).
+7. **Two click targets per row.** Every row has an empty circle beside the name. Clicking the **name**
+   selects the model (for evaluation). Clicking the **circle** puts it on the chart: the circle fills
+   with the model's series color, and if five are already charted, another comes off. A charted model
+   is always selected too.
 8. **A charted model with no forecast keeps its slot** (dimmed label "no forecast Dec 27"), so colors
    never shuffle while scrubbing.
+9. **Local experiments are pinned** at the top of the picker.
+10. **Show all** draws every other selected model as grey context, and has to work at 100+.
 
-## Proposals, refinements and push-back
+## Color means "on the chart"
 
-### Color means "on the chart"
+8 series colors can't identify 100+ models, so **only charted models get a series color**.
 
-The hard part of color is that 8 series colors have to cover the chart, the evaluation views and the
-picker, with 100+ models. Proposal: **only charted models get a series color.**
-
-- The three charted models get the first three free colors and keep them while they stay on the chart.
-  With at most three (plus grey baseline), colors never repeat and are always maximally distinct.
-- In the picker, **the colored dot is the "on the chart" marker** you asked for. Selected-but-not-
-  charted models show a plain check, no color. One mark carries both meanings, instead of a checkbox
-  plus a separate chart icon plus a color.
+- The five charted models take the first free colors (1–5 of the 8) and keep them while they stay on
+  the chart. Colors never repeat on the chart and are always the most distinct ones.
+- In the picker, **the filled circle is the "on the chart" marker**, in the model's color. Selected-
+  but-not-charted rows show the selected highlight and an empty circle. One mark, two meanings.
 - In evaluation views, charted models are highlighted in their color, so you can find them in a long
-  leaderboard; everything else is neutral ink, identified by name. A leaderboard of 25 doesn't need
-  25 colors; it has names.
-- **Categories get no color at all.** They're carried by grouping (section headers) and a short text
-  tag. Color stays reserved for one job: which line on the chart is which.
+  leaderboard; everything else is neutral ink, identified by name. A leaderboard of 25 doesn't need 25
+  colors; it has names.
+- **Categories get no color.** Color stays reserved for one job: which line on the chart is which.
 
-### Which three are charted
+### Five, not three: what changes on the chart
 
-- Default: **the first three selected**, as you said. It's stable: adding a fourth model never moves
-  what's on screen.
-- **Swapping:** clicking an empty circle charts that model and takes off the one that has been on the
-  chart longest. Repeated clicks keep your latest choices, like a queue of three. The new model takes the
-  color that was freed, so the other two never change color.
+- At 4–5 charted models the whisper fills overlap more. They stay readable because each band has its
+  own fine edge, and focus (click a label) is one click away. The intervals study's guidance still holds:
+  precise reading is easiest at 2–3, which focus gives you at any count.
+- Labels: five labels at the fan's end can collide more often. The existing stacking (18 px apart) still
+  works; with rulers on, five bars fit beside the fan (about 90 px).
+- The readout lists all five, focused first.
+
+## Which five are charted
+
+- Default: **the first five selected**. Stable: adding a sixth model never changes what's on screen.
+- **Swapping:** clicking an empty circle (or a grey line on the chart, below) charts that model. If five
+  are charted, the one that has been on the chart longest comes off, so repeated clicks keep your
+  latest choices, like a queue of five. The new model takes the color that was freed, so the others
+  never change color.
 - Clicking a **filled** circle takes that model off the chart and leaves the slot empty. That was an
-  explicit choice, so nothing refills it automatically; the chart shows two.
-- Free slots are filled automatically only when the selection changes: adding a model fills a free
-  slot, and deselecting a charted model frees its slot for the next selected model not yet charted.
-- A charted model with no forecast on the current date keeps its slot (colors don't shuffle as you
-  scrub through dates). Its label shows in place, dimmed: "flusion · no forecast Dec 27".
+  explicit choice, so nothing refills it automatically.
+- Free slots fill automatically only when the selection changes: adding a model fills a free slot, and
+  deselecting a charted model frees its slot for the next selected model not yet charted.
+- A charted model with no forecast on the current date keeps its slot (decision 8).
 
-### The "more than three" note, and Show all at any count
+## Show all, at any count
 
-- Wording: **"Showing 3 of 7 · Show all"**, with *Show all* as the blue link. It appears only when more
-  than three are selected; the baseline doesn't count. Placement: a small glass note under the top
-  chrome, near the model labels.
-- **Show all has to work at 100+.** Colors can't, and labels can't. So Show all adds every other
-  selected model as **context**: a thin median line in neutral ink at low strength, no band, no label,
-  no dots. The three charted models stay exactly as they were, in color, with bands and labels, drawn
-  on top. Seven models or 140 look the same in kind; 140 just makes a denser grey sheaf, which is itself
-  informative (it shows the spread of all selected models around the three you're reading).
-- Context lines are **identifiable on demand**: hovering one brightens it and shows its name next to
-  the pointer; clicking it charts it (it takes a colored slot, like clicking its circle in the picker).
-- The readout lists the charted three as usual, then one line "and 137 more selected", with the range
-  their medians span that week (the lowest and highest median among them), which is a fact about the
-  selection, not a score.
-- The note then reads **"Showing all 140 · Show 3"**.
-- In the picker, Show all is visible too: every selected-but-not-charted row's circle shows a small
-  grey dot ("drawn as context"), so the picker always matches what's on the chart. Charted rows keep
-  their filled color.
-- Show all is a view toggle, not part of the selection. It's kept with the selection (and in the URL),
-  so it survives scrubbing and reloads.
-- Performance: 140 models × 5 points is a few hundred line segments, cheap; context lines are drawn in
-  one path per model with no dots and no labels to measure.
+- Note, shown only when more than five are selected (the baseline doesn't count): **"Showing 5 of 12 ·
+  Show all"**, *Show all* as the blue link, in a small glass note under the top chrome near the labels.
+  After clicking: **"Showing all 12 · Show 5"**.
+- Show all adds every other selected model as **context**: a thin median line in neutral ink at low
+  strength, no band, no dots. The five charted models stay exactly as they were (color, bands, labels)
+  and are drawn on top. Twelve models or 140 look the same in kind; 140 is a denser grey sheaf, which
+  itself shows the spread of the selection around the five you're reading.
+- It's a view toggle, kept with the selection (and in the URL), so it survives scrubbing and reloads.
+- Performance: 140 models × 5 points is a few hundred segments, one path per model, no dots or labels
+  to measure. Hover hit-testing interpolates each context median at the pointer's x: 140 lookups per
+  pointer move, trivial.
 
-### What a row in the picker shows
+### Labels for context lines
+
+Labels can't scale to 140, and a mix of labelled and unlabelled grey lines would suggest the labelled
+ones matter more. So: **all or nothing.**
+
+- If every context line's label fits at the fan's end without colliding with each other or the colored
+  labels (in practice up to about 6), they're all shown, in tertiary ink, slightly smaller than the
+  colored labels, below them in the stacking order.
+- Otherwise none are shown, and context lines are named on hover. The note then adds "hover a grey line
+  to name it" the first time.
+- The rule is re-evaluated as you zoom or scrub; the switch fades rather than pops.
+
+## One interaction model for every line on the chart
+
+The chart already has: hover a label to preview focus, click a label to focus (click again or Escape to
+clear), hover the plot for the week readout, drag to scrub, ⌘-drag to pan. Context lines must fit into
+this, not add a parallel system. One rule:
+
+**Hover a model (its label or its line) to preview it; click it to focus it. If it's grey, clicking also
+puts it on the chart first.**
+
+- **Lines become targets, not just labels.** Hovering within 6 px of any median line (charted or
+  context) previews that model. A charted model previews exactly as its label does (bold label, others
+  dim). A context line brightens, and its name appears at its end, where a label would sit, with the
+  same halo, marked "click to chart".
+- **Click on a line** acts like a click on its label: focus. For a context line it first charts the
+  model (taking the longest-charted slot if five are charted) and then focuses it, so you see where it
+  went and in which color.
+- **Priority** when lines are close: the focused model, then other charted models (they're drawn on
+  top), then context lines; among context lines, the nearest. The cursor becomes a pointer only over a
+  target.
+- **Hover readout and line hover together:** the week readout still follows the pointer's week. When a
+  model is hovered, its row is highlighted in the readout; a hovered context model gets its own row
+  added at the top (grey dot), so the readout always explains the highlighted line.
+- **Drag vs click:** a press that moves more than 4 px is a scrub or pan, never a click on a line, even
+  if it started on one. A click without movement on empty plot sets the hover week, as now.
+- **While moving** (scrubbing, panning, pinching, gliding), line hover is suspended like label hover,
+  and re-evaluated against the still pointer when motion stops (the same after-each-frame check that
+  fixed sticky label highlights).
+- **Keyboard:** context lines aren't individual tab stops (140 would be hostile). The keyboard path to a
+  context model is the picker (Enter on a row charts it); charted models' labels stay focusable.
+
+### Edge cases
+
+- **Promoting removes the focused model:** focus moves to the newly charted model anyway, so nothing
+  is left focused on a model that's gone.
+- **Clicking a context line while five are charted and one has no forecast:** it still replaces the
+  longest-charted, not the empty one; slot rules don't depend on data availability (decision 8).
+- **Context model with no forecast this week:** not drawn, but counted: "and 128 more selected
+  (12 with no forecast Dec 27)".
+- **Context line overlapping a charted line:** the charted one wins the hover (priority above).
+- **Show all with six selected:** one grey line, labelled (it fits). Same rule, no special case.
+- **Rulers:** only for charted models; context models never get bars.
+- **Misses rings:** only for the focused model, as now; a context model can't be focused without being
+  charted, so there's no grey focus state.
+- **Zoomed far out** (fan mid-screen, labels riding with it): context names on hover appear at the
+  fan's end like labels; near the right edge they flip to the left of the line's end.
+
+## The readout with Show all
+
+The five charted models as usual (focused first), then one line: "and 128 more selected", with the
+range their medians span that week (lowest to highest), which is a fact about the selection, not a
+score. A hovered context model is added as its own row at the top.
+
+## What a row in the picker shows
 
 Only facts, nothing computed over an arbitrary window:
 
-- **Name** (short form), with the team in muted text beside it.
-- **Category tag**: the model's family (`family` in metadata, otherwise inferred from the name the way
-  viz does now: AR, GBQR, flusion…). When neither works, the model is never labelled "Unknown": it goes
-  in a last section, **"By team"**, grouped under its team (the part of the id before the first dash,
-  or the team name from metadata), and its tag is the team. Every model then has a meaningful group,
-  and a team's unparseable variants still sit together.
-- **This week's availability**, tied to what you're looking at: if the model has no forecast for the
-  current date and location, the row says so ("no forecast Dec 27"). It's contextual, but it's the
-  context already on screen, not an arbitrary one.
-- **A submission strip**: a tiny row of cells, one per forecast date this season, filled where the
-  model submitted. It shows at a glance when a model started, whether it's still running, and how
-  complete it is, which is exactly what you need to know before evaluating it. It's the same for
-  every viewer and every view.
-- **Provenance tag**, from the same classification viz uses today: **Hub** (submitted to the hub),
-  **Staged** (experimental iteration in the sandbox), **Local** (from `local-output/`). A modeler's own
-  experiments matter most to them and should be easy to find. (The baseline isn't in the list; it's
-  the toggle.)
+- **Circle** (empty, filled in the model's color when charted, a small grey dot inside when shown as
+  context under Show all), then the **name** (short form), with the team in muted text.
+- **Category tag**: the model's family (`family` in metadata, otherwise inferred from the name as viz
+  does now: AR, GBQR, flusion…). When neither works, it's never "Unknown": it goes in a last section,
+  **"By team"**, grouped under its team (from metadata, or the id before the first dash), tagged with
+  the team. A team's unparseable variants still sit together.
+- **Provenance tag**, from the classification viz already uses: **Hub**, **Staged** (experimental
+  iteration in the sandbox), **Local** (from `local-output/`).
+- **This week's availability**: if the model has no forecast for the date and location on screen, the
+  row says "no forecast Dec 27". Contextual, but the context already on screen, not an arbitrary one.
+- **A submission strip**: one tiny cell per forecast date this season, filled where the model
+  submitted. When it started, whether it's still running, how complete it is: exactly what you need to
+  know before evaluating it, and the same in every view.
 - Hover or expand: methods, data inputs, license, the designated-model flag, from metadata.
 
-### Organizing 100+ models
+## Organizing 100+ models
 
-- **Sections by category**, collapsible, with a count. Within a section, alphabetical.
-- **Pinned on top:** "Selected" (in selection order, so you can see the chart three), then "Local
-  experiments" if there are any.
-- **Search** across name, team and category. Typing a category name ("ar") matches the whole family.
-- **Bulk select**, for evaluation: a checkbox on each section header selects the whole category (all
-  AR models, all of one team's variants), and shift-click selects a range. Without this, "compare all
-  GBQR variants" takes 20 clicks.
-- **Recent selections**: the last few sets, one click to restore. People return to the same sets.
-- Sort options: by category (default), by name, by most recent submission. No metric sorting, per
-  decision 5.
+- **Pinned on top:** "Selected" (in selection order; charted ones show their color), then "Local".
+- **Sections by category**, collapsible, with counts; alphabetical within. "By team" last.
+- **Search** across name, team and category. Typing a category ("ar") matches the whole family.
+- **Bulk select** for evaluation: a checkbox on each section header selects the whole section, and
+  shift-click selects a range. Bulk selection never charts anything beyond filling free slots.
+- **Recent selections**: the last few sets, one click to restore.
+- Sort: by category (default), by name, or by most recent submission. No metric sorting (decision 5).
 
-### The baseline toggle
+## The baseline toggle
 
-- A switch in the picker's header row, "Baseline", plus the same toggle near the chart's labels.
+- A switch in the picker's header, "Baseline", and the same toggle beside the chart's labels.
 - It only controls whether the baseline is **drawn**. In evaluation it's always the reference
-  (relative WIS is computed against it), so there's nothing to toggle there; the evaluation views
-  should say "relative to baseline" rather than list it as a competitor.
+  (relative WIS is computed against it), so evaluation views say "relative to baseline" rather than
+  list it as a competitor.
 
-### Keyboard and state
+## Keyboard and state
 
-- Arrow keys move through rows, Space toggles selection, Enter toggles "on the chart", typing
-  searches. Section headers are reachable and collapsible from the keyboard.
-- The selection, its order, and the chart three go in the URL, so a shared link reproduces the view.
+- Arrow keys move through rows, Space toggles selection, Enter toggles "on the chart", typing searches.
+  Section headers are reachable and collapsible.
+- Selection, its order, the charted five and Show all go in the URL, so a shared link reproduces the
+  view.
 
-## Open questions
+## Open question
 
-1. **Local experiments:** pin them on top always, or only for the person who made them (if the app
-   ever knows who that is)? Leaning: always, since in a sandbox they are usually yours.
-2. **Show all and the leaderboard:** should hovering a context line also highlight that model's row in
-   an evaluation view on the same screen? Decide when the evaluation views are designed.
+- **Show all and evaluation views:** should hovering a context line also highlight that model's row
+  in a leaderboard on the same screen? Decide when the evaluation views are designed.
 
 ## What "good" means (testable)
 
-- Selecting a fourth model never changes what's on the chart, and the chart says that it didn't.
-- From the picker alone, you can tell which models are on the chart, which are only evaluated, and
-  which have no forecast this week, without opening anything.
+- Selecting a sixth model never changes what's on the chart, and the chart says that it didn't.
+- From the picker alone you can tell which models are charted, which are only evaluated, which are
+  drawn as context, and which have no forecast this week.
 - "All AR models" takes one click; "my local model plus two references" takes three.
 - No number in the picker depends on a date range or location set the user didn't choose.
-- Colors on the chart are never repeated and never change while scrubbing dates.
-- Show all with 140 selected stays readable: the three charted models are as clear as with nothing
-  else selected, and any context line can be named with one hover.
-- Everything works from the keyboard, and a shared URL restores the selection and the chart three.
+- Chart colors never repeat and never change while scrubbing.
+- Show all with 140 selected: the five charted models read as clearly as with nothing else selected,
+  any grey line can be named with one hover and charted with one click, and nothing about hover,
+  focus, scrub or pan behaves differently from before.
+- Everything works from the keyboard; a shared URL restores selection, the charted five and Show all.
