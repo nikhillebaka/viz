@@ -139,8 +139,6 @@ $("theme").addEventListener("click", () => {
 new Segmented($("c-set"), { label: "Models", value: S.set, glass: GL, items: [{ value: "close", label: "Close" }, { value: "apart", label: "Apart" }, { value: "skewed", label: "Skewed" }, { value: "baseline", label: "+ Baseline" }], onChange: (v) => { S.set = v; S.focus = null; draw(); } });
 new Segmented($("c-count"), { label: "Models shown", value: "3", glass: GL, items: [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }], onChange: (v) => { S.count = +v; if (!SETS[S.set].slice(0, S.count).includes(S.focus)) S.focus = null; draw(); } });
 const stepper = new Stepper($("c-date"), { values: DATES, index: DI0, label: "Forecast date", glass: GL, format: { long: fmtLong, short: fmtShort }, onChange: (i) => nav.goTo(i) });
-const zoomSeg = new Segmented($("c-zoom"), { label: "Time span", value: "close", glass: GL, items: [{ value: "close", label: "Forecast" }, { value: "season", label: "Season" }], onChange: (v) => nav.setSeason(v === "season") });
-tooltip($("c-zoom"), "Pinch or = − to zoom, ⌘ + side scroll to pan. Double-click the chart to switch.", { placement: "top" });
 const nav = new TimeNav({
   surface: chartEl, dates: DATES, index: DI0,
   season: [truth[0].date, new Date(Math.max(+truth.at(-1).date, +DATES.at(-1) + 3 * WEEK))],
@@ -148,7 +146,6 @@ const nav = new TimeNav({
   ignore: (e) => !!e.target.closest(".fc-label"),
   onFrame: draw,
   onWeek: (i) => { S.di = i; if (stepper.index !== i) { stepper.index = i; stepper.render(true); } $("hint").style.opacity = 0; },
-  onZoom: (m) => { if (zoomSeg.value !== m) zoomSeg.set(m, false); },
 });
 window.__nav = nav; // for testing from the console
 $("recenter").addEventListener("click", () => nav.recenter());

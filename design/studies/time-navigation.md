@@ -40,15 +40,17 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **The camera follows the date.** Zoom state is a span in weeks, never absolute dates, so it survives
   date, model and location changes. Close up, the reference date keeps its place with 3 forecast weeks to
   its right, and zoom pivots on it, never the cursor. The y-axis stays fixed.
-- **Two regimes.** Close up spans 6 to 20 weeks, continuously, and drag or side scroll scrubs the date.
-  Season shows the whole season (first to last observed week, about 48 weeks) with the camera still; the
-  forecast moves across it like a playhead, and a drag or tap places the date under the pointer.
-  Between 20 weeks and Season the camera blends (log-space span, smoothstep on the endpoints) and is
-  only passed through: on release it settles on the nearer end, weighted toward staying close up.
-  Below 6 weeks it rubber-bands back.
+- **One continuous zoom, no modes.** Pinch anywhere from 6 weeks to the whole season (about 48
+  weeks, a hard stop) and leave it at any span. Up to 20 weeks the camera follows the date. From 20
+  weeks to the full season it gradually stops following (log space, smoothstep) until, fully out, it
+  stands still and the forecast moves across it like a playhead. A drag moves whatever the camera
+  moves more: the content while it mostly follows (drag right for earlier, 1:1 close up), the forecast
+  once it mostly stands still (drag right for later, fan under the pointer, and a tap jumps to the week
+  tapped). Side scroll always means "scroll right for later". Below 6 weeks it rubber-bands back.
+  (A first version snapped to either "close up" or "Season" with a switch in the chrome; removed.)
 - **Inputs:** trackpad pinch (ctrl + wheel) and Safari pinch gestures, ⌘/ctrl + mouse wheel (clamped
-  per notch), bare = / - / 0 keys, double-click (close up → Season; in Season, zoom back in on the
-  clicked week), and a Forecast / Season control in the bottom-right chrome. Plain vertical wheel
+  per notch), bare = / - / 0 keys, double-click (zoom fully out; when fully out, zoom back in on the
+  clicked week). Plain vertical wheel
   does nothing. Gestures are 1:1 while held; springs only settle them.
 - **Pan: ⌘ + side scroll** moves the view without moving the forecast (a camera offset in weeks), 1:1
   with the scroll, within the season, rubber-banding at its ends. Trackpad pinch (which arrives as
