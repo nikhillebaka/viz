@@ -20,8 +20,8 @@
  *    season, rubber-banding at its ends.
  *  - The pan is kept: while the reference date is on screen, scrubbing and stepping change the date
  *    around it, and its line stays exactly where it was left. While it is off-screen, plain side scroll
- *    and drag pan too (as if ⌘ were held) until it comes back on screen, and from that moment the same
- *    gesture scrubs again. Keys and the stepper with the forecast off-screen bring it back to its home
+ *    and drag pan too (as if ⌘ were held) until the view is back at its home position (where the
+ *    recenter pill would put it), the same point from either side; from there the same gesture scrubs. Keys and the stepper with the forecast off-screen bring it back to its home
  *    position; so do Season, double-click and 0.
  *  - double-click: close up → Season; in Season → zoom back in on the date you clicked.
  *  - left / right: step a week (timeKeys).
@@ -78,7 +78,7 @@ export class TimeNav {
   /* ---- commands ---- */
   goTo(i, { w = 38, v = null, recenter = "auto" } = {}) {
     i = Math.max(0, Math.min(this.N - 1, Math.round(i)));
-    if (recenter === true || (recenter === "auto" && !this.refVisible())) this.tP = 0;
+    if (recenter === true || (recenter === "auto" && !this.refVisible())) { this.tP = 0; this.returning = false; }
     if (i !== this.tT) { this.tT = i; this.onWeek(i); }
     this.wT = w; if (v != null) this.vT = v;
     this.#run();
@@ -87,14 +87,14 @@ export class TimeNav {
   zoomTo(E, { w = 30, recenter = false } = {}) {
     const from = Math.min(this.span, this.maxSpan);
     this.tZ = Math.log(Math.max(this.minSpan, Math.min(this.seasonSpan, E))); this.wZ = w;
-    if (recenter || this.tZ >= Math.log(this.seasonSpan) - 1e-6) this.tP = 0;
+    if (recenter || this.tZ >= Math.log(this.seasonSpan) - 1e-6) { this.tP = 0; this.returning = false; }
     else if (Math.abs(this.tP) > 1e-3) this.tP += (Math.min(Math.exp(this.tZ), this.maxSpan) - from) / 2; // panned: keep the middle still
     this.#mode(this.tZ >= Math.log(this.seasonSpan) - 1e-6 ? "season" : "close");
     this.#run();
   }
   zoomIn() { this.zoomTo(this.mode === "season" ? this.maxSpan : this.span / 1.25); }
   zoomOut() { this.zoomTo(this.span * 1.25 > this.maxSpan ? this.seasonSpan : this.span * 1.25); }
-  recenter() { this.tP = 0; this.wP = 30; this.#run(); }
+  recenter() { this.tP = 0; this.wP = 30; this.returning = false; this.#run(); }
   setSeason(on) { this.zoomTo(on ? this.seasonSpan : this.home, { recenter: true }); }
   /* how far the view can pan at span E (weeks): its edges stay within the season */
   panRange(E = Math.min(this.span, this.maxSpan)) {
@@ -153,7 +153,18 @@ export class TimeNav {
   /* a scroll or drag moved the content by a weeks: scrub the date if the forecast is on screen, else pan */
   #advance(a, { grab = false } = {}) { // grab: a pointer drag holds the content, so it stays exactly 1:1
     const k = grab ? 1 : this.#pxPerWeek() / this.#scrubPx();
-    if (this.refVisible()) { this.#stop(); this.vT = 0; this.busy = true; this.#setT(this.#clampT(this.#rawT(this.T) + a * k)); return "scrub"; }
+    const scrub = (d) => { this.#stop(); this.vT = 0; this.busy = true; this.#setT(this.#clampT(this.#rawT(this.T) + d * k)); return "scrub"; };
+    // Forecast off-screen: plain scroll and drag pan instead, and keep panning ("returning") until the
+    // view is back at its home position, exactly where the recenter pill would put it. Only then does
+    // the rest of the gesture scrub. Measuring "home" (P = 0) rather than "visible" makes the hand-off
+    // happen at the same place whether you come back from the left or the right.
+    if (!this.returning && !this.refVisible()) this.returning = true;
+    if (!this.returning) return scrub(a);
+    const P = this.P, next = P + a;
+    if (P === 0 || next === 0 || (P < 0) !== (next < 0)) {   // this step reaches home
+      clearTimeout(this.panIdle); this.panning = false; this.P = this.tP = 0; this.vP = 0; this.returning = false;
+      return next ? scrub(next) : "pan";                      // whatever is left over moves the date
+    }
     this.#panBy(a); return "pan";
   }
   #placeAt(clientX) { // Season: the date under the pointer
@@ -236,6 +247,7 @@ export class TimeNav {
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1;
       if (e.metaKey && !e.ctrlKey && Math.abs(e.deltaX || (e.shiftKey ? e.deltaY : 0)) > Math.abs(e.shiftKey ? 0 : e.deltaY)) {
         e.preventDefault();                                      // ⌘ + side scroll: pan, the forecast stays put
+        this.returning = false;                                  // a deliberate pan sets a new resting place
         if (this.mix > 0.001) return;                            // Season already shows everything
         const dx = (e.deltaX || e.deltaY) * unit;
         this.#panBy(dx / this.#pxPerWeek());

@@ -57,7 +57,10 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **The pan is kept.** While the forecast is on screen (its reference line and whole 3-week fan),
   scrubbing, arrow keys and the stepper change the date around it, and the reference line stays
   exactly where it was left. While it is off-screen, plain side scroll and drag pan as well, as if ⌘
-  were held, until it is fully back on screen; from that moment the same gesture scrubs. Arrow keys and
+  were held, until the view is back at its home position (where the recenter pill would put it); from
+  that point the rest of the same gesture scrubs. Using home rather than "visible again" makes the
+  hand-off happen at the same place from either side (visible-again came early from the left, where
+  the reference line clears the edge first). A new ⌘ pan sets a new resting place. Arrow keys and
   the stepper with the forecast off-screen bring it back to its home position, as do Season,
   double-click and 0. A "← Dec 27 forecast" pill at the edge points to an off-screen forecast and
   brings it back.
