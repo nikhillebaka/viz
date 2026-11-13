@@ -382,3 +382,34 @@ Score each on its own"). Definitions live in popovers and tooltips.
 - Resizing from 1600 to 700 px never truncates a number or reorders a row.
 - A shared link reproduces scope, window, seasons, columns, sort, heatmap axes and expanded rows.
 - Every old viz evaluation feature has a home (the table above) or a stated reason it's gone.
+
+## Prototype status (Nov 13, 2026)
+
+**Data.** `data/extract_scores.py` scores every forecast in the hub (three seasons: 2023–24, 2024–25,
+2025–26; 40–57 models each) into `data/scores.json` + one binary per season (WIS, its three components,
+coverage at 11 levels, state). Not committed (15 MB); regenerate with
+`viz/.venv/bin/python design/data/extract_scores.py . design/data` from the hub root (about a minute).
+Its WIS matches the earlier `core.json` exactly; components sum to WIS.
+
+**Scoring.** `lib/scores.js`: scope → rows (forecasts scored, WIS, components, coverage, pairwise relative
+WIS, relative WIS per horizon, status), and heatmap slices (weeks, locations, horizons). Shared-only,
+rank among all / selected, baseline fallback and states-only pooling as specified. Speed on the main
+thread: one season 40 ms, three seasons × 61 models 65 ms in node and about 440 ms in the browser pane.
+That's fine for the study, not for live window dragging: the worker and per-pair prefix sums (Computing it
+fast) are still to do.
+
+**Score color study** (`studies/scores.html`): the leaderboard (rank, name with the charted dot, Rel. WIS
+with a colored lollipop, WIS, 50% and 95% with colored marks, sort by header) and the heatmap (models ×
+weeks / locations / horizons, season breaks, hover readout) on real data, with a working scope line
+(metric options, locations, seasons, horizons). Three diverging candidates, switchable, both themes:
+
+| Candidate | Poles (light / dark) | Validator |
+|---|---|---|
+| Blue · orange | `#0267c7` `#b13f00` / `#4b92ea` `#d7712e` | poles pass all checks both modes; CVD ΔE ≥ 24 |
+| Blue · red | `#006ac5` `#b63039` / `#3c95e8` `#dd6666` | poles pass all checks both modes |
+| Violet · amber | `#6b50c2` `#a44f00` / `#917ee5` `#c97d00` | poles pass all checks both modes |
+
+Each ramp is 9 steps made in OKLCH (4 per arm, grey middle); the inner steps fail the categorical chroma and
+contrast checks by design (they recede toward "same as baseline"), which the validator docs say is expected
+for diverging ramps. Not built yet: the expanded row, the + column chooser, export, the Dates popover with
+the week range, the page under the fan chart, the scope lift.
