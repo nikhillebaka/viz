@@ -12,6 +12,10 @@ Prototype: `studies/intervals-refine.html`. The drawing is `fanChart({ t })` in 
 - **Drag scrubs the date.** It follows the pointer 1:1 (one week per week-width dragged, drag right for
   earlier). Past the first and last date it rubber-bands, with resistance topping out under two weeks.
   On release it snaps to a week, carrying a flick's momentum (~120 ms worth), in 200 ms.
+- **Side scroll scrubs too** (trackpad swipe, or shift + mouse wheel): 1:1 with the scroll, the same
+  rubber band at the ends, and a snap to the nearest week 140 ms after scrolling stops (so a trackpad's
+  own momentum plays out first). Mostly-vertical scrolls are ignored. No scrollbars, and the page
+  can't overscroll or trigger swipe-to-go-back.
 - **Buttons and keys glide.** The stepper, its hold-to-repeat and the left/right keys move to the new
   week in 140 ms with an ease-out. Each press retargets from wherever the chart is; nothing queues, so
   fast clicking or a held key just moves faster. The stepper label changes instantly to the target week.

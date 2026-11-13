@@ -10,7 +10,7 @@
 <style>
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html, body { margin: 0; height: 100%; overflow: hidden; }
+html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; } /* no scrollbars, no swipe-to-go-back */
 body { background: var(--surface-chart); color: var(--ink-primary); font-family: var(--font-sans); font-size: 14px; line-height: 21px; -webkit-font-smoothing: antialiased; }
 svg { display: block; }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

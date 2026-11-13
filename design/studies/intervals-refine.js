@@ -115,6 +115,7 @@ function glideTo(i, dur = 140) {
 // drag to scrub
 const chartEl = svg.node();
 const rubber = (d) => (1 - 1 / (d * 0.6 + 1)) / 0.6; // past the ends: resistance grows, tops out under 2 weeks
+const unrubber = (r) => (1 / (1 - Math.min(r * 0.6, 0.999)) - 1) / 0.6;
 let drag = null;
 chartEl.addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || e.target.closest(".fc-label")) return;
@@ -146,6 +147,26 @@ const endDrag = (e) => {
   const v = z.t - a.t < 120 ? (z.T - a.T) / dt : 0;     // weeks per ms, only if the pointer was still moving
   glideTo(Math.round(M.T + v * 120), 200);             // a flick carries ~120ms further, then snaps
 };
+// side scroll (trackpad swipe, shift + wheel) scrubs the same way: 1:1 with the scroll, rubber band at
+// the ends, and a snap to the nearest week once the scroll (including the trackpad's own momentum) stops
+let wheelIdle = 0;
+view.addEventListener("wheel", (e) => {
+  let dx = e.deltaX;
+  if (!dx && e.shiftKey) dx = e.deltaY;
+  if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || e.target.closest(".c-float")) return; // vertical, or in a menu: not ours
+  e.preventDefault();
+  if (e.deltaMode === 1) dx *= 16; else if (e.deltaMode === 2) dx *= chartEl.clientWidth;
+  cancelAnimationFrame(M.raf);
+  const pxw = G.x(new Date(+G.ref + WEEK)) - G.x(G.ref);
+  // undo the rubber band to get the raw position, add the scroll, re-apply the rubber band
+  const raw = M.T < 0 ? -unrubber(-M.T) : M.T > N - 1 ? N - 1 + unrubber(M.T - (N - 1)) : M.T;
+  let T = raw + dx / pxw;
+  if (T < 0) T = -rubber(-T); else if (T > N - 1) T = N - 1 + rubber(T - (N - 1));
+  M.T = T; M.dragging = true; showWeek(clampI(Math.round(T))); $("hint").style.opacity = 0;
+  frame();
+  clearTimeout(wheelIdle);
+  wheelIdle = setTimeout(() => { M.dragging = false; glideTo(Math.round(M.T), 200); }, 140);
+}, { passive: false });
 chartEl.addEventListener("pointerup", endDrag);
 chartEl.addEventListener("pointercancel", endDrag);
 
