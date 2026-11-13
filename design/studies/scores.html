@@ -7,112 +7,26 @@
 <link rel="stylesheet" href="../tokens/tokens.css">
 <link rel="stylesheet" href="../lib/glass.css">
 <link rel="stylesheet" href="../lib/controls.css">
+<link rel="stylesheet" href="../lib/evaluation.css">
 <style>
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { margin: 0; }
-body { background: var(--surface-chart); color: var(--ink-primary); font-family: var(--font-sans); font-size: 13px; line-height: 20px; -webkit-font-smoothing: antialiased; }
-button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
-.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-
-/* study chrome (glass, fixed) */
+body { background: var(--surface-chart); color: var(--ink-primary); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
 .chrome { position: fixed; z-index: 50; left: 16px; right: 16px; display: flex; justify-content: space-between; align-items: center; gap: 8px; pointer-events: none; }
 .chrome > * { pointer-events: auto; }
 .chrome.top { top: 16px; } .chrome.bottom { bottom: 16px; justify-content: center; }
-.chrome .grp { display: flex; gap: 8px; align-items: center; }
-
-/* the paper */
-.paper { container-type: inline-size; padding: 96px 40px 160px; max-width: 1480px; margin: 0 auto; }
-
-/* scope line: fragments are buttons; non-default in primary ink */
-.scope { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 2px; font-size: 15px; line-height: 24px; letter-spacing: -0.01em; margin-bottom: 28px; }
-.scope .f { color: var(--ink-secondary); border-radius: 6px; padding: 0 4px; margin: 0 -2px; }
-.scope .f.set { color: var(--ink-primary); }
-.scope .f:hover { color: var(--ink-primary); background: var(--fill-hover); }
-.scope .f.warn { text-decoration: underline 1.5px var(--status-warning); text-underline-offset: 4px; }
-.scope .dot { color: var(--ink-faint); padding: 0 4px; }
-.scope .f:first-child { color: var(--ink-primary); font-weight: 600; }
-.scope .exp { margin-left: auto; color: var(--ink-tertiary); width: 28px; height: 24px; display: grid; place-items: center; border-radius: 6px; }
-.scope .exp:hover { color: var(--ink-primary); background: var(--fill-hover); }
-.scope .exp svg { width: 16px; height: 16px; }
-
-/* leaderboard */
-.board { --lolli: 168px; --name: minmax(150px, 300px); margin-bottom: 64px; }
-.lb-grid { display: grid; grid-template-columns: 32px var(--name) 52px var(--lolli) 64px 52px 52px 1fr; align-items: center; column-gap: 12px; }
-.lb-head { position: sticky; top: 0; z-index: 5; background: var(--surface-chart); height: 32px; border-bottom: 1px solid var(--line-axis); color: var(--ink-tertiary); font-size: 11.5px; font-weight: 500; }
-.lb-head .h { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; height: 32px; }
-.lb-head .h.num { justify-content: flex-end; }
-.lb-head button.h:hover { color: var(--ink-primary); }
-.lb-head .h.on { color: var(--ink-primary); }
-.lb-head .h .ar { width: 8px; display: inline-block; font-size: 9px; }
-.lb-head .axis { position: relative; height: 32px; }
-.lb-head .axis span { position: absolute; top: 9px; transform: translateX(-50%); font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-tertiary); }
-.lb-head .plus { justify-self: end; width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; color: var(--ink-tertiary); }
-.lb-head .plus:hover { color: var(--ink-primary); background: var(--fill-hover); }
-.row { height: 30px; border-radius: 6px; }
-.row:hover { background: var(--fill-hover); }
-.row .rk { text-align: right; font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); padding-right: 2px; }
-.row .nm { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.row .nm i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.row .nm i.none { background: transparent; }
-.row .nm .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row .nm .tm { color: var(--ink-tertiary); white-space: nowrap; }
-.row .v { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
-.row .cv { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.row .cv b { width: 6px; height: 6px; border-radius: 50%; flex: none; }
-.row.base .nm .t, .row.base .v { color: var(--ink-tertiary); }
-.row.dimmed .v, .row.dimmed .nm .t { color: var(--ink-tertiary); }
-.rule { height: 1px; background: var(--line-axis); margin: 10px 0; }
-.lolli { display: block; overflow: visible; }
-
-/* heatmap */
-.heat-line { display: flex; align-items: baseline; gap: 2px; font-size: 15px; line-height: 24px; letter-spacing: -0.01em; margin-bottom: 16px; }
-.heat-line .f { color: var(--ink-primary); border-radius: 6px; padding: 0 4px; margin: 0 -2px; }
-.heat-line .f:first-child { font-weight: 600; }
-.heat-line .f:hover { background: var(--fill-hover); }
-.heat-line .dot { color: var(--ink-faint); padding: 0 4px; }
-.legend { margin-left: auto; display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-tertiary); }
-.legend canvas { width: 120px; height: 6px; border-radius: 3px; }
-#heat { display: block; width: 100%; }
-.heat-wrap { position: relative; }
-
-.readout { position: fixed; z-index: 60; min-width: 200px; padding: 10px 12px; border-radius: var(--radius-menu); background: var(--surface-raised); box-shadow: 0 0 0 0.5px var(--line-axis), 0 8px 28px rgba(0,0,0,.28); pointer-events: none; font-size: 12px; line-height: 18px; }
-.readout .when { color: var(--ink-tertiary); margin-bottom: 6px; }
-.readout table { border-collapse: collapse; width: 100%; }
-.readout td + td { text-align: right; padding-left: 12px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.readout td:first-child { color: var(--ink-secondary); }
-
-.checks { display: grid; gap: 2px; padding: 6px; min-width: 220px; }
-.checks button { display: flex; align-items: center; justify-content: space-between; gap: 16px; height: 32px; padding: 0 10px; border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--ink-secondary); }
-.checks button:hover { background: var(--fill-hover); color: var(--ink-primary); }
-.checks button[aria-checked="true"] { color: var(--ink-primary); }
-.checks button .ck { width: 16px; color: var(--accent); }
-.checks .sep { height: 1px; background: var(--line-axis); margin: 4px 8px; }
-.checks .hd { padding: 6px 10px 2px; font-size: 11px; color: var(--ink-tertiary); }
-
-@container (max-width: 1100px) { .board { --lolli: 112px; } }
-@container (max-width: 900px) { .lb-grid { grid-template-columns: 32px var(--name) 52px 0 64px 52px 52px 1fr; } .lolli-cell, .lb-head .axis { visibility: hidden; } }
+.c-pill { text-decoration: none; color: inherit; }
+#ev { padding: 96px 40px 160px; max-width: 1480px; margin: 0 auto; }
 </style>
 </head>
 <body>
 <div class="chrome top">
-  <div class="grp"><a class="c-pill icon" id="back" href="../index.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></a></div>
-  <div class="grp"><button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button></div>
+  <a class="c-pill icon" id="back" href="../index.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></a>
+  <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
 </div>
 <div class="chrome bottom"><div id="t-rows"></div></div>
-
-<main class="paper">
-  <div class="scope" id="scope"></div>
-  <section class="board" id="board">
-    <div class="lb-head lb-grid" id="lb-head"></div>
-    <div id="lb-rows"></div>
-  </section>
-  <section class="heat">
-    <div class="heat-line" id="heat-line"></div>
-    <div class="heat-wrap"><canvas id="heat"></canvas></div>
-  </section>
-</main>
-<div class="readout" id="readout" hidden></div>
+<main id="ev"></main>
 <script type="module" src="scores.js"></script>
 </body>
 </html>

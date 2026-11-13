@@ -415,3 +415,34 @@ Each ramp is 9 steps made in OKLCH (4 per arm, grey middle); the inner steps fai
 contrast checks by design (they recede toward "same as baseline"), which the validator docs say is expected
 for diverging ramps. Not built yet: the expanded row, the + column chooser, export, the Dates popover with
 the week range, the page under the fan chart, the scope lift.
+
+### The scores under the chart (Nov 13, 2026)
+
+Built on the fan chart page (`studies/intervals-refine.html`), with the section in `lib/evaluation.js` and
+`lib/evaluation.css` (the score study page now mounts the same module):
+
+- **The page scrolls.** The chart is the first screen minus a 52 px peek that shows the scope line
+  (minimum 480 px tall). Vertical scrolling over the chart scrolls the page; side scroll, pinch, ⌘ and
+  shift keep their chart meanings (the chart already ignored mostly-vertical scrolls).
+- **Bubbles.** Back, Models and Theme are fixed to the screen. The chart's own bubbles (Rulers, Misses,
+  the date) scroll with it and fade out as they reach the top bubbles, rather than sliding under them.
+- **Glass over paper is frosted.** A fixed bubble refracts the chart (the WebGL pass) while it's over the
+  chart; once it's over the page below, the compositor skips it and CSS frosts it (`lg--paper`). The
+  scope bubble is frosted from the start: it's only ever over the page.
+- **The lift.** When the scope line passes under the top bubbles, it fades out and the same fragments fade
+  in as a frosted bubble at the top centre (both are live buttons). The leaderboard's header sticks just
+  below the bubbles.
+- **Links.** Hovering a leaderboard or heatmap row previews a charted model on the chart (while some of
+  the chart is on screen); hovering a model on the chart lights its row. The dot on a row charts the
+  model (the same queue of five). A heatmap cell: moves the chart to that week (when it's one of the
+  chart's weeks), charts and focuses the model, and scrolls up to it. The chart's current week is outlined
+  in the heatmap and follows ← →.
+- **Seasons follow the chart**: the scores start on the chart's season (2025–26 here).
+- **The picker** still opens while you're down in the scores, and the scores slide right to make room.
+
+Checks: `tests/scores-check.js` (page behaviour: scrolling, lift, frosted glass, links), alongside
+`tests/time-nav-check.js` and `tests/selection-check.mjs`.
+
+Not built yet: the expanded row, the + column chooser, export, the Dates popover with a week range,
+Locations as a heatmap → chart link (the prototype chart only has US forecasts), Back returning to the
+cell after a jump, the worker for live scoring, ⌘Z for scope changes, the URL.

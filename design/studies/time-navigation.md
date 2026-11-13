@@ -21,8 +21,8 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
   It snaps without waiting out the trackpad's coast: once the deltas have shrunk for several events in a
   row and are tiny, it snaps right away with the remaining speed and ignores the rest of the coast (a
   delta that grows, reverses or follows a gap starts a new gesture). Without a coast (mouse wheels), it
-  snaps 80 ms after the last event. Mostly-vertical scrolls are ignored. No scrollbars, and the page
-  can't overscroll or trigger swipe-to-go-back. (It used to wait for the coast to end plus 140 ms,
+  snaps 80 ms after the last event. Mostly-vertical scrolls are ignored, so they scroll the page down to the scores (evaluation-goals.md).
+  No scrollbars, and the page can't trigger swipe-to-go-back. (It used to wait for the coast to end plus 140 ms,
   which read as a half-second pause.)
 - **Buttons and keys glide** on a critically damped spring that chases the target week (about 100 ms to
   look settled). It starts from the current position and velocity, so a new press mid-motion bends the

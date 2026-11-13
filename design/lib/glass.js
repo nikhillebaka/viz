@@ -399,6 +399,8 @@ class Compositor {
     // aside); while anything is moving, follow it every frame, then stop
     for (const ev of ["transitionrun", "transitionend", "animationstart", "animationend"]) document.addEventListener(ev, () => this.watch(), true);
     addEventListener("resize", () => this.watch());
+    // the page scrolls (scores under the chart): fixed glass moves relative to the chart
+    addEventListener("scroll", () => this.watch(), { passive: true });
   }
   add(g) { this.glass.add(g); this.watch(); }
   remove(g) { this.glass.delete(g); this.watch(); }
@@ -441,6 +443,10 @@ class Compositor {
       if (!el.isConnected) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) continue;
+      // scrolled off the chart (fixed glass over the page below it): frosted by CSS instead of refracted here
+      const offChart = r.top + r.height / 2 >= sr.bottom || r.bottom <= sr.top;
+      if (offChart !== el.classList.contains("lg--paper")) el.classList.toggle("lg--paper", offChart);
+      if (offChart) { key += "p;"; continue; }
       // the glass's own opacity, and its ancestors' up to the container (fades, the picker hiding chrome)
       let a = 1;
       for (let n = el; n && n !== this.container; n = n.parentElement) { a *= parseFloat(getComputedStyle(n).opacity); if (a < 0.003) break; }

@@ -7,15 +7,29 @@
 <link rel="stylesheet" href="../tokens/tokens.css">
 <link rel="stylesheet" href="../lib/glass.css">
 <link rel="stylesheet" href="../lib/controls.css">
+<link rel="stylesheet" href="../lib/evaluation.css">
 <style>
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; } /* no scrollbars, no swipe-to-go-back */
+html, body { margin: 0; overscroll-behavior-x: none; } /* the page scrolls down to the scores; no swipe-to-go-back */
+html { scrollbar-width: none; } html::-webkit-scrollbar { display: none; }
 body { background: var(--surface-chart); color: var(--ink-primary); font-family: var(--font-sans); font-size: 14px; line-height: 21px; -webkit-font-smoothing: antialiased; }
 svg { display: block; }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
-#view { position: fixed; inset: 0; overflow: hidden; }
+/* the chart fills the screen but a peek, which shows the scores' scope line: the only hint there's more below */
+:root { --peek: 52px; }
+#view { position: relative; height: max(480px, calc(100svh - var(--peek))); overflow: hidden; }
+/* global bubbles stay on screen while the page scrolls; the chart's own bubbles scroll away with it */
+#chrome-top { position: fixed; inset: 0 0 auto 0; z-index: calc(var(--z-chrome) + 2); grid-template-rows: auto; grid-template-areas: "tl tc tr"; }
+/* the chart's own bubbles fade as they reach the top bubbles, instead of sliding under them */
+#chrome.tucked .c-zone > * { opacity: 0 !important; pointer-events: none; }
+#scores { min-height: calc(100svh - 24px); padding: 14px 40px 160px; padding-left: max(40px, var(--pk-inset, 0px)); max-width: 1560px; margin: 0 auto; }
+/* the scope line, lifted: the same fragments in a frosted bubble at the top centre */
+#scope-bubble { display: inline-flex; align-items: center; height: var(--size-control); padding: 0 6px 0 12px; border-radius: var(--radius-pill); opacity: 0; transform: translateY(-6px) scale(0.98); pointer-events: none; transition: opacity 200ms var(--ease-fade), transform 200ms var(--ease-fade); }
+#scope-bubble.show { opacity: 1; transform: none; pointer-events: auto; }
+#scope-bubble .ev-scope { font-size: 13.5px; line-height: 20px; }
+#scope-bubble .ev-scope .exp { margin-left: 4px; }
 #chart { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: pan-y; outline: none; user-select: none; -webkit-user-select: none; }
 .c-pill { text-decoration: none; color: inherit; }
 .c-pill[aria-pressed="true"]::before { background: var(--fill-selected); }
@@ -65,7 +79,7 @@ svg { display: block; }
 /* while it's open, the chrome on the left gives way, and the date control moves to the middle of the chart */
 .c-zone > * { transition: opacity 200ms var(--ease-fade), transform 200ms var(--ease-fade); }
 .c-zone[data-zone="bc"], .hint { transition: transform 320ms var(--ease-fade), opacity 200ms var(--ease-fade); }
-#view.picker-open [data-zone="tl"] > *, #view.picker-open [data-zone="bl"] > * { opacity: 0; transform: scale(0.96); pointer-events: none; }
+body.picker-open [data-zone="tl"] > *, body.picker-open [data-zone="tc"] > *, body.picker-open [data-zone="bl"] > * { opacity: 0; transform: scale(0.96); pointer-events: none; }
 #view.picker-open [data-zone="bc"] { transform: translateX(var(--pk-shift, 0px)); }
 #view.picker-open .hint { opacity: 0 !important; }
 .pk-panel .c-float-body { display: flex; flex-direction: column; }
@@ -127,13 +141,6 @@ svg { display: block; }
   <div class="hint" id="hint">Click a model to focus it · drag or ← → to change date · pinch to zoom</div>
 
   <div class="c-chrome" id="chrome">
-    <div class="c-zone" data-zone="tl">
-      <a class="c-pill icon" id="back" href="../components.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></a>
-      <button class="c-pill" id="c-models" aria-haspopup="dialog"><span class="dots"></span><span class="label"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-    </div>
-    <div class="c-zone" data-zone="tr">
-      <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
-    </div>
     <div class="c-zone" data-zone="bl">
       <button class="c-pill" id="c-rulers" aria-pressed="false" aria-label="Width rulers"><span class="tick"></span><span data-compact-hide>Rulers</span></button>
       <button class="c-pill" id="c-misses" aria-pressed="true" data-compact-hide><span class="tick"></span><span>Misses</span></button>
@@ -142,6 +149,17 @@ svg { display: block; }
     <div class="c-zone" data-zone="br"></div>
   </div>
 </div>
+<div class="c-chrome" id="chrome-top">
+    <div class="c-zone" data-zone="tl">
+      <a class="c-pill icon" id="back" href="../components.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></a>
+      <button class="c-pill" id="c-models" aria-haspopup="dialog"><span class="dots"></span><span class="label"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+    </div>
+    <div class="c-zone" data-zone="tc"><div id="scope-bubble"></div></div>
+    <div class="c-zone" data-zone="tr">
+      <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
+    </div>
+</div>
+<main id="scores" aria-label="Scores"></main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script type="module" src="intervals-refine.js"></script>

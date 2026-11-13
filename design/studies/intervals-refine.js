@@ -7,6 +7,8 @@ import { Stepper, tooltip, openPopover, icon } from "../lib/controls.js";
 import { ModelSelection, groupModels, inferFamily, teamOf } from "../lib/selection.js";
 import { TimeNav } from "../lib/time.js";
 import { sizeClass } from "../lib/position.js";
+import { loadManifest } from "../lib/scores.js";
+import { mountScores } from "../lib/evaluation.js";
 
 const root = document.documentElement;
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
@@ -19,6 +21,7 @@ const fmtN = d3.format(",.0f"), fmtHalf = d3.format(".2~s");
 const fmtLong = d3.utcFormat("%b %-d, %Y"), fmtShort = d3.utcFormat("%b %-d");
 const truthAt = new Map(truth.map((t) => [+t.date, t.v]));
 
+let fromScores = false; // the focus preview comes from hovering the scores, not the chart
 const S = { di: DI0, rulers: false, misses: true, focus: null, preview: null, hot: null, hoverH: null };
 const focused = () => S.preview ?? S.focus;
 
@@ -35,7 +38,7 @@ const familyTag = (m) => { const f = inferFamily(m); return GROUPS.families.some
 const sel = new ModelSelection({
   max: 5,
   selected: ["UMass-flusion", "UMass-AR6_pooled", "UMass-gbqr_4src", "UMass-WISAR6_fourthroot_adaptive_t", "axial-tfm_L4v5", "UMass-AR2", "UMass-timesfm3_nhsn"],
-  onChange: () => { if (S.focus && !sel.isCharted(S.focus)) S.focus = null; renderModelsPill(); pickerRefresh?.(); frame(); },
+  onChange: () => { if (S.focus && !sel.isCharted(S.focus)) S.focus = null; renderModelsPill(); pickerRefresh?.(); frame(); scoresChanged(); },
 });
 
 const view = $("view"), chartEl = $("chart");
@@ -146,6 +149,7 @@ chartEl.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse")
 let mouse = null;
 chartEl.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") { mouse = { x: e.clientX, y: e.clientY }; previewUnderPointer(); } });
 function previewUnderPointer() {
+  if (fromScores && !mouse) return; // the preview comes from a hovered scores row, not the chart
   let hit = null; // { m, ctx }
   if (mouse && !nav.moving && G) {
     const l = labelAt(mouse.x, mouse.y);
@@ -154,7 +158,7 @@ function previewUnderPointer() {
   // a charted model previews focus, exactly as hovering its label does; a grey one is lifted and named
   const preview = hit && !hit.ctx ? hit.m : null, hot = hit && hit.ctx ? hit.m : null;
   chartEl.style.cursor = hit ? "pointer" : "";
-  if (preview !== S.preview || hot !== S.hot) { S.preview = preview; S.hot = hot; frame(); }
+  if (preview !== S.preview || hot !== S.hot) { S.preview = preview; S.hot = hot; frame(); ev?.highlight(preview ?? hot); }
 }
 /* The label under a page point, from the hit boxes the layout computed (no DOM reads). */
 function labelAt(cx, cy) {
@@ -227,8 +231,8 @@ let pickerInset = 0, insetRaf = 0, savedView = null;
 function animateInset(to) {
   cancelAnimationFrame(insetRaf);
   const from = pickerInset, t0 = performance.now();
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { pickerInset = to; frame(); return; }
-  const tick = () => { const u = Math.min(1, (performance.now() - t0) / 320); pickerInset = from + (to - from) * (1 - (1 - u) ** 3); draw(); if (u < 1) insetRaf = requestAnimationFrame(tick); };
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { pickerInset = to; document.body.style.setProperty("--pk-inset", `${to}px`); frame(); return; }
+  const tick = () => { const u = Math.min(1, (performance.now() - t0) / 320); pickerInset = from + (to - from) * (1 - (1 - u) ** 3); document.body.style.setProperty("--pk-inset", `${pickerInset}px`); draw(); if (u < 1) insetRaf = requestAnimationFrame(tick); };
   insetRaf = requestAnimationFrame(tick);
 }
 const PREVIEW_WEEKS = 14; // close enough that the four forecast weeks stay distinct; ← → move through the season
@@ -241,7 +245,7 @@ function openModelPicker() {
   savedView = nav.view();
   openPopover(anchor, {
     title: "Models", width: pickerWidth(ALL.length), className: "pk-panel", timeKeys: true,
-    onClose: () => { pickerRefresh = null; view.classList.remove("picker-open"); if (savedView) nav.setView(savedView); savedView = null; insetGoal = 0; animateInset(0); },
+    onClose: () => { pickerRefresh = null; view.classList.remove("picker-open"); document.body.classList.remove("picker-open"); if (savedView) nav.setView(savedView); savedView = null; insetGoal = 0; animateInset(0); },
     content: (el, layer) => {
       el.innerHTML = `<div class="pk-head"><label class="pop-search">${icon.search}<input type="search" placeholder="Search ${ALL.length} models, teams, families" aria-label="Search models"></label>
           <button type="button" class="pk-base" aria-pressed="${sel.baseline}"><span class="tick"></span>Baseline</button></div>
@@ -323,7 +327,7 @@ function openModelPicker() {
       render();
     },
   });
-  view.classList.add("picker-open");
+  view.classList.add("picker-open"); document.body.classList.add("picker-open");
   nav.zoomTo(PREVIEW_WEEKS, { recenter: true });
   nav.setHeight(1); // normal height while previewing; closing restores the user's height zoom with the rest
 }
@@ -332,12 +336,13 @@ let insetGoal = 0;
 /* ---------------- chrome ---------------- */
 const GL = { canvas: chartEl, container: view };
 $("label-a11y").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) activate(b.dataset.m); });
-for (const id of ["back", "theme", "c-rulers", "c-misses"]) new LiquidGlass($(id), GL);
+for (const id of ["back", "theme", "c-rulers", "c-misses"]) new LiquidGlass($(id), GL); // back, theme: fixed, refracting the chart until they scroll off it
 tooltip($("back"), "Back to the design system", { placement: "bottom" });
 $("theme").addEventListener("click", () => {
   root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
   store.set("viz-ds-theme", root.dataset.theme);
   draw(); // the canvas resolves token colors when it draws, so redraw in the new theme
+  ev?.redraw();
   requestAnimationFrame(() => LiquidGlass.updateAll());
 });
 renderModelsPill(); // fill it before the glass measures it
@@ -354,7 +359,7 @@ const nav = new TimeNav({
   ignore: (e) => !!labelAt(e.clientX, e.clientY),
   tapTarget: (e) => !!(G && lineUnder(e.clientX, e.clientY)),
   onFrame: draw,
-  onWeek: (i) => { S.di = i; stepper.show(i); $("hint").style.opacity = 0; },
+  onWeek: (i) => { S.di = i; stepper.show(i); $("hint").style.opacity = 0; weekChanged(); },
 });
 window.__nav = nav; window.__sel = sel; window.__draw = () => draw(); window.__models = ALL; // for tests and benchmarks from the console
 $("recenter").addEventListener("click", () => nav.recenter());
@@ -371,10 +376,11 @@ function animateRulers() {
 }
 
 // the chrome tells the chart how much room it takes, top and bottom
-const chrome = $("chrome");
+const chrome = $("chrome"), chromeTopEl = $("chrome-top");
 function measure() {
   const vr = view.getBoundingClientRect();
-  const t = Math.max(...[...chrome.querySelectorAll('[data-zone="tl"],[data-zone="tc"],[data-zone="tr"]')].map((z) => z.getBoundingClientRect().bottom - vr.top));
+  // the top bubbles are fixed to the screen, so their room is measured from the screen's top
+  const t = Math.max(...[...chromeTopEl.querySelectorAll('[data-zone="tl"],[data-zone="tr"]')].map((z) => z.getBoundingClientRect().bottom));
   const b = Math.max(...[...chrome.querySelectorAll('[data-zone="bl"],[data-zone="bc"],[data-zone="br"]')].map((z) => vr.bottom - z.getBoundingClientRect().top));
   const changed = Math.abs(t - chromeTop) > 1 || Math.abs(b - chromeBottom) > 1;
   chromeTop = t; chromeBottom = b;
@@ -384,6 +390,59 @@ function measure() {
 measure(); draw();
 let rt = 0;
 new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => { measure(); draw(); }, 16); }).observe(view);
-chrome.querySelectorAll(".c-zone").forEach((z) => new ResizeObserver(() => { if (measure()) draw(); }).observe(z));
+document.querySelectorAll("#chrome .c-zone, #chrome-top .c-zone:not([data-zone=tc])").forEach((z) => new ResizeObserver(() => { if (measure()) draw(); }).observe(z));
 document.fonts?.ready.then(() => { measure(); draw(); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => draw()); // system theme, when not overridden
+
+/* ---------------- scores, under the chart (studies/evaluation-goals.md) ----------------
+ * The same section as studies/scores.html, on the same selection. Linked both ways: hovering a row (or a
+ * heatmap row) previews a charted model on the chart, hovering a model on the chart lights its row; the
+ * dot charts a model; a heatmap cell shows that forecast on the chart. The scope line lifts into a bubble
+ * at the top centre once it scrolls under the top chrome. */
+var ev = null;
+const isoDay = d3.utcFormat("%Y-%m-%d");
+function scoresChanged() { if (!ev) return; cancelAnimationFrame(scoresChanged.raf); scoresChanged.raf = requestAnimationFrame(() => ev.update()); }
+function weekChanged() { if (!ev) return; cancelAnimationFrame(weekChanged.raf); weekChanged.raf = requestAnimationFrame(() => ev.renderHeat()); }
+const man = await loadManifest("../data/");
+const chartSeason = (() => { const d = DATES[DI0], y = d.getUTCFullYear(), a = d.getUTCMonth() >= 7 ? y : y - 1; return `${a}-${String(a + 1).slice(2)}`; })();
+ev = mountScores($("scores"), {
+  man, seasons: man.seasonById.has(chartSeason) ? [chartSeason] : [man.seasons.at(-1).id],
+  selected: () => sel.selected, slotOf: (m) => sel.slotOf(m), seriesColor: seriesVar,
+  currentRound: () => isoDay(DATES[nav.week]),
+  onAdd: () => openModelPicker(),
+  onChart: (m) => sel.toggleChart(m),
+  onPreview: (m) => {
+    ev.highlight(m);
+    if (m) mouse = null; // the pointer is over the scores, not the chart
+    // a charted model previews on the chart exactly as hovering its label does (only while some of the chart is on screen)
+    const p = m && sel.isCharted(m) && view.getBoundingClientRect().bottom > 0 ? m : null;
+    if (p) { fromScores = true; if (S.preview !== p) { S.preview = p; frame(); } }
+    else if (fromScores) { fromScores = false; S.preview = null; frame(); }
+  },
+  onCell: ({ m, axis, col }) => {
+    // show it on the chart: that week (when it's one of the chart's), the model charted and focused, the chart scrolled into view
+    if (axis === "weeks") { const i = DATES.findIndex((d) => isoDay(d) === col.label); if (i >= 0) nav.goTo(i, { recenter: "auto" }); }
+    if (m !== D.baseline && !sel.isCharted(m)) sel.chart(m);
+    S.focus = m; S.preview = null; fromScores = false; draw();
+    scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  },
+});
+ev.cloneScope($("scope-bubble"));
+var scopeGlass = new LiquidGlass($("scope-bubble"), { frosted: true });
+await ev.update();
+// the lift: once the scope line passes under the top chrome, the bubble shows it instead
+let lifted = false;
+function onScroll() {
+  const zTop = Math.min(...[...chrome.querySelectorAll('[data-zone="bl"],[data-zone="bc"]')].map((z) => z.getBoundingClientRect().top));
+  chrome.classList.toggle("tucked", zTop < chromeTop + 12);
+  const up = ev.scopeEl.getBoundingClientRect().top < chromeTop - 8;
+  document.body.style.setProperty("--ev-sticky", `${chromeTop + 4}px`);
+  if (up === lifted) return;
+  lifted = up;
+  ev.scopeEl.classList.toggle("lifted", up);
+  $("scope-bubble").classList.toggle("show", up);
+  if (up) requestAnimationFrame(() => scopeGlass.update());
+}
+addEventListener("scroll", onScroll, { passive: true });
+onScroll();
+window.__ev = ev;
