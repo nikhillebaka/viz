@@ -99,7 +99,9 @@ function hoverAt(clientX) {
   const px = clientX - chartEl.getBoundingClientRect().left;
   const weeks = [0, 1, 2, 3];
   const near = weeks.reduce((a, b) => (Math.abs(G.x(new Date(+G.ref + b * WEEK)) - px) < Math.abs(G.x(new Date(+G.ref + a * WEEK)) - px) ? b : a));
-  const far = px < G.x(G.ref) - 60 || px > G.x.range()[1] + 30;
+  // hover counts within half a week (at most 60px) beyond the first and last forecast weeks, on both sides
+  const reach = Math.min(60, (G.x(new Date(+G.ref + WEEK)) - G.x(G.ref)) / 2);
+  const far = px < G.x(G.ref) - reach || px > G.x(new Date(+G.ref + 3 * WEEK)) + reach;
   setHover(far ? null : near);
 }
 chartEl.addEventListener("pointermove", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
