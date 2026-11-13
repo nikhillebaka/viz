@@ -134,8 +134,9 @@ function floating(anchor, { className = "", role = "dialog", label = "", sheetTi
       const a = anchor.getBoundingClientRect(), p = panel.getBoundingClientRect();
       anchor.classList.add("c-morphing");
       const from = { transform: `translate(${a.left - p.left}px, ${a.top - p.top}px) scale(${a.width / p.width}, ${a.height / p.height})`, borderRadius: `${a.height / 2}px`, opacity: 0.5 };
-      body.animate([{ opacity: 0 }, { opacity: 0, offset: 0.35 }, { opacity: 1 }], spring());
-      return panel.animate([{ ...from, transformOrigin: "0 0" }, { transform: "none", borderRadius: getComputedStyle(panel).borderRadius, opacity: 1, transformOrigin: "0 0" }], spring());
+      // the morph uses the soft spring: no overshoot, which on a large panel reads as a bounce
+      body.animate([{ opacity: 0 }, { opacity: 0, offset: 0.35 }, { opacity: 1 }], spring(true));
+      return panel.animate([{ ...from, transformOrigin: "0 0" }, { transform: "none", borderRadius: getComputedStyle(panel).borderRadius, opacity: 1, transformOrigin: "0 0" }], spring(true));
     }
     return panel.animate([{ opacity: 0, transform: "scale(0.96)" }, { opacity: 1, transform: "none" }], spring());
   };
@@ -181,7 +182,7 @@ function floating(anchor, { className = "", role = "dialog", label = "", sheetTi
         const ar = anchor.getBoundingClientRect(), p = panel.getBoundingClientRect();
         anchor.classList.remove("c-morphing");
         body.animate([{ opacity: 1 }, { opacity: 0 }], { duration: reducedMotion() ? 0 : 90, fill: "forwards" });
-        a = panel.animate([{ transform: "none", opacity: 1, transformOrigin: "0 0" }, { transform: `translate(${ar.left - p.left}px, ${ar.top - p.top}px) scale(${ar.width / p.width}, ${ar.height / p.height})`, borderRadius: `${ar.height / 2}px`, opacity: 0, transformOrigin: "0 0" }], { ...spring(), duration: reducedMotion() ? 0 : 260 });
+        a = panel.animate([{ transform: "none", opacity: 1, transformOrigin: "0 0" }, { transform: `translate(${ar.left - p.left}px, ${ar.top - p.top}px) scale(${ar.width / p.width}, ${ar.height / p.height})`, borderRadius: `${ar.height / 2}px`, opacity: 0, transformOrigin: "0 0" }], { ...spring(true), duration: reducedMotion() ? 0 : 260 });
       } else a = panel.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.97)" }], fade());
       // remove when the exit animation ends, with a fallback in case the browser pauses animations
       let finished = false; const fin = () => { if (!finished) { finished = true; done(); } };
