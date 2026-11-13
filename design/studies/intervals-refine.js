@@ -43,7 +43,7 @@ function draw() {
     id: "chart-src", models: models(), t: nav.T, domain: nav.domain(),
     // the right margin holds the model labels close up; in Season they sit at the fan's end instead
     pad: { l: 64, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
-    focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: S.rulers && u < 0.001, misses: S.misses,
+    focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: rulerK, misses: S.misses,
     onLabel: toggleFocus,
   });
   G = { ...P, compact, w };
@@ -150,7 +150,16 @@ const nav = new TimeNav({
 window.__nav = nav; // for testing from the console
 $("recenter").addEventListener("click", () => nav.recenter());
 var rcGlass = new LiquidGlass($("recenter"), GL);
-for (const [id, key] of [["c-rulers", "rulers"], ["c-misses", "misses"]]) $(id).addEventListener("click", () => { S[key] = !S[key]; $(id).setAttribute("aria-pressed", S[key]); draw(); });
+for (const [id, key] of [["c-rulers", "rulers"], ["c-misses", "misses"]]) $(id).addEventListener("click", () => { S[key] = !S[key]; $(id).setAttribute("aria-pressed", S[key]); key === "rulers" ? animateRulers() : draw(); });
+// rulers fade and slide in or out over ~180ms (the labels step aside with them); instant with reduced motion
+let rulerK = 0, rulerRaf = 0;
+function animateRulers() {
+  cancelAnimationFrame(rulerRaf);
+  const to = S.rulers ? 1 : 0, from = rulerK, t0 = performance.now();
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { rulerK = to; draw(); return; }
+  const tick = () => { const u = Math.min(1, (performance.now() - t0) / 180); rulerK = from + (to - from) * (1 - (1 - u) ** 3); draw(); if (u < 1) rulerRaf = requestAnimationFrame(tick); };
+  rulerRaf = requestAnimationFrame(tick);
+}
 
 // the chrome tells the chart how much room it takes, top and bottom
 const chrome = $("chrome");

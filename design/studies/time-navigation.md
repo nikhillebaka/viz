@@ -1,6 +1,7 @@
 # Moving through time
 
-Regression check: `tests/time-nav-check.js` covers every behaviour below (23 cases). Run it on the
+Regression check: `tests/time-nav-check.js` covers every behaviour below (32 cases;
+`run({ rulers: true })` repeats them with the width rulers on). Run it on the
 prototype page after any change: `(await import("/tests/time-nav-check.js")).run()`.
 
 Prototype: `studies/intervals-refine.html`. Motion, gestures and zoom live in `lib/time.js` (`TimeNav`);
@@ -80,8 +81,12 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
   but never faster than 1 week per 3/4 of a home-span week's width, so wide zooms and Season don't fly
   through dates (Season went ~4 weeks per small flick; now 100 px ≈ 1.1 weeks, close to the home
   pace of 100 px ≈ 0.9). A pointer drag stays exactly 1:1, since it holds the content; panning stays 1:1.
-- **In Season,** the model labels ride at the fan's end, rulers are hidden, and the right margin
-  shrinks from 168px to 56px with the blend.
+- **Width rulers work at every zoom** and move with the fan every frame. They sit in the margin beside
+  the fan and the model labels step aside for them, so turning them on never narrows the plot or
+  rescales the chart. The toggle fades and slides them in over ~180 ms. (They had been switched off past
+  20 weeks by a leftover from the two-mode zoom, and turning them on used to narrow the plot.)
+- **A flick needs motion at release.** A drag that pauses before letting go settles where it is; the
+  momentum used to be measured from the last moves even after a pause.
 - Season is where the evaluation window brush should live, so time selection is one concept
   app-wide. Past-forecast trails are held out of the first version.
 

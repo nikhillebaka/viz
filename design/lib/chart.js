@@ -100,8 +100,11 @@ export function fanChart(svgSel, data, opts = {}) {
   const ref = whole ? DATES[di] : new Date(+DATES[0] + t * WEEK);
   const models = opts.models || [];
   const rulerStep = w < 600 ? 11 : 14;
-  const rulerW = opts.rulers ? 18 + models.length * rulerStep : 0;
-  const x = d3.scaleUtc(opts.domain || [new Date(+ref - 14 * WEEK), new Date(+ref + 3 * WEEK)], [pad.l, w - pad.r - rulerW]);
+  // rulers: 0–1 (a number animates them in and out; true = 1). They sit in the margin beside the fan and
+  // push the labels aside; they never narrow the plot, so toggling them doesn't rescale the chart.
+  const rk = typeof opts.rulers === "number" ? Math.max(0, Math.min(1, opts.rulers)) : opts.rulers ? 1 : 0;
+  const rulerW = 18 + models.length * rulerStep;
+  const x = d3.scaleUtc(opts.domain || [new Date(+ref - 14 * WEEK), new Date(+ref + 3 * WEEK)], [pad.l, w - pad.r]);
   const y = d3.scaleLinear([0, opts.ymax ?? YMAX], [h - pad.b, pad.t]).nice(5);
   const ay = h - pad.b;
   const cutoff = whole ? cutoffFor(truth, ref) : new Date(+ref - WEEK);
@@ -215,11 +218,12 @@ export function fanChart(svgSel, data, opts = {}) {
   // width rulers beside the fan, at the hovered week (default 3 weeks ahead)
   const fanEnd = x(new Date(+ref + 3 * WEEK)); // the last forecast week; equals the plot's right edge close up
   const rx0 = fanEnd + 18;
-  if (opts.rulers && B.length) {
+  if (rk > 0.001 && B.length) {
     const rh = opts.hover ?? 3;
-    g.append("text").attr("class", "t-label-chart").attr("fill", "var(--ink-tertiary)").attr("x", rx0 - 4).attr("y", ay + 20).text(rh === 0 ? "This wk" : `+${rh} wk`);
+    const rg = g.append("g").attr("opacity", rk).attr("transform", `translate(${(1 - rk) * -10},0)`); // fades and slides out from the fan
+    rg.append("text").attr("class", "t-label-chart").attr("fill", "var(--ink-tertiary)").attr("x", rx0 - 4).attr("y", ay + 20).text(rh === 0 ? "This wk" : `+${rh} wk`);
     const rows = B.map((b, i) => ({ b, i, p: b.pts.find((p) => p.h === rh) })).filter((d) => d.p);
-    const r = g.append("g").attr("clip-path", clip).selectAll("g").data(rows).join("g").attr("transform", (d) => `translate(${rx0 + d.i * rulerStep},0)`)
+    const r = rg.append("g").attr("clip-path", clip).selectAll("g").data(rows).join("g").attr("transform", (d) => `translate(${rx0 + d.i * rulerStep},0)`)
       .attr("stroke", (d) => d.b.c).attr("stroke-linecap", "round").attr("opacity", (d) => (dim(d.b.m) ? 0.45 : 1));
     r.append("line").attr("y1", (d) => y(d.p.lo)).attr("y2", (d) => y(d.p.hi)).attr("stroke-width", 2).attr("stroke-opacity", 0.75);
     for (const k of ["lo", "hi"]) r.append("line").attr("x1", -3.5).attr("x2", 3.5).attr("y1", (d) => y(d.p[k])).attr("y2", (d) => y(d.p[k])).attr("stroke-width", 1.75);
@@ -229,7 +233,7 @@ export function fanChart(svgSel, data, opts = {}) {
   // direct labels at the end of each median; a halo lets the dotted observed line pass behind them
   if (opts.labels !== false) {
     const top = y.domain()[1];
-    const lx = opts.rulers ? rx0 + models.length * rulerStep + 8 : fanEnd + 14; // labels ride with the fan (zoomed out it sits mid-chart)
+    const lx = fanEnd + 14 + rk * (rulerW - 6); // labels ride with the fan (zoomed out it sits mid-chart), and step aside for rulers
     const labs = S.map((s) => ({ s, x: lx, y: y(Math.min(s.pts.at(-1).med, top)) })).sort((a, b) => a.y - b.y);
     for (let i = 1; i < labs.length; i++) labs[i].y = Math.max(labs[i].y, labs[i - 1].y + 18);
     // labels pushed off-screen (when the view is panned into the past) are skipped entirely: fitting a

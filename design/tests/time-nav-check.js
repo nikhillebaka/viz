@@ -3,11 +3,12 @@
  * navigation, from the page's console:
  *     (await import("/tests/time-nav-check.js")).run()
  * It drives the page with synthetic wheel, pointer and key events and returns { passed, failed, results }.
+ * run({ rulers: true }) runs everything with the width rulers on.
  * Things only a real hand can judge (smoothness, feel) are not covered. */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
-export async function run() {
+export async function run({ rulers = false } = {}) {
   const nav = window.__nav, el = document.getElementById("chart");
   if (!nav || !el) throw new Error("open studies/intervals-refine.html first");
   // a hidden tab throttles animation frames; tests need them to run
@@ -36,7 +37,11 @@ export async function run() {
   };
   const pxw = () => { const [r0, r1] = nav.scale().range(); return (r1 - r0) / nav.span; };
 
+  const rulersBtn = document.getElementById("c-rulers");
+  const setRulers = async (on) => { if ((rulersBtn.getAttribute("aria-pressed") === "true") !== on) { rulersBtn.click(); await sleep(400); } };
+  const rulerLabel = () => [...el.querySelectorAll("text")].find((t) => /^(\+\d wk|This wk)$/.test(t.textContent));
   try {
+    await setRulers(rulers);
     await reset();
     // --- date: keys, stepper, glide
     { const T0 = nav.T, seen = []; key("ArrowRight"); for (let i = 0; i < 40; i++) { seen.push(nav.T); await sleep(8); } await settle(400);
@@ -103,6 +108,33 @@ export async function run() {
     nav.zoomTo(1e9); await settle(); { const T0 = nav.T; await drag(150); await settle();
       check("drag at the full season: the forecast follows the pointer (right = later)", nav.T > T0, { T: nav.T }); }
     await reset();
+    // --- width rulers
+    await setRulers(false); await reset(); const d0 = nav.domain().map(Number), x0 = nav.refX();
+    await setRulers(true); await sleep(300);
+    const d1 = nav.domain().map(Number);
+    check("rulers: toggling them doesn't rescale or move the chart", d0[0] === d1[0] && d0[1] === d1[1] && near(nav.refX(), x0, 0.5), {});
+    for (const span of [8, 11, 20, 30, 1e9]) {
+      nav.zoomTo(span); await settle(); const lab = rulerLabel();
+      const bars = lab ? lab.parentNode.querySelectorAll("g[transform] > line").length : 0;
+      check(`rulers show at ${span > 100 ? "the full season" : span + " weeks"}`, !!lab && bars >= 3, { bars });
+    }
+    await reset();
+    { // during a glide the rulers stay beside the fan (same offset from the reference line every frame)
+      const offs = []; key("ArrowRight");
+      // both read from the same drawn frame: the ruler label and the reference-date tick label
+      const refTick = () => [...el.querySelectorAll("tspan")].find((t) => t.textContent === "Reference date");
+      for (let i = 0; i < 25; i++) { const lab = rulerLabel(), rt = refTick(); if (lab && rt) offs.push(+lab.getAttribute("x") - +rt.getAttribute("x")); await sleep(12); }
+      await settle(); const spread = Math.max(...offs) - Math.min(...offs);
+      check("rulers move with the fan during a glide", offs.length > 5 && spread < 2, { frames: offs.length, spread: +spread.toFixed(2) });
+    }
+    await pan(5, -15); await settle(); check("rulers stay beside the fan when panned", !!rulerLabel() && near(+rulerLabel().getAttribute("x") - nav.scale()(nav.ref), 3 * pxw() + 14, 2), {});
+    await reset();
+    { // model labels step aside: they start after the last ruler
+      const lab = rulerLabel(), xs = [...lab.parentNode.querySelectorAll("g[transform]")].map((g) => +g.getAttribute("transform").match(/translate\(([-\d.]+)/)[1]);
+      const lx = Math.min(...[...el.querySelectorAll(".fc-label")].map((g) => +g.getAttribute("transform").match(/translate\(([-\d.]+)/)[1]));
+      check("model labels sit clear of the rulers", lx > Math.max(...xs) + 4, { lastRuler: Math.round(Math.max(...xs)), labels: Math.round(lx) });
+    }
+    await setRulers(rulers); await reset();
   } finally {
     window.requestAnimationFrame = raf; window.cancelAnimationFrame = caf;
   }

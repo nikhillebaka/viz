@@ -257,7 +257,9 @@ export class TimeNav {
       }
       if (!d.scrubbed) return;                                  // it only panned: the pan settles itself
       const a = d.hist[0], z = d.hist.at(-1), dt = Math.max(1, z.t - a.t);
-      const v = z.t - a.t < 120 ? ((z.T - a.T) / dt) * 1000 : 0; // weeks per second, only if still moving
+      // a flick only if the pointer was still moving when released (no pause before letting go)
+      const still = e.timeStamp - z.t > 60;
+      const v = !still && z.t - a.t < 120 ? ((z.T - a.T) / dt) * 1000 : 0; // weeks per second
       this.#settleT(d.fan ? 0 : v);
     };
     el.addEventListener("pointerup", end);
