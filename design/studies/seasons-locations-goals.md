@@ -24,10 +24,11 @@ structure before handoff (see `evaluation-goals.md`, `time-navigation.md`). Noth
 
 - **The chart shows one season at a time.** A season is the forecast rounds of one hub season plus the
   observed data around them.
-- **The full-season view** spans the first round minus 6 weeks to the last round plus 4 weeks (for the
-  current season, to whichever is later: the last round, or May 31). That keeps the previous summer's
-  quiet tail and a little lead-in, without months of empty axis. This is the zoom-out limit (it already
-  is a hard stop at "season size").
+- **The full-season view** spans the season's observed data, from its first week in late summer to its
+  last (or the last round's forecasts, if later): the rule the chart already used. (A shorter window, 6
+  weeks before the first round, was tried in the prototype and dropped: it took away the room to pan
+  back through the quiet early weeks, which the agreed panning behaviour relies on.) This is the zoom-out
+  limit.
 - **Panning stops at the season's edges** (the existing rubber band). The previous season's data isn't
   drawn as context; seasons are compared in the scores, not by panning across six empty months.
 
@@ -165,3 +166,30 @@ Comparing a state with its neighbours is easier per 100,000 people. Old viz offe
 - Observed data per location, all seasons.
 - Per season: its rounds and models; per model: metadata (team, family, provenance, license).
 - Scores per season (as `scores-<season>.bin`, see `evaluation-goals.md`).
+
+## Prototype status (Nov 13, 2026)
+
+Built on the fan chart page (`studies/intervals-refine.html`):
+
+- **Data**: `data/extract_fc.py` writes forecasts per season and location (`data/fc/<season>/<loc>.json`,
+  159 files, 99 MB, not committed; regenerate from the hub root with
+  `viz/.venv/bin/python design/data/extract_fc.py . design/data` after `extract_scores.py`). It matches
+  the old `fc-US.json` exactly. `lib/fandata.js` loads one (season, place) at a time, cached, in the shape
+  `lib/chart.js` has always drawn; a season's timeline is every week from its first round to its last.
+- **Seasons**: ← → and the stepper arrows cross at either end (a 150 ms crossfade, zoom kept, height
+  reset, axis easing to the season's maximum); drag and side scroll rubber-band. `TimeNav.setTimeline()`
+  swaps the dates and window; `TimeNav.step()` hands a step past either end to `onEdge`. The stepper's
+  arrows stay enabled while another season exists.
+- **Date picker**: the stepper's label opens season chips, the season's rounds by month (faint where no
+  charted model forecast), Latest; arrow keys move through the grid, a letter jumps to a month.
+- **Missing models**: one quiet line ("2 not in 2024–25", "1 not in Wyoming") instead of a ghost per
+  model; the picker's "Not in 2024–25" section (collapsed) holds models absent from the chart's season.
+- **Places**: the Location bubble (search with Enter, recent places, US button, a 52-tile map with arrow
+  keys, hover prefetch); the date, zoom and focus stay; the axis eases to the place's scale; height resets.
+- **Scores** follow the chart's season (unless seasons were picked by hand), and gain a third Locations
+  option, the chart's location, which follows the bubble. A Locations heatmap cell sets the place; a
+  Weeks cell in another season crosses to it.
+- **Checks**: `tests/seasons-check.js` (23 cases), with time-nav (48), scores (33) and selection (14).
+
+Not built: per-100k rates; the URL; prefetching the neighbouring season; the picker's availability by
+place (it's by season only).

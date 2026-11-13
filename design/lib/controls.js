@@ -429,8 +429,11 @@ function slide(el, html, dir) {
  * repeats and accelerates; the label opens a menu of every value. The label keeps a fixed width
  * (the widest value) so the arrows never jump as the date changes. */
 export class Stepper {
-  constructor(el, { values, index = 0, format, onChange, label = "Date", glass = null }) {
-    Object.assign(this, { el, values, index, format, onChange, label });
+  /* edge(d): called when stepping past either end; return true if it handled it (e.g. crossed into another
+   * season), so the arrows stay enabled while there's somewhere to go. onLabel(btn): replaces the label's
+   * default menu (e.g. a date picker). */
+  constructor(el, { values, index = 0, format, onChange, label = "Date", glass = null, edge = null, canEdge = null, onLabel = null }) {
+    Object.assign(this, { el, values, index, format, onChange, label, edge, canEdge });
     el.classList.add("c-stepper");
     el.setAttribute("role", "group"); el.setAttribute("aria-label", label);
     el.innerHTML = `<button type="button" class="c-step prev" aria-label="Previous">${icon.left}</button>
@@ -447,7 +450,7 @@ export class Stepper {
       if (e.key === "Home") { e.preventDefault(); this.go(0); }
       if (e.key === "End") { e.preventDefault(); this.go(this.values.length - 1); }
     });
-    this.lab.addEventListener("click", () => openMenu(this.lab, {
+    this.lab.addEventListener("click", () => onLabel ? onLabel(this.lab) : openMenu(this.lab, {
       title: label, label, placement: "top",
       items: this.values.map((v, i) => ({ label: format.long(v), value: i, checked: i === this.index, onSelect: (i) => this.go(i) })).reverse(),
     }));
@@ -476,7 +479,9 @@ export class Stepper {
     btn.addEventListener("click", (e) => { if (e.detail === 0) this.step(d); }); // keyboard Enter/Space
     ["pointerup", "pointerleave", "pointercancel", "blur"].forEach((ev) => btn.addEventListener(ev, stop));
   }
-  step(d) { this.go(this.index + d); }
+  step(d) { const i = this.index + d; if ((i < 0 || i >= this.values.length) && this.edge?.(d)) return; this.go(i); }
+  /* new values (another season), shown at index without a roll or onChange */
+  setValues(values, index) { this.values = values; this.index = Math.max(0, Math.min(values.length - 1, index)); this.fixWidth(); this.render(true); }
   go(i) {
     const n = Math.max(0, Math.min(this.values.length - 1, i));
     if (n === this.index) { this.el.animate([{ transform: "translateX(0)" }, { transform: `translateX(${i < 0 ? -3 : 3}px)` }, { transform: "translateX(0)" }], { duration: reducedMotion() ? 0 : 180 }); return; }
@@ -493,7 +498,7 @@ export class Stepper {
     rollText(this.el.querySelector(".long"), this.format.long(v), dir, !initial);
     rollText(this.el.querySelector(".short"), this.format.short(v), dir, !initial);
     this.lab.setAttribute("aria-label", `${this.label}: ${this.format.long(v)}. Open list`);
-    this.prev.setAttribute("aria-disabled", this.index === 0); this.next.setAttribute("aria-disabled", this.index === this.values.length - 1);
+    this.prev.setAttribute("aria-disabled", this.index === 0 && !this.canEdge?.(-1)); this.next.setAttribute("aria-disabled", this.index === this.values.length - 1 && !this.canEdge?.(1));
     if (!initial && announce) this.live.textContent = this.format.long(v);
   }
 }

@@ -248,6 +248,8 @@ export function layoutFan(data, opts, w, h) {
     const dayLabel = fmtDay(DATES[di]);
     let gy = labs.length ? labs.at(-1).y + 18 : (pad.t + ay) / 2;
     for (const o of missing) { labs.push({ s: { m: o.m, c: seriesVar(o.slot) }, x: lx, y: gy, ghost: `no forecast ${dayLabel}` }); gy += 18; }
+    // charted models with nothing at all this season or place: one quiet line, not a ghost each
+    if (opts.absent) { labs.push({ s: { m: null, c: "transparent" }, x: lx, y: gy, ghost: opts.absent, summary: true }); gy += 18; }
     // context labels, all or nothing: shown only if every one fits at its own height without touching
     // another label; a mix of labelled and unlabelled grey lines would suggest some matter more
     const ctxLabs = C.map((c) => ({ s: { m: c.m, c: "var(--ink-tertiary)" }, x: lx, y: Y(Math.min(c.pts.at(-1).med, top)), ctx: true }));
@@ -262,7 +264,7 @@ export function layoutFan(data, opts, w, h) {
     // labels pushed off-screen (panned into the past) are skipped entirely
     labels = labs.filter((d) => d.x < w - 24).map((d) => {
       const focused = hasFocus && d.s.m === f, weight = focused ? 600 : 500, size = d.ctx && !d.hot ? 11 : 11.5;
-      const fnt = font(weight, size), full = short(d.s.m) + (d.ghost ? ` · ${d.ghost}` : "");
+      const fnt = font(weight, size), full = d.summary ? d.ghost : short(d.s.m) + (d.ghost ? ` · ${d.ghost}` : "");
       const text = fitText(full, fnt, Math.round(w - d.x - 10 - 8)); // never run off the chart; full name kept
       const len = textWidth(text, fnt);
       return {
@@ -270,7 +272,8 @@ export function layoutFan(data, opts, w, h) {
         dotR: d.ctx ? 2.5 : 3.5, dotC: d.s.c, dotAlpha: d.ghost ? 0.4 : dim(d.s.m) ? 0.55 : 1,
         fill: d.hot ? "var(--ink-primary)" : d.ctx || d.ghost ? "var(--ink-tertiary)" : !hasFocus ? "var(--ink-secondary)" : focused ? "var(--ink-primary)" : "var(--ink-tertiary)",
         // the click / hover target is just a little larger than the dot and the name (5px around)
-        hit: { x0: d.x - 9, x1: d.x + 10 + len + 5, y0: d.y - 11, y1: d.y + 11 },
+        hit: d.summary ? { x0: 1, x1: 0, y0: 1, y1: 0 } : { x0: d.x - 9, x1: d.x + 10 + len + 5, y0: d.y - 11, y1: d.y + 11 },
+        ...(d.summary ? { dotR: 0, fill: "var(--ink-tertiary)" } : {}),
       };
     });
   }

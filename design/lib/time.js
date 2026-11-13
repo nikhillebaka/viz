@@ -106,7 +106,24 @@ export class TimeNav {
     this.wT = w; if (v != null) this.vT = v;
     this.#run();
   }
-  step(d) { this.goTo(this.tT + d); }
+  /* ← → and the stepper. Past the first or last date, onEdge(d) may take over (crossing into another
+   * season); if it does, nothing else happens here. Drag and side scroll never call it: they rubber-band. */
+  step(d) { const i = this.tT + d; if ((i < 0 || i >= this.N) && this.onEdge?.(d)) return; this.goTo(i); }
+
+  /* Swap the whole timeline (another season): new dates and season window, the date set to index at once
+   * (a cut, not a glide). Zoom carries over (clamped to the new season); pan carries over if it fits. */
+  setTimeline({ dates, season, index }) {
+    this.dates = dates; this.N = dates.length; this.season = season;
+    this.seasonSpan = (season[1] - season[0]) / WEEK;
+    this.T = this.tT = Math.max(0, Math.min(this.N - 1, index)); this.vT = 0;
+    const zmax = Math.log(this.seasonSpan);
+    this.Z = Math.min(this.Z, zmax); this.tZ = Math.min(this.tZ, zmax); this.vZ = 0;
+    const [lo, hi] = this.panRange ? this.panRange(Math.exp(this.tZ)) : [0, 0];
+    if (!(this.tP >= lo && this.tP <= hi)) { this.P = this.tP = 0; this.returning = false; }
+    this.vP = 0;
+    this.onWeek(this.tT);
+    this.request();
+  }
   zoomTo(E, { w = 30, recenter = false } = {}) {
     const mid = this.#c0() + this.tP * WEEK;                    // where the view's middle is heading
     this.tZ = Math.log(Math.max(this.minSpan, Math.min(this.seasonSpan, E))); this.wZ = w;

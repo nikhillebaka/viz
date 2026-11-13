@@ -2,7 +2,8 @@
  * in lib/chart.js (fanCanvas: drawn on a canvas, refracted by the WebGL glass); this file adds the page around it: focus state, the hover readout, the
  * chrome, and time keys (left/right always step the forecast date). Decisions: intervals-goals.md. */
 import { LiquidGlass } from "../lib/glass.js";
-import { loadData, fanCanvas, short, seriesVar, WEEK } from "../lib/chart.js";
+import { fanCanvas, short, seriesVar, WEEK } from "../lib/chart.js";
+import { loadFan, timeline, seasonLabel, isoDay } from "../lib/fandata.js";
 import { Stepper, tooltip, openPopover, icon } from "../lib/controls.js";
 import { ModelSelection, groupModels, inferFamily, teamOf } from "../lib/selection.js";
 import { TimeNav } from "../lib/time.js";
@@ -15,11 +16,24 @@ const store = { get: (k) => { try { return localStorage.getItem(k); } catch { re
 if (store.get("viz-ds-theme")) root.dataset.theme = store.get("viz-ds-theme");
 const $ = (id) => document.getElementById(id);
 
-const data = await loadData("../data/");
-const { D, DATES, truth, DI0 } = data;
+/* Data: one season and one location at a time (studies/seasons-locations-goals.md). The season follows the
+ * chart's date; the place is the Location bubble. useData() swaps everything that depends on them. */
+const man = await loadManifest("../data/");
+const SEASONS = man.seasons.map((s) => s.id);
+const placeName = (id) => man.locations.find((l) => l.id === id)?.name ?? id;
+let place = man.locIndex.has(store.get("viz-place")) ? store.get("viz-place") : "US";
+let data = await loadFan(man, SEASONS.at(-1), place);
+let D = data.D, DATES = data.DATES, truth = data.truth;
+const DI0 = Math.max(0, data.D.dates.indexOf("2025-12-27")) || data.DI0;
 const fmtN = d3.format(",.0f"), fmtHalf = d3.format(".2~s");
 const fmtLong = d3.utcFormat("%b %-d, %Y"), fmtShort = d3.utcFormat("%b %-d");
-const truthAt = new Map(truth.map((t) => [+t.date, t.v]));
+let truthAt = new Map(truth.map((t) => [+t.date, t.v]));
+const niceTop = (v) => d3.scaleLinear().domain([0, v]).nice(5).domain()[1];
+let yTop = niceTop(data.YMAX); // the axis maximum at normal height, fixed per season and place, animated between them
+function useData(nd) {
+  data = nd; D = nd.D; DATES = nd.DATES; truth = nd.truth; truthAt = new Map(truth.map((t) => [+t.date, t.v]));
+  if (S.focus && !nd.present.has(S.focus)) S.focus = null;
+}
 
 let fromScores = false; // the focus preview comes from hovering the scores, not the chart
 const S = { di: DI0, rulers: false, misses: true, focus: null, preview: null, hot: null, hoverH: null };
@@ -29,7 +43,7 @@ const focused = () => S.preview ?? S.focus;
  * Provenance below is SAMPLE metadata for the prototype (the real app reads it from each model's
  * metadata / which folder it came from): two models stand in for local experiments, names with
  * experimental suffixes stand in for staged ones, the rest are hub models. */
-const ALL = D.models.filter((m) => m !== D.baseline);
+const ALL = [...new Set(man.seasons.flatMap((s) => s.models))].filter((m) => m !== man.baseline).sort(); // every season's models
 const SAMPLE_LOCAL = new Set(["UMass-timesfm3_nhsn", "UMass-AR2_nc_none"]);
 const provenance = (m) => (SAMPLE_LOCAL.has(m) ? "Local" : /_nc_|otid|_spatial|_prod/.test(m) ? "Staged" : "Hub");
 const metaOf = () => ({});
@@ -42,14 +56,19 @@ const sel = new ModelSelection({
 });
 
 const view = $("view"), chartEl = $("chart");
-const baseYmax = d3.scaleLinear().domain([0, data.YMAX]).nice(5).domain()[1]; // the axis maximum at normal height
 let chromeTop = 70, chromeBottom = 70, G = null;
 
 // charted models in a stable order (by color slot), then the baseline if it's on
+// charted models with nothing in this season or place aren't drawn; absent() names them in one line
 function models() {
-  const list = [...sel.charted].sort((a, b) => a.slot - b.slot).map(({ m, slot }) => ({ m, slot }));
-  if (sel.baseline) list.push({ m: D.baseline, slot: "baseline" });
+  const list = [...sel.charted].sort((a, b) => a.slot - b.slot).filter(({ m }) => data.present.has(m)).map(({ m, slot }) => ({ m, slot }));
+  if (sel.baseline && data.present.has(D.baseline)) list.push({ m: D.baseline, slot: "baseline" });
   return list;
+}
+function absent() {
+  const inSeason = new Set(D.models), gone = sel.charted.map((c) => c.m).filter((m) => !data.present.has(m));
+  const notSeason = gone.filter((m) => !inSeason.has(m)).length, notHere = gone.length - notSeason;
+  return [notSeason ? `${notSeason} not in ${seasonLabel(data.sid)}` : null, notHere ? `${notHere} not in ${placeName(place)}` : null].filter(Boolean).join(" · ") || null;
 }
 
 /* ---------------- draw ---------------- */
@@ -58,12 +77,12 @@ function draw() {
   const u = nav.mix; // 0 close up, 1 fully zoomed out
   const P = fanCanvas(chartEl, data, {
     models: models(), t: nav.T, domain: nav.domain(),
-    ymax: baseYmax / nav.heightZoom, nice: false, // height zoom: the normal (rounded) axis maximum, divided
+    ymax: yTop / nav.heightZoom, nice: false, // height zoom: the normal (rounded) axis maximum, divided
     // the right margin holds the model labels close up; in Season they sit at the fan's end instead
     // while the model picker is open, the plot moves into the space to its right (pickerInset)
     pad: { l: 64 + pickerInset, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
     focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: rulerK, misses: S.misses,
-    context: sel.context, hot: S.hot,
+    context: sel.context.filter((m) => data.present.has(m)), hot: S.hot, absent: absent(),
   });
   G = { ...P, compact, w };
   window.__G = G; // for tests
@@ -223,7 +242,7 @@ function renderNote() {
  * charted, the one charted longest comes off. Under Show all, selected-but-not-charted rows show a small
  * grey dot: drawn as context. Sections: Selected and Local pinned, then families, then By team. */
 let pickerRefresh = null;
-const collapsed = new Set();
+const collapsed = new Set(SEASONS.map((s) => `away:${s}`)); // "Not in 2023–24" starts collapsed
 /* While the picker is open, the chart previews: the plot slides into the space right of the panel and the
  * view zooms out to most of the season (recentered), so models can be judged as they're added. Closing
  * puts the view back exactly as it was. Left/right keep stepping the date throughout. */
@@ -272,11 +291,14 @@ function openModelPicker() {
         const q = input.value.trim().toLowerCase();
         const match = (m) => !q || m.toLowerCase().includes(q) || teamOf(m).toLowerCase().includes(q) || familyTag(m).toLowerCase().includes(q) || provenance(m).toLowerCase() === q;
         const out = [];
-        const local = ALL.filter((m) => provenance(m) === "Local" && match(m));
+        const here = new Set(D.models), away = (m) => !here.has(m);
+        const local = ALL.filter((m) => provenance(m) === "Local" && match(m) && !away(m));
         if (local.length) out.push({ key: "local", title: "Local", ms: local });
-        for (const g of GROUPS.families) { const ms = g.models.filter(match); if (ms.length) out.push({ key: g.key, title: g.title, ms }); }
-        const teams = GROUPS.teams.map((t) => ({ team: t.team, ms: t.models.filter(match) })).filter((t) => t.ms.length);
+        for (const g of GROUPS.families) { const ms = g.models.filter((m) => match(m) && !away(m)); if (ms.length) out.push({ key: g.key, title: g.title, ms }); }
+        const teams = GROUPS.teams.map((t) => ({ team: t.team, ms: t.models.filter((m) => match(m) && !away(m)) })).filter((t) => t.ms.length);
         if (teams.length) out.push({ key: "team", title: "By team", ms: teams.flatMap((t) => t.ms), teams });
+        const gone = ALL.filter((m) => away(m) && match(m));
+        if (gone.length) out.push({ key: `away:${data.sid}`, title: `Not in ${seasonLabel(data.sid)}`, ms: gone });
         return out;
       };
       const render = () => {
@@ -348,13 +370,20 @@ $("theme").addEventListener("click", () => {
 renderModelsPill(); // fill it before the glass measures it
 var modelsGlass = new LiquidGlass($("c-models"), GL);
 $("c-models").addEventListener("click", openModelPicker);
+renderPlacePill(); // fill it before the glass measures it
+var placeGlass = new LiquidGlass($("c-place"), GL);
+$("c-place").addEventListener("click", openPlacePicker);
 var noteGlass = new LiquidGlass($("more"), GL);
 $("more-btn").addEventListener("click", () => sel.setShowAll(!sel.showAll));
 renderModelsPill();
-const stepper = new Stepper($("c-date"), { values: DATES, index: DI0, label: "Forecast date", glass: GL, format: { long: fmtLong, short: fmtShort }, onChange: (i) => nav.goTo(i) });
+const stepper = new Stepper($("c-date"), {
+  values: DATES, index: DI0, label: "Forecast date", glass: GL, format: { long: fmtLong, short: fmtShort }, onChange: (i) => nav.goTo(i),
+  edge: (d) => crossSeason(d), canEdge: (d) => !!neighbour(d), onLabel: (btn) => openDatePicker(btn),
+});
 const nav = new TimeNav({
   surface: chartEl, dates: DATES, index: DI0,
-  season: [truth[0].date, new Date(Math.max(+truth.at(-1).date, +DATES.at(-1) + 3 * WEEK))],
+  season: data.timeline.window,
+  onEdge: (d) => crossSeason(d),
   scale: () => G.x,
   ignore: (e) => !!labelAt(e.clientX, e.clientY),
   tapTarget: (e) => !!(G && lineUnder(e.clientX, e.clientY)),
@@ -394,19 +423,157 @@ document.querySelectorAll("#chrome .c-zone, #chrome-top .c-zone:not([data-zone=t
 document.fonts?.ready.then(() => { measure(); draw(); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => draw()); // system theme, when not overridden
 
+
+/* ---------------- seasons and places (studies/seasons-locations-goals.md) ----------------
+ * ← → and the stepper cross into the next or previous season at either end, as a cut: a 150 ms
+ * crossfade, the camera keeping its zoom (and pan, if it fits), height back to normal, the axis easing to
+ * the new season's maximum. Drag and side scroll never cross (they rubber-band in TimeNav). */
+const neighbour = (d) => SEASONS[SEASONS.indexOf(data.sid) + d] ?? null;
+let switching = false;
+/* the old frame fades out over the new one */
+function cut(apply) {
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const g = document.createElement("canvas");
+  g.width = chartEl.width; g.height = chartEl.height; g.getContext("2d").drawImage(chartEl, 0, 0);
+  Object.assign(g.style, { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none", transition: "opacity 150ms ease" });
+  if (!reduce) chartEl.after(g);
+  apply();
+  requestAnimationFrame(() => { g.style.opacity = "0"; });
+  setTimeout(() => g.remove(), 260); // not tied to frames: a hidden tab never leaves copies behind
+}
+/* the axis maximum eases to a new value (no overshoot) */
+let yRaf = 0;
+function animateY(to) {
+  cancelAnimationFrame(yRaf);
+  const from = yTop, t0 = performance.now();
+  if (Math.abs(to - from) < 1e-6 || matchMedia("(prefers-reduced-motion: reduce)").matches) { yTop = to; frame(); return; }
+  const tick = () => { const u = Math.min(1, (performance.now() - t0) / 300); yTop = from + (to - from) * (1 - (1 - u) ** 3); draw(); if (u < 1) yRaf = requestAnimationFrame(tick); };
+  yRaf = requestAnimationFrame(tick);
+}
+/* while data loads (rarely over 100 ms), the old plot stays, slightly dimmed after a moment */
+async function load(sid, loc) {
+  const dim = setTimeout(() => { chartEl.style.opacity = "0.75"; }, 80);
+  try { return await loadFan(man, sid, loc); } finally { clearTimeout(dim); chartEl.style.opacity = ""; }
+}
+async function showSeason(sid, index) {
+  if (switching) return; switching = true;
+  try {
+    const nd = await load(sid, place);
+    cut(() => {
+      useData(nd);
+      nav.setTimeline({ dates: DATES, season: nd.timeline.window, index: index < 0 ? DATES.length + index : index });
+      nav.setHeight(1);
+      stepper.setValues(DATES, nav.week);
+      draw();
+    });
+    animateY(niceTop(nd.YMAX));
+    ev?.followSeason(sid);
+    pickerRefresh?.();
+  } finally { switching = false; }
+}
+function crossSeason(d) {
+  const sid = neighbour(d);
+  if (!sid) return false;
+  showSeason(sid, d > 0 ? 0 : -1);
+  return true;
+}
+/* any round in any season: the date picker, a heatmap cell */
+function goToRound(sid, iso) {
+  if (sid && sid !== data.sid) { const tl = timeline(man, sid); showSeason(sid, Math.max(0, tl.iso.indexOf(iso))); return; }
+  const i = D.dates.indexOf(iso); if (i >= 0) nav.goTo(i, { recenter: "auto" });
+}
+/* another place: the same date, zoom and focus; the plot crossfades and the axis eases to the new scale */
+async function setPlace(loc) {
+  if (loc === place || switching) return;
+  switching = true;
+  try {
+    const nd = await load(data.sid, loc);
+    place = loc; store.set("viz-place", loc);
+    const recent = [loc, ...(JSON.parse(store.get("viz-places") || "[]")).filter((x) => x !== loc)].slice(0, 4);
+    store.set("viz-places", JSON.stringify(recent));
+    cut(() => { useData(nd); nav.setHeight(1); draw(); });
+    animateY(niceTop(nd.YMAX));
+    renderPlacePill();
+    ev?.followPlace();
+  } finally { switching = false; }
+}
+
+/* ---------------- the date picker: seasons, then that season's rounds by month ---------------- */
+function openDatePicker(btn) {
+  let shown = data.sid;
+  openPopover(btn, { width: 340, placement: "top", morph: false, className: "dp-panel", content: (body, layer) => {
+    const paint = async () => {
+      const tl = timeline(man, shown), nd = shown === data.sid ? data : await loadFan(man, shown, place);
+      const charted = sel.charted.map((c) => c.m);
+      const any = (iso) => charted.some((m) => nd.FC[m]?.[iso]);
+      const months = d3.groups(man.seasonById.get(shown).rounds, (r) => r.slice(0, 7));
+      const cur = shown === data.sid ? D.dates[nav.week] : null;
+      const latest = man.seasons.at(-1).rounds.at(-1);
+      body.innerHTML = `<div class="dp-seasons">${[...SEASONS].reverse().map((sid) => `<button type="button" class="dp-chip${sid === shown ? " on" : ""}" data-sid="${sid}">${seasonLabel(sid)}</button>`).join("")}<button type="button" class="dp-chip latest" data-latest>Latest</button></div>
+        <div class="dp-grid" role="grid">${months.map(([ym, rs]) => `<div class="dp-row"><span class="dp-m">${d3.utcFormat("%b")(new Date(ym + "-01T00:00:00Z"))}</span>${rs.map((r) => `<button type="button" class="dp-day${r === cur ? " on" : ""}${any(r) ? "" : " faint"}" data-r="${r}" aria-label="${fmtLong(new Date(r + "T00:00:00Z"))}">${+r.slice(8)}</button>`).join("")}</div>`).join("")}</div>`;
+      body.querySelectorAll(".dp-chip[data-sid]").forEach((b) => b.addEventListener("click", () => { shown = b.dataset.sid; paint(); }));
+      body.querySelector("[data-latest]").addEventListener("click", () => { layer.close(true); goToRound(man.seasons.at(-1).id, latest); });
+      body.querySelectorAll(".dp-day").forEach((b) => b.addEventListener("click", () => { layer.close(true); goToRound(shown, b.dataset.r); }));
+      (body.querySelector(".dp-day.on") || body.querySelector(".dp-day:not(.faint)") || body.querySelector(".dp-day"))?.focus({ preventScroll: true });
+    };
+    body.addEventListener("keydown", (e) => {
+      const days = [...body.querySelectorAll(".dp-day")], i = days.indexOf(document.activeElement);
+      const d = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -4, ArrowDown: 4 }[e.key];
+      if (d && i >= 0) { e.preventDefault(); e.stopPropagation(); days[Math.max(0, Math.min(days.length - 1, i + d))].focus(); }
+      if (/^[a-z]$/i.test(e.key)) { const row = [...body.querySelectorAll(".dp-row")].find((r) => r.querySelector(".dp-m").textContent.toLowerCase().startsWith(e.key.toLowerCase())); row?.querySelector(".dp-day")?.focus(); }
+    });
+    paint();
+  } });
+}
+
+/* ---------------- the Location bubble: search, recent, a US tile map ---------------- */
+const TILES = { AK: [0, 0], ME: [10, 0], VT: [9, 1], NH: [10, 1], WA: [0, 2], ID: [1, 2], MT: [2, 2], ND: [3, 2], MN: [4, 2], IL: [5, 2], WI: [6, 2], MI: [7, 2], NY: [8, 2], RI: [9, 2], MA: [10, 2],
+  OR: [0, 3], NV: [1, 3], WY: [2, 3], SD: [3, 3], IA: [4, 3], IN: [5, 3], OH: [6, 3], PA: [7, 3], NJ: [8, 3], CT: [9, 3],
+  CA: [0, 4], UT: [1, 4], CO: [2, 4], NE: [3, 4], MO: [4, 4], KY: [5, 4], WV: [6, 4], VA: [7, 4], MD: [8, 4], DE: [9, 4],
+  AZ: [1, 5], NM: [2, 5], KS: [3, 5], AR: [4, 5], TN: [5, 5], NC: [6, 5], SC: [7, 5], DC: [8, 5],
+  OK: [3, 6], LA: [4, 6], MS: [5, 6], AL: [6, 6], GA: [7, 6], HI: [0, 7], TX: [3, 7], FL: [8, 7], PR: [10, 7] };
+function renderPlacePill() {
+  const pill = $("c-place");
+  pill.querySelector(".label").textContent = placeName(place);
+  pill.setAttribute("aria-label", `Location: ${placeName(place)}. Change`);
+  placeGlass?.update();
+}
+function openPlacePicker() {
+  openPopover($("c-place"), { width: 420, morph: true, className: "lp-panel", content: (body, layer) => {
+    const recent = JSON.parse(store.get("viz-places") || "[]").filter((x) => x !== place && man.locIndex.has(x));
+    body.innerHTML = `<div class="lp-head"><label class="pop-search">${icon.search}<input type="search" placeholder="Search 53 locations" aria-label="Search locations"></label></div>
+      ${recent.length ? `<div class="lp-recent">${recent.map((id) => `<button type="button" class="dp-chip" data-loc="${id}">${placeName(id)}</button>`).join("")}</div>` : ""}
+      <div class="lp-map"><button type="button" class="lp-us${place === "US" ? " on" : ""}" data-loc="US">United States</button>
+      <div class="lp-tiles">${man.locations.filter((l) => TILES[l.abbr]).map((l) => `<button type="button" class="lp-tile${l.id === place ? " on" : ""}" data-loc="${l.id}" data-abbr="${l.abbr}" style="grid-column:${TILES[l.abbr][0] + 1};grid-row:${TILES[l.abbr][1] + 1}" title="${l.name}">${l.abbr}</button>`).join("")}</div></div>`;
+    const input = body.querySelector("input"), tiles = [...body.querySelectorAll("[data-loc]")];
+    const pick = (id) => { layer.close(true); setPlace(id); };
+    tiles.forEach((b) => { b.addEventListener("click", () => pick(b.dataset.loc)); b.addEventListener("pointerenter", () => loadFan(man, data.sid, b.dataset.loc)); }); // hover prefetches
+    const matches = () => { const q = input.value.trim().toLowerCase(); return q ? man.locations.filter((l) => l.name.toLowerCase().includes(q) || l.abbr.toLowerCase() === q || l.id.toLowerCase() === q).sort((a, b) => (b.abbr.toLowerCase() === q) - (a.abbr.toLowerCase() === q) || (b.name.toLowerCase().startsWith(q)) - (a.name.toLowerCase().startsWith(q))) : []; };
+    input.addEventListener("input", () => { const ms = new Set(matches().map((l) => l.id)); body.classList.toggle("filtering", !!input.value.trim()); tiles.forEach((b) => b.classList.toggle("match", ms.has(b.dataset.loc))); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { const m = matches()[0]; if (m) pick(m.id); } if (e.key === "ArrowDown") { e.preventDefault(); body.querySelector(".lp-tile.on, .lp-us.on, .lp-tile")?.focus(); } });
+    // arrows move across the tile map by its grid
+    body.querySelector(".lp-map").addEventListener("keydown", (e) => {
+      const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key], at = document.activeElement?.dataset.abbr;
+      if (!d) return; e.preventDefault(); e.stopPropagation();
+      if (!at) { body.querySelector(".lp-tile")?.focus(); return; }
+      const [x, y] = TILES[at]; let best = null, bd = Infinity;
+      for (const [ab, [tx, ty]] of Object.entries(TILES)) { const dx = tx - x, dy = ty - y; if ((d[0] && Math.sign(dx) === d[0]) || (d[1] && Math.sign(dy) === d[1])) { const dist = (d[0] ? Math.abs(dx) + 2 * Math.abs(dy) : Math.abs(dy) + 2 * Math.abs(dx)); if (dist < bd) { bd = dist; best = ab; } } }
+      if (best) body.querySelector(`[data-abbr="${best}"]`)?.focus();
+    });
+    requestAnimationFrame(() => input.focus());
+  } });
+}
+
 /* ---------------- scores, under the chart (studies/evaluation-goals.md) ----------------
  * The same section as studies/scores.html, on the same selection. Linked both ways: hovering a row (or a
  * heatmap row) previews a charted model on the chart, hovering a model on the chart lights its row; the
  * dot charts a model; a heatmap cell shows that forecast on the chart. The scope line lifts into a bubble
  * at the top centre once it scrolls under the top chrome. */
 var ev = null;
-const isoDay = d3.utcFormat("%Y-%m-%d");
 function scoresChanged() { if (!ev) return; cancelAnimationFrame(scoresChanged.raf); scoresChanged.raf = requestAnimationFrame(() => ev.update()); }
 function weekChanged() { if (!ev) return; cancelAnimationFrame(weekChanged.raf); weekChanged.raf = requestAnimationFrame(() => ev.renderHeat()); }
-const man = await loadManifest("../data/");
-const chartSeason = (() => { const d = DATES[DI0], y = d.getUTCFullYear(), a = d.getUTCMonth() >= 7 ? y : y - 1; return `${a}-${String(a + 1).slice(2)}`; })();
 ev = mountScores($("scores"), {
-  man, seasons: man.seasonById.has(chartSeason) ? [chartSeason] : [man.seasons.at(-1).id],
+  man, seasons: [data.sid], chartLocation: () => place, placeName,
   selected: () => sel.selected, slotOf: (m) => sel.slotOf(m), seriesColor: seriesVar,
   currentRound: () => isoDay(DATES[nav.week]),
   onAdd: () => openModelPicker(),
@@ -421,7 +588,8 @@ ev = mountScores($("scores"), {
   },
   onCell: ({ m, axis, col }) => {
     // show it on the chart: that week (when it's one of the chart's), the model charted and focused, the chart scrolled into view
-    if (axis === "weeks") { const i = DATES.findIndex((d) => isoDay(d) === col.label); if (i >= 0) nav.goTo(i, { recenter: "auto" }); }
+    if (axis === "weeks") goToRound(col.season, col.label);
+    if (axis === "locations") { const l = man.locations.find((x) => x.abbr === col.label); if (l) setPlace(l.id); }
     if (m !== D.baseline && !sel.isCharted(m)) sel.chart(m);
     S.focus = m; S.preview = null; fromScores = false; draw();
     scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
@@ -444,4 +612,4 @@ function onScroll() {
 }
 addEventListener("scroll", onScroll, { passive: true });
 onScroll();
-window.__ev = ev;
+window.__ev = ev; window.__setPlace = setPlace; window.__data = () => data; // for tests

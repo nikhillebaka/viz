@@ -65,7 +65,8 @@ export function mountScores(el, opts) {
   let result = null;
   async function compute() {
     await Promise.all(S.scope.seasons.map((id) => loadSeason(man, id)));
-    result = score(man, { ...S.scope, selected: opts.selected() });
+    const locations = S.scope.locations === "chart" ? [opts.chartLocation()] : S.scope.locations;
+    result = score(man, { ...S.scope, locations, selected: opts.selected() });
   }
   const shownRows = () => result.rows.filter((r) => S.rows === "all" || opts.selected().includes(r.m) || r.m === result.baseline);
 
@@ -75,7 +76,7 @@ export function mountScores(el, opts) {
     const seasons = sc.seasons.length === SEASONS.length && SEASONS.length > 1 ? "All seasons" : sc.seasons.length > 1 ? `${sc.seasons.length} seasons` : seasonLabel(sc.seasons[0]);
     return [
       { k: "metric", t: "Relative WIS" + (sc.shared ? " · shared" : "") + (sc.among === "selected" ? " · among selected" : ""), set: sc.shared || sc.among !== "all" },
-      { k: "loc", t: sc.locations === "states" ? "All states" : "US", set: sc.locations !== d.locations },
+      { k: "loc", t: sc.locations === "states" ? "All states" : sc.locations === "chart" ? opts.placeName?.(opts.chartLocation()) ?? "Chart" : "US", set: sc.locations !== d.locations },
       { k: "dates", t: seasons, set: sc.seasons.join() !== d.seasons.join() },
       { k: "h", t: H.length === 4 ? "0–3 wk" : H.length === 1 ? `${H[0]} wk` : H.join(", ") + " wk", set: H.length !== 4 },
     ];
@@ -111,7 +112,8 @@ export function mountScores(el, opts) {
         { items: [{ label: "Relative WIS", on: true, v: null }] },
         { items: [{ label: "Shared forecasts only", on: sc.shared, v: "shared" }] },
         { title: "Rank among", items: [{ label: "Every model in scope", on: sc.among === "all", v: "among:all" }, { label: "Selected", on: sc.among === "selected", v: "among:selected" }] },
-      ] : k === "loc" ? [{ items: [{ label: "All states", on: sc.locations === "states", v: "states" }, { label: "US", on: sc.locations === "US", v: "US" }] }]
+      ] : k === "loc" ? [{ items: [{ label: "All states", on: sc.locations === "states", v: "states" }, { label: "US", on: sc.locations === "US", v: "US" },
+          ...(opts.chartLocation ? [{ label: `The chart's (${opts.placeName?.(opts.chartLocation()) ?? opts.chartLocation()})`, on: sc.locations === "chart", v: "chart" }] : [])] }]
       : k === "dates" ? [{ title: "Seasons", items: [...SEASONS].reverse().map((s) => ({ label: seasonLabel(s), on: sc.seasons.includes(s), v: s })) }, { items: [{ label: "All", on: sc.seasons.length === SEASONS.length, v: "all" }] }]
       : [{ items: [0, 1, 2, 3].map((h) => ({ label: `${h} wk ahead`, on: sc.horizons.includes(h), v: h })) }];
     openPopover(btn, { width: 260, morph: false, content: (body) => {
@@ -392,6 +394,15 @@ export function mountScores(el, opts) {
     heatSl = null;
     renderScope(); scopeClone && renderScope(scopeClone); redraw();
   }
+  /* the chart moved to another season: the scores follow, unless the seasons were picked by hand */
+  function followSeason(sid) {
+    const d = JSON.parse(S.defaults);
+    const following = S.scope.seasons.join() === d.seasons.join();
+    d.seasons = [sid]; S.defaults = JSON.stringify(d);
+    if (following) { S.scope.seasons = [sid]; update(); } else renderScope();
+  }
+  /* the chart moved to another place: re-score only if the scope follows it */
+  function followPlace() { if (S.scope.locations === "chart") update(); else { renderScope(); scopeClone && renderScope(scopeClone); } }
   function redraw() { readRamp(); renderBoard(); renderHeatLine(); renderHeat(); renderFigures(); }
   function highlight(m) {
     if (m === S.hot) return;
@@ -405,5 +416,6 @@ export function mountScores(el, opts) {
   function cloneScope(target) { scopeClone = target; target.classList.add("ev-scope"); renderScope(target); return target; }
   let rz = 0;
   new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { renderBoard(); renderHeat(); renderFigures(); }); }).observe(el);
-  return { update, redraw, highlight, renderHeat, cloneScope, scopeEl, get result() { return result; }, state: S };
+  function setHeatAxis(axis) { S.heatAxis = axis; heatSl = null; renderHeatLine(); renderHeat(); }
+  return { update, redraw, highlight, renderHeat, cloneScope, scopeEl, followSeason, followPlace, setHeatAxis, get result() { return result; }, state: S };
 }

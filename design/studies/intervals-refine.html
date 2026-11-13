@@ -118,6 +118,36 @@ body.picker-open [data-zone="tl"] > *, body.picker-open [data-zone="tc"] > *, bo
 .pk-row.sel .pk-check svg { opacity: 1; transform: none; }
 .pk-foot { padding: 8px 10px 2px; color: var(--ink-tertiary); font-size: 12px; }
 
+/* location pill and popover: search, recent places, a US tile map */
+#c-place .label { position: relative; z-index: 4; }
+#c-place > svg:not(.lg-layer) { width: 14px; height: 14px; position: relative; z-index: 4; color: var(--ink-tertiary); }
+.lp-head { padding: 2px 8px 8px 6px; border-bottom: 1px solid var(--line-hairline); margin-bottom: 10px; }
+.lp-head .pop-search { display: flex; align-items: center; gap: 9px; height: 32px; }
+.lp-head .pop-search svg { width: 15px; height: 15px; color: var(--ink-tertiary); flex: none; }
+.lp-head input { flex: 1; border: 0; outline: 0; background: none; color: var(--ink-primary); font: 14px var(--font-sans); min-width: 0; }
+.lp-recent { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 6px 12px; }
+.lp-map { padding: 0 6px 6px; }
+.lp-us { width: 100%; height: 30px; border-radius: 8px; border: 0; margin-bottom: 8px; background: var(--fill-field); color: var(--ink-secondary); font: 500 12.5px var(--font-sans); cursor: pointer; }
+.lp-tiles { display: grid; grid-template-columns: repeat(11, 1fr); grid-auto-rows: 30px; gap: 4px; }
+.lp-tile { border: 0; border-radius: 7px; background: var(--fill-field); color: var(--ink-secondary); font: 500 11px var(--font-mono); cursor: pointer; padding: 0; transition: background 120ms, color 120ms, opacity 120ms; }
+.lp-tile:hover, .lp-us:hover { background: var(--fill-hover); color: var(--ink-primary); }
+.lp-tile.on, .lp-us.on { background: var(--accent); color: #fff; }
+.lp-panel.filtering .lp-tile:not(.match), .filtering .lp-tile:not(.match) { opacity: 0.25; }
+.filtering .lp-tile.match { color: var(--ink-primary); box-shadow: inset 0 0 0 1.5px var(--accent); }
+/* date picker: season chips, then the season's rounds by month */
+.dp-chip { height: 28px; padding: 0 11px; border-radius: var(--radius-pill); border: 0; background: var(--fill-field); color: var(--ink-secondary); font: 500 12.5px var(--font-sans); cursor: pointer; }
+.dp-chip:hover { color: var(--ink-primary); background: var(--fill-hover); }
+.dp-chip.on { background: var(--fill-selected); color: var(--ink-primary); }
+.dp-chip.latest { margin-left: auto; background: none; color: var(--accent); }
+.dp-seasons { display: flex; gap: 6px; padding: 4px 6px 12px; border-bottom: 1px solid var(--line-hairline); margin-bottom: 8px; }
+.dp-grid { display: grid; gap: 2px; padding: 0 6px 6px; }
+.dp-row { display: flex; align-items: center; gap: 4px; }
+.dp-m { width: 40px; color: var(--ink-tertiary); font-size: 12px; }
+.dp-day { width: 38px; height: 30px; border: 0; border-radius: 8px; background: none; color: var(--ink-primary); font: 13px var(--font-mono); font-variant-numeric: tabular-nums; cursor: pointer; }
+.dp-day:hover { background: var(--fill-hover); }
+.dp-day.faint { color: var(--ink-faint); }
+.dp-day.on { background: var(--accent); color: #fff; }
+
 /* visually hidden, still reachable by keyboard and screen readers */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
@@ -154,6 +184,7 @@ body.picker-open [data-zone="tl"] > *, body.picker-open [data-zone="tc"] > *, bo
     <div class="c-zone" data-zone="tl">
       <a class="c-pill icon" id="back" href="../components.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></a>
       <button class="c-pill" id="c-models" aria-haspopup="dialog"><span class="dots"></span><span class="label"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+      <button class="c-pill" id="c-place" aria-haspopup="dialog"><span class="label"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
     </div>
     <div class="c-zone" data-zone="tc"><div id="scope-bubble"></div></div>
     <div class="c-zone" data-zone="tr">
