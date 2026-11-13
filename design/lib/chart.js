@@ -179,18 +179,26 @@ export function fanChart(svgSel, data, opts = {}) {
   const og = g.append("g").attr("clip-path", clip);
   og.append("path").attr("d", tl(after)).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.75).attr("stroke-linecap", "round").attr("stroke-dasharray", "0 4.5");
   og.append("path").attr("d", tl(known)).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5).attr("stroke-linejoin", "round");
-  og.append("g").selectAll("circle").data(known.filter((d) => !d.cut && x(d.date) > -10)).join("circle").attr("r", 2.9).attr("cx", (d) => x(d.date)).attr("cy", (d) => y(d.v))
-    .attr("fill", "var(--ink-primary)").attr("stroke", "var(--surface-chart)").attr("stroke-width", 1.5);
-  const scored = after.filter((d) => !d.cut && d.date > cutoff && d.date >= ref && d.date <= new Date(+ref + 3 * WEEK));
-  og.append("g").selectAll("circle").data(scored).join("circle").attr("r", 2.9).attr("cx", (d) => x(d.date)).attr("cy", (d) => y(d.v))
-    .attr("fill", "var(--surface-chart)").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5);
+  // observed points change continuously with the cutoff, so nothing pops in when an animation lands.
+  // k = weeks after the cutoff: k <= 0 known (filled); over the week before the cutoff reaches a point
+  // it fills in gradually; 0 < k <= 4 are the scored weeks (hollow); past that, points fade out over a
+  // week, so the rest of the season is just the dotted line.
+  const pts = truth.map((d) => ({ ...d, k: (d.date - cutoff) / WEEK })).filter((d) => d.k < 5 && x(d.date) > -10);
+  const pg = og.append("g").selectAll("g").data(pts).join("g").attr("transform", (d) => `translate(${x(d.date)},${y(d.v)})`)
+    .attr("opacity", (d) => Math.max(0, Math.min(1, 5 - d.k)));
+  pg.append("circle").attr("r", 2.9).attr("fill", "var(--surface-chart)").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5);
+  pg.filter((d) => d.k < 1).append("circle").attr("r", 2.9 + 0.75).attr("fill", "var(--ink-primary)").attr("fill-opacity", (d) => Math.max(0, Math.min(1, 1 - d.k)));
 
   // misses: observed weeks outside the focused (or only) model's interval
   const mm = hasFocus ? B.find((b) => b.m === f) : B.length === 1 ? B[0] : null;
-  if (opts.misses && mm && whole) {
+  // misses belong to whole weeks; while moving between weeks they fade out and back in around the
+  // nearest week, so they never pop in at the end of an animation
+  const missAlpha = Math.max(0, 1 - 2.5 * Math.abs(t - di));
+  if (opts.misses && mm && missAlpha > 0) {
     const tv = new Map(truth.map((t) => [+t.date, t.v]));
-    const miss = mm.pts.filter((p) => !p.anchor && tv.has(+p.date)).map((p) => ({ p, v: tv.get(+p.date) })).filter((d) => d.v < d.p.lo || d.v > d.p.hi);
-    g.append("g").selectAll("circle").data(miss).join("circle").attr("r", 6).attr("cx", (d) => x(d.p.date)).attr("cy", (d) => y(d.v)).attr("fill", "none").attr("stroke", mm.c).attr("stroke-width", 1.25);
+    const mw = bands(data, models.filter((o) => o.m === mm.m), di, level || 0.95)[0] || mm; // the nearest whole week's interval
+    const miss = mw.pts.filter((p) => !p.anchor && tv.has(+p.date)).map((p) => ({ p, v: tv.get(+p.date) })).filter((d) => d.v < d.p.lo || d.v > d.p.hi);
+    g.append("g").attr("opacity", missAlpha).selectAll("circle").data(miss).join("circle").attr("r", 6).attr("cx", (d) => x(d.p.date)).attr("cy", (d) => y(d.v)).attr("fill", "none").attr("stroke", mm.c).attr("stroke-width", 1.25);
   }
 
   // medians on top: solid, with week dots
