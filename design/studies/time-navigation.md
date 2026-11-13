@@ -16,9 +16,14 @@ Prototype: `studies/intervals-refine.html`. The drawing is `fanChart({ t })` in 
   rubber band at the ends, and a snap to the nearest week 140 ms after scrolling stops (so a trackpad's
   own momentum plays out first). Mostly-vertical scrolls are ignored. No scrollbars, and the page
   can't overscroll or trigger swipe-to-go-back.
-- **Buttons and keys glide.** The stepper, its hold-to-repeat and the left/right keys move to the new
-  week in 140 ms with an ease-out. Each press retargets from wherever the chart is; nothing queues, so
-  fast clicking or a held key just moves faster. The stepper label changes instantly to the target week.
+- **Buttons and keys glide** on a critically damped spring that chases the target week (about 100 ms to
+  look settled). It starts from the current position and velocity, so a new press mid-motion bends the
+  path instead of restarting it: no speed surge per press, no backward step, and an exact landing. The
+  snap after a drag or side scroll uses a softer spring and carries the flick's speed. The stepper label
+  changes instantly to the target week. (A timed ease-out tween before this stepped backwards on its
+  first frame, because the frame timestamp was earlier than the key press, and surged on every press.)
+- **The dotted observed line is pinned to the data.** It starts at the first observed week and is
+  clipped at the cutoff, so its dots travel with the data instead of crawling as the cutoff moves.
 - **Performance:** at most one redraw per animation frame, with label text measurement cached. Reduced
   motion switches instantly. The hover readout hides while dragging, and misses only show on whole weeks.
 

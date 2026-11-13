@@ -177,7 +177,11 @@ export function fanChart(svgSel, data, opts = {}) {
   }
   const tl = d3.line().x((d) => x(d.date)).y((d) => y(d.v));
   const og = g.append("g").attr("clip-path", clip);
-  og.append("path").attr("d", tl(after)).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.75).attr("stroke-linecap", "round").attr("stroke-dasharray", "0 4.5");
+  // the dotted line always starts at the first observed week and is clipped to after the cutoff, so its
+  // dots are pinned to the data and travel with it; starting it at the moving cutoff made them crawl
+  const dotClip = `${uid}-after`;
+  defs.append("clipPath").attr("id", dotClip).append("rect").attr("x", xc).attr("width", Math.max(0, w - xc)).attr("height", ay);
+  og.append("path").attr("d", tl(truth)).attr("clip-path", `url(#${dotClip})`).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.75).attr("stroke-linecap", "round").attr("stroke-dasharray", "0 4.5");
   og.append("path").attr("d", tl(known)).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5).attr("stroke-linejoin", "round");
   // observed points change continuously with the cutoff, so nothing pops in when an animation lands.
   // k = weeks after the cutoff: k <= 0 known (filled); over the week before the cutoff reaches a point

@@ -88,9 +88,9 @@ function readout() {
  *    T is; nothing queues, so fast clicking or a held key just moves faster.
  * At most one redraw per animation frame. The stepper always shows the week T will settle on. */
 const N = DATES.length;
-const M = { T: DI0, target: DI0, from: DI0, t0: 0, dur: 0, raf: 0, dragging: false };
+window.__motion = () => ({ ...M }); // for testing the motion from the console
+const M = { T: DI0, V: 0, w: 38, target: DI0, raf: 0, dragging: false }; // T in weeks, V in weeks per second
 const clampI = (i) => Math.max(0, Math.min(N - 1, i));
-const easeOut = (u) => 1 - (1 - u) ** 3;
 const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 let frameQueued = 0;
 function frame() { if (!frameQueued) frameQueued = requestAnimationFrame(() => { frameQueued = 0; draw(); }); }
@@ -98,16 +98,25 @@ function frame() { if (!frameQueued) frameQueued = requestAnimationFrame(() => {
 function showWeek(i) { // keep the stepper on the week we're heading to, without re-triggering it
   if (stepper.index !== i) { stepper.index = i; stepper.render(true); }
 }
-function glideTo(i, dur = 140) {
+// Every move to a week is a critically damped spring chasing the target: it starts from the current
+// position AND velocity, so a new press mid-motion bends the path instead of restarting it (no surge,
+// no backward step), and it lands exactly on the week. Frame time comes from the clock between frames,
+// clamped so a dropped frame can't make it leap. w sets the pace: higher is snappier.
+function glideTo(i, { w = 38, v = null } = {}) {
   i = clampI(i); showWeek(i); S.di = i;
-  cancelAnimationFrame(M.raf);
-  if (reduced.matches || dur === 0) { M.T = M.target = i; frame(); return; }
-  Object.assign(M, { from: M.T, target: i, t0: performance.now(), dur });
-  const tick = (now) => {
-    const u = Math.min(1, (now - M.t0) / M.dur);
-    M.T = M.from + (M.target - M.from) * easeOut(u);
+  M.target = i; M.w = w;
+  if (v != null) M.V = v;
+  if (reduced.matches) { cancelAnimationFrame(M.raf); M.raf = 0; M.T = i; M.V = 0; frame(); return; }
+  if (M.raf) return; // already moving: the running loop just picks up the new target
+  let last = performance.now();
+  const tick = () => {
+    const now = performance.now(), dt = Math.min(0.033, Math.max(0.001, (now - last) / 1000)); last = now;
+    const y0 = M.T - M.target, v0 = M.V, w = M.w, e = Math.exp(-w * dt), c = v0 + w * y0;
+    M.T = M.target + (y0 + c * dt) * e;              // exact critically damped step
+    M.V = (v0 - w * c * dt) * e;
+    if (Math.abs(M.T - M.target) < 0.0005 && Math.abs(M.V) < 0.01) { M.T = M.target; M.V = 0; M.raf = 0; draw(); return; }
     draw();
-    if (u < 1) M.raf = requestAnimationFrame(tick); else M.T = M.target;
+    M.raf = requestAnimationFrame(tick);
   };
   M.raf = requestAnimationFrame(tick);
 }
@@ -119,7 +128,7 @@ const unrubber = (r) => (1 / (1 - Math.min(r * 0.6, 0.999)) - 1) / 0.6;
 let drag = null;
 chartEl.addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || e.target.closest(".fc-label")) return;
-  cancelAnimationFrame(M.raf);
+  cancelAnimationFrame(M.raf); M.raf = 0; M.V = 0;
   const pxw = G.x(new Date(+G.ref + WEEK)) - G.x(G.ref);
   drag = { id: e.pointerId, x0: e.clientX, T0: M.T, pxw, moved: false, hist: [{ t: e.timeStamp, T: M.T }] };
   hoverAt(e.clientX);
@@ -128,7 +137,7 @@ chartEl.addEventListener("pointermove", (e) => {
   if (drag && e.pointerId === drag.id) {
     const dx = e.clientX - drag.x0;
     if (!drag.moved && Math.abs(dx) < 4) return;
-    if (!drag.moved) { drag.moved = true; M.dragging = true; chartEl.setPointerCapture(e.pointerId); chartEl.style.cursor = "grabbing"; $("hint").style.opacity = 0; }
+    if (!drag.moved) { drag.moved = true; M.dragging = true; try { chartEl.setPointerCapture(e.pointerId); } catch {} chartEl.style.cursor = "grabbing"; $("hint").style.opacity = 0; }
     let T = drag.T0 - dx / drag.pxw;                 // drag right = earlier dates, like moving the page
     if (T < 0) T = -rubber(-T); else if (T > N - 1) T = N - 1 + rubber(T - (N - 1));
     M.T = T; showWeek(clampI(Math.round(T)));
@@ -141,11 +150,11 @@ chartEl.addEventListener("pointermove", (e) => {
 const endDrag = (e) => {
   if (!drag || e.pointerId !== drag.id) return;
   const d = drag; drag = null;
-  if (!d.moved) return;                                // a tap: it already set the hover week
+  if (!d.moved) { if (M.T !== M.target) glideTo(M.target); return; } // a tap: hover is set; finish any move it interrupted
   M.dragging = false; chartEl.style.cursor = "";
   const a = d.hist[0], z = d.hist.at(-1), dt = Math.max(1, z.t - a.t);
   const v = z.t - a.t < 120 ? (z.T - a.T) / dt : 0;     // weeks per ms, only if the pointer was still moving
-  glideTo(Math.round(M.T + v * 120), 200);             // a flick carries ~120ms further, then snaps
+  glideTo(Math.round(M.T + v * 120), { w: 26, v: v * 1000 }); // a flick carries ~120ms further, then snaps with its speed
 };
 // side scroll (trackpad swipe, shift + wheel) scrubs the same way: 1:1 with the scroll, rubber band at
 // the ends, and a snap to the nearest week once the scroll (including the trackpad's own momentum) stops
@@ -156,7 +165,7 @@ view.addEventListener("wheel", (e) => {
   if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || e.target.closest(".c-float")) return; // vertical, or in a menu: not ours
   e.preventDefault();
   if (e.deltaMode === 1) dx *= 16; else if (e.deltaMode === 2) dx *= chartEl.clientWidth;
-  cancelAnimationFrame(M.raf);
+  cancelAnimationFrame(M.raf); M.raf = 0; M.V = 0;
   const pxw = G.x(new Date(+G.ref + WEEK)) - G.x(G.ref);
   // undo the rubber band to get the raw position, add the scroll, re-apply the rubber band
   const raw = M.T < 0 ? -unrubber(-M.T) : M.T > N - 1 ? N - 1 + unrubber(M.T - (N - 1)) : M.T;
@@ -165,7 +174,7 @@ view.addEventListener("wheel", (e) => {
   M.T = T; M.dragging = true; showWeek(clampI(Math.round(T))); $("hint").style.opacity = 0;
   frame();
   clearTimeout(wheelIdle);
-  wheelIdle = setTimeout(() => { M.dragging = false; glideTo(Math.round(M.T), 200); }, 140);
+  wheelIdle = setTimeout(() => { M.dragging = false; glideTo(Math.round(M.T), { w: 26, v: 0 }); }, 140);
 }, { passive: false });
 chartEl.addEventListener("pointerup", endDrag);
 chartEl.addEventListener("pointercancel", endDrag);
