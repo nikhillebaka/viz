@@ -49,6 +49,14 @@ function draw() {
   });
   G = { ...P, compact, w };
   readout();
+  // panned so far that the forecast is off-screen: show which way it is, and bring it back on click
+  const xr = P.x(P.ref), off = xr < 0 ? "left" : xr > w ? "right" : null, rc = $("recenter"), wrap = $("recenter-wrap");
+  if (wrap.hidden !== !off) { wrap.hidden = !off; if (off) requestAnimationFrame(() => rcGlass?.update()); }
+  if (off) {
+    wrap.className = off;
+    rc.querySelector(".arr").textContent = off === "left" ? "←" : "";
+    rc.querySelector(".lb").textContent = `${fmtShort(DATES[nav.week])} forecast${off === "right" ? " →" : ""}`;
+  }
 }
 
 function toggleFocus(m) {
@@ -112,7 +120,7 @@ new Segmented($("c-set"), { label: "Models", value: S.set, glass: GL, items: [{ 
 new Segmented($("c-count"), { label: "Models shown", value: "3", glass: GL, items: [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }], onChange: (v) => { S.count = +v; if (!SETS[S.set].slice(0, S.count).includes(S.focus)) S.focus = null; draw(); } });
 const stepper = new Stepper($("c-date"), { values: DATES, index: DI0, label: "Forecast date", glass: GL, format: { long: fmtLong, short: fmtShort }, onChange: (i) => nav.goTo(i) });
 const zoomSeg = new Segmented($("c-zoom"), { label: "Time span", value: "close", glass: GL, items: [{ value: "close", label: "Forecast" }, { value: "season", label: "Season" }], onChange: (v) => nav.setSeason(v === "season") });
-tooltip($("c-zoom"), "Pinch, or press = and −, to zoom. Double-click the chart to switch.", { placement: "top" });
+tooltip($("c-zoom"), "Pinch or = − to zoom, ⌘ + side scroll to pan. Double-click the chart to switch.", { placement: "top" });
 const nav = new TimeNav({
   surface: chartEl, dates: DATES, index: DI0,
   season: [truth[0].date, new Date(Math.max(+truth.at(-1).date, +DATES.at(-1) + 3 * WEEK))],
@@ -123,6 +131,8 @@ const nav = new TimeNav({
   onZoom: (m) => { if (zoomSeg.value !== m) zoomSeg.set(m, false); },
 });
 window.__nav = nav; // for testing from the console
+$("recenter").addEventListener("click", () => nav.recenter());
+var rcGlass = new LiquidGlass($("recenter"), GL);
 for (const [id, key] of [["c-rulers", "rulers"], ["c-misses", "misses"]]) $(id).addEventListener("click", () => { S[key] = !S[key]; $(id).setAttribute("aria-pressed", S[key]); draw(); });
 
 // the chrome tells the chart how much room it takes, top and bottom

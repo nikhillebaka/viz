@@ -14,8 +14,11 @@
  *  - drag: close up, scrubs T (one week per week-width; drag right for earlier). In Season, places the date
  *    where the pointer is. A tap in Season jumps there.
  *  - side scroll (trackpad, shift + wheel): scrubs T, same as drag.
- *  - pinch (ctrl/⌘ + wheel, Safari gestures), = / - / 0 keys: zoom. Zoom pivots on the forecast, never the
- *    cursor, so the forecast never leaves the screen.
+ *  - pinch (trackpad, Safari gestures), ⌘ + vertical wheel, = / - / 0 keys: zoom. Zoom pivots on the
+ *    forecast, never the cursor (when panned, on the middle of the view).
+ *  - ⌘ + side scroll: pan the view without moving the forecast (P, weeks of camera offset), within the
+ *    season, rubber-banding at its ends. Changing the date with keys or the stepper, going to Season, or
+ *    pressing 0 glides the view back to the forecast; scrubbing keeps the pan.
  *  - double-click: close up → Season; in Season → zoom back in on the date you clicked.
  *  - left / right: step a week (timeKeys).
  * Past the first and last date, and below minSpan, the gesture rubber-bands and springs back. */
@@ -46,6 +49,7 @@ export class TimeNav {
     this.home = o.span ?? 11;
     this.T = this.tT = this.index; this.vT = 0; this.wT = 38;
     this.Z = this.tZ = Math.log(this.home); this.vZ = 0; this.wZ = 30;
+    this.P = this.tP = 0; this.vP = 0; this.wP = 30;          // camera offset from the forecast, in weeks
     this.busy = false; this.raf = 0; this.queued = 0; this.mode = "close";
     this.#bind();
   }
@@ -62,45 +66,59 @@ export class TimeNav {
   domain() {
     const ref = +this.ref, fw = this.forecastWeeks * WEEK;
     const E = Math.min(this.span, this.maxSpan) * WEEK;
-    const close = [ref - (E - fw), ref + fw];
+    const p = this.P * WEEK, close = [ref - (E - fw) + p, ref + fw + p];
     const u = this.mix, s = u * u * (3 - 2 * u);                  // smoothstep: eases in and out of the blend
     return [new Date(close[0] + (this.season[0] - close[0]) * s), new Date(close[1] + (this.season[1] - close[1]) * s)];
   }
 
   /* ---- commands ---- */
-  goTo(i, { w = 38, v = null } = {}) {
+  goTo(i, { w = 38, v = null, recenter = true } = {}) {
     i = Math.max(0, Math.min(this.N - 1, Math.round(i)));
+    if (recenter) this.tP = 0;
     if (i !== this.tT) { this.tT = i; this.onWeek(i); }
     this.wT = w; if (v != null) this.vT = v;
     this.#run();
   }
   step(d) { this.goTo(this.tT + d); }
-  zoomTo(E, { w = 30 } = {}) {
+  zoomTo(E, { w = 30, recenter = false } = {}) {
+    const from = Math.min(this.span, this.maxSpan);
     this.tZ = Math.log(Math.max(this.minSpan, Math.min(this.seasonSpan, E))); this.wZ = w;
+    if (recenter || this.tZ >= Math.log(this.seasonSpan) - 1e-6) this.tP = 0;
+    else if (Math.abs(this.tP) > 1e-3) this.tP += (Math.min(Math.exp(this.tZ), this.maxSpan) - from) / 2; // panned: keep the middle still
     this.#mode(this.tZ >= Math.log(this.seasonSpan) - 1e-6 ? "season" : "close");
     this.#run();
   }
   zoomIn() { this.zoomTo(this.mode === "season" ? this.maxSpan : this.span / 1.25); }
   zoomOut() { this.zoomTo(this.span * 1.25 > this.maxSpan ? this.seasonSpan : this.span * 1.25); }
-  setSeason(on) { this.zoomTo(on ? this.seasonSpan : this.home); }
+  recenter() { this.tP = 0; this.wP = 30; this.#run(); }
+  setSeason(on) { this.zoomTo(on ? this.seasonSpan : this.home, { recenter: true }); }
+  /* how far the view can pan at span E (weeks): its edges stay within the season */
+  panRange(E = Math.min(this.span, this.maxSpan)) {
+    const ref = (+this.dates[0] + this.tT * WEEK), fw = this.forecastWeeks;
+    const lo = (this.season[0] - ref) / WEEK + (E - fw), hi = (this.season[1] - ref) / WEEK - fw;
+    return lo <= hi ? [Math.min(lo, 0), Math.max(hi, 0)] : [0, 0];
+  }
   request() { if (!this.queued) this.queued = requestAnimationFrame(() => { this.queued = 0; this.onFrame(); }); }
 
   /* ---- motion ---- */
   #mode(m) { if (m !== this.mode) { this.mode = m; this.onZoom(m); } }
   #run() {
-    if (reduced.matches) { this.T = this.tT; this.Z = this.tZ; this.vT = this.vZ = 0; this.request(); return; }
+    if (reduced.matches) { this.T = this.tT; this.Z = this.tZ; this.P = this.tP; this.vT = this.vZ = this.vP = 0; this.request(); return; }
     if (this.raf) return;                                        // the running loop picks up new targets
     let last = performance.now();
     const tick = () => {
       const now = performance.now(), dt = Math.min(0.033, Math.max(0.001, (now - last) / 1000)); last = now;
       if (!this.busy) [this.T, this.vT] = spring(this.T, this.vT, this.tT, this.wT, dt);
       if (!this.pinching) [this.Z, this.vZ] = spring(this.Z, this.vZ, this.tZ, this.wZ, dt);
+      if (!this.panning) [this.P, this.vP] = spring(this.P, this.vP, this.tP, this.wP, dt);
       const doneT = this.busy || (Math.abs(this.T - this.tT) < 5e-4 && Math.abs(this.vT) < 0.01);
       const doneZ = this.pinching || (Math.abs(this.Z - this.tZ) < 5e-4 && Math.abs(this.vZ) < 0.01);
       if (doneT && !this.busy) { this.T = this.tT; this.vT = 0; }
       if (doneZ && !this.pinching) { this.Z = this.tZ; this.vZ = 0; }
+      const doneP = this.panning || (Math.abs(this.P - this.tP) < 5e-4 && Math.abs(this.vP) < 0.01);
+      if (doneP && !this.panning) { this.P = this.tP; this.vP = 0; }
       this.onFrame();
-      this.raf = doneT && doneZ ? 0 : requestAnimationFrame(tick);
+      this.raf = doneT && doneZ && doneP ? 0 : requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
   }
@@ -113,12 +131,14 @@ export class TimeNav {
     return Math.max(0, Math.min(this.N - 1, (x.invert(px) - this.dates[0]) / WEEK));
   }
   #setT(T) { this.T = T; const i = Math.max(0, Math.min(this.N - 1, Math.round(T))); if (i !== this.tT) { this.tT = i; this.onWeek(i); } this.request(); }
-  #settleT(v = 0, w = 26) { this.busy = false; this.goTo(Math.round(this.T + v * 0.12), { w, v }); }
+  #settleT(v = 0, w = 26) { this.busy = false; this.goTo(Math.round(this.T + v * 0.12), { w, v, recenter: false }); }
   #settleZ() {
     this.pinching = false;
     const z = this.Z, a = Math.log(this.maxSpan), b = Math.log(this.seasonSpan), lo = Math.log(this.minSpan);
     const target = z < lo ? lo : z > a && z < b ? (z - a > (b - a) * 0.35 ? b : a) : Math.min(z, b);
     this.tZ = target; this.wZ = 26;
+    if (target >= b - 1e-6) this.tP = 0;
+    else { const [p0, p1] = this.panRange(Math.min(Math.exp(target), this.maxSpan)); this.tP = Math.max(p0, Math.min(p1, this.tP)); }
     this.#mode(target >= b - 1e-6 ? "season" : "close");
     this.#run();
   }
@@ -126,9 +146,21 @@ export class TimeNav {
     this.#stop(); this.pinching = true; this.vZ = 0;
     const lo = Math.log(this.minSpan), b = Math.log(this.seasonSpan);
     const raw = (this.Z < lo ? lo - unrubber(lo - this.Z, 4) : this.Z) + Math.log(f);
+    const before = Math.min(this.span, this.maxSpan);
     this.Z = raw < lo ? lo - rubber(lo - raw, 4) : Math.min(raw, b);
+    if (Math.abs(this.P) > 1e-3) { this.P += (Math.min(this.span, this.maxSpan) - before) / 2; this.tP = this.P; } // panned: keep the middle still
     this.request();
     clearTimeout(this.zoomIdle); this.zoomIdle = setTimeout(() => this.#settleZ(), 160);
+  }
+
+  #panBy(weeks) { // 1:1 pan from ⌘ + side scroll, rubber-banding at the season's ends
+    this.#stop(); this.panning = true; this.vP = 0;
+    const [p0, p1] = this.panRange();
+    const raw = (this.P < p0 ? p0 - unrubber(p0 - this.P) : this.P > p1 ? p1 + unrubber(this.P - p1) : this.P) + weeks;
+    this.P = this.tP = raw < p0 ? p0 - rubber(p0 - raw) : raw > p1 ? p1 + rubber(raw - p1) : raw;
+    this.request();
+    clearTimeout(this.panIdle);
+    this.panIdle = setTimeout(() => { this.panning = false; this.tP = Math.max(p0, Math.min(p1, this.P)); this.wP = 26; this.#run(); }, 140);
   }
 
   /* ---- inputs ---- */
@@ -170,7 +202,14 @@ export class TimeNav {
     el.addEventListener("wheel", (e) => {
       if (e.target.closest?.(".c-float")) return;
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1;
-      if (e.ctrlKey || e.metaKey) {                              // pinch, or ⌘/ctrl + wheel
+      if (e.metaKey && !e.ctrlKey && Math.abs(e.deltaX || (e.shiftKey ? e.deltaY : 0)) > Math.abs(e.shiftKey ? 0 : e.deltaY)) {
+        e.preventDefault();                                      // ⌘ + side scroll: pan, the forecast stays put
+        if (this.mix > 0.001) return;                            // Season already shows everything
+        const dx = (e.deltaX || e.deltaY) * unit;
+        this.#panBy(dx / this.#pxPerWeek());
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {                              // pinch (arrives as ctrl + wheel), or ⌘ + wheel
         e.preventDefault();
         const d = Math.max(-25, Math.min(25, e.deltaY * unit)); // a mouse wheel notch is ~100; a pinch is ~1-10
         this.#zoomBy(Math.exp(d * 0.012));
@@ -194,7 +233,7 @@ export class TimeNav {
 
     el.addEventListener("dblclick", (e) => {
       if (this.ignore(e)) return;
-      this.zoomTo(this.mode === "season" ? this.home : this.seasonSpan);
+      this.zoomTo(this.mode === "season" ? this.home : this.seasonSpan, { recenter: true });
     });
 
     timeKeys((d) => this.step(d));
@@ -202,7 +241,7 @@ export class TimeNav {
       if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.("input, textarea, select, [contenteditable], .c-float")) return;
       if (e.key === "=" || e.key === "+") { e.preventDefault(); this.zoomIn(); }
       else if (e.key === "-" || e.key === "_") { e.preventDefault(); this.zoomOut(); }
-      else if (e.key === "0") { e.preventDefault(); this.zoomTo(this.home); }
+      else if (e.key === "0") { e.preventDefault(); this.zoomTo(this.home, { recenter: true }); }
     });
   }
 }

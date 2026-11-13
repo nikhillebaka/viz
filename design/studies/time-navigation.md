@@ -50,6 +50,12 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
   per notch), bare = / - / 0 keys, double-click (close up → Season; in Season, zoom back in on the
   clicked week), and a Forecast / Season control in the bottom-right chrome. Plain vertical wheel
   does nothing. Gestures are 1:1 while held; springs only settle them.
+- **Pan: ⌘ + side scroll** moves the view without moving the forecast (a camera offset in weeks), 1:1
+  with the scroll, within the season, rubber-banding at its ends. Trackpad pinch (which arrives as
+  ctrl + wheel) always zooms; ⌘ + vertical wheel zooms; ⌘ + horizontal pans. While panned, zoom keeps
+  the middle of the view still. Changing the date with keys or the stepper, going to Season, double-
+  clicking or pressing 0 glides the view back to the forecast; scrubbing keeps the pan. When the
+  forecast is off-screen, a "← Dec 27 forecast" pill at that edge points to it and brings it back.
 - **In Season,** the model labels ride at the fan's end, rulers are hidden, and the right margin
   shrinks from 168px to 56px with the blend.
 - Season is where the evaluation window brush should live, so time selection is one concept

@@ -39,6 +39,10 @@ svg { display: block; }
 .readout .obs { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-hairline); color: var(--ink-secondary); display: flex; justify-content: space-between; gap: 12px; }
 .readout .out { display: inline-block; margin-left: 6px; color: var(--ink-tertiary); }
 
+/* shown when the view is panned away from the forecast: points at it, and brings it back */
+#recenter-wrap { position: absolute; z-index: var(--z-chrome); top: 50%; transform: translateY(-50%); }
+#recenter-wrap.left { left: var(--layout-inset-regular); } #recenter-wrap.right { right: var(--layout-inset-regular); }
+#recenter .arr, #recenter .lb { position: relative; z-index: 4; }
 @container view (max-width: 599px) { .hint { display: none; } #c-rulers { padding: 0; width: var(--size-control); justify-content: center; } }
 .hint { position: absolute; left: 50%; transform: translateX(-50%); z-index: var(--z-chrome); top: calc(var(--chrome-top, 70px) + 6px); color: var(--ink-tertiary); font-size: 12px; pointer-events: none; transition: opacity var(--dur-fade) ease; white-space: nowrap; }
 </style>
@@ -47,6 +51,7 @@ svg { display: block; }
 <div id="view" data-view>
   <svg id="chart" role="img" aria-label="Forecast chart with 95% intervals. Left and right arrow keys change the forecast date."></svg>
   <div class="readout" id="readout" hidden></div>
+  <div id="recenter-wrap" hidden><button class="c-pill sm" id="recenter"><span class="arr"></span><span class="lb"></span></button></div>
   <div class="hint" id="hint">Click a model to focus it · drag or ← → to change date · pinch to zoom</div>
 
   <div class="c-chrome" id="chrome">
