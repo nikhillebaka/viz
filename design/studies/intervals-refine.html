@@ -16,7 +16,7 @@ svg { display: block; }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
 #view { position: fixed; inset: 0; overflow: hidden; }
-#chart { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: pan-y; outline: none; }
+#chart { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: pan-y; outline: none; user-select: none; -webkit-user-select: none; }
 .c-pill { text-decoration: none; color: inherit; }
 .c-pill[aria-pressed="true"]::before { background: var(--fill-selected); }
 .c-pill .tick { width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--ink-tertiary); display: inline-grid; place-items: center; position: relative; z-index: 4; flex: none; }

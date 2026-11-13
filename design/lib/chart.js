@@ -39,6 +39,7 @@ export async function loadData(base = "data/") {
 export const seriesVar = (slot) => (slot === "baseline" ? "var(--series-baseline)" : `var(--series-${(slot % 8) + 1})`);
 export const short = (m) => m.replace(/^UMass-/, "");
 const fmtTick = d3.format("~s"), fmtDay = d3.utcFormat("%b %-d");
+const fitCache = new Map();
 
 /* The data cutoff for a reference date: the last observed week before it. */
 export const cutoffFor = (truth, ref) => truth.filter((t) => t.date < ref).at(-1)?.date ?? new Date(+ref - WEEK);
@@ -59,8 +60,25 @@ export function bands(data, models, di, level = 0.95) {
   }).filter(Boolean);
 }
 
+/* Bands at a fractional forecast-date index t (for scrubbing and date transitions). Each model's five
+ * points (anchor + 4 weeks) move point by point from date floor(t) to ceil(t), so the fan slides and
+ * reshapes continuously and its root travels along the observed line. A model with a forecast on only
+ * one side of t is shown as that forecast. */
+export function bandsAt(data, models, t, level = 0.95) {
+  const n = data.DATES.length, i0 = Math.max(0, Math.min(n - 1, Math.floor(t))), i1 = Math.min(n - 1, i0 + 1), u = Math.max(0, Math.min(1, t - i0));
+  if (u < 1e-4 || i0 === i1) return bands(data, models, i0, level);
+  if (u > 1 - 1e-4) return bands(data, models, i1, level);
+  const A = new Map(bands(data, models, i0, level).map((b) => [b.m, b])), Z = new Map(bands(data, models, i1, level).map((b) => [b.m, b]));
+  const L = (a, z) => a + (z - a) * u;
+  return models.map(({ m }) => {
+    const a = A.get(m), z = Z.get(m);
+    if (!a || !z || a.pts.length !== z.pts.length) return a || z || null;
+    return { ...a, pts: a.pts.map((p, k) => { const q = z.pts[k]; return { ...p, date: new Date(L(+p.date, +q.date)), lo: L(p.lo, q.lo), hi: L(p.hi, q.hi), med: L(p.med, q.med) }; }) };
+  }).filter(Boolean);
+}
+
 /* opts:
- *  models [{m, slot}], di, domain, pad, id (glass source id), bg (opaque background, default true)
+ *  models [{m, slot}], di, t (fractional date index; overrides di while scrubbing or animating), domain, pad, id (glass source id), bg (opaque background, default true)
  *  band: interval level (default 0.95; 0 or null for none)
  *  focus: model id or null; onLabel(m): called when a label is clicked (focus is the page's state)
  *  onLabelHover(m | null): mouse preview of focus
@@ -76,16 +94,20 @@ export function fanChart(svgSel, data, opts = {}) {
   const node = svgSel.node();
   const w = opts.w ?? node.clientWidth, h = opts.h ?? node.clientHeight;
   const pad = { l: 56, r: 150, t: 72, b: 64, ...(opts.pad || {}) };
-  const di = opts.di ?? DI0, ref = DATES[di];
+  // t: fractional date index. Integer t is an ordinary forecast date; in between, everything is
+  // interpolated (forecast dates are consecutive weeks).
+  const t = opts.t ?? opts.di ?? DI0, di = Math.round(t), whole = Math.abs(t - di) < 1e-4;
+  const ref = whole ? DATES[di] : new Date(+DATES[0] + t * WEEK);
   const models = opts.models || [];
   const rulerStep = w < 600 ? 11 : 14;
   const rulerW = opts.rulers ? 18 + models.length * rulerStep : 0;
   const x = d3.scaleUtc(opts.domain || [new Date(+ref - 14 * WEEK), new Date(+ref + 3 * WEEK)], [pad.l, w - pad.r - rulerW]);
   const y = d3.scaleLinear([0, opts.ymax ?? YMAX], [h - pad.b, pad.t]).nice(5);
   const ay = h - pad.b;
-  const cutoff = cutoffFor(truth, ref);
-  const B = opts.band === null || opts.band === 0 ? [] : bands(data, models, di, opts.band ?? 0.95);
-  const S = bands(data, models, di, 0.95); // medians are drawn even with no band
+  const cutoff = whole ? cutoffFor(truth, ref) : new Date(+ref - WEEK);
+  const level = opts.band === null || opts.band === 0 ? 0 : opts.band ?? 0.95;
+  const B = level ? bandsAt(data, models, t, level) : [];
+  const S = level === 0.95 ? B : bandsAt(data, models, t, 0.95); // medians are drawn even with no band
   const f = opts.focus, hasFocus = S.some((b) => b.m === f);
   const dim = (m) => hasFocus && m !== f;
 
@@ -123,8 +145,9 @@ export function fanChart(svgSel, data, opts = {}) {
       t.append("tspan").attr("x", xx + dx).attr("y", ay + 20).attr("fill", "var(--ink-tertiary)").text(name);
       t.append("tspan").attr("x", xx + dx).attr("y", ay + 34).attr("fill", "var(--ink-secondary)").attr("font-weight", 500).text(date);
     };
-    tick(xc, "Data cutoff", fmtDay(cutoff), "end", 2);
-    tick(xr, "Reference date", fmtDay(ref), "start", -2);
+    // while between dates, the labels name the week the chart will settle on
+    tick(xc, "Data cutoff", fmtDay(whole ? cutoff : new Date(+DATES[di] - WEEK)), "end", 2);
+    tick(xr, "Reference date", fmtDay(DATES[di]), "start", -2);
   }
 
   // bands: unfocused first so the focused one sits on top
@@ -146,20 +169,25 @@ export function fanChart(svgSel, data, opts = {}) {
   }
 
   // observed: whole season, solid through the cutoff, dotted after
-  const known = truth.filter((t) => t.date <= cutoff), after = truth.filter((t) => t.date >= cutoff);
+  // split the observed line exactly at the cutoff (between weeks while scrubbing)
+  let known = truth.filter((d) => d.date <= cutoff), after = truth.filter((d) => d.date >= cutoff);
+  if (!whole) {
+    const a = known.at(-1), z = after[0];
+    if (a && z) { const cut = { date: cutoff, v: a.v + (z.v - a.v) * ((cutoff - a.date) / (z.date - a.date)), cut: true }; known = [...known, cut]; after = [cut, ...after]; }
+  }
   const tl = d3.line().x((d) => x(d.date)).y((d) => y(d.v));
   const og = g.append("g").attr("clip-path", clip);
   og.append("path").attr("d", tl(after)).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.75).attr("stroke-linecap", "round").attr("stroke-dasharray", "0 4.5");
   og.append("path").attr("d", tl(known)).attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5).attr("stroke-linejoin", "round");
-  og.append("g").selectAll("circle").data(known.filter((d) => x(d.date) > -10)).join("circle").attr("r", 2.9).attr("cx", (d) => x(d.date)).attr("cy", (d) => y(d.v))
+  og.append("g").selectAll("circle").data(known.filter((d) => !d.cut && x(d.date) > -10)).join("circle").attr("r", 2.9).attr("cx", (d) => x(d.date)).attr("cy", (d) => y(d.v))
     .attr("fill", "var(--ink-primary)").attr("stroke", "var(--surface-chart)").attr("stroke-width", 1.5);
-  const scored = after.filter((d) => d.date >= ref && d.date <= new Date(+ref + 3 * WEEK));
+  const scored = after.filter((d) => !d.cut && d.date > cutoff && d.date >= ref && d.date <= new Date(+ref + 3 * WEEK));
   og.append("g").selectAll("circle").data(scored).join("circle").attr("r", 2.9).attr("cx", (d) => x(d.date)).attr("cy", (d) => y(d.v))
     .attr("fill", "var(--surface-chart)").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5);
 
   // misses: observed weeks outside the focused (or only) model's interval
   const mm = hasFocus ? B.find((b) => b.m === f) : B.length === 1 ? B[0] : null;
-  if (opts.misses && mm) {
+  if (opts.misses && mm && whole) {
     const tv = new Map(truth.map((t) => [+t.date, t.v]));
     const miss = mm.pts.filter((p) => !p.anchor && tv.has(+p.date)).map((p) => ({ p, v: tv.get(+p.date) })).filter((d) => d.v < d.p.lo || d.v > d.p.hi);
     g.append("g").selectAll("circle").data(miss).join("circle").attr("r", 6).attr("cx", (d) => x(d.p.date)).attr("cy", (d) => y(d.v)).attr("fill", "none").attr("stroke", mm.c).attr("stroke-width", 1.25);
@@ -209,11 +237,19 @@ export function fanChart(svgSel, data, opts = {}) {
       .text((d) => short(d.s.m))
       // never let a label run off the chart: shorten it with an ellipsis, full name in a <title>
       .each(function (d) {
-        const room = w - d.x - 10 - 8, full = this.textContent;
-        if (this.getComputedTextLength() > room) {
-          let s = full;
-          while (s.length > 2 && this.getComputedTextLength() > room) { s = s.slice(0, -1); this.textContent = s.trimEnd() + "…"; }
+        // measuring text forces layout, so remember the result per name and width: scrubbing redraws
+        // every frame and labels rarely change
+        const room = Math.round(w - d.x - 10 - 8), full = this.textContent, key = `${full}|${room}|${this.getAttribute("font-weight") || ""}`;
+        let fit = fitCache.get(key);
+        if (fit === undefined) {
+          fit = full;
+          if (this.getComputedTextLength() > room) {
+            let s = full;
+            while (s.length > 2 && this.getComputedTextLength() > room) { s = s.slice(0, -1); this.textContent = fit = s.trimEnd() + "…"; }
+          }
+          fitCache.set(key, fit);
         }
+        this.textContent = fit;
         d3.select(this).append("title").text(full);
       });
   }
