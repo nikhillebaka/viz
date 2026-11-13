@@ -103,6 +103,9 @@ svg { display: block; }
 .pk-row.sel .pk-check svg { opacity: 1; transform: none; }
 .pk-foot { padding: 8px 10px 2px; color: var(--ink-tertiary); font-size: 12px; }
 
+/* benchmark only: glass without refraction, to measure what refraction costs */
+#view.no-glass .lg-refr { display: none !important; }
+
 /* shown when the view is panned away from the forecast: points at it, and brings it back */
 #recenter-wrap { position: absolute; z-index: var(--z-chrome); top: 50%; transform: translateY(-50%); }
 #recenter-wrap.left { left: var(--layout-inset-regular); } #recenter-wrap.right { right: var(--layout-inset-regular); }

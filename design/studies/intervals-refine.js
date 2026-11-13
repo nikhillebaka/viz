@@ -336,7 +336,7 @@ const nav = new TimeNav({
   onFrame: draw,
   onWeek: (i) => { S.di = i; stepper.show(i); $("hint").style.opacity = 0; },
 });
-window.__nav = nav; // for testing from the console
+window.__nav = nav; window.__sel = sel; window.__draw = () => draw(); window.__models = ALL; // for tests and benchmarks from the console
 $("recenter").addEventListener("click", () => nav.recenter());
 var rcGlass = new LiquidGlass($("recenter"), GL);
 for (const [id, key] of [["c-rulers", "rulers"], ["c-misses", "misses"]]) $(id).addEventListener("click", () => { S[key] = !S[key]; $(id).setAttribute("aria-pressed", S[key]); key === "rulers" ? animateRulers() : draw(); });

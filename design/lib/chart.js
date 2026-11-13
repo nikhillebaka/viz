@@ -45,36 +45,51 @@ const fitCache = new Map();
 export const cutoffFor = (truth, ref) => truth.filter((t) => t.date < ref).at(-1)?.date ?? new Date(+ref - WEEK);
 
 /* Per-model interval geometry for a forecast date, anchored at the cutoff. */
-export function bands(data, models, di, level = 0.95) {
-  const { DATES, Q, MED, truth, fcPts } = data;
-  const qi = (q) => d3.minIndex(Q, (v) => Math.abs(v - q));
-  const LO = qi((1 - level) / 2), HI = qi(1 - (1 - level) / 2);
-  const ref = DATES[di], cutoff = cutoffFor(truth, ref);
-  const anchor = truth.find((t) => +t.date === +cutoff);
-  return models.map(({ m, slot }) => {
-    const raw = fcPts(m, di);
-    if (!raw) return null;
-    const pts = raw.map((p) => ({ date: p.date, h: p.h, lo: p.a[LO], hi: p.a[HI], med: p.a[MED] }));
-    if (anchor) pts.unshift({ date: anchor.date, h: -1, lo: anchor.v, hi: anchor.v, med: anchor.v, anchor: true });
-    return { m, slot, c: seriesVar(slot), pts };
-  }).filter(Boolean);
+/* Interval points for one model on one forecast date: the anchor (the last observed week) and each forecast
+ * week, as { date (ms), h, lo, hi, med }. Computed once per model, date and level, then reused: a frame
+ * on a whole week allocates nothing, and the arrays are never mutated (treat them as read-only). */
+function pointsFor(data, m, di, level) {
+  const cache = (data._pts ||= new Map()), key = `${m}|${di}|${level}`;
+  let pts = cache.get(key);
+  if (pts !== undefined) return pts;
+  const { DATES, Q, MED, truth, FC, D } = data;
+  const qs = (data._qi ||= new Map());
+  if (!qs.has(level)) { const qi = (q) => d3.minIndex(Q, (v) => Math.abs(v - q)); qs.set(level, [qi((1 - level) / 2), qi(1 - (1 - level) / 2)]); }
+  const [LO, HI] = qs.get(level);
+  const arr = FC[m]?.[D.dates[di]];
+  if (!arr) { cache.set(key, null); return null; }
+  const anchors = (data._anchor ||= DATES.map((ref) => { const c = cutoffFor(truth, ref); return truth.find((t) => +t.date === +c) || null; }));
+  const ref = +DATES[di], anchor = anchors[di];
+  pts = [];
+  if (anchor) pts.push({ date: +anchor.date, h: -1, lo: anchor.v, hi: anchor.v, med: anchor.v, anchor: true });
+  arr.forEach((a, h) => { if (a) pts.push({ date: ref + h * WEEK, h, lo: a[LO], hi: a[HI], med: a[MED] }); });
+  cache.set(key, pts);
+  return pts;
 }
 
-/* Bands at a fractional forecast-date index t (for scrubbing and date transitions). Each model's five
- * points (anchor + 4 weeks) move point by point from date floor(t) to ceil(t), so the fan slides and
- * reshapes continuously and its root travels along the observed line. A model with a forecast on only
- * one side of t is shown as that forecast. */
+export function bands(data, models, di, level = 0.95) {
+  const out = [];
+  for (const { m, slot } of models) { const pts = pointsFor(data, m, di, level); if (pts) out.push({ m, slot, c: seriesVar(slot), pts }); }
+  return out;
+}
 export function bandsAt(data, models, t, level = 0.95) {
   const n = data.DATES.length, i0 = Math.max(0, Math.min(n - 1, Math.floor(t))), i1 = Math.min(n - 1, i0 + 1), u = Math.max(0, Math.min(1, t - i0));
   if (u < 1e-4 || i0 === i1) return bands(data, models, i0, level);
   if (u > 1 - 1e-4) return bands(data, models, i1, level);
-  const A = new Map(bands(data, models, i0, level).map((b) => [b.m, b])), Z = new Map(bands(data, models, i1, level).map((b) => [b.m, b]));
-  const L = (a, z) => a + (z - a) * u;
-  return models.map(({ m }) => {
-    const a = A.get(m), z = Z.get(m);
-    if (!a || !z || a.pts.length !== z.pts.length) return a || z || null;
-    return { ...a, pts: a.pts.map((p, k) => { const q = z.pts[k]; return { ...p, date: new Date(L(+p.date, +q.date)), lo: L(p.lo, q.lo), hi: L(p.hi, q.hi), med: L(p.med, q.med) }; }) };
-  }).filter(Boolean);
+  const out = [];
+  for (const { m, slot } of models) {
+    const a = pointsFor(data, m, i0, level), z = pointsFor(data, m, i1, level);
+    const one = a || z;
+    if (!one) continue;
+    if (!a || !z || a.length !== z.length) { out.push({ m, slot, c: seriesVar(slot), pts: one }); continue; }
+    const pts = new Array(a.length);
+    for (let k = 0; k < a.length; k++) {
+      const p = a[k], q = z[k];
+      pts[k] = { date: p.date + (q.date - p.date) * u, h: p.h, lo: p.lo + (q.lo - p.lo) * u, hi: p.hi + (q.hi - p.hi) * u, med: p.med + (q.med - p.med) * u, anchor: p.anchor };
+    }
+    out.push({ m, slot, c: seriesVar(slot), pts });
+  }
+  return out;
 }
 
 /* opts:
