@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>viz components</title>
+<link rel="stylesheet" href="tokens/tokens.css">
+<link rel="stylesheet" href="lib/glass.css">
+<link rel="stylesheet" href="lib/controls.css">
+<style>
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--surface-page); color: var(--ink-primary); font-family: var(--font-sans); font-size: 14px; line-height: 21px; -webkit-font-smoothing: antialiased; }
+svg { display: block; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+a { color: inherit; }
+
+/* page chrome (same as Foundations) */
+.topbar { position: fixed; z-index: 50; top: var(--space-16); left: var(--space-16); right: var(--space-16); display: flex; justify-content: space-between; gap: var(--space-8); pointer-events: none; }
+.topbar > * { pointer-events: auto; }
+.brand { text-decoration: none; }
+.brand b { font-weight: 600; } .brand .dim { color: var(--ink-tertiary); }
+.nav { display: flex; gap: 2px; padding: 3px; height: var(--size-control); border-radius: var(--radius-pill); overflow-x: auto; scrollbar-width: none; }
+.nav a { position: relative; z-index: 4; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: var(--radius-pill); color: var(--ink-secondary); text-decoration: none; white-space: nowrap; font-size: 13px; font-weight: 500; transition: background var(--dur-fade) ease, color var(--dur-fade) ease; }
+.nav a:hover { color: var(--ink-primary); }
+.nav a.on { background: var(--fill-selected); color: var(--ink-primary); }
+.nav .sep { width: 1px; margin: 8px 4px; background: var(--line-axis); position: relative; z-index: 4; }
+
+main { max-width: 1120px; margin: 0 auto; padding: 0 var(--space-24) 160px; }
+.hero { padding: 168px 0 48px; max-width: 760px; }
+.hero p { color: var(--ink-secondary); margin: var(--space-16) 0 0; max-width: 640px; }
+section { padding-top: 96px; scroll-margin-top: 40px; }
+.sh { margin-bottom: var(--space-24); max-width: 700px; }
+.sh .t-label-section { color: var(--ink-tertiary); display: block; margin-bottom: var(--space-8); }
+.sh h2 { margin: 0; font-weight: inherit; }
+.sh p { color: var(--ink-secondary); margin: var(--space-12) 0 0; }
+h3 { margin: var(--space-32) 0 var(--space-12); font-weight: inherit; }
+
+.stage { position: relative; height: 320px; border-radius: var(--radius-card); background: var(--surface-chart); overflow: hidden; isolation: isolate; box-shadow: inset 0 0 0 1px var(--line-hairline); }
+.stage > svg.chart { position: absolute; inset: 0; width: 100%; height: 100%; }
+.stage .center { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: var(--space-12); flex-wrap: wrap; padding: var(--space-24); z-index: var(--z-chrome); pointer-events: none; }
+.stage .center > * { pointer-events: auto; }
+.row2 { display: grid; grid-template-columns: 2fr 1fr; gap: var(--space-16); }
+
+.specs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--space-12) var(--space-40); margin-top: var(--space-24); }
+.specs div { color: var(--ink-secondary); }
+.specs b { color: var(--ink-primary); font-weight: 500; display: block; }
+kbd.k { font: 500 11px var(--font-mono); color: var(--ink-secondary); padding: 1px 6px; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--line-axis); }
+
+.states { display: flex; flex-wrap: wrap; gap: var(--space-24) var(--space-20); align-items: flex-end; }
+.states figure { margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.states figcaption { color: var(--ink-tertiary); }
+
+/* placement demo */
+.frame-bar { display: flex; align-items: center; gap: var(--space-16); margin-bottom: var(--space-12); flex-wrap: wrap; }
+.frame-bar .readout { color: var(--ink-tertiary); }
+.frame-wrap { display: flex; justify-content: center; }
+.frame { position: relative; width: 100%; max-width: 100%; transition: width var(--dur-spring-soft) var(--ease-spring-soft); }
+.frame.dragging { transition: none; }
+.frame .stage { height: 640px; }
+.frame-handle { position: absolute; top: 50%; right: -14px; width: 10px; height: 64px; margin-top: -32px; border-radius: 5px; background: var(--fill-selected); cursor: ew-resize; touch-action: none; }
+.frame-handle:hover, .frame.dragging .frame-handle { background: var(--ink-faint); }
+.frame-handle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.rules { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--space-16) var(--space-40); margin-top: var(--space-32); }
+.rules div { display: grid; grid-template-columns: 28px 1fr; gap: var(--space-8); color: var(--ink-secondary); }
+.rules .z { font: 600 11px var(--font-mono); color: var(--ink-tertiary); padding-top: 2px; }
+.rules b { color: var(--ink-primary); font-weight: 500; }
+.legend-zones { position: absolute; inset: 0; pointer-events: none; z-index: 1; display: none; }
+.show-zones .legend-zones { display: block; }
+.show-zones .c-zone { outline: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 3px; border-radius: 6px; }
+
+.model-list { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow: auto; }
+.model-row { display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; border-radius: 9px; cursor: pointer; color: var(--ink-secondary); font-size: 13px; font-weight: 500; border: 0; background: none; text-align: left; font-family: inherit; }
+.model-row:hover, .model-row:focus-visible { background: var(--fill-selected); color: var(--ink-primary); outline: none; }
+.model-row i { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--ink-tertiary); }
+.model-row[aria-checked="true"] { color: var(--ink-primary); }
+.model-row[aria-checked="true"] i { box-shadow: none; background: var(--c); }
+.model-row .v { font: 12px var(--font-mono); color: var(--ink-tertiary); }
+.pop-search { display: flex; align-items: center; gap: 8px; height: 34px; margin: 0 4px 6px; padding: 0 10px; border-radius: var(--radius-field); background: var(--fill-field); }
+.pop-search svg { width: 14px; height: 14px; color: var(--ink-tertiary); }
+.pop-search input { flex: 1; border: 0; outline: 0; background: none; color: var(--ink-primary); font: 14px var(--font-sans); min-width: 0; }
+.pop-note { padding: 6px 10px 2px; color: var(--ink-tertiary); }
+
+@media (max-width: 760px) {
+  .nav a:not(.page) { display: none; }
+  .row2 { grid-template-columns: 1fr; }
+  .frame .stage { height: 560px; }
+  .hero { padding-top: 120px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <a class="c-pill brand" id="brand" href="index.html"><b>viz</b><span class="dim">design system</span></a>
+  <nav class="nav" id="nav" aria-label="Sections">
+    <a class="page" href="index.html">Foundations</a><a class="page on" href="components.html" aria-current="page">Components</a><span class="sep"></span>
+    <a href="#placement">Placement</a><a href="#pill">Pill</a><a href="#segmented">Segmented</a><a href="#stepper">Stepper</a><a href="#search">Search</a><a href="#menu">Menu</a><a href="#popover">Popover</a><a href="#tooltip">Tooltip</a><a href="#status">Status</a>
+  </nav>
+  <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
+</div>
+
+<main>
+  <header class="hero">
+    <h1 class="t-display-lg" style="margin:0">Components</h1>
+    <p class="t-body">The core controls everything else is built from. Each one adapts to the size of the view it's in, works by mouse, touch and keyboard, and uses liquid glass only where it floats over the chart. All of them live in <span class="mono">lib/controls.js</span>.</p>
+  </header>
+
+  <section id="placement">
+    <div class="sh"><span class="t-label-section">01</span><h2 class="t-title-1">Placement and sizes</h2>
+      <p class="t-body">Controls float in six zones around the edge of the view, so the data keeps the middle. The layout adapts to the view's width, not the window's: switch sizes or drag the edge to watch controls collapse into icons and menus. The chart also moves its margins out from under the controls, so nothing important is ever hidden.</p></div>
+    <div class="frame-bar">
+      <div id="frame-seg"></div>
+      <span class="readout t-numeric-value" id="frame-readout"></span>
+      <label class="t-small" style="display:flex;gap:6px;align-items:center;color:var(--ink-secondary);margin-left:auto"><input type="checkbox" id="show-zones"> Show zones</label>
+    </div>
+    <div class="frame-wrap"><div class="frame" id="frame">
+      <div class="stage" id="demo" data-view>
+        <svg class="chart" id="demo-chart"></svg>
+        <div class="c-chrome" id="demo-chrome">
+          <div class="c-zone" data-zone="tl">
+            <button class="c-pill" id="d-loc" aria-haspopup="menu" style="--pill-max:200px"><span class="label">United States</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+            <div id="d-view"></div>
+          </div>
+          <div class="c-zone" data-zone="tc"><div id="d-island" tabindex="0"></div></div>
+          <div class="c-zone" data-zone="tr">
+            <div id="d-search"></div>
+            <button class="c-pill icon" id="d-share" aria-label="Share this view" data-compact-hide><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3M7.5 7.5L12 3l4.5 4.5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg></button>
+            <button class="c-pill icon" id="d-more" aria-label="More" aria-haspopup="menu" data-compact-show><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+          </div>
+          <div class="c-zone" data-zone="bl"><button class="c-pill" id="d-models" aria-haspopup="dialog" data-collapse="label"><span class="dots" id="d-dots"></span><span class="label" id="d-models-label">3 models</span></button></div>
+          <div class="c-zone" data-zone="bc"><div id="d-stepper"></div></div>
+          <div class="c-zone" data-zone="br"><button class="c-pill" id="d-band" aria-haspopup="menu" data-collapse><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 15c4-1 6-6 9-6s5 3 9 2"/><path d="M3 19c4-.5 6-4 9-4s5 2 9 1.5" opacity=".5"/><path d="M3 11c4-1.5 6-8 9-8s5 4 9 2.5" opacity=".5"/></svg><span class="label" id="d-band-label">80% interval</span></button></div>
+        </div>
+      </div>
+      <button class="frame-handle" id="frame-handle" aria-label="Resize the demo view. Use left and right arrow keys."></button>
+    </div></div>
+    <div class="rules t-body">
+      <div><span class="z">TL</span><span><b>Where you are</b>: location and view. The view switch collapses into a menu when there's no room.</span></div>
+      <div><span class="z">TC</span><span><b>What's happening</b>: the status island. On phones it drops to its own row so it never collides.</span></div>
+      <div><span class="z">TR</span><span><b>Global actions</b>: search, share, appearance. On phones, search becomes an icon and the rest move into a More menu.</span></div>
+      <div><span class="z">BL</span><span><b>What you're comparing</b>: the model picker. On phones it shows just the model colors.</span></div>
+      <div><span class="z">BC</span><span><b>When</b>: the date stepper, always centered and in reach of a thumb. The date shortens on phones.</span></div>
+      <div><span class="z">BR</span><span><b>How it's drawn</b>: display options like the interval. Collapses to its icon on phones.</span></div>
+    </div>
+    <div class="specs t-body">
+      <div><b>Size classes come from the view</b>Compact under 600px, regular to 1024px, wide above, measured on the view with container queries, so a split view or embed behaves like the device it resembles.</div>
+      <div><b>Edges and safe areas</b>16px from the edge (12px on compact), plus the device's safe area so nothing sits under a notch or home indicator.</div>
+      <div><b>The chart steps aside</b>The chrome reports how much room it takes at the top and bottom, and the chart sets its margins from that.</div>
+      <div><b>Touch targets</b>On touch screens every control grows to at least 44px, whatever the size class.</div>
+      <div><b>Menus become sheets</b>On compact views, menus and popovers open as bottom sheets you can drag down to dismiss.</div>
+      <div><b>One layer at a time</b>Opening a menu or popover closes any other. Layers stack in a fixed order: chrome, popover, sheet, toast, tooltip.</div>
+    </div>
+  </section>
+
+  <section id="pill">
+    <div class="sh"><span class="t-label-section">02</span><h2 class="t-title-1">Pill</h2><p class="t-body">The base control: a capsule of liquid glass holding a label, an icon, or both. Every other floating control is built on it.</p></div>
+    <div class="stage" id="pill-stage" data-view style="height:260px"><svg class="chart" id="pill-chart"></svg>
+      <div class="center states" id="pill-states"></div>
+    </div>
+    <div class="specs t-body">
+      <div><b>Three sizes</b>30, 38 (default) and 44px tall. Use 44 for primary controls; on touch screens everything is at least 44.</div>
+      <div><b>States</b>Hover brightens, press shrinks slightly with a spring, selected holds a soft fill, disabled fades to 38% and ignores input.</div>
+      <div><b>Long labels truncate</b>with an ellipsis at a set maximum width, never wrap. The full text stays available to screen readers.</div>
+      <div><b>Collapsing</b>A pill marked to collapse shows only its icon on compact views, and keeps its label as an accessible name.</div>
+    </div>
+  </section>
+
+  <section id="segmented">
+    <div class="sh"><span class="t-label-section">03</span><h2 class="t-title-1">Segmented control</h2><p class="t-body">Picks one of a few options. The highlight slides with a spring. When the control no longer fits the room it has, it turns into a pill with a menu automatically.</p></div>
+    <div class="row2">
+      <div class="stage" id="seg-stage" data-view style="height:200px"><svg class="chart" id="seg-chart"></svg><div class="center"><div id="seg-a"></div></div></div>
+      <div class="stage" id="seg-stage2" data-view style="height:200px"><svg class="chart" id="seg-chart2"></svg><div class="center"><div style="width:150px;display:flex;justify-content:center"><div id="seg-b"></div></div></div></div>
+    </div>
+    <div class="specs t-body">
+      <div><b>Keyboard</b><kbd class="k">Tab</kbd> enters at the selected option, <kbd class="k">←</kbd> <kbd class="k">→</kbd> move the selection, <kbd class="k">Home</kbd> <kbd class="k">End</kbd> jump to the ends.</div>
+      <div><b>Collapses when it doesn't fit</b>It measures itself against the space its zone has left. Right: the same control in a narrow spot becomes a pill and menu.</div>
+      <div><b>Two to five options</b>Short labels. More than five, or labels that need explaining, belong in a menu.</div>
+    </div>
+  </section>
+
+  <section id="stepper">
+    <div class="sh"><span class="t-label-section">04</span><h2 class="t-title-1">Date stepper</h2><p class="t-body">Moves the forecast date one week at a time. It pairs with dragging the reference line on the chart itself.</p></div>
+    <div class="stage" id="step-stage" data-view style="height:320px"><svg class="chart" id="step-chart"></svg><div class="c-chrome"><div class="c-zone" data-zone="bc"><div id="step-a"></div></div></div></div>
+    <div class="specs t-body">
+      <div><b>Steady width</b>The label is as wide as the widest date, so the arrows never shift under your finger as the date changes.</div>
+      <div><b>Hold to repeat</b>Press and hold an arrow: after 400ms it repeats, speeding up. At the first or last date it nudges instead of moving.</div>
+      <div><b>Jump anywhere</b>Click the date for a menu of every forecast date, opening at the current one.</div>
+      <div><b>Keyboard</b><kbd class="k">←</kbd> <kbd class="k">→</kbd> step, <kbd class="k">Home</kbd> <kbd class="k">End</kbd> go to the first or last date. Changes are announced to screen readers.</div>
+      <div><b>Compact</b>The date drops the year on narrow views, for example "Dec 27".</div>
+    </div>
+  </section>
+
+  <section id="search">
+    <div class="sh"><span class="t-label-section">05</span><h2 class="t-title-1">Search</h2><p class="t-body">One field for locations and models. Press <kbd class="k">/</kbd> or <kbd class="k">⌘K</kbd> from anywhere on the page to jump to it.</p></div>
+    <div class="stage" id="search-stage" data-view style="height:420px"><svg class="chart" id="search-chart"></svg><div class="c-chrome"><div class="c-zone" data-zone="tr"><div id="search-a"></div></div></div></div>
+    <div class="specs t-body">
+      <div><b>Results as you type</b>Grouped into locations and models, with the matching part of each name in bold.</div>
+      <div><b>Keyboard</b><kbd class="k">↑</kbd> <kbd class="k">↓</kbd> move through results, <kbd class="k">Enter</kbd> picks, <kbd class="k">Esc</kbd> clears, then closes. Focus never leaves the field.</div>
+      <div><b>Compact</b>Shows as an icon; tapping it expands the field across the top of the view.</div>
+    </div>
+  </section>
+
+  <section id="menu">
+    <div class="sh"><span class="t-label-section">06</span><h2 class="t-title-1">Menu</h2><p class="t-body">A short list of choices or actions in frosted glass. It opens from its control and always stays on screen: try the controls near each corner.</p></div>
+    <div class="stage" id="menu-stage" data-view style="height:380px"><svg class="chart" id="menu-chart"></svg>
+      <div class="c-chrome">
+        <div class="c-zone" data-zone="tl"><button class="c-pill" id="m-tl" aria-haspopup="menu">Interval<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button></div>
+        <div class="c-zone" data-zone="br"><button class="c-pill" id="m-br" aria-haspopup="menu">Actions<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button></div>
+      </div>
+    </div>
+    <div class="specs t-body">
+      <div><b>Stays on screen</b>Opens below its control, flips above when there isn't room, slides sideways at the edges, and scrolls when long.</div>
+      <div><b>Keyboard</b>Focus moves into the menu. <kbd class="k">↑</kbd> <kbd class="k">↓</kbd>, <kbd class="k">Home</kbd> <kbd class="k">End</kbd>, or type a letter to jump; <kbd class="k">Enter</kbd> picks; <kbd class="k">Esc</kbd> closes and returns focus.</div>
+      <div><b>Choices and actions</b>Choice menus show a check on the current option. Destructive actions are red and sit last.</div>
+      <div><b>Compact</b>Opens as a bottom sheet with larger rows; drag it down or tap outside to dismiss.</div>
+    </div>
+  </section>
+
+  <section id="popover">
+    <div class="sh"><span class="t-label-section">07</span><h2 class="t-title-1">Popover</h2><p class="t-body">For richer choices like the model picker. The pill grows into the panel and shrinks back, so it's always clear where it came from.</p></div>
+    <div class="stage" id="pop-stage" data-view style="height:460px"><svg class="chart" id="pop-chart"></svg><div class="c-chrome"><div class="c-zone" data-zone="tl"><button class="c-pill" id="pop-a" aria-haspopup="dialog"><span class="dots" id="pop-dots"></span><span class="label" id="pop-label">3 models</span></button></div></div></div>
+    <div class="specs t-body">
+      <div><b>Grows from its control</b>The pill becomes the panel and returns to it on close. With reduced motion, it simply appears.</div>
+      <div><b>Focus stays inside</b>Focus moves into the popover and <kbd class="k">Tab</kbd> cycles within it; <kbd class="k">Esc</kbd> or a click outside closes it and returns focus to the pill.</div>
+      <div><b>Frosted, not liquid</b>Panels hold text, so they use the frosted glass and never flip text color.</div>
+      <div><b>Compact</b>Becomes a bottom sheet with a title and drag handle.</div>
+    </div>
+  </section>
+
+  <section id="tooltip">
+    <div class="sh"><span class="t-label-section">08</span><h2 class="t-title-1">Tooltip and value tag</h2><p class="t-body">Tooltips name icon-only controls. Value tags write exact numbers onto the chart, next to the data they describe.</p></div>
+    <div class="stage" id="tip-stage" data-view style="height:300px"><svg class="chart" id="tip-chart"></svg>
+      <div class="c-chrome"><div class="c-zone" data-zone="tr" id="tip-zone"></div></div>
+      <div id="tip-tags"></div>
+    </div>
+    <div class="specs t-body">
+      <div><b>Tooltips</b>Appear after 500ms of hover, at once on keyboard focus, and instantly when moving between controls. Never on touch: those controls need a visible label instead.</div>
+      <div><b>Solid, not glass</b>Tooltips usually sit over glass, and glass never sits on glass.</div>
+      <div><b>Value tags</b>Monospace numbers on a translucent chart-colored backing, median first and the interval in a quieter tone.</div>
+    </div>
+  </section>
+
+  <section id="status">
+    <div class="sh"><span class="t-label-section">09</span><h2 class="t-title-1">Status island and toast</h2><p class="t-body">The island is the one place background work shows up. Toasts confirm something you just did.</p></div>
+    <div class="stage" id="st-stage" data-view style="height:360px"><svg class="chart" id="st-chart"></svg>
+      <div class="c-chrome" id="st-chrome">
+        <div class="c-zone" data-zone="tc"><div id="st-island"></div></div>
+        <div class="c-zone" data-zone="bc"><button class="c-pill" id="st-sync">Sync hub</button><button class="c-pill" id="st-fail">Fail a sync</button><button class="c-pill" id="st-toast">Copy link</button></div>
+      </div>
+    </div>
+    <div class="specs t-body">
+      <div><b>Island</b>Grows with a spring to show progress, then settles back. Errors stay until you act. Changes are announced to screen readers without stealing focus.</div>
+      <div><b>Toast</b>Appears above the bottom controls, stays 3.2 seconds, pauses while you hover or focus it, and can carry one action like Undo.</div>
+      <div><b>Restraint</b>At most three toasts at once. Never use a toast for an error that needs fixing; that belongs in the island or next to the thing that failed.</div>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script type="module" src="components.js"></script>
+</body>
+</html>

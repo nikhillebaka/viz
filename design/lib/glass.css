@@ -1,0 +1,53 @@
+/* Liquid glass surface. Pair with lib/glass.js. Uses tokens.css. */
+.lg {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  color: var(--ink-primary);
+  box-shadow: var(--glass-shadow);
+  text-shadow: var(--glass-text-shadow);
+  transition: color 240ms ease, text-shadow 240ms ease;
+}
+/* edge: a hairline, a soft inner glow, and depth at the bottom */
+.lg::after {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 3;
+  box-shadow:
+    inset 0 0 0 var(--stroke-glass) var(--glass-stroke),
+    inset 0 1.5px 1px var(--glass-highlight),
+    inset 0 -1.5px 2px var(--glass-shade),
+    inset 0 0 14px rgba(255, 255, 255, 0.04);
+}
+.lg > .lg-layer { position: absolute; pointer-events: none; }
+.lg > .lg-refr { left: 0; top: 0; z-index: 0; margin: 0 !important; padding: 0 !important; opacity: 1 !important; max-width: none !important; max-height: none !important; transform-origin: 0 0; }
+.lg > .lg-tint { inset: 0; z-index: 1; background: var(--glass-tint); transition: background-color 240ms ease; }
+/* extra tint over busy content; strength set by glass.js */
+.lg > .lg-veil { inset: 0; z-index: 1; background: var(--glass-tint); opacity: var(--lg-veil, 0); transition: opacity 320ms ease, background-color 240ms ease; }
+.lg--frost > .lg-veil { background: var(--glass-frost); }
+.lg > .lg-spec {
+  inset: 0; z-index: 2; border-radius: inherit;
+  background: radial-gradient(120px 50px at var(--lg-mx, 30%) var(--lg-my, 0%), rgba(255, 255, 255, 0.06), transparent 70%);
+  mix-blend-mode: plus-lighter;
+}
+/* rim light from the top-left, catching the opposite edge faintly */
+.lg > .lg-rim {
+  inset: 0; z-index: 3; border-radius: inherit; padding: 1.25px;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.06) 32%, rgba(255, 255, 255, 0) 52%, rgba(255, 255, 255, 0.03) 78%, rgba(255, 255, 255, 0.14));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  mix-blend-mode: plus-lighter;
+}
+:root[data-theme="light"] .lg > .lg-rim { mix-blend-mode: normal; background: linear-gradient(135deg, rgba(255, 255, 255, 1), rgba(255, 255, 255, 0.4) 32%, rgba(255, 255, 255, 0) 52%, rgba(255, 255, 255, 0.2) 78%, rgba(255, 255, 255, 0.85)); }
+:root[data-theme="light"] .lg > .lg-spec { mix-blend-mode: normal; background: radial-gradient(120px 50px at var(--lg-mx, 30%) var(--lg-my, 0%), rgba(255, 255, 255, 0.16), transparent 70%); }
+.lg > :not(.lg-layer) { position: relative; z-index: 4; }
+
+/* frosted: panels with text, other browsers, reduced transparency */
+.lg--frost {
+  -webkit-backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
+  backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
+}
+.lg--frost > .lg-tint { background: var(--glass-frost); }

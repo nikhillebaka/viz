@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>viz design system</title>
+<link rel="stylesheet" href="tokens/tokens.css">
+<link rel="stylesheet" href="lib/glass.css">
+<style>
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--surface-page); color: var(--ink-primary); font-family: var(--font-sans); font-size: 14px; line-height: 21px; -webkit-font-smoothing: antialiased; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+svg { display: block; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* chrome */
+.topbar { position: fixed; z-index: 50; top: var(--space-16); left: var(--space-16); right: var(--space-16); display: flex; justify-content: space-between; pointer-events: none; }
+.topbar > * { pointer-events: auto; }
+.pill { height: var(--size-control); padding: 0 var(--space-16); border-radius: var(--radius-pill); display: inline-flex; align-items: center; gap: var(--space-8); white-space: nowrap; }
+.pill.icon { width: var(--size-control); padding: 0; justify-content: center; }
+.pill > svg:not(.lg-layer) { width: var(--size-icon); height: var(--size-icon); }
+.brand b { font-weight: 600; }
+.brand span { color: var(--ink-tertiary); }
+.nav { display: flex; gap: 2px; padding: 3px; height: var(--size-control); border-radius: var(--radius-pill); }
+.nav a { display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: var(--radius-pill); color: var(--ink-secondary); text-decoration: none; transition: background var(--dur-fade) ease, color var(--dur-fade) ease; }
+.nav a:hover { color: var(--ink-primary); }
+.nav a.on { background: var(--fill-selected); color: var(--ink-primary); }
+
+/* layout */
+main { max-width: 1120px; margin: 0 auto; padding: 0 var(--space-24) 160px; }
+.hero { padding: 168px 0 72px; max-width: 760px; }
+.hero p { color: var(--ink-secondary); margin: var(--space-16) 0 0; max-width: 620px; }
+.hero .meta { margin-top: var(--space-24); display: flex; gap: var(--space-16); flex-wrap: wrap; color: var(--ink-tertiary); }
+section { padding-top: 96px; scroll-margin-top: 40px; }
+.sh { margin-bottom: var(--space-32); max-width: 680px; }
+.sh .t-label-section { color: var(--ink-tertiary); display: block; margin-bottom: var(--space-8); }
+.sh h2 { margin: 0; }
+.sh p { color: var(--ink-secondary); margin: var(--space-12) 0 0; }
+h3 { margin: var(--space-40) 0 var(--space-16); }
+h2, h3 { font-weight: inherit; }
+.note { color: var(--ink-tertiary); margin-top: var(--space-12); max-width: 680px; }
+.card { background: var(--surface-chart); border-radius: var(--radius-card); box-shadow: inset 0 0 0 1px var(--line-hairline); }
+
+/* principles */
+.principles { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: var(--space-32) var(--space-40); }
+.principles .n { color: var(--ink-tertiary); }
+.principles h3 { margin: var(--space-4) 0 var(--space-8); }
+.principles p { margin: 0; color: var(--ink-secondary); }
+
+/* swatches */
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-16); }
+.swatches.series { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); }
+.sw .chip { height: 56px; border-radius: var(--radius-field); box-shadow: inset 0 0 0 1px var(--line-hairline); margin-bottom: var(--space-8); position: relative; overflow: hidden; }
+.sw .chip.checker { background-image: linear-gradient(45deg, var(--fill-hover) 25%, transparent 25%, transparent 75%, var(--fill-hover) 75%), linear-gradient(45deg, var(--fill-hover) 25%, transparent 25%, transparent 75%, var(--fill-hover) 75%); background-size: 12px 12px; background-position: 0 0, 6px 6px; }
+.sw .chip i { position: absolute; inset: 0; }
+.sw .name { display: block; }
+.sw .val { display: block; color: var(--ink-tertiary); }
+.chart-card { height: 440px; overflow: hidden; position: relative; }
+.chart-card svg { width: 100%; height: 100%; }
+.heat-card { padding: var(--space-24); overflow-x: auto; }
+.heat-legend { display: flex; align-items: center; gap: var(--space-12); color: var(--ink-tertiary); margin-top: var(--space-16); }
+.heat-legend .ramp { width: 220px; height: 8px; border-radius: 4px; }
+.status { display: flex; gap: var(--space-12); flex-wrap: wrap; }
+.status span { display: inline-flex; align-items: center; gap: var(--space-8); height: var(--size-control-sm); padding: 0 var(--space-12); border-radius: var(--radius-pill); background: var(--surface-raised); }
+.status i { width: 8px; height: 8px; border-radius: 50%; }
+
+/* type */
+.type-row { display: grid; grid-template-columns: 240px 1fr; gap: var(--space-24); align-items: baseline; padding: var(--space-16) 0; border-top: 1px solid var(--line-hairline); }
+.type-row .meta { display: flex; flex-direction: column; gap: 2px; }
+.type-row .meta .mono { color: var(--ink-tertiary); font-size: 10.5px; }
+.type-row .use { color: var(--ink-tertiary); font-size: 12px; line-height: 16px; }
+
+/* dimensions */
+.dims { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-56); }
+.space-row { display: grid; grid-template-columns: 36px 1fr; align-items: center; gap: var(--space-12); height: 22px; }
+.space-row i { display: block; height: 10px; border-radius: 2px; background: var(--accent); }
+.radii { display: flex; gap: var(--space-16); flex-wrap: wrap; align-items: end; }
+.radii .r { width: 76px; height: 60px; background: var(--surface-raised); box-shadow: inset 0 0 0 1px var(--line-axis); margin-bottom: var(--space-8); }
+.radii .r.wide { width: 120px; }
+.heights { display: flex; gap: var(--space-12); align-items: end; flex-wrap: wrap; }
+.heights span { display: inline-flex; align-items: center; padding: 0 var(--space-16); border-radius: var(--radius-pill); background: var(--surface-raised); }
+.strokes { display: flex; gap: var(--space-32); flex-wrap: wrap; }
+.strokes svg { width: 96px; height: 12px; margin-bottom: var(--space-8); }
+
+/* glass stage */
+.stage { position: relative; height: 560px; overflow: hidden; border-radius: var(--radius-card); background: var(--surface-chart); isolation: isolate; }
+.stage > svg.chart { position: absolute; inset: 0; width: 100%; height: 100%; }
+.stage .tl { position: absolute; top: var(--space-16); left: var(--space-16); display: flex; gap: var(--space-8); z-index: 5; }
+.stage .tr { position: absolute; top: var(--space-16); right: var(--space-16); z-index: 5; }
+.seg { display: inline-flex; padding: 3px; height: var(--size-control); border-radius: var(--radius-pill); position: relative; }
+.seg button { position: relative; z-index: 5; height: 32px; padding: 0 13px; border-radius: var(--radius-pill); color: var(--ink-secondary); transition: color var(--dur-fade) ease; }
+.seg button.on { color: var(--ink-primary); }
+.seg .thumb { position: absolute; z-index: 4; top: 3px; height: 32px; border-radius: var(--radius-pill); background: var(--fill-selected); transition: left var(--dur-spring) var(--ease-spring), width var(--dur-spring) var(--ease-spring); }
+.lens { position: absolute; left: 0; top: 0; z-index: 6; width: 300px; height: 68px; border-radius: 34px; cursor: grab; touch-action: none; display: flex; align-items: center; justify-content: center; gap: var(--space-4); }
+.lens.dragging { cursor: grabbing; }
+.lens span { font-weight: 600; font-size: 15px; letter-spacing: -0.01em; }
+.lens > svg:not(.lg-layer) { width: 16px; height: 16px; opacity: 0.8; margin: 0 10px; }
+.panel { position: absolute; z-index: 5; width: 300px; padding: var(--space-8); border-radius: var(--radius-popover); }
+.panel .row { display: grid; grid-template-columns: 10px 1fr auto; gap: var(--space-12); align-items: center; height: 34px; padding: 0 var(--space-12); border-radius: var(--radius-field); }
+.panel .row:hover { background: var(--fill-hover); }
+.panel .row i { width: 9px; height: 9px; border-radius: 50%; }
+.panel .row .v { color: var(--ink-tertiary); }
+.panel .hd { padding: var(--space-8) var(--space-12) var(--space-4); color: var(--ink-tertiary); }
+.rules { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--space-16) var(--space-40); margin-top: var(--space-32); }
+.rules div { display: grid; grid-template-columns: 18px 1fr; gap: var(--space-8); color: var(--ink-secondary); }
+.rules b { color: var(--ink-primary); font-weight: 500; }
+.rules .y { color: var(--status-good); } .rules .x { color: var(--status-error); }
+
+/* motion */
+.springs { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--space-24); }
+.spring { padding: var(--space-20); }
+.spring svg.curve { width: 100%; height: 120px; margin: var(--space-12) 0; }
+.spring .track { position: relative; height: 34px; border-radius: var(--radius-pill); background: var(--fill-hover); margin-top: var(--space-12); }
+.spring .ball { position: absolute; top: 5px; left: 5px; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); }
+.spring .row { display: flex; justify-content: space-between; align-items: center; }
+.spring .row .mono { color: var(--ink-tertiary); }
+.btn { height: var(--size-control-sm); padding: 0 var(--space-12); border-radius: var(--radius-pill); background: var(--fill-selected); }
+.btn:hover { background: var(--fill-hover); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; scroll-behavior: auto !important; }
+}
+@media (max-width: 760px) {
+  .nav { display: none; }
+  .dims { grid-template-columns: 1fr; }
+  .type-row { grid-template-columns: 1fr; gap: var(--space-8); }
+  .hero { padding-top: 120px; }
+  .stage { height: 480px; }
+  .panel { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="pill brand" id="brand"><b>viz</b><span>design system</span></div>
+  <nav class="nav" id="nav">
+    <a href="components.html" style="color:var(--ink-primary)">Components →</a>
+    <a href="#principles">Principles</a><a href="#color">Color</a><a href="#type">Type</a><a href="#dimensions">Dimensions</a><a href="#glass">Glass</a><a href="#motion">Motion</a>
+  </nav>
+  <button class="pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
+</div>
+
+<main>
+  <header class="hero">
+    <h1 class="t-display-lg" style="margin:0">Design system</h1>
+    <p class="t-body">Foundations for the viz redesign: content that fills the screen, liquid-glass controls floating above it, and a technical tool designed with care. Every value on this page comes from <span class="mono">tokens/source.mjs</span>, which also generates <span class="mono">tokens.css</span> and <span class="mono">tokens.json</span> for the build.</p>
+    <div class="meta t-small"><span>Branch design-system</span><span>Data: forecast-sandbox 2025–26, US</span><span id="theme-label"></span></div>
+  </header>
+
+  <section id="principles">
+    <div class="sh"><span class="t-label-section">01</span><h2 class="t-title-1">Principles</h2><p class="t-body">What to fall back on when a decision isn't covered anywhere else. Drawn from Apple's Human Interface Guidelines, Dieter Rams, Edward Tufte, Jakob Nielsen's usability heuristics and accessibility practice, adapted for a tool that people use to judge forecasts.</p></div>
+    <div class="principles">
+      <div><span class="t-numeric-value n">1</span><h3 class="t-title-3">The content is the page</h3><p>Data fills the screen. Controls float above it and stay out of its way, rather than framing it with bars and panels.</p></div>
+      <div><span class="t-numeric-value n">2</span><h3 class="t-title-3">Function first, designed all the way</h3><p>Function wins every tie, but design is never an afterthought. The best answer is the one we sit with until it is both, even if it means something unconventional.</p></div>
+      <div><span class="t-numeric-value n">3</span><h3 class="t-title-3">Honest by default</h3><p>Nothing on screen should make a forecast look better, worse or more certain than it is. Scales, colors and summaries tell the truth first and look good second.</p></div>
+      <div><span class="t-numeric-value n">4</span><h3 class="t-title-3">Clear hierarchy</h3><p>Each view has one thing to look at first. Emphasis comes from position, size and weight before color, and everything that isn't the point steps back.</p></div>
+      <div><span class="t-numeric-value n">5</span><h3 class="t-title-3">As little as possible, but no less</h3><p>Every element earns its place. Remove what doesn't help someone understand or act, and keep the details that experts rely on even when they add density.</p></div>
+      <div><span class="t-numeric-value n">6</span><h3 class="t-title-3">Consistent everywhere</h3><p>The same thing looks and behaves the same way on every screen. Once someone learns a pattern, it works everywhere they meet it.</p></div>
+      <div><span class="t-numeric-value n">7</span><h3 class="t-title-3">Act on the thing itself</h3><p>Where possible, people work directly with the data rather than through menus and settings, and every action responds immediately and visibly.</p></div>
+      <div><span class="t-numeric-value n">8</span><h3 class="t-title-3">Always say what's going on</h3><p>What is selected, what is loading, how fresh the data is and what just changed are never a mystery. Status is quiet but always findable.</p></div>
+      <div><span class="t-numeric-value n">9</span><h3 class="t-title-3">Motion explains</h3><p>Things move to show where they came from and where they went. Motion is never decoration, never slows anyone down, and steps aside when the system asks for reduced motion.</p></div>
+      <div><span class="t-numeric-value n">10</span><h3 class="t-title-3">Readable by everyone</h3><p>Text keeps its contrast on any background, color is never the only signal, and everything works by keyboard and with reduced transparency or motion.</p></div>
+      <div><span class="t-numeric-value n">11</span><h3 class="t-title-3">Glass is for controls</h3><p>Liquid glass only on floating controls. Content surfaces stay solid. Never stack glass on glass.</p></div>
+      <div><span class="t-numeric-value n">12</span><h3 class="t-title-3">One serif, rarely</h3><p>Inter does the work. Instrument Serif appears once on a screen at most, for the one title that sets the place.</p></div>
+    </div>
+  </section>
+
+  <section id="color">
+    <div class="sh"><span class="t-label-section">02</span><h2 class="t-title-1">Color</h2><p class="t-body">Dark is pure black with neutral greys. Light is a soft grey page with a near-white chart. Both themes share every name; switch with the button in the top-right corner.</p></div>
+    <div id="swatches"></div>
+    <h3 class="t-title-3">Models on a real forecast</h3>
+    <div class="card chart-card"><svg id="series-chart"></svg></div>
+    <p class="note t-small">US forecasts for the eight best models of the season by relative WIS, plus the baseline, made on Dec 27, 2025. Pastels on black, the same hues made vivid on light.</p>
+    <h3 class="t-title-3">Better and worse than baseline</h3>
+    <div class="card heat-card"><svg id="heatmap"></svg>
+      <div class="heat-legend t-small"><span>better</span><span class="ramp" id="ramp"></span><span>worse</span><span style="margin-left:auto" class="mono">flusion ÷ baseline WIS · state × forecast date</span></div>
+    </div>
+    <h3 class="t-title-3">Status</h3>
+    <div class="status t-label-control"><span><i style="background:var(--status-good)"></i>Up to date</span><span><i style="background:var(--status-warning)"></i>3 models missing this week</span><span><i style="background:var(--status-error)"></i>Sync failed</span></div>
+    <p class="note t-small">Status colors only describe system state, always with a label. They are never used for models.</p>
+  </section>
+
+  <section id="type">
+    <div class="sh"><span class="t-label-section">03</span><h2 class="t-title-1">Type</h2><p class="t-body">Inter for the interface, Instrument Serif for the rare big title, Geist Mono for numbers and code. Variety comes from weight and size, not more fonts.</p></div>
+    <div id="type-list"></div>
+  </section>
+
+  <section id="dimensions">
+    <div class="sh"><span class="t-label-section">04</span><h2 class="t-title-1">Dimensions</h2><p class="t-body">A 4-point spacing scale, six corner radii, three control heights and four line widths.</p></div>
+    <div class="dims">
+      <div><h3 class="t-title-3" style="margin-top:0">Spacing</h3><div id="spacing"></div></div>
+      <div>
+        <h3 class="t-title-3" style="margin-top:0">Corner radius</h3><div class="radii" id="radii"></div>
+        <h3 class="t-title-3">Control heights</h3><div class="heights t-label-control" id="heights"></div>
+        <h3 class="t-title-3">Line widths</h3><div class="strokes" id="strokes"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="glass">
+    <div class="sh"><span class="t-label-section">05</span><h2 class="t-title-1">Glass</h2><p class="t-body">Liquid glass bends what's beneath it at the rim and magnifies it slightly through the body, with a faint color split at the edge and a rim lit from the top-left, so a control reads as a solid lens rather than a window. <em style="font-style:normal;color:var(--ink-primary)">Drag the date lens across the lines, or focus it and use the arrow keys.</em> Panels that hold lists use the frosted version so text stays readable.</p></div>
+    <div class="stage" id="stage">
+      <svg class="chart" id="glass-chart"></svg>
+      <div class="tl"><div class="pill t-label-control" id="g-loc">United States</div><div class="seg t-label-control" id="g-seg"><span class="thumb"></span><button data-v="forecast" class="on">Forecast</button><button data-v="evaluate">Evaluate</button><button data-v="map">Map</button></div></div>
+      <div class="lens" id="lens" role="group" aria-label="Date lens. Drag, or use the arrow keys, to move it over the chart."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg><span id="lens-date">Dec 27, 2025</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+      <div class="panel t-label-control" id="g-panel"></div>
+    </div>
+    <h3 class="t-title-3">Adapts to what's under it</h3>
+    <div class="stage" id="stage2" style="height:440px">
+      <svg class="chart" id="heat-glass"></svg>
+      <div class="lens" id="lens2" role="group" aria-label="Glass lens. Drag, or use the arrow keys, to move it over the heatmap."><span>Drag over the cells</span></div>
+    </div>
+    <p class="note t-small">The glass averages the brightness of whatever is beneath it and switches to dark or light text when the content calls for it, with a small dead zone so it never flickers. The top bar does the same as the page scrolls under it.</p>
+    <h3 class="t-title-3">Three renderings</h3>
+    <div class="rules t-body" style="margin-top:0">
+      <div><span class="y">1</span><span><b>Refract</b>: bends a copy of the chart inside the control. Works in every browser; used for everything floating over the chart.</span></div>
+      <div><span class="y">2</span><span><b>Backdrop</b>: bends whatever is behind it on the page. Chrome, Edge and Arc only; used for chrome over regular page content, like the top bar.</span></div>
+      <div><span class="y">3</span><span><b>Frosted</b>: a soft blur. For panels that hold lists, for Safari and Firefox in place of backdrop, and whenever the OS asks for reduced transparency.</span></div>
+    </div>
+    <h3 class="t-title-3">Rules</h3>
+    <div class="rules t-body" style="margin-top:0">
+      <div><span class="y">✓</span><span><b>Floating controls</b> over the chart: pills, steppers, segmented controls.</span></div>
+      <div><span class="y">✓</span><span><b>Frosted panels</b> for popovers and menus that hold lists of text.</span></div>
+      <div><span class="x">✕</span><span><b>No glass on content</b>: chart cards, tables and the leaderboard stay solid.</span></div>
+      <div><span class="x">✕</span><span><b>No glass on glass</b>: a popover over a pill hides the pill or replaces it.</span></div>
+      <div><span class="x">✕</span><span><b>No large glass tiles</b>: glass stays small enough to read as an object, not a pane.</span></div>
+      <div><span class="y">✓</span><span><b>Stay readable</b>: glass switches its text to suit what's under it, and becomes frosted when the OS asks for reduced transparency.</span></div>
+    </div>
+  </section>
+
+  <section id="motion">
+    <div class="sh"><span class="t-label-section">06</span><h2 class="t-title-1">Motion</h2><p class="t-body">Three springs cover nearly everything. They are CSS <span class="mono">linear()</span> curves, so plain transitions and the Web Animations API share them.</p></div>
+    <div class="springs" id="springs"></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script type="module" src="foundations.js"></script>
+</body>
+</html>
