@@ -50,6 +50,8 @@ export const color = {
     "band-whisper": "0.075", "band-focus": "0.15",
     // tint over everything after the data cutoff (unknown when the forecast was made)
     "shade-forecast": "rgba(255, 255, 255, 0.035)",
+    // scores: diverging, better (cool, 1) → same as baseline (5) → worse (warm, 9). See studies/evaluation-goals.md
+    "score-1": "#4b92ea", "score-2": "#3e77be", "score-3": "#325e95", "score-4": "#26466d", "score-5": "#2e2e2e", "score-6": "#65371b", "score-7": "#894a22", "score-8": "#af5d28", "score-9": "#d7712e",
     "heat-better": "#38bdf8",
     "heat-neutral": "#2b2b2b",
     "heat-worse": "#fb7185",
@@ -83,6 +85,8 @@ export const color = {
     "series-baseline": "#8a8a8f",
     "band-whisper": "0.06", "band-focus": "0.13",
     "shade-forecast": "rgba(0, 0, 0, 0.045)",
+    // scores: diverging, better (cool, 1) → same as baseline (5) → worse (warm, 9). See studies/evaluation-goals.md
+    "score-1": "#0267c7", "score-2": "#4689db", "score-3": "#75abef", "score-4": "#a3ccff", "score-5": "#ebebeb", "score-6": "#f8b996", "score-7": "#e19164", "score-8": "#ca6a2b", "score-9": "#b13f00",
     "heat-better": "#268bd2",
     "heat-neutral": "#e6e6ea",
     "heat-worse": "#cb4b16",

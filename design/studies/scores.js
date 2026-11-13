@@ -1,5 +1,5 @@
 /* Score study: the leaderboard and heatmap from studies/evaluation-goals.md on real scores (three seasons),
- * with three candidate diverging palettes. Scoring is lib/scores.js; this file is the page. */
+ * in the score colors (tokens --score-1…9). Scoring is lib/scores.js; this file is the page. */
 import { LiquidGlass } from "../lib/glass.js";
 import { Segmented, openPopover, icon } from "../lib/controls.js";
 import { loadManifest, loadSeason, score, slices, seasonLabel } from "../lib/scores.js";
@@ -9,17 +9,11 @@ const root = document.documentElement;
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 root.dataset.theme = store.get("viz-theme") || "dark";
 
-/* Diverging ramps (cool = better / too wide, warm = worse / too narrow), 9 steps with a grey middle.
- * Made in OKLCH and checked with the dataviz validator: poles pass every check in both modes (band, chroma,
- * CVD ΔE ≥ 24, contrast ≥ 5:1); the inner steps recede toward the surface by design. */
-const RAMPS = {
-  "blue-orange": { light: ["#0267c7", "#4689db", "#75abef", "#a3ccff", "#ebebeb", "#f8b996", "#e19164", "#ca6a2b", "#b13f00"], dark: ["#4b92ea", "#3e77be", "#325e95", "#26466d", "#2e2e2e", "#65371b", "#894a22", "#af5d28", "#d7712e"] },
-  "blue-red": { light: ["#006ac5", "#388cd9", "#6daded", "#9eceff", "#ebebeb", "#fdb3af", "#e78a87", "#d06060", "#b63039"], dark: ["#3c95e8", "#337abd", "#2a6093", "#21476c", "#2e2e2e", "#683232", "#8d4342", "#b45454", "#dd6666"] },
-  "violet-amber": { light: ["#6b50c2", "#8876d7", "#a79beb", "#c7c0fe", "#ebebeb", "#eebf8a", "#d69a51", "#bd7500", "#a44f00"], dark: ["#917ee5", "#7667ba", "#5d5292", "#443d6b", "#2e2e2e", "#5f3c0c", "#815105", "#a46700", "#c97d00"] },
-};
+/* Score colors: the --score-1…9 tokens (blue · orange, chosen Nov 13, 2026; see evaluation-goals.md).
+ * 1 = better (cool pole), 5 = same as baseline, 9 = worse (warm pole). */
 const hexRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 let rampRgb = [];
-function setRamp() { rampRgb = RAMPS[S.palette][root.dataset.theme].map(hexRgb); }
+function setRamp() { const cs = getComputedStyle(root); rampRgb = Array.from({ length: 9 }, (_, i) => hexRgb(cs.getPropertyValue(`--score-${i + 1}`).trim())); }
 /* x in [-1, 1]: -1 best (cool pole), 0 neutral, 1 worst (warm pole). */
 function divColor(x) {
   if (!(x === x)) return null;
@@ -38,7 +32,7 @@ const CHARTED = { "UMass-flusion": 0, "UMass-gbqr_4src": 1, "UMass-AR2": 2, "UMa
 const SELECTED = [...Object.keys(CHARTED), "UMass-gbqr_4src_spatial", "UMass-flusion_4src_spatial", "UMass-AR6_pooled", "UMass-trends_ensemble", "UMass-chronos_small", "UMass-gbqr_1src", "UMass-WISAR6_fourthroot_adaptive_t"];
 
 const S = {
-  palette: store.get("score-palette") || "blue-orange", rows: "selected",
+  rows: "selected",
   scope: { seasons: [SEASONS.at(-1)], locations: "states", horizons: [0, 1, 2, 3], shared: false, among: "all" },
   sort: { key: "rel", dir: 1 }, heatAxis: "weeks",
 };
@@ -249,7 +243,6 @@ $("heat").addEventListener("pointerleave", () => ($("readout").hidden = true));
 /* ---------------------------------------------------------------- page */
 function update() { const t0 = performance.now(); compute(); window.__scoreMs = performance.now() - t0; renderScope(); renderBoard(); renderHeatLine(); renderHeat(); }
 for (const id of ["back", "theme"]) new LiquidGlass($(id), {});
-new Segmented($("t-pal"), { label: "Score colors", value: S.palette, items: [{ value: "blue-orange", label: "Blue · orange" }, { value: "blue-red", label: "Blue · red" }, { value: "violet-amber", label: "Violet · amber" }], onChange: (v) => { S.palette = v; store.set("score-palette", v); setRamp(); renderBoard(); renderHeatLine(); renderHeat(); } });
 new Segmented($("t-rows"), { label: "Rows", value: S.rows, items: [{ value: "selected", label: `Selected ${SELECTED.length}` }, { value: "all", label: "All models" }], onChange: (v) => { S.rows = v; renderBoard(); renderHeat(); } });
 $("theme").addEventListener("click", () => { root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark"; store.set("viz-theme", root.dataset.theme); setRamp(); renderBoard(); renderHeatLine(); renderHeat(); requestAnimationFrame(() => LiquidGlass.updateAll?.()); });
 let rz = 0; new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { renderBoard(); renderHeat(); }); }).observe($("board"));

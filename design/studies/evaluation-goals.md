@@ -313,8 +313,9 @@ Container queries on the section's own width, never the window's.
 
 ## Score colors
 
-- **One diverging pair** for better/worse, around a neutral grey at "same as baseline" (or "on target"
-  for coverage). Cool for better (or intervals too wide), warm for worse (or too narrow). Not green/red,
+- **One diverging pair: blue · orange** (chosen Nov 13, 2026, from the study below), as tokens
+  `--score-1` (better) … `--score-5` (same as baseline / on target) … `--score-9` (worse), with their own
+  light and dark steps. Cool for better (or intervals too wide), warm for worse (or too narrow). Not green/red,
   and not equal to any series color, so a scored mark is never mistaken for a charted model.
 - **One sequential hue** for magnitudes in the heatmap.
 - Both validated with the dataviz validator against both surfaces, light and dark chosen separately.
@@ -398,7 +399,8 @@ thread: one season 40 ms, three seasons × 61 models 65 ms in node and about 440
 That's fine for the study, not for live window dragging: the worker and per-pair prefix sums (Computing it
 fast) are still to do.
 
-**Score color study** (`studies/scores.html`): the leaderboard (rank, name with the charted dot, Rel. WIS
+**Score color study** (`studies/scores.html`; decided: blue · orange, now the `--score-*` tokens, and the
+study page uses them): the leaderboard (rank, name with the charted dot, Rel. WIS
 with a colored lollipop, WIS, 50% and 95% with colored marks, sort by header) and the heatmap (models ×
 weeks / locations / horizons, season breaks, hover readout) on real data, with a working scope line
 (metric options, locations, seasons, horizons). Three diverging candidates, switchable, both themes:
