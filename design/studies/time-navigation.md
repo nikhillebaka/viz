@@ -64,6 +64,10 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **Panning into the past was slow** because the model labels, pushed off the right edge, were being
   fitted into negative room one dropped letter (and one text measurement) at a time, every frame.
   Off-screen labels are now skipped; a frame costs under 1 ms in every pan position.
+- **Scroll speed adapts to zoom.** Side-scroll scrubbing is 1:1 with the content at the home span,
+  but never faster than 1 week per 3/4 of a home-span week's width, so wide zooms and Season don't fly
+  through dates (Season went ~4 weeks per small flick; now 100 px ≈ 1.1 weeks, close to the home
+  pace of 100 px ≈ 0.9). A pointer drag stays exactly 1:1, since it holds the content; panning stays 1:1.
 - **In Season,** the model labels ride at the fan's end, rulers are hidden, and the right margin
   shrinks from 168px to 56px with the blend.
 - Season is where the evaluation window brush should live, so time selection is one concept

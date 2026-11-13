@@ -142,9 +142,18 @@ export class TimeNav {
   #clampT(T) { const n = this.N - 1; return T < 0 ? -rubber(-T) : T > n ? n + rubber(T - n) : T; }
   #rawT(T) { const n = this.N - 1; return T < 0 ? -unrubber(-T) : T > n ? n + unrubber(T - n) : T; }
   #pxPerWeek() { const [r0, r1] = this.scale().range(), [d0, d1] = this.domain(); return (r1 - r0) / ((d1 - d0) / WEEK); }
+  /* Pixels of side scroll per week of date change. Close up at the home span this is 1:1 with the content.
+   * Zoomed out, weeks get narrow and 1:1 would fly through dates (in Season ~4 weeks per small flick), so
+   * the rate never drops below 3/4 of the home span's: wide zooms scrub a little slower than the content
+   * moves, and Season scrubs at close to the home pace. Panning stays 1:1. */
+  #scrubPx() {
+    const [r0, r1] = this.scale().range();
+    return Math.max(this.#pxPerWeek(), (0.75 * (r1 - r0)) / this.home);
+  }
   /* a scroll or drag moved the content by a weeks: scrub the date if the forecast is on screen, else pan */
-  #advance(a) {
-    if (this.refVisible()) { this.#stop(); this.vT = 0; this.busy = true; this.#setT(this.#clampT(this.#rawT(this.T) + a)); return "scrub"; }
+  #advance(a, { grab = false } = {}) { // grab: a pointer drag holds the content, so it stays exactly 1:1
+    const k = grab ? 1 : this.#pxPerWeek() / this.#scrubPx();
+    if (this.refVisible()) { this.#stop(); this.vT = 0; this.busy = true; this.#setT(this.#clampT(this.#rawT(this.T) + a * k)); return "scrub"; }
     this.#panBy(a); return "pan";
   }
   #placeAt(clientX) { // Season: the date under the pointer
@@ -201,7 +210,7 @@ export class TimeNav {
       if (!drag.moved && Math.abs(dx) < 4) return;
       if (!drag.moved) { drag.moved = true; try { el.setPointerCapture(e.pointerId); } catch {} el.style.cursor = "grabbing"; }
       if (drag.season) { this.busy = true; drag.scrubbed = true; this.#setT(this.#placeAt(e.clientX)); }
-      else if (this.#advance(-(e.clientX - drag.lastX) / this.#pxPerWeek()) === "scrub") drag.scrubbed = true; // drag right = earlier
+      else if (this.#advance(-(e.clientX - drag.lastX) / this.#pxPerWeek(), { grab: true }) === "scrub") drag.scrubbed = true; // drag right = earlier
       drag.lastX = e.clientX;
       drag.hist.push({ t: e.timeStamp, T: this.T }); if (drag.hist.length > 6) drag.hist.shift();
     });
@@ -243,7 +252,7 @@ export class TimeNav {
       if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || this.pinching) return;
       if (this.mix > 0.001 && this.mix < 0.999) return;
       e.preventDefault();
-      const did = this.mix > 0.999 ? (this.#stop(), this.vT = 0, this.busy = true, this.#setT(this.#clampT(this.#rawT(this.T) + (dx * unit) / this.#pxPerWeek())), "scrub")
+      const did = this.mix > 0.999 ? (this.#stop(), this.vT = 0, this.busy = true, this.#setT(this.#clampT(this.#rawT(this.T) + (dx * unit) / this.#scrubPx())), "scrub")
         : this.#advance((dx * unit) / this.#pxPerWeek());
       if (did === "scrub") { clearTimeout(wheelIdle); wheelIdle = setTimeout(() => this.#settleT(0), 140); }
     }, { passive: false });
