@@ -181,8 +181,8 @@ export function fanChart(svgSel, data, opts = {}) {
   if (C.length) {
     const cl = d3.line().x((p) => x(p.date)).y((p) => y(p.med));
     g.append("g").attr("clip-path", clip).selectAll("path").data(C.filter((c) => c.m !== opts.hot)).join("path")
-      .attr("d", (c) => cl(c.pts)).attr("fill", "none").attr("stroke", "var(--ink-tertiary)").attr("stroke-opacity", hasFocus ? 0.3 : 0.45)
-      .attr("stroke-width", 1).attr("stroke-linejoin", "round");
+      .attr("d", (c) => cl(c.pts)).attr("fill", "none").attr("stroke", "var(--ink-tertiary)").attr("stroke-opacity", hasFocus ? 0.45 : 0.75)
+      .style("stroke-width", "var(--stroke-series)") /* as wide as the colored medians */.attr("stroke-linejoin", "round");
   }
 
   // observed: whole season, solid through the cutoff, dotted after
@@ -232,7 +232,7 @@ export function fanChart(svgSel, data, opts = {}) {
   // a hovered context line is lifted above everything else, so you can see which one it is
   const hotC = C.find((c) => c.m === opts.hot);
   if (hotC) g.append("path").attr("clip-path", clip).attr("d", d3.line().x((p) => x(p.date)).y((p) => y(p.med))(hotC.pts))
-    .attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 1.5).attr("stroke-linejoin", "round");
+    .attr("fill", "none").attr("stroke", "var(--ink-primary)").attr("stroke-width", 2).attr("stroke-linejoin", "round");
 
   // width rulers beside the fan, at the hovered week (default 3 weeks ahead)
   const fanEnd = x(new Date(+ref + 3 * WEEK)); // the last forecast week; equals the plot's right edge close up

@@ -223,14 +223,16 @@ function openModelPicker() {
         const slot = sel.slotOf(m), chosen = sel.has(m), ctx = sel.showAll && chosen && slot == null;
         return `<div class="pk-row${chosen ? " sel" : ""}" data-m="${m}">
           <button type="button" class="pk-dot${ctx ? " ctx" : ""}" aria-pressed="${slot != null}" aria-label="${slot != null ? "On the chart. Take off" : "Put on the chart"}: ${short(m)}" style="--c:${slot != null ? seriesVar(slot) : "transparent"}"><i></i></button>
-          <button type="button" class="pk-name" role="checkbox" aria-checked="${chosen}"><span class="nm">${short(m)}</span><span class="tm">${teamOf(m)}</span>${data.FC[m]?.[weekKey] ? "" : `<span class="miss">no forecast ${fmtShort(week)}</span>`}</button>
+          <button type="button" class="pk-name" role="checkbox" aria-checked="${chosen}"><span class="nm">${short(m)}</span><span class="sub">${[teamOf(m), familyTag(m) !== teamOf(m) ? familyTag(m) : null, provenance(m)].filter(Boolean).join(" · ")}${data.FC[m]?.[weekKey] ? "" : ` · <span class="miss">no forecast ${fmtShort(week)}</span>`}</span></button>
           <span class="pk-strip" title="Forecasts submitted this season">${strip(m)}</span>
-          <span class="pk-tags"><span>${familyTag(m)}</span><span>${provenance(m)}</span></span></div>`;
+          <span class="pk-check" aria-hidden="true">${icon.check}</span></div>`;
       };
       const chev = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+      // headers are plain text; every section but Selected collapses, and has a quiet Select all / Deselect all
       const section = (key, title, ms, inner) => {
-        const n = ms.filter((m) => sel.has(m)).length, state = n === 0 ? "false" : n === ms.length ? "true" : "mixed";
-        return `<div class="pk-sec${collapsed.has(key) ? " collapsed" : ""}" data-key="${key}"><button type="button" class="pk-all" role="checkbox" aria-checked="${state}" aria-label="Select all ${title}"></button><button type="button" class="pk-sec-t" aria-expanded="${!collapsed.has(key)}">${title} <span class="n">${ms.length}</span>${chev}</button></div>${collapsed.has(key) ? "" : inner}`;
+        if (key === "sel") return `<div class="pk-sec fixed" data-key="${key}"><span class="pk-sec-t">${title} <span class="n">${ms.length}</span></span></div>${inner}`;
+        const all = ms.every((m) => sel.has(m)), open = !collapsed.has(key);
+        return `<div class="pk-sec${open ? "" : " collapsed"}" data-key="${key}"><button type="button" class="pk-sec-t" aria-expanded="${open}">${chev}${title} <span class="n">${ms.length}</span></button><button type="button" class="pk-all">${all ? "Deselect all" : "Select all"}</button></div>${open ? inner : ""}`;
       };
       const sections = () => {
         const q = input.value.trim().toLowerCase();
@@ -260,8 +262,9 @@ function openModelPicker() {
         const r = e.target.closest(".pk-row"), sec = e.target.closest(".pk-sec");
         if (sec) {
           const s = sections().find((x) => x.key === sec.dataset.key);
+          if (s.key === "sel") return;
           if (e.target.closest(".pk-all")) sel.setMany(s.ms, !s.ms.every((m) => sel.has(m)));
-          else { collapsed.has(s.key) ? collapsed.delete(s.key) : collapsed.add(s.key); render(); }
+          else if (e.target.closest(".pk-sec-t")) { collapsed.has(s.key) ? collapsed.delete(s.key) : collapsed.add(s.key); render(); }
           return;
         }
         if (!r) return;

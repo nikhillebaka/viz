@@ -87,8 +87,8 @@ All of them come back repeatedly, often to the same sets.
 - Note, shown only when more than five are selected (the baseline doesn't count): **"Showing 5 of 12 ·
   Show all"**, *Show all* as the blue link, in a small glass note under the top chrome near the labels.
   After clicking: **"Showing all 12 · Show 5"**.
-- Show all adds every other selected model as **context**: a thin median line in neutral ink at low
-  strength, no band, no dots. The five charted models stay exactly as they were (color, bands, labels)
+- Show all adds every other selected model as **context**: a median line in neutral ink, as wide as
+  the colored medians (lighter while a model is focused), no band, no dots. The five charted models stay exactly as they were (color, bands, labels)
   and are drawn on top. Twelve models or 140 look the same in kind; 140 is a denser grey sheaf, which
   itself shows the spread of the selection around the five you're reading.
 - It's a view toggle, kept with the selection (and in the URL), so it survives scrubbing and reloads.
@@ -241,3 +241,11 @@ the drawing in `lib/chart.js`:
 Not built yet: recent selections, sort options, the metadata hover (methods, inputs, license), the
 selection in the URL, Escape-to-clear for hover state inside the picker. Provenance in the prototype is
 sample data (two "Local" stand-ins), since the prototype's data files carry no metadata.
+
+### Picker look, revised (Nov 13)
+
+The first version mixed old-viz boxes with this design. Now: no background on selected rows (selection is
+a blue checkmark at the right and full-strength text; unselected names are quieter); two-line rows
+(name, then team · family · provenance in small muted text, replacing boxed tags); plain section
+headers with no background and a quiet "Select all / Deselect all" at the right; the Selected section
+can't be collapsed. Grey context lines are now as wide as the colored medians.
