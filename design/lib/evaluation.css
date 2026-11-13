@@ -21,13 +21,16 @@
 /* leaderboard */
 .ev-board { --lolli: 168px; --name: minmax(150px, 300px); margin-bottom: 64px; }
 .ev-grid { display: grid; grid-template-columns: 32px var(--name) 52px var(--lolli) 64px 52px 52px 1fr; align-items: center; column-gap: 12px; }
-.ev-head { position: sticky; top: var(--ev-sticky, 0px); z-index: 5; background: var(--surface-chart); height: 32px; border-bottom: 1px solid var(--line-axis); color: var(--ink-tertiary); font-size: 11.5px; font-weight: 500; }
-.ev-head .h { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; height: 32px; }
+/* the column titles are a footer: they ride the bottom of the screen while the table scrolls past, and come
+ * to rest under the last row. The lollipop's scale ticks sit here too, like an axis along the bottom. */
+.ev-head { position: sticky; bottom: 0; z-index: 5; background: var(--surface-chart); height: 36px; border-top: 1px solid var(--line-axis); color: var(--ink-tertiary); font-size: 11.5px; font-weight: 500; }
+.ev-head::before { content: ""; position: absolute; left: 0; right: 0; bottom: calc(100% + 1px); height: 20px; background: linear-gradient(to bottom, transparent, var(--surface-chart)); pointer-events: none; }
+.ev-head .h { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; height: 36px; }
 .ev-head .h.num { justify-content: flex-end; }
 .ev-head button.h:hover, .ev-head .h.on { color: var(--ink-primary); }
 .ev-head .h .ar { width: 8px; display: inline-block; font-size: 9px; }
-.ev-head .axis { position: relative; height: 32px; }
-.ev-head .axis span { position: absolute; top: 9px; transform: translateX(-50%); font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-tertiary); }
+.ev-head .axis { position: relative; height: 36px; }
+.ev-head .axis span { position: absolute; top: 4px; transform: translateX(-50%); font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-tertiary); }
 .ev-head .plus { justify-self: end; width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; color: var(--ink-tertiary); }
 .ev-head .plus:hover { color: var(--ink-primary); background: var(--fill-hover); }
 .ev-row { height: 30px; border-radius: 6px; transition: background 120ms; }

@@ -436,7 +436,6 @@ function onScroll() {
   const zTop = Math.min(...[...chrome.querySelectorAll('[data-zone="bl"],[data-zone="bc"]')].map((z) => z.getBoundingClientRect().top));
   chrome.classList.toggle("tucked", zTop < chromeTop + 12);
   const up = ev.scopeEl.getBoundingClientRect().top < chromeTop - 8;
-  document.body.style.setProperty("--ev-sticky", `${chromeTop + 4}px`);
   if (up === lifted) return;
   lifted = up;
   ev.scopeEl.classList.toggle("lifted", up);

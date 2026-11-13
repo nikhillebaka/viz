@@ -34,8 +34,19 @@ export async function run() {
     const rows = [...document.querySelectorAll("#scores .ev-row")].map((r) => r.dataset.m);
     const expect = new Set([...sel.selected, ev.result.baseline]);
     check("the leaderboard lists the selection and the baseline", rows.length === expect.size && rows.every((m) => expect.has(m)), { rows: rows.length, expect: expect.size });
+    { const head = document.querySelector("#scores .ev-head"), rowsEl = document.querySelector("#scores .ev-rows");
+      check("the column titles are a footer under the rows, sticky to the screen's bottom", head.previousElementSibling === rowsEl && getComputedStyle(head).position === "sticky" && getComputedStyle(head).bottom === "0px"); }
     check("the peek: the scope line shows at the bottom of the first screen", (() => { const r = ev.scopeEl.getBoundingClientRect(); return r.top < innerHeight && r.top > innerHeight - 80; })(), { top: Math.round(ev.scopeEl.getBoundingClientRect().top), h: innerHeight });
 
+    // the footer rides the screen's bottom while the table is cut off by it, then rests under the last row
+    { const board = document.querySelector("#scores .ev-board"), head = board.querySelector(".ev-head"), rowsEl = board.querySelector(".ev-rows");
+      const y0 = scrollY + board.getBoundingClientRect().top;
+      await go(Math.max(0, y0 - innerHeight + 140));
+      const riding = Math.abs(head.getBoundingClientRect().bottom - innerHeight) < 2 && rowsEl.getBoundingClientRect().bottom > innerHeight;
+      await go(y0 - 80);
+      const resting = Math.abs(head.getBoundingClientRect().top - rowsEl.getBoundingClientRect().bottom) < 2;
+      check("the column titles ride the bottom of the screen while the table runs past it", riding, { headBottom: Math.round(head.getBoundingClientRect().bottom), h: innerHeight });
+      check("…and rest under the last row once the table ends", resting); }
     // the lift, the tuck, frosted glass
     await go(document.getElementById("view").offsetHeight + 40);
     const bubble = document.getElementById("scope-bubble");

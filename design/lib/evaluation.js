@@ -39,7 +39,7 @@ export function mountScores(el, opts) {
 
   el.classList.add("ev");
   el.innerHTML = `<div class="ev-scope on-paper"></div>
-    <section class="ev-board"><div class="ev-head ev-grid"></div><div class="ev-rows"></div></section>
+    <section class="ev-board"><div class="ev-rows"></div><div class="ev-head ev-grid"></div></section>
     <section class="ev-heat"><div class="ev-heat-line"></div><canvas class="ev-heat-canvas"></canvas></section>`;
   const q = (s) => el.querySelector(s);
   const scopeEl = q(".ev-scope"), headEl = q(".ev-head"), rowsEl = q(".ev-rows"), heatLine = q(".ev-heat-line"), heatCv = q(".ev-heat-canvas");

@@ -184,7 +184,9 @@ in the URL.
   the picker's Baseline toggle only controls the fan chart.
 - **Sort** by clicking a header. Default: Rel. WIS, best first. Coverage sorts by distance from target.
   Name A–Z. Clicking the active header reverses. Unranked rows always come last, after a hairline.
-- **Row height** 28 px; the header row sticks under the scope bubble.
+- **Row height** 28 px. The column titles are a **footer**: they ride the bottom of the screen while the
+  table scrolls past and come to rest under the last row (Nov 13; the lollipop's scale ticks sit there
+  like an axis). Nothing sticks at the top, where it would leave half-hidden rows above it.
 
 #### Expanding a row
 
@@ -430,8 +432,8 @@ Built on the fan chart page (`studies/intervals-refine.html`), with the section 
   chart; once it's over the page below, the compositor skips it and CSS frosts it (`lg--paper`). The
   scope bubble is frosted from the start: it's only ever over the page.
 - **The lift.** When the scope line passes under the top bubbles, it fades out and the same fragments fade
-  in as a frosted bubble at the top centre (both are live buttons). The leaderboard's header sticks just
-  below the bubbles.
+  in as a bubble at the top centre (both are live buttons). The leaderboard's column titles ride the
+  bottom of the screen instead (see the leaderboard).
 - **Links.** Hovering a leaderboard or heatmap row previews a charted model on the chart (while some of
   the chart is on screen); hovering a model on the chart lights its row. The dot on a row charts the
   model (the same queue of five). A heatmap cell: moves the chart to that week (when it's one of the
