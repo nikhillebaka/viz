@@ -428,9 +428,10 @@ Built on the fan chart page (`studies/intervals-refine.html`), with the section 
   shift keep their chart meanings (the chart already ignored mostly-vertical scrolls).
 - **Bubbles.** Back, Models and Theme are fixed to the screen. The chart's own bubbles (Rulers, Misses,
   the date) scroll with it and fade out as they reach the top bubbles, rather than sliding under them.
-- **Glass over paper is frosted.** A fixed bubble refracts the chart (the WebGL pass) while it's over the
-  chart; once it's over the page below, the compositor skips it and CSS frosts it (`lg--paper`). The
-  scope bubble is frosted from the start: it's only ever over the page.
+- **Glass is the same glass everywhere.** A fixed bubble refracts the chart with the WebGL pass while
+  it's over the chart. Once it's over the page below, the compositor skips it and the same refraction (the
+  SVG displacement filter the shader was built to match) is applied to the page behind it as a backdrop
+  filter, so text bends at the rim exactly as the chart does. The scope bubble uses the same glass.
 - **The lift.** When the scope line passes under the top bubbles, it fades out and the same fragments fade
   in as a bubble at the top centre (both are live buttons). The leaderboard's column titles ride the
   bottom of the screen instead (see the leaderboard).

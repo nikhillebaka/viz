@@ -53,7 +53,9 @@ export async function run() {
     check("scrolled to the scores, the scope line lifts into the top bubble", bubble.classList.contains("show") && ev.scopeEl.classList.contains("lifted"));
     check("…and the chart's own bubbles are tucked away", document.getElementById("chrome").classList.contains("tucked"));
     LiquidGlass.frame(); await sleep(50);
-    check("…and the fixed top bubbles are frosted (off the chart)", document.getElementById("c-models").classList.contains("lg--paper"));
+    { const m = document.getElementById("c-models"), sb = document.getElementById("scope-bubble");
+      check("…and the fixed top bubbles switch to the page's glass (off the chart)", m.classList.contains("lg--paper"));
+      check("…which is the same refraction filter as over the chart, not just a blur", /url\(/.test(m.style.backdropFilter) && /url\(/.test(sb.style.backdropFilter), { models: m.style.backdropFilter, scope: sb.style.backdropFilter }); }
     // changing the scope from the bubble: the popover stays by its button, the bubble keeps its glass
     const frag = bubble.querySelector('.f[data-k="h"]'), layers0 = bubble.querySelectorAll(":scope > .lg-layer").length;
     frag.click(); await sleep(400);
@@ -70,7 +72,7 @@ export async function run() {
     await go(0);
     check("back at the top, the scope line is on the paper again", !bubble.classList.contains("show") && !ev.scopeEl.classList.contains("lifted") && !document.getElementById("chrome").classList.contains("tucked"));
     LiquidGlass.frame(); await sleep(50);
-    check("…and the top bubbles refract the chart again", !document.getElementById("c-models").classList.contains("lg--paper"));
+    check("…and the top bubbles refract the chart again (WebGL pass, no backdrop filter)", !document.getElementById("c-models").classList.contains("lg--paper") && !document.getElementById("c-models").style.backdropFilter);
     window.__draw(); await sleep(50);
     check("the chart's top margin doesn't depend on the scroll position", Math.abs(window.__G.pad.t - padT) < 1, { before: padT, after: window.__G.pad.t });
 

@@ -142,13 +142,7 @@ export class LiquidGlass {
     layer("lg-tint");
     if (this.mode === "canvas") this.comp.add(this);
     else if (this.mode !== "frost") {
-      const id = `lg-f${++uid}`;
-      this.filter = document.createElementNS(NS, "filter");
-      this.filter.setAttribute("id", id);
-      this.filter.setAttribute("filterUnits", "userSpaceOnUse");
-      this.filter.setAttribute("color-interpolation-filters", "sRGB");
-      this.filter.innerHTML = FILTER;
-      defs().appendChild(this.filter);
+      const id = this.#makeFilter();
       if (this.mode === "refract") {
         this.refr = document.createElementNS(NS, "svg");
         this.refr.setAttribute("class", "lg-layer lg-refr");
@@ -166,9 +160,36 @@ export class LiquidGlass {
     this.update();
   }
 
+  #makeFilter() {
+    const id = `lg-f${++uid}`;
+    this.filter = document.createElementNS(NS, "filter");
+    this.filter.setAttribute("id", id);
+    this.filter.setAttribute("filterUnits", "userSpaceOnUse");
+    this.filter.setAttribute("color-interpolation-filters", "sRGB");
+    this.filter.innerHTML = FILTER;
+    defs().appendChild(this.filter);
+    return id;
+  }
+
+  /* Canvas glass that has scrolled off its chart (fixed glass over the page below it): the compositor
+   * stops drawing it, and the same refraction is applied to the page as a backdrop filter, the SVG filter
+   * the shader reproduces, so text bends at the rim exactly as the chart does. Where backdrop SVG filters
+   * aren't supported, CSS (.lg--paper) falls back to the shader's blur, saturation and brightness. */
+  setPaper(on) {
+    if (on === !!this.paper) return;
+    this.paper = on;
+    this.el.classList.toggle("lg--paper", on);
+    if (on && isChromium()) {
+      const id = this.filter ? this.filter.id : this.#makeFilter();
+      this.lastKey = ""; this.#place();
+      this.el.style.backdropFilter = this.el.style.webkitBackdropFilter = `url(#${id})`;
+    } else this.el.style.backdropFilter = this.el.style.webkitBackdropFilter = "";
+    schedule(this, true);
+  }
+
   /** Re-position the lens and re-check appearance. Call after moving the element yourself. */
   update() {
-    if (this.mode === "canvas") this.comp.watch();
+    if (this.mode === "canvas") { this.comp.watch(); if (this.paper && this.filter && isChromium()) this.#place(); }
     else if (this.mode !== "frost") this.#place();
     schedule(this, true);
   }
@@ -445,7 +466,7 @@ class Compositor {
       if (r.width < 1 || r.height < 1) continue;
       // scrolled off the chart (fixed glass over the page below it): frosted by CSS instead of refracted here
       const offChart = r.top + r.height / 2 >= sr.bottom || r.bottom <= sr.top;
-      if (offChart !== el.classList.contains("lg--paper")) el.classList.toggle("lg--paper", offChart);
+      g.setPaper(offChart);
       if (offChart) { key += "p;"; continue; }
       // the glass's own opacity, and its ancestors' up to the container (fades, the picker hiding chrome)
       let a = 1;
