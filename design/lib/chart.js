@@ -242,7 +242,6 @@ export function fanChart(svgSel, data, opts = {}) {
         .on("keydown", (e, d) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); opts.onLabel(d.s.m); } })
         .on("pointerenter", (e, d) => { if (e.pointerType === "mouse") opts.onLabelHover?.(d.s.m); })
         .on("pointerleave", (e) => { if (e.pointerType === "mouse") opts.onLabelHover?.(null); });
-      lg.append("rect").attr("x", -6).attr("y", -11).attr("height", 22).attr("width", Math.max(0, w - lx)).attr("fill", "transparent");
     }
     lg.append("circle").attr("r", 3.5).attr("fill", (d) => d.s.c).attr("opacity", (d) => (dim(d.s.m) ? 0.55 : 1));
     lg.append("text").attr("class", "t-label-chart").attr("x", 10).attr("dy", "0.34em")
@@ -255,18 +254,23 @@ export function fanChart(svgSel, data, opts = {}) {
         // measuring text forces layout, so remember the result per name and width: scrubbing redraws
         // every frame and labels rarely change
         const room = Math.round(w - d.x - 10 - 8), full = this.textContent, key = `${full}|${room}|${this.getAttribute("font-weight") || ""}`;
-        let fit = fitCache.get(key);
-        if (fit === undefined) {
-          fit = full;
+        let c = fitCache.get(key);
+        if (c === undefined) {
+          let fit = full;
           if (this.getComputedTextLength() > room) {
             let s = full;
             while (s.length > 2 && this.getComputedTextLength() > room) { s = s.slice(0, -1); this.textContent = fit = s.trimEnd() + "…"; }
           }
-          fitCache.set(key, fit);
+          c = { fit, len: this.getComputedTextLength() };
+          fitCache.set(key, c);
         }
-        this.textContent = fit;
+        this.textContent = c.fit;
+        d.len = c.len;
         d3.select(this).append("title").text(full);
       });
+    // the click / hover target is just a little larger than the dot and the name (5px around)
+    if (opts.onLabel) lg.insert("rect", ":first-child").attr("x", -9).attr("y", -11).attr("height", 22).attr("rx", 6)
+      .attr("width", (d) => 10 + (d.len || 0) + 14).attr("fill", "transparent");
   }
   return { x, y, g, w, h, pad, ref, di, cutoff, series: S, bands: B, focus: hasFocus ? f : null };
 }
