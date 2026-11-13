@@ -6,33 +6,47 @@ follows. Same approach as `intervals-goals.md` and `models-goals.md`. Nothing he
 ## The premise: paper and bubbles
 
 The page is paper. The fan chart is printed on it, and the scores continue on the same paper below it,
-in the same line language: hairlines, thin medians, small dots, tabular numbers, no boxes, no cards,
-no fills larger than a cell. Glass bubbles float on top of the paper and hold the controls. A bubble
+in the same line language: hairlines, thin lines, small dots, tabular numbers, no boxes, no cards, no
+fills larger than a cell. Glass bubbles float on top of the paper and hold the controls. A bubble
 appears only while the thing it controls is on screen or applies.
 
-Two consequences shape everything else:
-
-1. **Evaluation is not a menu.** You scroll down to it. It's never a popover, sheet, modal or tab, and it
-   never covers the chart. Settings that change the numbers are the numbers' own labels (the scope line),
-   not a separate panel.
-2. **One identity rule for the whole page.** On the fan chart, the five charted models are in color and
-   every other selected model is grey context. Every evaluation figure follows the same rule: charted
-   models in their series color, everything else neutral ink, identified by name. Color never encodes
-   rank, category or score, and scores never use green/red.
+1. **Evaluation is not a menu.** You scroll down to it. It's never a modal or tab, and it never covers
+   the chart. The settings that change the numbers are the numbers' own label (the scope line).
+2. **Chart colors stay on the chart.** Evaluation doesn't repeat the fan chart's color identity. A charted
+   model is marked only by the same small color dot beside its name, so you can find it; every line and
+   mark in the scores is ink.
+3. **Color in the scores is for scores, used sparingly.** A few columns where better/worse is the point
+   (relative WIS, change vs baseline, coverage) and the heatmap cells get a diverging color. Everything
+   else is ink. The numbers themselves stay in text ink; the color sits on a mark beside or behind them.
 
 ## Who reads scores, and what they ask
 
 The same three people as the picker (modelers, evaluators, analysts), with different questions:
 
-1. **"Which models beat the baseline, and by how much?"** The headline: one number per model
-   (relative WIS), ranked, with the baseline as a visible reference.
-2. **"Is that consistent, or driven by a few weeks or places?"** Breakdown by week, location, horizon.
-3. **"Are its intervals honest?"** Coverage and calibration: too narrow or too wide.
+1. **"Which models beat the baseline, and by how much?"** One number per model (relative WIS), ranked,
+   with the baseline as a visible reference.
+2. **"Is that consistent, or driven by a few weeks or places?"** Breakdowns by week, location, horizon.
+3. **"Are its intervals honest?"** Coverage and calibration.
 4. **"Why does it lose: spread, or bias?"** WIS split into dispersion, over- and under-prediction.
 5. **"Why was it bad there?"** Jump from a bad week or place straight to that forecast on the chart.
-6. **"Over what, exactly?"** Weeks, locations, horizons, how many forecasts. Scores mean nothing without
-   their scope, so the scope is always on screen beside them.
-7. **"Can I take this with me?"** Export the table, copy the command that reproduces it, link to it.
+6. **"Over what, exactly?"** Seasons, weeks, locations, horizons, how many forecasts. Scores mean nothing
+   without their scope, so the scope is always on screen beside them.
+7. **"Can I take this with me?"** Export, copy the command that reproduces it, link to it.
+
+## Many seasons
+
+Prototypes so far use one season; production has several, in the fan chart and in evaluation.
+
+- **Evaluation can span seasons**: one, several, or all, with the same week range and phase applied to
+  each (old viz's rule).
+- **By default the scope follows the chart's season**: step the chart into 2024–25 and the scores move to
+  2024–25. Picking seasons in the Dates popover pins them; Reset returns to following.
+- **Models active only in some seasons** are listed but unranked when the scope has none of their
+  forecasts ("2024–25 only").
+- **Data loads per season.** Adding a season shows a thin progress hairline under the scope line and
+  dims the numbers until it's in; nothing else moves.
+- **The fan chart across seasons** (stepping past a season's last week, the full-season zoom when
+  seasons differ in length, the date picker) is its own time-navigation topic, next after this one.
 
 ## What old viz does, and where each piece goes
 
@@ -42,341 +56,329 @@ peak are alternate modes of the chart panel. Its useful logic is kept; its struc
 
 | Old viz | Here |
 |---|---|
-| Telemetry strip (top performer, cohort mean WIS, the *top model's* coverage and MAE) | **Dropped.** The ledger's first row is the top performer; the other cells mixed cohort and single-model numbers under similar labels. |
-| Leaderboard tab, 17 columns | **The ledger**: 4 default columns, the rest optional (below) |
-| Error Anatomy tab (bars, 12 cards with advice text, bias badges) | **Anatomy** figure + a component bar in each expanded row. No generated advice text. |
-| Calibration tab (reliability diagram, scorecard, status words) | **Calibration** figure; coverage columns; status words dropped (the curve shows it) |
-| Horizon Decay tab (grouped bars) | **Horizon** figure (lines) + the lane's Horizons mode |
-| Heatmap (model × date / location / horizon) | **The lane** in the ledger. Location × date heatmaps of *truth or forecasts* are not evaluation; they belong to the chart's future alternate views (map, etc.), not this doc. |
-| Season peak scorecard | **Peaks** section, only for targets with peak forecasts |
-| LOC: Current / All States | scope line: **Locations** |
-| TIME: Date / Season ▾ (seasons, phase, week brush, Apply) | scope line: **Dates** + the season strip. Live, no Apply. |
-| SCALE: Natural / Log | scope line: **Metric** popover |
+| Telemetry strip (top performer, cohort mean WIS, the *top model's* coverage and MAE) | **Dropped.** The leaderboard's first row is the top performer; the other cells mixed cohort and single-model numbers under similar labels. |
+| Leaderboard tab, 17 columns | **Leaderboard**: 5 default columns, the rest optional |
+| Heatmap view (rows × columns × metric) | **Heatmap**, its own section under the leaderboard, same permutations, sharing the scope |
+| Error Anatomy tab (bars, cards with advice text, bias badges) | **Anatomy** figure + a component bar in each expanded row. No generated advice text. |
+| Calibration tab (reliability diagram, scorecard, status words) | **Calibration** figure; coverage columns. Status words dropped (the curve shows it). |
+| Horizon Decay tab (grouped bars) | **Horizon** figure (lines); h0–h3 as optional columns |
+| Season peak scorecard | **Peaks**, only for targets with peak forecasts |
+| LOC: Current / All States (leaderboard and heatmap each had their own) | scope line: **Locations**, one for everything |
+| TIME: Date / Season ▾ (seasons, phase, brush) (heatmap had its own) | scope line: **Dates**, the same popover, one for everything |
+| SCALE: Natural / Log | Metric popover |
 | Common Tasks ON/OFF | Metric popover: **Shared forecasts only** |
-| Export ▾ (CSV/TSV/XLSX) + nav "Copy CLI" + "Share" | scope line: **↓** (one menu) |
-| ⓘ definition popovers, Guide modal, Methodology modal | definitions inside the popovers that set them; a "Methods" link at the bottom of the Metric popover |
+| Export ▾ + nav "Copy CLI" + "Share" | scope line: **↓**, one menu |
+| ⓘ definition popovers, Guide modal | definitions inside the popover of the setting they explain; a "Methods" link in the Metric popover |
 | Validation warnings pill and modal | the ⋯ bubble shows a count; affected rows carry a glyph |
-| Model Detail modal | the expanded row |
-| Ensemble Studio modal | the picker (a "Combine" action on the current selection); out of scope here |
+| Model Detail modal | the expanded leaderboard row |
+| Ensemble Studio modal | the picker ("Combine" on the selection); out of scope here |
 | Brand menu, live hubs modal | the ⋯ bubble |
-| Target switch (Flu Hosp / ED Visits) | a **Target** bubble, shown only when more than one target exists |
+| Target switch (Flu Hosp / ED Visits) | a **Target** bubble, only when more than one target exists |
 
-Fixed on the way (old bugs and inconsistencies): the table now sorts by relative WIS by default (it
-sorted by raw WIS while the server ranked by relative WIS); exported rank equals the table's rank;
-diagnostics follow the same scope, scale and sort as the table; the baseline is visible and choosable;
-the whole scope is in the URL.
+Fixed on the way: one scope for every section (old heatmap and leaderboard disagreed on location and
+time); default sort by relative WIS (old table sorted by raw WIS while the server ranked by relative
+WIS); exported rank equals the table's rank; diagnostics follow the table's scope, scale and sort; the
+baseline is visible and choosable; the whole scope is in the URL.
 
 ## Page anatomy, top to bottom
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ (Models) (US)                                       (◐) (⋯) │  ← fixed glass bubbles
-│                                                              │
 │                        fan chart                             │  ← 100svh − peek
 │ (Rulers) (Misses)        (‹ Dec 27 ›)                        │  ← chart bubbles, scroll away
 ├──────────────────────────────────────────────────────────────┤
-│ Relative WIS · All states · Nov 22 – Mar 7 · 0–3 wk      ↓   │  ← scope line (the peek)
-│                ─────────╱╲──────────[▓▓▓▓▓▓▓▓]┄┄┄┄┄          │  ← season strip = window
-│        Rel. WIS            WIS   50%  95%   Weeks Locations… │
-│ ○ 1  flusion    0.71 ──●|        212   48   93   ▪▪▪▪▪▪▪▪▪▪▪ │
-│ ● 2  gbqr_4src  0.78  ─●|        231   52   95   ▪▪▪▪▪▪▪▪▪▪▪ │  ← the ledger
-│   …  Baseline   1.00    ●        297   41   88   ▪▪▪▪▪▪▪▪▪▪▪ │
-├──────────────────────────────────────────────────────────────┤
+│ Relative WIS · All states · 2025–26 · 0–3 wk              ↓  │  ← scope line (the peek)
+│                                                              │
+│      Rel. WIS              WIS    50%   95%            +     │
+│  1 ● flusion       0.71 ──●|        212    48    93          │  ← leaderboard
+│  2   gbqr_4src     0.78  ─●|        231    52    95          │
+│  …   Baseline      1.00    ●        297    41    88          │
+│                                                              │
+│ Models × Weeks · Rel. WIS                              ⇄     │  ← heatmap, its own line
+│ flusion     ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪                         │
+│ gbqr_4src   ▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪▪                         │
+│                                                              │
 │  Calibration       Horizon        Anatomy                    │  ← figures
-│  Peaks (only when the target has them)                       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 ### 1. The fan chart, with a peek
 
-- The chart takes the viewport height minus a **peek** (about 44 px) that shows the scope line. That
-  sliver is the only hint that more is below, and it's useful on its own: it says what the scores cover.
-  No "scroll for more", no arrow.
-- On short windows (chart under 480 px) the chart keeps 480 px and the peek goes; the page just scrolls.
-- The chart's own bubbles (Rulers, Misses, date stepper, Recenter, the Show-all note) are anchored to the
-  chart, not the viewport: they scroll away with it.
+- The chart takes the viewport height minus a **peek** (about 44 px) that shows the scope line: the only
+  hint that more is below, and useful on its own. No "scroll for more", no arrow.
+- On short windows (chart under 480 px) the chart keeps 480 px and the peek goes.
+- The chart's own bubbles (Rulers, Misses, date stepper, Recenter, Show-all note) are anchored to the
+  chart: they scroll away with it.
 
 ### 2. The scope line
 
-One line of fragments, each a button opening a small popover (the same morph as every control):
+One line of fragments, each a button opening a popover (the same morph as every control):
 
-**Relative WIS · All states · Nov 22 – Mar 7 · 0–3 wk** &nbsp; ↓
+**Relative WIS · All states · 2025–26 · 0–3 wk** &nbsp; ↓
 
 | Fragment | Popover | Default |
 |---|---|---|
 | **Metric** | Relative WIS / WIS / MAE · Natural / Log · Shared forecasts only · Baseline (which model) · Rank among (selected / every model in scope) · Methods → | Relative WIS, natural, off, the hub baseline, every model |
 | **Locations** | All states · US · the chart's location (follows it) · a custom set: tile map + search | All states |
-| **Dates** | Seasons (multi) · Phase: Full / Pre-peak / Peak / Post-peak · the strip, for when it's out of view · "Follow the chart's date" (a one-week window that moves with ← →) | the current season, every observed week |
-| **Horizons** | 0 · 1 · 2 · 3, four toggles (at least one stays on) | all four |
+| **Dates** | the evaluation window, below | the chart's season, every observed week |
+| **Horizons** | 0 · 1 · 2 · 3, four toggles (one always stays on) | all four |
 | **↓** | Scores CSV · TSV · XLSX · Chart PNG · Copy link · Copy command | — |
 
-- It's the section's title and its settings at once. There's no other heading.
-- When you scroll past it, it **lifts into a glass bubble** at the top centre, between the left bubbles
-  and the theme button, so the scope stays beside every number below. Scrolling back up, it settles onto
-  the paper. Same text, same buttons; only the material changes (a 200 ms crossfade of the glass in,
-  no movement of the text).
+- It's the title of everything below it and its settings at once. There's no other heading.
+- Scrolling past it, it **lifts into a glass bubble** at the top centre, so the scope stays beside every
+  number. Scrolling back up, it settles onto the paper. Same text, same buttons; only the material
+  changes (a 200 ms crossfade of the glass, the text doesn't move).
 - A fragment that differs from its default is primary ink; defaults are secondary. You can tell at a
-  glance whether this is the standard view, and a shared link shows what was changed.
-- Changes apply live. No Apply, no Cancel: every change is one click to undo, and ⌘Z undoes the last
-  scope change.
-- When a narrowing leaves nothing scored (see edge cases), the fragment responsible gets a warning
-  underline.
+  glance whether this is the standard view.
+- Changes apply live; ⌘Z undoes the last scope change. When a narrowing leaves nothing scored, the
+  fragment responsible gets a warning underline.
 
-**Locations, pooled the way old viz pools:** if any state is in scope, the headline uses states only
-(the US national forecast isn't counted twice). "All states" means the 52 non-US jurisdictions. "US"
-scores the national forecast alone.
+**Locations pool the way old viz pools:** if any state is in scope, headline numbers use states only (the
+national forecast isn't counted twice). "All states" means the 52 non-US jurisdictions; "US" scores the
+national forecast alone.
 
-**Rank among.** Old viz computed the pairwise tournament among only the selected models (plus a hidden
-baseline), so adding a model changed everyone else's relative WIS. The default here is **every model
-with forecasts in scope**: a model's number doesn't depend on what else you picked. "Selected only"
-remains as the option, for reproducing old numbers.
+**Rank among.** Old viz ran the pairwise tournament among only the selected models (plus a hidden
+baseline), so adding a model changed everyone else's relative WIS. The default here is **every model with
+forecasts in scope**, so a model's number doesn't depend on what else you picked. "Selected only" stays
+as an option, for reproducing old numbers.
 
-### 3. The season strip (the evaluation window)
+### 3. The Dates popover (the evaluation window)
 
-A thin, full-season time axis directly under the scope line. It shows:
+Old viz's window popover was right to be a popover; this keeps its structure and redraws it:
 
-- the observed curve for the scoped locations (summed), in the chart's observed ink and weight;
-- weeks as ticks, months labelled like the chart's axis;
-- **the window**: selected weeks at full strength, the rest dimmed;
-- weeks whose targets aren't observed yet, dotted, the chart's post-cutoff convention;
-- the chart's current date as the same "ref" mark used on the chart;
-- the peak phase as a faint hairline bracket under the axis, when Phase isn't Full (it's computed per
-  location, so with many locations the bracket is the national one, and the popover says so).
+- **Seasons**: one chip per season, multi-select, plus All. While following the chart, the chart's season
+  is selected and marked as following; picking chips pins them. Reset returns to following.
+- **Phase**: Full · Pre-peak · Peak · Post-peak (peak computed per location, as before).
+- **The season chart**: each selected season's observed curve on a shared week-of-season axis (newest
+  strongest, older lighter), months labelled, in the chart's observed ink. The window is a range on it:
+  drag to draw, drag edges to resize, drag inside to move, double-click for every week. Weeks not yet
+  observed are dotted. The chart's current date is the same ref mark as on the chart. Under Peak, the peak
+  weeks show as a hairline bracket.
+- **Readout**: "Nov 22 – Mar 7 · wk 17–31", or "All weeks".
+- No Apply or Cancel: the scores update live behind the popover while you drag (rows reorder once, on
+  release). Escape or clicking outside closes it, keeping the change; Reset undoes it.
+- The fragment reads what was chosen, as briefly as possible: "2025–26", "2025–26 · Nov 22 – Mar 7",
+  "3 seasons · Peak", "All seasons".
+- Keyboard: Tab to the range; ← → move it, shift ← → resize it (arrow keys here don't step the chart).
 
-With several seasons, each season's curve is drawn over the same week-of-season axis (lightest for the
-oldest); the window applies to every season, as in old viz.
-
-Interaction:
-
-- Drag on the strip: a new window, snapping to weeks. Drag an edge: resize. Drag inside: move.
-  Double-click: back to every observed week. A plain click does nothing (old viz cleared the range on a
-  stray click).
-- The numbers update live while dragging; rows **don't reorder until you let go**, then move to their new
-  places in 250 ms on the soft spring. Reordering under the pointer is unreadable.
-- Keyboard: the strip is one tab stop; ← → move the window, shift ← → resize it.
-
-The strip's plot area is exactly as wide as the ledger's lane column and sits right above it, so in
-Weeks mode it doubles as the lane's header: each cell sits under its week.
-
-### 4. The ledger (leaderboard and heatmap, merged)
-
-Old viz's leaderboard and heatmap answer questions 1 and 2 about the same rows, so here they're one
-table: a ranking on the left, the breakdown on the right.
-
-Default columns, left to right:
+### 4. The leaderboard
 
 | Column | Shows | Notes |
 |---|---|---|
-| Circle | on the chart or not | the picker's control: empty, filled in series color, grey dot when context. Click to chart. |
 | Rank | position | faint mono; only when sorted by a score; ties share a number |
-| Name | short name, team muted | ellipsis, full name on hover; click to expand |
-| Rel. WIS | 0.71, with its lollipop | the number, then a stem from a hairline at 1.00 to a dot on a shared log axis; left is better |
+| Name | color dot (charted only), short name, team muted | ellipsis, full name on hover; click to expand |
+| Rel. WIS | 0.71 + lollipop | a stem from a hairline at 1.00 to a dot on a shared log axis, left is better. **Colored**: the stem and dot take the diverging score color. |
 | WIS | 212 | absolute, so a ratio is never read without its size |
-| 50% · 95% | coverage, percent | plain numbers; the header carries the target |
-| Lane | the breakdown | Weeks · Locations · Horizons |
+| 50% · 95% | coverage, percent | the header carries the target. **Colored**: a small mark beside the number, by distance from target (close neutral, under warm, over cool). |
 
-Optional columns, from a quiet **+** at the end of the header row (a checklist popover): **Forecasts**
-(scored, of possible), **Wins** (weeks with the lowest WIS, of weeks competed), **vs baseline** (% change,
-direct, on shared forecasts), **WIS / 100k**, **MAE**, **Sharpness** (mean 95% width), **80%** coverage,
-**MCE** (mean calibration error). Choices are remembered per person and go in the URL.
+Optional columns, from a quiet **+** at the end of the header row (a checklist): **Forecasts** (scored, of
+possible), **Wins**, **vs baseline** (% change, direct; colored like Rel. WIS), **WIS / 100k**, **MAE**,
+**Sharpness**, **80%**, **MCE**, **h0–h3** (relative WIS per horizon; colored). Remembered per person and
+in the URL.
 
-- **Charted models** have their circle and dot in their series color, so your five can be found in a
-  long list. Everything else is ink. Rows never get colored backgrounds.
-- **The baseline is a row**, in tertiary ink, at exactly 1.00, sorted with everyone else. Where it lands
-  is information. It's always there; the picker's Baseline toggle only controls the fan chart.
-- **Sort** by clicking a header. Default: Rel. WIS, best first. Coverage sorts by distance from its
-  target, closest first (sorting coverage by raw value is never what anyone wants). Name sorts A–Z.
-  Clicking the active header reverses it. Rows that can't be ranked always come last.
-- **Log scale** relabels nothing: the metric fragment already reads "Relative WIS (log)". Coverage,
-  sharpness and per-100k stay natural, as before.
-- **Row height** 28 px. The header row sticks under the scope bubble.
-
-#### The lane
-
-A row of cells, one per week, location or horizon, each showing that model's relative WIS for that
-slice: its mean WIS over the slice divided by the baseline's on the same forecasts.
-
-- Switch: **Weeks · Locations · Horizons**, three words in the lane header, the active one in primary ink.
-- **Encoding:** diverging on log₂(ratio), clamped at ½× and 2×: two hues and a neutral grey midpoint,
-  validated with the dataviz validator on both surfaces. Better than baseline cool, worse warm, never
-  green/red. The hues must not read as series colors; if no pair passes, the lane uses ink lightness with
-  "worse" cells outlined. (Prototype both; see Studies.)
-- Weeks: the whole season, cells outside the window faint, so you see what you're leaving out. The
-  chart's current week has a hairline outline in every row, so ← → visibly walks down the page too.
-- Locations: US first, then states A–Z (sort by region or population in the lane header's own small
-  menu, as old viz offered). Abbreviations in the header at 14 px per cell or wider; otherwise on hover.
-- Horizons: four wide cells, with the value printed inside when it fits (40 px or wider).
-- No forecast: empty. Targets not observed yet: dotted outline.
-- Hover a cell: a readout like the chart's: the slice, the model's WIS, the baseline's, the ratio.
-- **Click a cell: show it on the chart.** Sets the chart's date (Weeks) or location (Locations), charts
-  the model if needed, focuses it, and scrolls the chart into view. The ledger is an index into the fan
-  chart (question 5). Back (or scrolling down) returns you to the same row.
+- **The color dot** is the only trace of the chart's colors: it's there if the model is on the chart, so
+  you can find your five. Clicking it takes the model off the chart; there's no empty circle on other
+  rows (charting from here is a hover action: a faint circle appears in the dot's place on row hover).
+- **The baseline is a row**, in tertiary ink, at exactly 1.00, sorted with everyone else. Always present;
+  the picker's Baseline toggle only controls the fan chart.
+- **Sort** by clicking a header. Default: Rel. WIS, best first. Coverage sorts by distance from target.
+  Name A–Z. Clicking the active header reverses. Unranked rows always come last, after a hairline.
+- **Row height** 28 px; the header row sticks under the scope bubble.
 
 #### Expanding a row
 
-Click a model's name: the row opens in place on the soft spring, and shows:
+Click a name: the row opens in place on the soft spring, showing:
 
-- **Anatomy**: dispersion, over- and under-prediction as one thin stacked bar per horizon, ink tones plus
-  a texture for the middle segment (three identities, no series colors).
+- **Anatomy**: dispersion, over- and under-prediction as one thin stacked bar per horizon.
 - **Coverage curve**: empirical vs nominal at every level, against the diagonal; the baseline in grey.
-- **Locations** as a US tile grid in the lane's colors; click a tile to see it on the chart.
-- **Submissions**: one tick per round across the season (full / partial / missing), click to go there.
+- **Locations**: a US tile grid in the score colors; click a tile to see it on the chart.
+- **Submissions**: one tick per round across the scoped seasons (full / partial / missing); click to go.
 - **Facts**: provenance, team, family, quantiles (7 or 23), license, methods (from metadata).
 
-More than one row can be open; Escape closes the most recent. Open rows survive scope and window changes.
+More than one row can be open; Escape closes the most recent. Open rows survive scope changes.
 
-### 5. Figures
+### 5. The heatmap
 
-Below the ledger, small figures in the chart's line language, each titled with one word:
+Its own section, because its permutations don't fit inside a table row. It has its own line on the
+paper, in the scope line's style, every fragment a button:
+
+**Models × Weeks · Rel. WIS** &nbsp; ⇄
+
+| Fragment | Choices |
+|---|---|
+| Rows | Models · Locations · Weeks · Horizons |
+| Columns | what's valid for the rows (as old viz: models → horizons, locations, weeks; locations → weeks, models; weeks → locations, models; horizons → models) |
+| Metric | depends on the axes: with models on an axis, Rel. WIS · WIS · WIS / 100k · MAE · 95% coverage · Sharpness; with one model chosen, also its forecast and error; with no model, observed rate, admissions, trend |
+| Model | only when models aren't an axis: one selected model, or Observed |
+| Horizon | only when horizons aren't an axis |
+| ⇄ | swap rows and columns |
+| Display (in the Metric popover) | Sort (rows: score, A–Z, region, population, peak timing) · Scale (none, per-row) · Palette |
+
+- **It follows the scope line**: same locations, seasons, window and horizons. No second LOC/TIME.
+  Weeks across several seasons are columns with a wider gap at each season break.
+- Cells: 2 px gaps (paper shows through), no outlines. Diverging scores (relative WIS, coverage error)
+  use the diverging pair; magnitudes (WIS, admissions) use one sequential hue. No rainbow palettes; the
+  palette choice is between validated ramps.
+- Row labels on the left in ink, with the charted color dot; column labels on top, every one shown when
+  they fit, otherwise every Nth and the rest on hover. The chart's current week is outlined, so ← → walk
+  across it too.
+- Empty cells (no forecast): blank. Not yet observed: dotted outline. Inactive models: after a hairline at
+  the bottom, as in the leaderboard.
+- Hover a cell: a readout like the chart's (slice, value, the baseline's, observed). **Click a cell: show
+  it on the chart**: sets the chart's date and location, charts the model if needed, focuses it, scrolls
+  up. Back returns to the cell.
+- Rows: 20 px, virtualized past a screenful; cells drawn on one canvas.
+
+### 6. Figures
+
+Small figures in the chart's line language, each titled with one word:
 
 - **Calibration**: coverage at every nominal level (10–98%) per model, the diagonal as a hairline.
-  Above: intervals too wide. Below: too narrow. No zone labels, no corridor; the diagonal is enough.
-- **Horizon**: relative WIS at each horizon (0–3), one line per model, a hairline at 1.00.
-- **Anatomy**: for each model, the share of its WIS from spread, over- and under-prediction, as one
-  thin horizontal bar, sorted like the ledger. Absolute / share toggle in the title ("Anatomy · share").
-- **Peaks** (own row, only when the target has season-peak forecasts and the window's season has peaked
-  or is provisional): timing and size error per model in the same lollipop form, plus RPS and coverage
-  as columns. Its full design is its own study; old viz's peak view is the reference for content.
+- **Horizon**: relative WIS at each horizon (0–3) per model, a hairline at 1.00.
+- **Anatomy**: each model's WIS as one thin stacked bar (spread, over, under), sorted like the
+  leaderboard; "Anatomy · share" toggles absolute / share.
+- **Peaks** (only when the target has season-peak forecasts and the season has peaked or is
+  provisional): its own study; old viz's peak view is the content reference.
 
-Each figure follows the identity rule: charted models in color and drawn on top, every other selected
-model a grey line. Hover a line: it's named and its ledger row lights. Click: it's charted, exactly like a
-grey line on the fan chart. Up to 140 lines; with that many, figures show the charted five over a grey
-sheaf, like Show all.
+Lines are ink. With many models the lines are faint; **hovering a leaderboard row or a line** brings that
+model to full ink and names it at the line's end. **Expanded rows stay emphasized** in every figure, with
+their names at the line ends (and their color dot, if charted). So the figures compare the rows you
+opened against the field, without needing a color per model.
 
 ## Floating bubbles: what's there, and when
 
 | Bubble | Where | Shown |
 |---|---|---|
-| Models | top left | always: the selection drives the chart and the scores |
+| Models | top left | always |
 | Location | top left | always: the chart's location (the scope line has its own) |
 | Target | top left | only when the data has more than one target |
 | Scope | top centre | once the scope line scrolls under the top |
 | Theme | top right | always |
-| ⋯ | top right | always: data sources and hubs, sync, truth date, validation warnings (count shown on the bubble only when there are any) |
+| ⋯ | top right | always: data sources and hubs, sync, truth date, validation warnings (a count on the bubble only when there are any) |
 | Date stepper | chart, bottom centre | with the chart; scrolls away |
 | Rulers, Misses | chart, bottom left | with the chart; scrolls away |
-| Recenter | chart | the forecast is off screen (as now) |
-| Showing 5 of 12 | chart | more than five selected (as now) |
+| Recenter, Showing 5 of 12 | chart | as now |
 
-Nothing floats over the scores except the global bubbles and the scope. Sorting, columns, lane mode and
-expansion are on the paper. There's no Guide button: definitions live where the setting lives.
+Nothing else floats over the scores. Sorting, columns, the heatmap's axes and row expansion are on the
+paper. There's no Guide button.
 
 ### Which buttons open menus
 
-A button opens a popover only when it has more than two choices or needs explaining. Otherwise it acts in
-place.
+A control opens a popover only when it has more than two choices or needs explaining.
 
 | Control | Acts in place | Opens |
 |---|---|---|
-| Header click | sort / reverse | — |
-| Lane mode words | switch | — |
-| Circle | chart / unchart | — |
+| Column header | sort / reverse | — |
+| Color dot / hover circle | chart / unchart | — |
 | Model name | expand / collapse | — |
-| Lane cell | go to the chart | — |
-| Horizons | — | four toggles (small) |
+| Heatmap cell | go to the chart | — |
+| ⇄ | swap axes | — |
+| Horizons | — | four toggles |
 | Metric, Locations, Dates | — | popover |
-| **+** (columns) | — | checklist |
-| ↓ | — | export menu |
-| ⋯ | — | data menu |
+| Heatmap rows, columns, metric, model | — | small list |
+| + | — | column checklist |
+| ↓, ⋯ | — | menu |
 
 ## Linking the chart and the scores
 
-- **Hover** a ledger row or a figure line: the model previews on the fan chart (if any of it is on screen)
-  exactly as hovering its label does. Hover a model on the chart: its ledger row highlights. (This settles
-  the open question in `models-goals.md`.)
-- **Click** a circle anywhere: charts the model, same queue-of-five rule as the picker.
-- **← →** step the chart's date from anywhere on the page except text fields. The strip's ref mark and the
-  outlined lane column move with it. With Dates following the chart, the scores follow too.
-- **↑ ↓** scroll the page, unless a ledger row has keyboard focus; then they move between rows (Enter
+- **Hover** a leaderboard row, heatmap row or figure line: if the model is charted and the chart is on
+  screen, it previews there as hovering its label does. Hovering a model on the chart highlights its
+  leaderboard row. (Settles the open question in `models-goals.md`.)
+- **← →** step the chart's date from anywhere on the page except text fields and the Dates range. The
+  heatmap's current-week outline moves with it. If the scope follows the chart's season, crossing into
+  another season changes the scope too.
+- **↑ ↓** scroll the page, unless a leaderboard row has focus; then they move between rows (Enter
   expands, Space charts).
-- **Vertical scroll scrolls the page everywhere, including over the chart.** The chart already ignores
-  mostly-vertical scrolls; side scroll, pinch, ⌘ and shift keep their chart meanings. Shift + vertical
-  scroll is height zoom only over the chart; elsewhere it's the browser's.
-- **The picker** (left half) still works while scrolled to the scores: the right half shows whatever was
-  on screen, and the ledger narrows to the right half (it's a container query, so this is free).
+- **Vertical scroll scrolls the page everywhere, including over the chart.** The chart ignores
+  mostly-vertical scrolls already; side scroll, pinch, ⌘ and shift keep their chart meanings. Shift +
+  vertical scroll is height zoom only over the chart.
+- **The picker** still opens while scrolled to the scores; the scores narrow to the right half (a
+  container query, so it's free).
 
 ## Resizing
 
-The section uses container queries on its own width, never the window's.
+Container queries on the section's own width, never the window's.
 
-| Width | Layout |
-|---|---|
-| ≥ 1280 | all columns; figures three across |
-| 960–1280 | lollipop narrows (min 96 px); figures two across |
-| 720–960 | lollipop hidden (the number stays); lane at least 160 px; figures one across |
-| < 720 | lane hidden; optional columns hidden; a row's lane appears when it's expanded |
+| Width | Leaderboard | Heatmap | Figures |
+|---|---|---|---|
+| ≥ 1280 | all chosen columns | cells as wide as fit, min 6 px | three across |
+| 960–1280 | lollipop narrows (min 96 px) | labels thin out | two across |
+| 720–960 | lollipop hidden (number stays, colored mark stays) | row labels truncate at 120 px | one across |
+| < 720 | optional columns hidden | scrolls sideways inside its own block, row labels pinned | one across |
 
-- Name column: 140–280 px, ellipsis, never wraps.
-- Numbers never truncate; the lane absorbs the slack. Number columns size to their widest value in
-  tabular figures, so they don't jitter as the window drags.
-- The strip always matches the lane column; when the lane is hidden, it runs full width.
+- Names: 140–280 px, ellipsis, never wrap. Numbers never truncate, sized to their widest value in tabular
+  figures so they don't jitter while values change.
 - Resizing never reorders, re-sorts or collapses anything.
+
+## Score colors
+
+- **One diverging pair** for better/worse, around a neutral grey at "same as baseline" (or "on target"
+  for coverage). Cool for better (or intervals too wide), warm for worse (or too narrow). Not green/red,
+  and not equal to any series color, so a scored mark is never mistaken for a charted model.
+- **One sequential hue** for magnitudes in the heatmap.
+- Both validated with the dataviz validator against both surfaces, light and dark chosen separately.
+- Clamped at ½× and 2× (log scale), so one disaster doesn't wash out the rest; the readout shows the real
+  value.
+- Where: Rel. WIS lollipop, vs baseline, h0–h3, coverage marks, heatmap cells, the expanded row's tile
+  map. Nowhere else.
 
 ## Edge cases
 
-- **Partial submitters.** Relative WIS is pairwise on forecasts each pair shares (Cramer et al.), so a
-  model that missed weeks is compared fairly. Its row has a small partial-circle glyph filled to the
-  fraction submitted; hover: "18 of 28 weeks".
-- **Shared forecasts only** with disjoint models (different seasons): nothing in common. Every number
-  shows "–", the Metric fragment gets the warning underline, and the ledger's only words are
-  "No shared forecasts · Score each on its own", the second part a link that turns the option off.
-- **Small samples** (fewer than 10 forecasts scored): numbers render in tertiary ink with the count beside
-  them in the Forecasts position. No banner; the faint numbers say "don't trust this much".
-- **A model with no forecasts in scope** (another season, a location it doesn't cover, not yet scored):
-  shown at the bottom after a hairline, unranked, "–", with a glyph whose hover says why ("2024–25 only",
-  "no Alaska", "awaiting truth").
-- **Window over unobserved weeks only.** Numbers "–"; the strip shows the window over the dotted region.
-  The dotting says it.
-- **Partly observed recent rounds.** Scored on the horizons already observed (as old viz does); in the
-  lane, those cells are drawn at reduced strength until all horizons are in.
-- **Baseline has no forecasts in scope.** Relative WIS rescales to the fallback (old viz's rule), the
-  Metric fragment reads "Relative WIS · vs ensemble" in primary ink, and the ⋯ warning count goes up.
-- **Near-zero baseline WIS** (a small state off-season): the cell's color clamps; the readout shows both
-  absolute numbers.
-- **7-quantile models**: the "7Q" glyph; coverage columns other than 50/80/95 show "–".
-- **No models selected.** The ledger shows the baseline row and one ghost row, "Add models", that opens
-  the picker.
-- **One model.** Two rows. Nothing special.
-- **140 models.** The ledger is virtualized at a fixed row height; the lane draws on one canvas for the
-  visible rows; figures draw 140 grey lines, as Show all does.
-- **Ties.** Same rank number, then by name.
-- **Rate targets** (ED visits, proportion): WIS / 100k disappears from the column list; values use 3
-  significant figures under 1, as old viz does.
+- **Partial submitters.** Relative WIS is pairwise on shared forecasts (Cramer et al.), so missing weeks
+  don't bias it. A small partial-circle glyph by the name, filled to the fraction submitted; hover:
+  "18 of 28 weeks".
+- **Shared forecasts only, with disjoint models** (different seasons): nothing in common. Numbers show
+  "–", the Metric fragment gets the warning underline, and the only words are "No shared forecasts ·
+  Score each on its own", the second part a link that turns the option off.
+- **Small samples** (fewer than 10 forecasts): numbers in tertiary ink with the count beside them. No
+  banner.
+- **No forecasts in scope** (other season, a location it doesn't cover, awaiting truth): after the
+  hairline, unranked, "–", a glyph whose hover says why ("2024–25 only", "no Alaska", "awaiting truth").
+- **Window over unobserved weeks only.** Numbers "–"; the Dates fragment gets the warning underline.
+- **Partly observed recent rounds.** Scored on the horizons observed so far; those heatmap cells at reduced
+  strength until complete.
+- **Baseline has no forecasts in scope.** Relative WIS rescales to the fallback (old viz's rule); the
+  Metric fragment reads "Relative WIS · vs ensemble" in primary ink; the ⋯ warning count goes up.
+- **Near-zero baseline WIS** (a small state off-season): color clamps; the readout shows both numbers.
+- **7-quantile models**: a "7Q" glyph; coverage other than 50/80/95 shows "–".
+- **No models selected.** The baseline row and a ghost row, "Add models", that opens the picker.
+- **140 models, several seasons.** Leaderboard and heatmap virtualized; scores computed in a worker;
+  figures draw 140 faint lines.
+- **Ties.** Same rank, then by name.
+- **Rate targets.** No WIS / 100k; 3 significant figures under 1.
 - **Truth revisions.** Scores use the truth as of the date in the ⋯ bubble.
-- **Changing the chart's location** doesn't change the scores, unless Locations follows the chart.
 
 ## Computing it fast
 
-- Scores are computed in a worker from per-forecast WIS, components and coverage flags (typed arrays:
-  model × date × location × horizon).
-- For each scope (locations, horizons, shared-only, scale), per-model and per-pair prefix sums over dates
-  are built once (140 models: about 20k pairs × 28 dates, a few hundred milliseconds in the worker).
-  Any window is then a lookup: dragging the strip recomputes the tournament for 140 models in well under
-  a frame.
-- Rows are DOM (text must be selectable and accessible); lollipops and lanes are canvas, one per column
-  for the visible rows.
+- Per-forecast WIS, components and coverage flags in typed arrays (model × round × location × horizon),
+  loaded per season, scored in a worker.
+- For each scope (locations, horizons, shared-only, scale), per-model and per-pair prefix sums over rounds
+  are built once; any window is then a lookup, so dragging the range re-ranks 140 models within a frame.
+- Rows are DOM (selectable, accessible); lollipops and heatmap cells are canvas.
 
 ## Text on screen
 
-Every word on the scores section is a label of something you can see: the scope line, the column
-headers, the lane switch, model names, figure titles, and the two edge-case phrases ("Add models",
-"No shared forecasts · Score each on its own"). Methods and definitions live in popovers and tooltips.
+Every word on the scores section labels something visible: the scope line, the heatmap's line, column
+headers, model names, figure titles, and two edge-case phrases ("Add models", "No shared forecasts ·
+Score each on its own"). Definitions live in popovers and tooltips.
 
 ## Studies before building
 
-1. **Lane encoding**: diverging hues vs ink lightness with outlined "worse" cells vs short spikes off a
-   midline. Same data, side by side, both themes, 10 and 100 rows.
-2. **Scope lift**: the paper-to-glass transition of the scope line, and the sticky header under it.
-3. **Lollipop vs number only** at 960–1280 widths.
+1. **Score colors**: two or three diverging pairs plus a sequential hue, through the validator, on the
+   leaderboard and heatmap in both themes.
+2. **Scope lift**: the paper-to-glass transition and the sticky header under it.
+3. **Dates popover** with three seasons of real data.
 
 ## What "good" means (testable)
 
-- From any score on screen, you can tell what weeks, locations and horizons it covers without scrolling.
-- Your charted models can be found in a 140-row ledger at a glance.
-- Any bad cell gets you to the forecast behind it in one click.
+- From any score on screen, you can tell its seasons, weeks, locations and horizons without scrolling.
+- Your charted models can be found in a 140-row leaderboard at a glance (the dot).
+- Any bad heatmap cell gets you to the forecast behind it in one click.
+- Leaderboard and heatmap never disagree about scope.
 - Adding a model to the selection doesn't change anyone else's relative WIS (default ranking).
-- Dragging the window updates numbers within a frame; rows reorder once, on release.
+- Dragging the window re-scores within a frame; rows reorder once, on release.
 - Nothing floats over the scores except the global bubbles and the scope.
-- Resizing from 1600 to 700 px wide never truncates a number or reorders a row.
-- A shared link reproduces the scope, window, columns, sort, lane mode and expanded rows.
+- Resizing from 1600 to 700 px never truncates a number or reorders a row.
+- A shared link reproduces scope, window, seasons, columns, sort, heatmap axes and expanded rows.
 - Every old viz evaluation feature has a home (the table above) or a stated reason it's gone.
