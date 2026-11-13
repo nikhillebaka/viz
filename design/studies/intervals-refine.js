@@ -55,7 +55,8 @@ function draw() {
   const P = fanChart(svg, data, {
     id: "chart-src", models: models(), t: nav.T, domain: nav.domain(),
     // the right margin holds the model labels close up; in Season they sit at the fan's end instead
-    pad: { l: 64, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
+    // while the model picker is open, the plot moves into the space to its right (pickerInset)
+    pad: { l: 64 + pickerInset, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
     focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: rulerK, misses: S.misses,
     context: sel.context, hot: S.hot,
     onLabel: activate,
@@ -186,7 +187,6 @@ function renderModelsPill() {
   const n = sel.selected.length;
   pill.querySelector(".label").textContent = n === 0 ? "Choose models" : `${n} model${n === 1 ? "" : "s"}`;
   pill.setAttribute("aria-label", `Models: ${n} selected, ${charted.length} on the chart. Change`);
-  $("c-baseline").setAttribute("aria-pressed", sel.baseline);
   modelsGlass?.update();
 }
 function renderNote() {
@@ -203,18 +203,35 @@ function renderNote() {
  * grey dot: drawn as context. Sections: Selected and Local pinned, then families, then By team. */
 let pickerRefresh = null;
 const collapsed = new Set();
+/* While the picker is open, the chart previews: the plot slides into the space right of the panel and the
+ * view zooms out to most of the season (recentered), so models can be judged as they're added. Closing
+ * puts the view back exactly as it was. Left/right keep stepping the date throughout. */
+let pickerInset = 0, insetRaf = 0, savedView = null;
+function animateInset(to) {
+  cancelAnimationFrame(insetRaf);
+  const from = pickerInset, t0 = performance.now();
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) { pickerInset = to; frame(); return; }
+  const tick = () => { const u = Math.min(1, (performance.now() - t0) / 320); pickerInset = from + (to - from) * (1 - (1 - u) ** 3); draw(); if (u < 1) insetRaf = requestAnimationFrame(tick); };
+  insetRaf = requestAnimationFrame(tick);
+}
+const PREVIEW_WEEKS = 14; // close enough that the four forecast weeks stay distinct; ← → move through the season
+function pickerWidth(n) { // the left half (two columns) or quarter (one), minus the outer margin
+  const vw = view.clientWidth, inset = 16;
+  return n > 24 ? vw * 0.5 - inset * 1.5 : Math.max(vw * 0.25 - inset * 1.5, 360);
+}
 function openModelPicker() {
   const anchor = $("c-models");
-  const layer = openPopover(anchor, {
-    title: "Models", width: 480,
-    onClose: () => { pickerRefresh = null; },
-    content: (el) => {
+  savedView = nav.view();
+  openPopover(anchor, {
+    title: "Models", width: pickerWidth(ALL.length), className: "pk-panel", timeKeys: true,
+    onClose: () => { pickerRefresh = null; view.classList.remove("picker-open"); if (savedView) nav.setView(savedView); savedView = null; insetGoal = 0; animateInset(0); },
+    content: (el, layer) => {
       el.innerHTML = `<div class="pk-head"><label class="pop-search">${icon.search}<input type="search" placeholder="Search ${ALL.length} models, teams, families" aria-label="Search models"></label>
-          <button type="button" class="pk-base" role="switch" aria-checked="${sel.baseline}"><i></i>Baseline</button></div>
+          <button type="button" class="pk-base" aria-pressed="${sel.baseline}"><span class="tick"></span>Baseline</button></div>
         <div class="pk-list" role="group" aria-label="Models"></div>
         <div class="pk-foot"></div>`;
       const list = el.querySelector(".pk-list"), input = el.querySelector("input"), foot = el.querySelector(".pk-foot");
-      el.querySelector(".pk-base").addEventListener("click", (e) => { sel.setBaseline(!sel.baseline); e.currentTarget.setAttribute("aria-checked", sel.baseline); });
+      el.querySelector(".pk-base").addEventListener("click", (e) => { sel.setBaseline(!sel.baseline); e.currentTarget.setAttribute("aria-pressed", sel.baseline); });
       let lastClicked = null;
       const week = DATES[nav.week], weekKey = d3.utcFormat("%Y-%m-%d")(week);
       const row = (m) => {
@@ -227,7 +244,6 @@ function openModelPicker() {
       const chev = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
       // headers are plain text; every section but Selected collapses, and has a quiet Select all / Deselect all
       const section = (key, title, ms, inner) => {
-        if (key === "sel") return `<div class="pk-sec fixed" data-key="${key}"><span class="pk-sec-t">${title} <span class="n">${ms.length}</span></span></div>${inner}`;
         const all = ms.every((m) => sel.has(m)), open = !collapsed.has(key);
         return `<div class="pk-sec${open ? "" : " collapsed"}" data-key="${key}"><button type="button" class="pk-sec-t" aria-expanded="${open}">${chev}${title} <span class="n">${ms.length}</span></button><button type="button" class="pk-all">${all ? "Deselect all" : "Select all"}</button></div>${open ? inner : ""}`;
       };
@@ -235,8 +251,6 @@ function openModelPicker() {
         const q = input.value.trim().toLowerCase();
         const match = (m) => !q || m.toLowerCase().includes(q) || teamOf(m).toLowerCase().includes(q) || familyTag(m).toLowerCase().includes(q) || provenance(m).toLowerCase() === q;
         const out = [];
-        const selMs = sel.selected.filter(match);
-        if (selMs.length) out.push({ key: "sel", title: "Selected", ms: selMs });
         const local = ALL.filter((m) => provenance(m) === "Local" && match(m));
         if (local.length) out.push({ key: "local", title: "Local", ms: local });
         for (const g of GROUPS.families) { const ms = g.models.filter(match); if (ms.length) out.push({ key: g.key, title: g.title, ms }); }
@@ -247,9 +261,16 @@ function openModelPicker() {
       const render = () => {
         const keep = document.activeElement?.closest?.(".pk-row"), keepM = keep?.dataset.m, keepCls = document.activeElement?.className, top = list.scrollTop;
         const secs = sections();
-        list.innerHTML = secs.map((s) => section(s.key, s.title, s.ms, s.teams
+        // two columns when the list is long, one when it's short; the panel and the chart's inset follow
+        const shown = new Set(secs.flatMap((x) => x.ms)).size, two = shown > 24, wNow = pickerWidth(shown);
+        list.classList.toggle("two", two);
+        if (layer?.panel && Math.abs(layer.panel.offsetWidth - wNow) > 1) layer.panel.style.width = `${wNow}px`;
+        const right = 16 + wNow + 24;
+        if (Math.abs(right - insetGoal) > 1) { insetGoal = right; animateInset(right); }
+        view.style.setProperty("--pk-shift", `${right / 2}px`); // the date control centres on the chart half
+        list.innerHTML = `<div class="pk-cols">${secs.map((s) => section(s.key, s.title, s.ms, s.teams
           ? s.teams.map((t) => `<div class="pk-team">${t.team}</div>${t.ms.map(row).join("")}`).join("")
-          : s.ms.map(row).join(""))).join("") || `<div class="c-empty t-small">No models match</div>`;
+          : s.ms.map(row).join(""))).join("") || `<div class="c-empty t-small">No models match</div>`}</div>`;
         list.scrollTop = top;
         if (keepM) list.querySelector(`.pk-row[data-m="${CSS.escape(keepM)}"] .${keepCls?.split(" ")[0]}`)?.focus({ preventScroll: true });
         const n = sel.selected.length, on = sel.charted.length;
@@ -259,7 +280,6 @@ function openModelPicker() {
         const r = e.target.closest(".pk-row"), sec = e.target.closest(".pk-sec");
         if (sec) {
           const s = sections().find((x) => x.key === sec.dataset.key);
-          if (s.key === "sel") return;
           if (e.target.closest(".pk-all")) sel.setMany(s.ms, !s.ms.every((m) => sel.has(m)));
           else if (e.target.closest(".pk-sec-t")) { collapsed.has(s.key) ? collapsed.delete(s.key) : collapsed.add(s.key); render(); }
           return;
@@ -282,10 +302,14 @@ function openModelPicker() {
       });
       input.addEventListener("input", render);
       pickerRefresh = render;
+      requestAnimationFrame(render); // after the panel exists, so its width and the chart inset line up
       render();
     },
   });
+  view.classList.add("picker-open");
+  nav.zoomTo(PREVIEW_WEEKS, { recenter: true });
 }
+let insetGoal = 0;
 
 /* ---------------- chrome ---------------- */
 const GL = { source: "#chart-src", container: view };
@@ -297,9 +321,8 @@ $("theme").addEventListener("click", () => {
   requestAnimationFrame(() => LiquidGlass.updateAll());
 });
 renderModelsPill(); // fill it before the glass measures it
-var modelsGlass = new LiquidGlass($("c-models"), GL); new LiquidGlass($("c-baseline"), GL);
+var modelsGlass = new LiquidGlass($("c-models"), GL);
 $("c-models").addEventListener("click", openModelPicker);
-$("c-baseline").addEventListener("click", () => sel.setBaseline(!sel.baseline));
 var noteGlass = new LiquidGlass($("more"), GL);
 $("more-btn").addEventListener("click", () => sel.setShowAll(!sel.showAll));
 renderModelsPill();

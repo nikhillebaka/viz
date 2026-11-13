@@ -248,3 +248,18 @@ a blue checkmark at the right and full-strength text; unselected names are quiet
 (name, then team · family · provenance in small muted text, replacing boxed tags); plain section
 headers with no background and a quiet "Select all / Deselect all" at the right; the Selected section
 can't be collapsed. Grey context lines are now as wide as the colored medians.
+
+### The picker as a left-half panel (Nov 13)
+
+- The picker takes the actual left half of the screen at full height (two columns), or the left quarter
+  (one column) when the list is short (24 or fewer showing, e.g. after a search). The chrome on the left
+  fades away while it's open, and the date control slides to the middle of the chart half.
+- The chart moves its plot into the right half and previews at **14 weeks** (recentered), close enough
+  that the four forecast weeks stay distinct. Left and right keep stepping the date (the panel opts in
+  to time keys; only search typing keeps its arrows). Closing restores the zoom and pan exactly.
+- No "Selected" section: the checkmarks already show selection, and Select all no longer duplicates
+  rows into it.
+- One Baseline control, in the picker header, using the site's checkmark style with no background.
+  Search has no field background: icon and text, with a hairline under the header.
+- Regression check: 38 cases including picker size, arrow keys while open, one-column shrink and exact
+  restore.

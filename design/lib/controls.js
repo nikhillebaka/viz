@@ -53,7 +53,8 @@ export function timeKeys(step, { active = () => true } = {}) {
   document.addEventListener("keydown", (e) => {
     if ((e.key !== "ArrowLeft" && e.key !== "ArrowRight") || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
     const t = e.target;
-    if (t.closest?.("input, textarea, select, [contenteditable], .c-float") || !active()) return;
+    // open menus keep their arrows, unless a panel opts in (data-time-keys) because it only uses up/down
+    if (t.closest?.("input, textarea, select, [contenteditable], .c-float:not([data-time-keys])") || !active()) return;
     e.preventDefault(); e.stopPropagation();
     // a control that was clicked keeps focus, but pressing an arrow shouldn't light up its ring
     if (modality === "pointer" && t !== document.body && typeof t.blur === "function") t.blur();
@@ -245,9 +246,9 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
 
 /* ---------------------------------------------------------------- popover
  * content: an element or (body) => void. morph: the anchor pill grows into the panel (study 2). */
-export function openPopover(anchor, { title = "", content, placement = "bottom-start", width = null, morph = true, onClose } = {}) {
+export function openPopover(anchor, { title = "", content, placement = "bottom-start", width = null, morph = true, onClose, className = "", timeKeys = false } = {}) {
   const w = width || num("--layout-popover-width", 360);
-  const layer = floating(anchor, { className: "c-popover", role: "dialog", label: title, sheetTitle: title, placement, width: w, morph, onClose, modal: true });
+  const layer = floating(anchor, { className: `c-popover ${className}`.trim(), role: "dialog", label: title, sheetTitle: title, placement, width: w, morph, onClose, modal: true });
   if (title && !layer.compact) {
     const h = document.createElement("div"); h.className = "c-popover-head";
     h.innerHTML = `<span class="t-title-3"></span><button type="button" class="c-icon-btn" aria-label="Close">${icon.close}</button>`;
@@ -255,6 +256,7 @@ export function openPopover(anchor, { title = "", content, placement = "bottom-s
     h.querySelector("button").addEventListener("click", () => layer.close(true));
     layer.body.appendChild(h);
   }
+  if (timeKeys) layer.panel.dataset.timeKeys = "";
   const inner = document.createElement("div"); inner.className = "c-popover-content"; layer.body.appendChild(inner);
   if (typeof content === "function") content(inner, layer); else if (content) inner.appendChild(content);
   layer.open();

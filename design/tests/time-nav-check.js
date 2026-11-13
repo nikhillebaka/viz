@@ -97,9 +97,9 @@ export async function run({ rulers = false } = {}) {
     // --- reset and double-click
     await pinch(10, 8); await pan(5, -20); await settle(); key("0"); await settle();
     check("0 returns to 11 weeks, unpanned", near(nav.span, 11, 0.01) && nav.P === 0, { span: nav.span, P: nav.P });
-    el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await settle(1200);
+    el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await settle();
     const full = near(nav.span, nav.seasonSpan, 0.01);
-    el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await settle(1200);
+    el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); await settle();
     check("double-click: fully out, then back home", full && near(nav.span, 11, 0.01), { span: nav.span });
     await reset();
     // --- drag
@@ -141,6 +141,27 @@ export async function run({ rulers = false } = {}) {
       check("model labels sit clear of the rulers", lx > Math.max(...xs) + 4, { lastRuler: Math.round(Math.max(...xs)), labels: Math.round(lx) });
     }
     await setRulers(rulers); await reset();
+    // --- model picker: previews most of the season, keeps arrow keys, restores the view exactly on close
+    const pill = document.getElementById("c-models");
+    if (pill) {
+      nav.zoomTo(8); await settle(); await pan(4, -15); await settle();
+      const v0 = { span: nav.span, P: nav.P, x: nav.refX() };
+      pill.click(); await settle(8000);
+      const panel = document.querySelector(".pk-panel");
+      const sized = () => { const r = panel.getBoundingClientRect(); return r.width > el.clientWidth * 0.4 && r.height > el.clientHeight - 40; };
+      for (let i = 0; i < 80 && !sized(); i++) await sleep(100); // the open morph
+      const wide = panel.getBoundingClientRect().width > el.clientWidth * 0.4;
+      const half = Math.abs(panel.getBoundingClientRect().height - el.clientHeight) < 40 && !!document.querySelector("#view.picker-open");
+      check("picker: the left half, full height; chart previews at 14 weeks", wide && half && near(nav.span, 14, 0.01), { span: +nav.span.toFixed(2), h: Math.round(panel.getBoundingClientRect().height) });
+      const T0 = nav.T; key("ArrowRight"); await settle();
+      check("picker: left/right still step the date while it's open", nav.T === T0 + 1, { T: nav.T });
+      const input = panel.querySelector("input"); input.value = "ar6"; input.dispatchEvent(new Event("input", { bubbles: true })); await sleep(400);
+      check("picker: a short list shrinks to one column", !panel.querySelector(".pk-list").classList.contains("two") && panel.getBoundingClientRect().width < el.clientWidth * 0.4, { w: Math.round(panel.getBoundingClientRect().width) });
+      key("ArrowLeft"); await settle();
+      panel.querySelector(".c-popover-head .c-icon-btn, .c-icon-btn")?.click(); await settle(8000);
+      check("picker: closing restores the zoom and pan exactly", near(nav.span, v0.span, 1e-6) && near(nav.P, v0.P, 1e-6) && near(nav.refX(), v0.x, 0.5), { span: nav.span, P: nav.P });
+      await reset();
+    }
   } finally {
     window.requestAnimationFrame = raf; window.cancelAnimationFrame = caf;
   }

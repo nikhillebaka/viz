@@ -51,16 +51,29 @@ svg { display: block; }
 #c-models > svg:not(.lg-layer) { width: 14px; height: 14px; position: relative; z-index: 4; color: var(--ink-tertiary); }
 
 /* model picker */
-.pk-head { display: flex; gap: 8px; align-items: center; margin: 0 4px 6px; }
-.pk-head .pop-search { flex: 1; display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px; border-radius: var(--radius-field); background: var(--fill-field); }
-.pk-head .pop-search svg { width: 14px; height: 14px; color: var(--ink-tertiary); }
+.pk-head { display: flex; gap: 12px; align-items: center; margin: 0 2px 4px; padding: 0 8px 8px 6px; border-bottom: 1px solid var(--line-hairline); }
+.pk-head .pop-search { flex: 1; display: flex; align-items: center; gap: 9px; height: 32px; }
+.pk-head .pop-search svg { width: 15px; height: 15px; color: var(--ink-tertiary); flex: none; }
 .pk-head input { flex: 1; border: 0; outline: 0; background: none; color: var(--ink-primary); font: 14px var(--font-sans); min-width: 0; }
-.pk-head .pk-base { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 10px; border-radius: var(--radius-field); background: var(--fill-field); color: var(--ink-secondary); font: 500 12.5px var(--font-sans); border: 0; cursor: pointer; }
-.pk-base i { width: 26px; height: 16px; border-radius: 8px; background: var(--ink-faint); position: relative; transition: background var(--dur-fade); }
-.pk-base i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; transition: transform var(--dur-fade) var(--ease-fade); }
-.pk-base[aria-checked="true"] i { background: var(--series-baseline); }
-.pk-base[aria-checked="true"] i::after { transform: translateX(10px); }
-.pk-list { max-height: min(480px, 62vh); overflow: auto; scrollbar-width: thin; padding: 0 2px; }
+.pk-head input::placeholder { color: var(--ink-tertiary); }
+.pk-base { display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 2px; border: 0; background: none; color: var(--ink-secondary); font: 500 13px var(--font-sans); cursor: pointer; }
+.pk-base:hover { color: var(--ink-primary); }
+.pk-base .tick { width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--ink-tertiary); display: inline-grid; place-items: center; flex: none; }
+.pk-base[aria-pressed="true"] .tick { background: var(--accent); box-shadow: none; }
+.pk-base[aria-pressed="true"] .tick::after { content: ""; width: 7px; height: 4px; border: solid #fff; border-width: 0 0 1.75px 1.75px; transform: translateY(-1px) rotate(-45deg); }
+.pk-panel { top: var(--layout-inset-regular) !important; left: var(--layout-inset-regular) !important; height: calc(100% - 2 * var(--layout-inset-regular)) !important; max-height: none !important; transition: width 260ms var(--ease-fade); }
+/* while it's open, the chrome on the left gives way, and the date control moves to the middle of the chart */
+.c-zone > * { transition: opacity 200ms var(--ease-fade), transform 200ms var(--ease-fade); }
+.c-zone[data-zone="bc"], .hint { transition: transform 320ms var(--ease-fade), opacity 200ms var(--ease-fade); }
+#view.picker-open [data-zone="tl"] > *, #view.picker-open [data-zone="bl"] > * { opacity: 0; transform: scale(0.96); pointer-events: none; }
+#view.picker-open [data-zone="bc"] { transform: translateX(var(--pk-shift, 0px)); }
+#view.picker-open .hint { opacity: 0 !important; }
+.pk-panel .c-float-body { display: flex; flex-direction: column; }
+.pk-panel .c-popover-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pk-list { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; padding: 0 2px; }
+.pk-list.two .pk-cols { columns: 2; column-gap: 20px; }
+.pk-cols .pk-row, .pk-cols .pk-team { break-inside: avoid; }
+.pk-cols .pk-sec { break-inside: avoid; break-after: avoid; }
 /* section headers: plain text, no background; the action sits quietly at the right */
 .pk-sec { display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px 0 6px; margin-top: 10px; }
 .pk-sec:first-child { margin-top: 2px; }
@@ -110,7 +123,6 @@ svg { display: block; }
     <div class="c-zone" data-zone="tl">
       <a class="c-pill icon" id="back" href="../components.html" aria-label="Back to the design system"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg></a>
       <button class="c-pill" id="c-models" aria-haspopup="dialog"><span class="dots"></span><span class="label"></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-      <button class="c-pill" id="c-baseline" aria-pressed="true"><span class="tick"></span><span>Baseline</span></button>
     </div>
     <div class="c-zone" data-zone="tr">
       <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
