@@ -1,6 +1,7 @@
 # Moving through time
 
-Prototype: `studies/intervals-refine.html`. The drawing is `fanChart({ t })` in `lib/chart.js`.
+Prototype: `studies/intervals-refine.html`. Motion, gestures and zoom live in `lib/time.js` (`TimeNav`);
+the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 
 ## Decisions (Nov 12, 2026)
 
@@ -34,20 +35,27 @@ Prototype: `studies/intervals-refine.html`. The drawing is `fanChart({ t })` in 
 - **Desktop only** for now. Mobile will be a separate, simpler site or a "use desktop" page, so zoom and
   layout don't need phone-width rules.
 
-## Zoom (agreed direction, not built)
+## Zoom (built)
 
-- The camera follows the date: span (weeks visible) and lead (where the reference date sits) are stored,
-  never absolute dates. Zoom pivots on the reference date, never the cursor. The y-axis stays fixed.
-- Two regimes: close up (about 6 to 20 weeks, continuous zoom, drag scrubs) and Season (whole season,
-  the fan moves across it like a playhead, click or drag places the date). Pinching past about 20 weeks
-  commits to Season with an animated range change.
-- Inputs: trackpad pinch (ctrl + wheel) and Safari gestures, bare = / - / 0 keys, double-click toggles,
-  and a chrome control. Plain vertical wheel does nothing.
-- Season is where the evaluation window brush should live, so time selection is one concept app-wide.
-  Past-forecast trails are held out of the first version.
+- **The camera follows the date.** Zoom state is a span in weeks, never absolute dates, so it survives
+  date, model and location changes. Close up, the reference date keeps its place with 3 forecast weeks to
+  its right, and zoom pivots on it, never the cursor. The y-axis stays fixed.
+- **Two regimes.** Close up spans 6 to 20 weeks, continuously, and drag or side scroll scrubs the date.
+  Season shows the whole season (first to last observed week, about 48 weeks) with the camera still; the
+  forecast moves across it like a playhead, and a drag or tap places the date under the pointer.
+  Between 20 weeks and Season the camera blends (log-space span, smoothstep on the endpoints) and is
+  only passed through: on release it settles on the nearer end, weighted toward staying close up.
+  Below 6 weeks it rubber-bands back.
+- **Inputs:** trackpad pinch (ctrl + wheel) and Safari pinch gestures, ⌘/ctrl + mouse wheel (clamped
+  per notch), bare = / - / 0 keys, double-click (close up → Season; in Season, zoom back in on the
+  clicked week), and a Forecast / Season control in the bottom-right chrome. Plain vertical wheel
+  does nothing. Gestures are 1:1 while held; springs only settle them.
+- **In Season,** the model labels ride at the fan's end, rulers are hidden, and the right margin
+  shrinks from 168px to 56px with the blend.
+- Season is where the evaluation window brush should live, so time selection is one concept
+  app-wide. Past-forecast trails are held out of the first version.
 
 ## Open
 
 - Whether the full redraw per frame stays smooth on slower machines once the liquid glass refracts the
   moving chart. If not: update persistent elements in place instead of rebuilding.
-- A "Season" zoom to see the whole season with the current forecast in place (pinch / ⌘-scroll).

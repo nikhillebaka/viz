@@ -3,7 +3,8 @@
  * chrome, and time keys (left/right always step the forecast date). Decisions: intervals-goals.md. */
 import { LiquidGlass } from "../lib/glass.js";
 import { loadData, fanChart, bands, short, WEEK } from "../lib/chart.js";
-import { Segmented, Stepper, tooltip, timeKeys } from "../lib/controls.js";
+import { Segmented, Stepper, tooltip } from "../lib/controls.js";
+import { TimeNav } from "../lib/time.js";
 import { sizeClass } from "../lib/position.js";
 
 const root = document.documentElement;
@@ -37,12 +38,12 @@ function models() {
 /* ---------------- draw ---------------- */
 function draw() {
   const w = svg.node().clientWidth, compact = sizeClass(view) === "compact";
-  const T = M.T, ref = new Date(+DATES[0] + T * WEEK); // continuous: the view slides with T
+  const u = nav.mix; // 0 close up, 1 Season
   const P = fanChart(svg, data, {
-    id: "chart-src", models: models(), t: T,
-    domain: [new Date(+ref - (compact ? 4 : 8) * WEEK), new Date(+ref + 3 * WEEK)],
-    pad: { l: compact ? 40 : 64, r: compact ? 92 : 168, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
-    focus: focused(), hover: M.dragging ? null : S.hoverH, rulers: S.rulers, misses: S.misses,
+    id: "chart-src", models: models(), t: nav.T, domain: nav.domain(),
+    // the right margin holds the model labels close up; in Season they sit at the fan's end instead
+    pad: { l: 64, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
+    focus: focused(), hover: nav.busy ? null : S.hoverH, rulers: S.rulers && u < 0.001, misses: S.misses,
     onLabel: toggleFocus,
     onLabelHover: (m) => { if (S.preview !== m) { S.preview = m; draw(); } },
   });
@@ -59,7 +60,7 @@ function toggleFocus(m) {
 /* ---------------- readout ---------------- */
 function readout() {
   const el = $("readout");
-  if (S.hoverH == null || M.dragging) { el.hidden = true; return; }
+  if (S.hoverH == null || nav.busy) { el.hidden = true; return; }
   const hp = { h: S.hoverH, date: new Date(+G.ref + S.hoverH * WEEK) }, f = G.focus, hasFocus = f != null;
   const rows = G.bands.map((b) => ({ b, p: b.pts.find((p) => p.h === hp.h) })).filter((d) => d.p);
   if (hasFocus) rows.sort((a, b) => (b.b.m === f) - (a.b.m === f));
@@ -78,122 +79,27 @@ function readout() {
     el.style.left = `${lx > 12 ? lx : px + 18}px`; }
 }
 
-/* ---------------- time motion ----------------
- * One continuous position T, a fractional forecast-date index. Everything that changes the date moves T,
- * and the chart is drawn at T (lib/chart.js interpolates each forecast point by point, so fans slide and
- * reshape instead of jumping).
- *  - drag: T follows the pointer 1:1, one week per week-width dragged, rubber-banding past the first and
- *    last date. On release it snaps to a week, carrying the flick's velocity.
- *  - stepper and arrow keys: T glides to the new week in ~140ms. Repeated presses retarget from wherever
- *    T is; nothing queues, so fast clicking or a held key just moves faster.
- * At most one redraw per animation frame. The stepper always shows the week T will settle on. */
-const N = DATES.length;
-window.__motion = () => ({ ...M }); // for testing the motion from the console
-const M = { T: DI0, V: 0, w: 38, target: DI0, raf: 0, dragging: false }; // T in weeks, V in weeks per second
-const clampI = (i) => Math.max(0, Math.min(N - 1, i));
-const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+/* ---------------- time: date and zoom ----------------
+ * lib/time.js owns the date (scrub, glide, keys) and the zoom (close up 6–20 weeks, or Season). */
+const chartEl = svg.node();
 let frameQueued = 0;
 function frame() { if (!frameQueued) frameQueued = requestAnimationFrame(() => { frameQueued = 0; draw(); }); }
-
-function showWeek(i) { // keep the stepper on the week we're heading to, without re-triggering it
-  if (stepper.index !== i) { stepper.index = i; stepper.render(true); }
-}
-// Every move to a week is a critically damped spring chasing the target: it starts from the current
-// position AND velocity, so a new press mid-motion bends the path instead of restarting it (no surge,
-// no backward step), and it lands exactly on the week. Frame time comes from the clock between frames,
-// clamped so a dropped frame can't make it leap. w sets the pace: higher is snappier.
-function glideTo(i, { w = 38, v = null } = {}) {
-  i = clampI(i); showWeek(i); S.di = i;
-  M.target = i; M.w = w;
-  if (v != null) M.V = v;
-  if (reduced.matches) { cancelAnimationFrame(M.raf); M.raf = 0; M.T = i; M.V = 0; frame(); return; }
-  if (M.raf) return; // already moving: the running loop just picks up the new target
-  let last = performance.now();
-  const tick = () => {
-    const now = performance.now(), dt = Math.min(0.033, Math.max(0.001, (now - last) / 1000)); last = now;
-    const y0 = M.T - M.target, v0 = M.V, w = M.w, e = Math.exp(-w * dt), c = v0 + w * y0;
-    M.T = M.target + (y0 + c * dt) * e;              // exact critically damped step
-    M.V = (v0 - w * c * dt) * e;
-    if (Math.abs(M.T - M.target) < 0.0005 && Math.abs(M.V) < 0.01) { M.T = M.target; M.V = 0; M.raf = 0; draw(); return; }
-    draw();
-    M.raf = requestAnimationFrame(tick);
-  };
-  M.raf = requestAnimationFrame(tick);
-}
-
-// drag to scrub
-const chartEl = svg.node();
-const rubber = (d) => (1 - 1 / (d * 0.6 + 1)) / 0.6; // past the ends: resistance grows, tops out under 2 weeks
-const unrubber = (r) => (1 / (1 - Math.min(r * 0.6, 0.999)) - 1) / 0.6;
-let drag = null;
-chartEl.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0 || e.target.closest(".fc-label")) return;
-  cancelAnimationFrame(M.raf); M.raf = 0; M.V = 0;
-  const pxw = G.x(new Date(+G.ref + WEEK)) - G.x(G.ref);
-  drag = { id: e.pointerId, x0: e.clientX, T0: M.T, pxw, moved: false, hist: [{ t: e.timeStamp, T: M.T }] };
-  hoverAt(e.clientX);
-});
-chartEl.addEventListener("pointermove", (e) => {
-  if (drag && e.pointerId === drag.id) {
-    const dx = e.clientX - drag.x0;
-    if (!drag.moved && Math.abs(dx) < 4) return;
-    if (!drag.moved) { drag.moved = true; M.dragging = true; try { chartEl.setPointerCapture(e.pointerId); } catch {} chartEl.style.cursor = "grabbing"; $("hint").style.opacity = 0; }
-    let T = drag.T0 - dx / drag.pxw;                 // drag right = earlier dates, like moving the page
-    if (T < 0) T = -rubber(-T); else if (T > N - 1) T = N - 1 + rubber(T - (N - 1));
-    M.T = T; showWeek(clampI(Math.round(T)));
-    drag.hist.push({ t: e.timeStamp, T }); if (drag.hist.length > 6) drag.hist.shift();
-    frame();
-    return;
-  }
-  if (!e.target.closest(".fc-label")) hoverAt(e.clientX);
-});
-const endDrag = (e) => {
-  if (!drag || e.pointerId !== drag.id) return;
-  const d = drag; drag = null;
-  if (!d.moved) { if (M.T !== M.target) glideTo(M.target); return; } // a tap: hover is set; finish any move it interrupted
-  M.dragging = false; chartEl.style.cursor = "";
-  const a = d.hist[0], z = d.hist.at(-1), dt = Math.max(1, z.t - a.t);
-  const v = z.t - a.t < 120 ? (z.T - a.T) / dt : 0;     // weeks per ms, only if the pointer was still moving
-  glideTo(Math.round(M.T + v * 120), { w: 26, v: v * 1000 }); // a flick carries ~120ms further, then snaps with its speed
-};
-// side scroll (trackpad swipe, shift + wheel) scrubs the same way: 1:1 with the scroll, rubber band at
-// the ends, and a snap to the nearest week once the scroll (including the trackpad's own momentum) stops
-let wheelIdle = 0;
-view.addEventListener("wheel", (e) => {
-  let dx = e.deltaX;
-  if (!dx && e.shiftKey) dx = e.deltaY;
-  if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || e.target.closest(".c-float")) return; // vertical, or in a menu: not ours
-  e.preventDefault();
-  if (e.deltaMode === 1) dx *= 16; else if (e.deltaMode === 2) dx *= chartEl.clientWidth;
-  cancelAnimationFrame(M.raf); M.raf = 0; M.V = 0;
-  const pxw = G.x(new Date(+G.ref + WEEK)) - G.x(G.ref);
-  // undo the rubber band to get the raw position, add the scroll, re-apply the rubber band
-  const raw = M.T < 0 ? -unrubber(-M.T) : M.T > N - 1 ? N - 1 + unrubber(M.T - (N - 1)) : M.T;
-  let T = raw + dx / pxw;
-  if (T < 0) T = -rubber(-T); else if (T > N - 1) T = N - 1 + rubber(T - (N - 1));
-  M.T = T; M.dragging = true; showWeek(clampI(Math.round(T))); $("hint").style.opacity = 0;
-  frame();
-  clearTimeout(wheelIdle);
-  wheelIdle = setTimeout(() => { M.dragging = false; glideTo(Math.round(M.T), { w: 26, v: 0 }); }, 140);
-}, { passive: false });
-chartEl.addEventListener("pointerup", endDrag);
-chartEl.addEventListener("pointercancel", endDrag);
-
 /* ---------------- hover ---------------- */
 function setHover(h) { if (h === S.hoverH) return; S.hoverH = h; if (h != null) $("hint").style.opacity = 0; frame(); }
 function hoverAt(clientX) {
-  if (!G || M.dragging) return;
+  if (!G || nav.busy) return;
   const px = clientX - chartEl.getBoundingClientRect().left;
   const weeks = [0, 1, 2, 3];
   const near = weeks.reduce((a, b) => (Math.abs(G.x(new Date(+G.ref + b * WEEK)) - px) < Math.abs(G.x(new Date(+G.ref + a * WEEK)) - px) ? b : a));
   const far = px < G.x(G.ref) - 60 || px > G.x.range()[1] + 30;
   setHover(far ? null : near);
 }
-chartEl.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse" && !drag) setHover(null); });
+chartEl.addEventListener("pointermove", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
+chartEl.addEventListener("pointerdown", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
+chartEl.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") setHover(null); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.focus && !document.querySelector(".c-float")) { S.focus = null; draw(); } });
 
 /* ---------------- chrome ---------------- */
-timeKeys((d) => stepper.step(d));
 const GL = { source: "#chart-src", container: view };
 for (const id of ["back", "theme", "c-rulers", "c-misses"]) new LiquidGlass($(id), GL);
 tooltip($("back"), "Back to the design system", { placement: "bottom" });
@@ -204,7 +110,19 @@ $("theme").addEventListener("click", () => {
 });
 new Segmented($("c-set"), { label: "Models", value: S.set, glass: GL, items: [{ value: "close", label: "Close" }, { value: "apart", label: "Apart" }, { value: "skewed", label: "Skewed" }, { value: "baseline", label: "+ Baseline" }], onChange: (v) => { S.set = v; S.focus = null; draw(); } });
 new Segmented($("c-count"), { label: "Models shown", value: "3", glass: GL, items: [{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }], onChange: (v) => { S.count = +v; if (!SETS[S.set].slice(0, S.count).includes(S.focus)) S.focus = null; draw(); } });
-const stepper = new Stepper($("c-date"), { values: DATES, index: DI0, label: "Forecast date", glass: GL, format: { long: fmtLong, short: fmtShort }, onChange: (i) => glideTo(i) });
+const stepper = new Stepper($("c-date"), { values: DATES, index: DI0, label: "Forecast date", glass: GL, format: { long: fmtLong, short: fmtShort }, onChange: (i) => nav.goTo(i) });
+const zoomSeg = new Segmented($("c-zoom"), { label: "Time span", value: "close", glass: GL, items: [{ value: "close", label: "Forecast" }, { value: "season", label: "Season" }], onChange: (v) => nav.setSeason(v === "season") });
+tooltip($("c-zoom"), "Pinch, or press = and −, to zoom. Double-click the chart to switch.", { placement: "top" });
+const nav = new TimeNav({
+  surface: chartEl, dates: DATES, index: DI0,
+  season: [truth[0].date, new Date(Math.max(+truth.at(-1).date, +DATES.at(-1) + 3 * WEEK))],
+  scale: () => G.x,
+  ignore: (e) => !!e.target.closest(".fc-label"),
+  onFrame: draw,
+  onWeek: (i) => { S.di = i; if (stepper.index !== i) { stepper.index = i; stepper.render(true); } $("hint").style.opacity = 0; },
+  onZoom: (m) => { if (zoomSeg.value !== m) zoomSeg.set(m, false); },
+});
+window.__nav = nav; // for testing from the console
 for (const [id, key] of [["c-rulers", "rulers"], ["c-misses", "misses"]]) $(id).addEventListener("click", () => { S[key] = !S[key]; $(id).setAttribute("aria-pressed", S[key]); draw(); });
 
 // the chrome tells the chart how much room it takes, top and bottom

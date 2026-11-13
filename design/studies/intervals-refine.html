@@ -47,7 +47,7 @@ svg { display: block; }
 <div id="view" data-view>
   <svg id="chart" role="img" aria-label="Forecast chart with 95% intervals. Left and right arrow keys change the forecast date."></svg>
   <div class="readout" id="readout" hidden></div>
-  <div class="hint" id="hint">Click a model to focus it · hover for exact values · ← → change date</div>
+  <div class="hint" id="hint">Click a model to focus it · drag or ← → to change date · pinch to zoom</div>
 
   <div class="c-chrome" id="chrome">
     <div class="c-zone" data-zone="tl">
@@ -62,7 +62,7 @@ svg { display: block; }
       <button class="c-pill" id="c-misses" aria-pressed="true" data-compact-hide><span class="tick"></span><span>Misses</span></button>
     </div>
     <div class="c-zone" data-zone="bc"><div id="c-date"></div></div>
-    <div class="c-zone" data-zone="br"><div id="c-count"></div></div>
+    <div class="c-zone" data-zone="br"><div id="c-zoom"></div><div id="c-count"></div></div>
   </div>
 </div>
 

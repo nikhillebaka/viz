@@ -213,7 +213,8 @@ export function fanChart(svgSel, data, opts = {}) {
     .attr("cx", (p) => x(p.date)).attr("cy", (p) => y(p.med)).attr("fill", (p) => p.c).attr("stroke", "var(--surface-chart)").attr("stroke-width", 1.75);
 
   // width rulers beside the fan, at the hovered week (default 3 weeks ahead)
-  const rx0 = x.range()[1] + 18;
+  const fanEnd = x(new Date(+ref + 3 * WEEK)); // the last forecast week; equals the plot's right edge close up
+  const rx0 = fanEnd + 18;
   if (opts.rulers && B.length) {
     const rh = opts.hover ?? 3;
     g.append("text").attr("class", "t-label-chart").attr("fill", "var(--ink-tertiary)").attr("x", rx0 - 4).attr("y", ay + 20).text(rh === 0 ? "This wk" : `+${rh} wk`);
@@ -228,7 +229,7 @@ export function fanChart(svgSel, data, opts = {}) {
   // direct labels at the end of each median; a halo lets the dotted observed line pass behind them
   if (opts.labels !== false) {
     const top = y.domain()[1];
-    const lx = opts.rulers ? rx0 + models.length * rulerStep + 8 : x.range()[1] + 14;
+    const lx = opts.rulers ? rx0 + models.length * rulerStep + 8 : fanEnd + 14; // labels ride with the fan (zoomed out it sits mid-chart)
     const labs = S.map((s) => ({ s, x: lx, y: y(Math.min(s.pts.at(-1).med, top)) })).sort((a, b) => a.y - b.y);
     for (let i = 1; i < labs.length; i++) labs[i].y = Math.max(labs[i].y, labs[i - 1].y + 18);
     const lg = g.append("g").selectAll("g").data(labs).join("g").attr("class", "fc-label").attr("transform", (d) => `translate(${d.x},${d.y})`);
