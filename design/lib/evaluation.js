@@ -76,7 +76,13 @@ export function mountScores(el, opts) {
     ];
   }
   function renderScope(target = scopeEl) {
-    target.innerHTML = fragments().map((f, i) => `${i ? '<span class="dot">·</span>' : ""}<button class="f${f.set ? " set" : ""}" data-k="${f.k}">${esc(f.t)}</button>`).join("")
+    // update in place when the fragments are the same: an open popover stays anchored to its button
+    const fr = fragments(), btns = [...target.querySelectorAll(".f")];
+    if (btns.length === fr.length && btns.every((b, i) => b.dataset.k === fr[i].k)) {
+      fr.forEach((f, i) => { if (btns[i].textContent !== f.t) btns[i].textContent = f.t; btns[i].classList.toggle("set", f.set); });
+      return;
+    }
+    target.innerHTML = fr.map((f, i) => `${i ? '<span class="dot">·</span>' : ""}<button class="f${f.set ? " set" : ""}" data-k="${f.k}">${esc(f.t)}</button>`).join("")
       + `<button class="exp" aria-label="Export">${DOWNLOAD}</button>`;
     target.querySelectorAll(".f").forEach((b) => b.addEventListener("click", () => openScope(b)));
   }
@@ -180,14 +186,18 @@ export function mountScores(el, opts) {
 
   /* ---------------- heatmap ---------------- */
   let heat = null, heatSl = null;
+  // built once; later calls update it in place, so an open popover keeps its anchor
   function renderHeatLine() {
     const axisName = { weeks: "Weeks", locations: "Locations", horizons: "Horizons" }[S.heatAxis];
-    heatLine.innerHTML = `<button class="f" data-k="axis">Models × ${axisName}</button><span class="dot">·</span><button class="f">Rel. WIS</button>
-      <span class="ev-legend">½×<canvas width="240" height="12"></canvas>2×</span>`;
-    heatLine.querySelector("[data-k=axis]").addEventListener("click", (e) => openPopover(e.currentTarget, { width: 220, morph: false, content: (body) => {
-      const paint = () => { body.innerHTML = ""; checklist(body, [{ title: "Columns", items: ["weeks", "locations", "horizons"].map((a) => ({ label: a[0].toUpperCase() + a.slice(1), on: S.heatAxis === a, v: a })) }], (it) => { S.heatAxis = it.v; heatSl = null; renderHeat(); renderHeatLine(); paint(); }); };
-      paint();
-    } }));
+    if (!heatLine.firstChild) {
+      heatLine.innerHTML = `<button class="f" data-k="axis"></button><span class="dot">·</span><button class="f">Rel. WIS</button>
+        <span class="ev-legend">½×<canvas width="240" height="12"></canvas>2×</span>`;
+      heatLine.querySelector("[data-k=axis]").addEventListener("click", (e) => openPopover(e.currentTarget, { width: 220, morph: false, content: (body) => {
+        const paint = () => { body.innerHTML = ""; checklist(body, [{ title: "Columns", items: ["weeks", "locations", "horizons"].map((a) => ({ label: a[0].toUpperCase() + a.slice(1), on: S.heatAxis === a, v: a })) }], (it) => { S.heatAxis = it.v; heatSl = null; renderHeat(); renderHeatLine(); paint(); }); };
+        paint();
+      } }));
+    }
+    heatLine.querySelector("[data-k=axis]").textContent = `Models × ${axisName}`;
     const g = heatLine.querySelector("canvas").getContext("2d");
     for (let x = 0; x < 240; x++) { g.fillStyle = divColor((x / 239) * 2 - 1); g.fillRect(x, 0, 1, 12); }
   }

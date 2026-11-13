@@ -51,9 +51,10 @@
   backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
 }
 .lg--frost > .lg-tint { background: var(--glass-frost); }
-/* canvas glass that has scrolled off its chart and sits over the page: frosted, like any glass over paper */
+/* canvas glass that has scrolled off its chart and sits over the page: the same clear glass, made by CSS
+ * instead of the WebGL pass. The page under it is flat paper and text, so there's nothing to bend: just the
+ * shader's blur, saturation and brightness, and the same tint and veil as over the chart. */
 .lg--canvas.lg--paper {
-  -webkit-backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
-  backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 1px)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  backdrop-filter: blur(calc(var(--glass-blur) * 1px)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
 }
-.lg--canvas.lg--paper > .lg-tint { background: var(--glass-frost); }

@@ -428,7 +428,7 @@ ev = mountScores($("scores"), {
   },
 });
 ev.cloneScope($("scope-bubble"));
-var scopeGlass = new LiquidGlass($("scope-bubble"), { frosted: true });
+var scopeGlass = new LiquidGlass($("scope-bubble"), GL); // the same glass as the other top bubbles (clear, over the page)
 await ev.update();
 // the lift: once the scope line passes under the top chrome, the bubble shows it instead
 let lifted = false;

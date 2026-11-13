@@ -43,6 +43,18 @@ export async function run() {
     check("…and the chart's own bubbles are tucked away", document.getElementById("chrome").classList.contains("tucked"));
     LiquidGlass.frame(); await sleep(50);
     check("…and the fixed top bubbles are frosted (off the chart)", document.getElementById("c-models").classList.contains("lg--paper"));
+    // changing the scope from the bubble: the popover stays by its button, the bubble keeps its glass
+    const frag = bubble.querySelector('.f[data-k="h"]'), layers0 = bubble.querySelectorAll(":scope > .lg-layer").length;
+    frag.click(); await sleep(400);
+    const pop = document.querySelector(".c-float"), opt = pop?.querySelector(".ev-checks button");
+    opt?.click(); await sleep(300);
+    const fr = frag.getBoundingClientRect(), pr = pop?.getBoundingClientRect();
+    check("after a choice in a scope popover, its button is still the same element", frag.isConnected && bubble.contains(frag));
+    check("…the popover stays next to it (doesn't jump to a corner)", pr && Math.abs(pr.top - fr.bottom) < 40 && Math.abs(pr.left - fr.left) < 300, { frag: [Math.round(fr.left), Math.round(fr.bottom)], pop: pr && [Math.round(pr.left), Math.round(pr.top)] });
+    check("…and the bubble keeps its glass layers", bubble.querySelectorAll(":scope > .lg-layer").length === layers0 && layers0 > 0, { layers0, now: bubble.querySelectorAll(":scope > .lg-layer").length });
+    opt?.click(); await sleep(200); // put the horizon back
+    (pop?.querySelector("button") || document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await sleep(400);
+    check("the chart doesn't clip its bubbles' shadows", getComputedStyle(document.getElementById("view")).overflow === "visible");
     await go(0);
     check("back at the top, the scope line is on the paper again", !bubble.classList.contains("show") && !ev.scopeEl.classList.contains("lifted") && !document.getElementById("chrome").classList.contains("tucked"));
     LiquidGlass.frame(); await sleep(50);

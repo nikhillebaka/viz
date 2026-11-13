@@ -4,13 +4,16 @@
  *     (await import("/tests/time-nav-check.js")).run()
  * It drives the page with synthetic wheel, pointer and key events and returns { passed, failed, results }.
  * run({ rulers: true }) runs everything with the width rulers on.
- * Things only a real hand can judge (smoothness, feel) are not covered. */
+ * Things only a real hand can judge (smoothness, feel) are not covered.
+ * Run it in a desktop-sized window (about 1280 px wide or more): the scroll-speed and picker-width cases
+ * assume one, and five of them fail in a narrow pane even when nothing is wrong. */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
 export async function run({ rulers = false } = {}) {
   const nav = window.__nav, el = document.getElementById("chart");
   if (!nav || !el) throw new Error("open studies/intervals-refine.html first");
+  if (innerWidth < 1200) console.warn(`time-nav-check: window is ${innerWidth}px wide; the scroll-speed and picker-width cases expect about 1280 or more`);
   // a hidden tab throttles animation frames; tests need them to run
   const raf = window.requestAnimationFrame, caf = window.cancelAnimationFrame;
   window.requestAnimationFrame = (f) => setTimeout(() => f(performance.now()), 16);

@@ -19,7 +19,8 @@ svg { display: block; }
 
 /* the chart fills the screen but a peek, which shows the scores' scope line: the only hint there's more below */
 :root { --peek: 52px; }
-#view { position: relative; height: max(480px, calc(100svh - var(--peek))); overflow: hidden; }
+#view { position: relative; height: max(480px, calc(100svh - var(--peek))); } /* not clipped: the bubbles' shadows fall onto the page below */
+html { overflow-x: clip; }
 /* global bubbles stay on screen while the page scrolls; the chart's own bubbles scroll away with it */
 #chrome-top { position: fixed; inset: 0 0 auto 0; z-index: calc(var(--z-chrome) + 2); grid-template-rows: auto; grid-template-areas: "tl tc tr"; }
 /* the chart's own bubbles fade as they reach the top bubbles, instead of sliding under them */
