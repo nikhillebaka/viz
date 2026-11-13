@@ -51,6 +51,7 @@ export async function run() {
     const fr = frag.getBoundingClientRect(), pr = pop?.getBoundingClientRect();
     check("after a choice in a scope popover, its button is still the same element", frag.isConnected && bubble.contains(frag));
     check("…the popover stays next to it (doesn't jump to a corner)", pr && Math.abs(pr.top - fr.bottom) < 40 && Math.abs(pr.left - fr.left) < 300, { frag: [Math.round(fr.left), Math.round(fr.bottom)], pop: pr && [Math.round(pr.left), Math.round(pr.top)] });
+    check("the bubble's fragments are plain text buttons (no browser button chrome)", [...bubble.querySelectorAll("button")].every((b) => { const cs = getComputedStyle(b); return cs.borderTopWidth === "0px" && cs.backgroundColor === "rgba(0, 0, 0, 0)"; }));
     check("…and the bubble keeps its glass layers", bubble.querySelectorAll(":scope > .lg-layer").length === layers0 && layers0 > 0, { layers0, now: bubble.querySelectorAll(":scope > .lg-layer").length });
     opt?.click(); await sleep(200); // put the horizon back
     (pop?.querySelector("button") || document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await sleep(400);

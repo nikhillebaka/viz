@@ -1,6 +1,7 @@
 /* The scores section (studies/evaluation-goals.md): paper, not chrome. Thin lines, tabular numbers, no boxes. */
 .ev { container-type: inline-size; position: relative; color: var(--ink-primary); font-family: var(--font-sans); font-size: 13px; line-height: 20px; }
-.ev button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+/* the reset also covers the lifted scope bubble, which lives outside .ev (in the top chrome) */
+.ev button, .ev-scope button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; -webkit-appearance: none; appearance: none; }
 
 /* scope line: every fragment is a button; a fragment that differs from its default is primary ink */
 .ev-scope { display: flex; align-items: baseline; flex-wrap: nowrap; white-space: nowrap; gap: 0 2px; font-size: 15px; line-height: 24px; letter-spacing: -0.01em; }
