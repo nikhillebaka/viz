@@ -1,6 +1,6 @@
 # Moving through time
 
-Regression check: `tests/time-nav-check.js` covers every behaviour below (32 cases;
+Regression check: `tests/time-nav-check.js` covers every behaviour below (34 cases;
 `run({ rulers: true })` repeats them with the width rulers on). Run it on the
 prototype page after any change: `(await import("/tests/time-nav-check.js")).run()`.
 
@@ -65,7 +65,7 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
   per notch), bare = / - / 0 keys, double-click (zoom fully out; when fully out, zoom back in on the
   clicked week). Plain vertical wheel
   does nothing. Gestures are 1:1 while held; springs only settle them.
-- **Pan: ⌘ + side scroll** moves the view without moving the forecast (a camera offset in weeks), 1:1
+- **Pan: ⌘ + side scroll or ⌘ + drag** moves the view without moving the forecast (a camera offset in weeks), 1:1
   with the scroll, within the season, rubber-banding at its ends. Trackpad pinch (which arrives as
   ctrl + wheel) always zooms; ⌘ + vertical wheel zooms; ⌘ + horizontal pans. While panned, zoom keeps
   the middle of the view still.

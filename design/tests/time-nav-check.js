@@ -28,9 +28,9 @@ export async function run({ rulers = false } = {}) {
   const mid = () => { const [a, b] = nav.domain(); return (+a + +b) / 2; };
   const reset = async () => { key("0"); await settle(); nav.goTo(5, { recenter: true }); await settle(); };
   let id = 100;
-  const drag = async (dx, steps = 10) => {
+  const drag = async (dx, steps = 10, metaKey = false) => {
     const r = el.getBoundingClientRect(), x0 = r.left + r.width * 0.45, y = r.top + r.height * 0.6, p = ++id;
-    el.dispatchEvent(new PointerEvent("pointerdown", { clientX: x0, clientY: y, pointerId: p, button: 0, bubbles: true, pointerType: "mouse" }));
+    el.dispatchEvent(new PointerEvent("pointerdown", { clientX: x0, clientY: y, pointerId: p, button: 0, bubbles: true, pointerType: "mouse", metaKey }));
     for (let i = 1; i <= steps; i++) { el.dispatchEvent(new PointerEvent("pointermove", { clientX: x0 + (dx * i) / steps, clientY: y, pointerId: p, bubbles: true, pointerType: "mouse" })); await sleep(16); }
     await sleep(200); // let go after stopping, so there's no flick
     el.dispatchEvent(new PointerEvent("pointerup", { clientX: x0 + dx, clientY: y, pointerId: p, button: 0, bubbles: true, pointerType: "mouse" }));
@@ -105,6 +105,12 @@ export async function run({ rulers = false } = {}) {
     // --- drag
     { const T0 = nav.T, w = pxw(); await drag(-w); await settle();
       check("drag close up: one week-width left = one week later (1:1)", nav.T === T0 + 1, { T: nav.T }); }
+    for (const span of [11, 30]) { // ⌘ + drag pans like ⌘ + side scroll: content follows the pointer, date stays
+      nav.zoomTo(span); await settle(); const m0 = mid(), T0 = nav.T, w = pxw(); await drag(w * 2, 10, true); await settle();
+      const moved = (mid() - m0) / 864e5 / 7;
+      check(`⌘ + drag at ${span} weeks pans 1:1, date unchanged`, near(moved, -2, 0.15) && nav.T === T0, { weeks: +moved.toFixed(2), T: nav.T });
+      nav.recenter(); await settle();
+    }
     nav.zoomTo(1e9); await settle(); { const T0 = nav.T; await drag(150); await settle();
       check("drag at the full season: the forecast follows the pointer (right = later)", nav.T > T0, { T: nav.T }); }
     await reset();

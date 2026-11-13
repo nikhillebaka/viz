@@ -17,7 +17,7 @@
  *  - side scroll (trackpad, shift + wheel): scrubs T, same as drag.
  *  - pinch (trackpad, Safari gestures), ⌘ + vertical wheel, = / - / 0 keys: zoom. Zoom pivots on the
  *    forecast, never the cursor (when panned, on the middle of the view).
- *  - ⌘ + side scroll: pan the view without moving the forecast (P, weeks of camera offset), within the
+ *  - ⌘ + side scroll, or ⌘ + drag: pan the view without moving the forecast (P, weeks of camera offset), within the
  *    season, rubber-banding at its ends.
  *  - The pan is kept: while the reference date is on screen, scrubbing and stepping change the date
  *    around it, and its line stays exactly where it was left. While it is off-screen, plain side scroll
@@ -230,14 +230,17 @@ export class TimeNav {
       if (e.button !== 0 || this.ignore(e) || this.pinching) return;
       const fan = this.follow < 0.5;                            // zoomed far out: the drag moves the forecast
       this.#stop(); this.vT = 0;
-      drag = { id: e.pointerId, x0: e.clientX, lastX: e.clientX, fan, moved: false, scrubbed: false, hist: [{ t: e.timeStamp, T: this.T }] };
+      // ⌘ + drag pans, exactly like ⌘ + side scroll: the view moves, the forecast stays on its date
+      drag = { id: e.pointerId, x0: e.clientX, lastX: e.clientX, fan, pan: e.metaKey, moved: false, scrubbed: false, hist: [{ t: e.timeStamp, T: this.T }] };
+      if (drag.pan) this.returning = false;
     });
     el.addEventListener("pointermove", (e) => {
       if (!drag || e.pointerId !== drag.id) return;
       if (!drag.moved && Math.abs(e.clientX - drag.x0) < 4) return;
       if (!drag.moved) { drag.moved = true; try { el.setPointerCapture(e.pointerId); } catch {} el.style.cursor = "grabbing"; }
       const dx = e.clientX - drag.lastX, pxw = this.#pxPerWeek(), f = this.follow;
-      if (drag.fan) {                                           // the fan follows the pointer: drag right = later
+      if (drag.pan) this.#panBy(-dx / pxw);                    // the content follows the pointer, 1:1
+      else if (drag.fan) {                                           // the fan follows the pointer: drag right = later
         this.busy = true; drag.scrubbed = true;
         this.#setT(this.#clampT(this.#rawT(this.T) + dx / Math.max(1, pxw * (1 - f))));
       } else {                                                  // the content follows the pointer: drag right = earlier
