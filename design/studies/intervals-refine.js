@@ -1,8 +1,8 @@
 /* Interval refinement, full screen. This page is the reference for the fan chart: the drawing lives
- * in lib/chart.js (fanChart); this file adds the page around it: focus state, the hover readout, the
+ * in lib/chart.js (fanCanvas: drawn on a canvas, refracted by the WebGL glass); this file adds the page around it: focus state, the hover readout, the
  * chrome, and time keys (left/right always step the forecast date). Decisions: intervals-goals.md. */
 import { LiquidGlass } from "../lib/glass.js";
-import { loadData, fanChart, short, seriesVar, WEEK } from "../lib/chart.js";
+import { loadData, fanCanvas, short, seriesVar, WEEK } from "../lib/chart.js";
 import { Stepper, tooltip, openPopover, icon } from "../lib/controls.js";
 import { ModelSelection, groupModels, inferFamily, teamOf } from "../lib/selection.js";
 import { TimeNav } from "../lib/time.js";
@@ -38,7 +38,7 @@ const sel = new ModelSelection({
   onChange: () => { if (S.focus && !sel.isCharted(S.focus)) S.focus = null; renderModelsPill(); pickerRefresh?.(); frame(); },
 });
 
-const view = $("view"), svg = d3.select("#chart");
+const view = $("view"), chartEl = $("chart");
 let chromeTop = 70, chromeBottom = 70, G = null;
 
 // charted models in a stable order (by color slot), then the baseline if it's on
@@ -50,18 +50,20 @@ function models() {
 
 /* ---------------- draw ---------------- */
 function draw() {
-  const w = svg.node().clientWidth, compact = sizeClass(view) === "compact";
-  const u = nav.mix; // 0 close up, 1 Season
-  const P = fanChart(svg, data, {
-    id: "chart-src", models: models(), t: nav.T, domain: nav.domain(),
+  const w = chartEl.clientWidth, compact = sizeClass(view) === "compact";
+  const u = nav.mix; // 0 close up, 1 fully zoomed out
+  const P = fanCanvas(chartEl, data, {
+    models: models(), t: nav.T, domain: nav.domain(),
     // the right margin holds the model labels close up; in Season they sit at the fan's end instead
     // while the model picker is open, the plot moves into the space to its right (pickerInset)
     pad: { l: 64 + pickerInset, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
     focus: focused(), hover: nav.moving ? null : S.hoverH, rulers: rulerK, misses: S.misses,
     context: sel.context, hot: S.hot,
-    onLabel: activate,
   });
   G = { ...P, compact, w };
+  window.__G = G; // for tests
+  LiquidGlass.frame(); // the glass refracts the new frame
+  labelButtons();
   readout();
   previewUnderPointer();
   renderNote();
@@ -116,7 +118,6 @@ function readout() {
 
 /* ---------------- time: date and zoom ----------------
  * lib/time.js owns the date (scrub, glide, keys) and the zoom (close up 6–20 weeks, or Season). */
-const chartEl = svg.node();
 let frameQueued = 0;
 function frame() { if (!frameQueued) frameQueued = requestAnimationFrame(() => { frameQueued = 0; draw(); }); }
 /* ---------------- hover ---------------- */
@@ -145,16 +146,30 @@ chartEl.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse") 
 function previewUnderPointer() {
   let hit = null; // { m, ctx }
   if (mouse && !nav.moving && G) {
-    for (const g of chartEl.querySelectorAll(".fc-label")) {
-      const r = g.getBoundingClientRect();
-      if (mouse.x >= r.left && mouse.x <= r.right && mouse.y >= r.top && mouse.y <= r.bottom) { const d = d3.select(g).datum(); hit = { m: d.s.m, ctx: !!d.ctx }; break; }
-    }
-    if (!hit) hit = lineUnder(mouse.x, mouse.y);
+    const l = labelAt(mouse.x, mouse.y);
+    hit = l ? { m: l.m, ctx: !!l.ctx } : lineUnder(mouse.x, mouse.y);
   }
   // a charted model previews focus, exactly as hovering its label does; a grey one is lifted and named
   const preview = hit && !hit.ctx ? hit.m : null, hot = hit && hit.ctx ? hit.m : null;
   chartEl.style.cursor = hit ? "pointer" : "";
   if (preview !== S.preview || hot !== S.hot) { S.preview = preview; S.hot = hot; frame(); }
+}
+/* The label under a page point, from the hit boxes the layout computed (no DOM reads). */
+function labelAt(cx, cy) {
+  if (!G) return null;
+  const r = chartEl.getBoundingClientRect(), px = cx - r.left, py = cy - r.top;
+  return G.labels.find((d) => px >= d.hit.x0 && px <= d.hit.x1 && py >= d.hit.y0 && py <= d.hit.y1) || null;
+}
+/* Labels are painted on the canvas, so keyboard and screen-reader users get a matching list of buttons
+ * (visually hidden), rebuilt only when the set of labels changes. */
+let labelKey = "";
+function labelButtons() {
+  const ls = G.labels.filter((d) => !d.ctx || d.hot), key = ls.map((d) => `${d.m}|${d.m === G.focus}`).join(",");
+  if (key === labelKey) return;
+  labelKey = key;
+  const box = $("label-a11y"), had = document.activeElement?.closest?.("#label-a11y")?.dataset.m;
+  box.innerHTML = ls.map((d) => `<button type="button" data-m="${d.m}" aria-pressed="${d.m === G.focus}">${d.full}${d.m === G.focus ? ", focused" : ""}</button>`).join("");
+  if (had) box.querySelector(`[data-m="${CSS.escape(had)}"]`)?.focus();
 }
 /* The median line under the pointer (within 6px), by priority: the focused model, other charted models,
  * then grey context lines; nearest first within a priority. Medians are interpolated at the pointer's x. */
@@ -174,8 +189,8 @@ function lineUnder(cx, cy) {
 let down = null;
 chartEl.addEventListener("pointerdown", (e) => { down = { x: e.clientX, y: e.clientY }; });
 chartEl.addEventListener("click", (e) => {
-  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || e.target.closest(".fc-label")) return;
-  const hit = G && lineUnder(e.clientX, e.clientY);
+  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+  const hit = G && (labelAt(e.clientX, e.clientY) || lineUnder(e.clientX, e.clientY));
   if (hit) activate(hit.m);
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.focus && !document.querySelector(".c-float")) { S.focus = null; draw(); } });
@@ -312,12 +327,14 @@ function openModelPicker() {
 let insetGoal = 0;
 
 /* ---------------- chrome ---------------- */
-const GL = { source: "#chart-src", container: view };
+const GL = { canvas: chartEl, container: view };
+$("label-a11y").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) activate(b.dataset.m); });
 for (const id of ["back", "theme", "c-rulers", "c-misses"]) new LiquidGlass($(id), GL);
 tooltip($("back"), "Back to the design system", { placement: "bottom" });
 $("theme").addEventListener("click", () => {
   root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
   store.set("viz-ds-theme", root.dataset.theme);
+  draw(); // the canvas resolves token colors when it draws, so redraw in the new theme
   requestAnimationFrame(() => LiquidGlass.updateAll());
 });
 renderModelsPill(); // fill it before the glass measures it
@@ -331,7 +348,7 @@ const nav = new TimeNav({
   surface: chartEl, dates: DATES, index: DI0,
   season: [truth[0].date, new Date(Math.max(+truth.at(-1).date, +DATES.at(-1) + 3 * WEEK))],
   scale: () => G.x,
-  ignore: (e) => !!e.target.closest(".fc-label"),
+  ignore: (e) => !!labelAt(e.clientX, e.clientY),
   tapTarget: (e) => !!(G && lineUnder(e.clientX, e.clientY)),
   onFrame: draw,
   onWeek: (i) => { S.di = i; stepper.show(i); $("hint").style.opacity = 0; },
@@ -366,3 +383,4 @@ let rt = 0;
 new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => { measure(); draw(); }, 16); }).observe(view);
 chrome.querySelectorAll(".c-zone").forEach((z) => new ResizeObserver(() => { if (measure()) draw(); }).observe(z));
 document.fonts?.ready.then(() => { measure(); draw(); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => draw()); // system theme, when not overridden

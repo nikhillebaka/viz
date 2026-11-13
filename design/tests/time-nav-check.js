@@ -39,7 +39,8 @@ export async function run({ rulers = false } = {}) {
 
   const rulersBtn = document.getElementById("c-rulers");
   const setRulers = async (on) => { if ((rulersBtn.getAttribute("aria-pressed") === "true") !== on) { rulersBtn.click(); await sleep(400); } };
-  const rulerLabel = () => [...el.querySelectorAll("text")].find((t) => /^(\+\d wk|This wk)$/.test(t.textContent));
+  // the chart is a canvas: read what was drawn from the last frame's layout (window.__G), not the DOM
+  const drawnRulers = () => window.__G?.rulers || null;
   try {
     await setRulers(rulers);
     await reset();
@@ -114,30 +115,39 @@ export async function run({ rulers = false } = {}) {
     nav.zoomTo(1e9); await settle(); { const T0 = nav.T; await drag(150); await settle();
       check("drag at the full season: the forecast follows the pointer (right = later)", nav.T > T0, { T: nav.T }); }
     await reset();
+    // --- focus: clicking a label focuses that model, and every frame still draws while focused
+    { const l = window.__G.labels[0], r = el.getBoundingClientRect(), cx = r.left + l.x + 20, cy = r.top + l.y, p = ++id;
+      el.dispatchEvent(new PointerEvent("pointerdown", { clientX: cx, clientY: cy, pointerId: p, button: 0, bubbles: true, pointerType: "mouse" }));
+      el.dispatchEvent(new PointerEvent("pointerup", { clientX: cx, clientY: cy, pointerId: p, button: 0, bubbles: true, pointerType: "mouse" }));
+      el.dispatchEvent(new MouseEvent("click", { clientX: cx, clientY: cy, bubbles: true }));
+      const focused = window.__G.focus === l.m;
+      key("ArrowRight"); await settle(); const stillDrawing = window.__G.focus === l.m && window.__G.di === nav.week;
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await settle();
+      check("clicking a label focuses it; focused frames keep drawing; Escape clears", focused && stillDrawing && window.__G.focus == null, { focused, stillDrawing }); }
+    await reset();
     // --- width rulers
     await setRulers(false); await reset(); const d0 = nav.domain().map(Number), x0 = nav.refX();
     await setRulers(true); await sleep(300);
     const d1 = nav.domain().map(Number);
     check("rulers: toggling them doesn't rescale or move the chart", d0[0] === d1[0] && d0[1] === d1[1] && near(nav.refX(), x0, 0.5), {});
     for (const span of [8, 11, 20, 30, 1e9]) {
-      nav.zoomTo(span); await settle(); const lab = rulerLabel();
-      const bars = lab ? lab.parentNode.querySelectorAll("g[transform] > line").length : 0;
-      check(`rulers show at ${span > 100 ? "the full season" : span + " weeks"}`, !!lab && bars >= 3, { bars });
+      nav.zoomTo(span); await settle(); const R = drawnRulers();
+      const bars = R ? R.rows.length : 0;
+      check(`rulers show at ${span > 100 ? "the full season" : span + " weeks"}`, !!R && bars >= 3, { bars });
     }
     await reset();
     { // during a glide the rulers stay beside the fan (same offset from the reference line every frame)
       const offs = []; key("ArrowRight");
       // both read from the same drawn frame: the ruler label and the reference-date tick label
-      const refTick = () => [...el.querySelectorAll("tspan")].find((t) => t.textContent === "Reference date");
-      for (let i = 0; i < 25; i++) { const lab = rulerLabel(), rt = refTick(); if (lab && rt) offs.push(+lab.getAttribute("x") - +rt.getAttribute("x")); await sleep(12); }
+      for (let i = 0; i < 25; i++) { const G = window.__G; if (G?.rulers && G.dates) offs.push(G.rulers.labelX - G.dates.ref.x); await sleep(12); }
       await settle(); const spread = Math.max(...offs) - Math.min(...offs);
       check("rulers move with the fan during a glide", offs.length > 5 && spread < 2, { frames: offs.length, spread: +spread.toFixed(2) });
     }
-    await pan(5, -15); await settle(); check("rulers stay beside the fan when panned", !!rulerLabel() && near(+rulerLabel().getAttribute("x") - nav.scale()(nav.ref), 3 * pxw() + 14, 2), {});
+    await pan(5, -15); await settle(); check("rulers stay beside the fan when panned", !!drawnRulers() && near(drawnRulers().labelX - nav.scale()(nav.ref), 3 * pxw() + 14, 2), {});
     await reset();
     { // model labels step aside: they start after the last ruler
-      const lab = rulerLabel(), xs = [...lab.parentNode.querySelectorAll("g[transform]")].map((g) => +g.getAttribute("transform").match(/translate\(([-\d.]+)/)[1]);
-      const lx = Math.min(...[...el.querySelectorAll(".fc-label")].map((g) => +g.getAttribute("transform").match(/translate\(([-\d.]+)/)[1]));
+      const xs = drawnRulers().rows.map((r) => r.x);
+      const lx = Math.min(...window.__G.labels.map((d) => d.x));
       check("model labels sit clear of the rulers", lx > Math.max(...xs) + 4, { lastRuler: Math.round(Math.max(...xs)), labels: Math.round(lx) });
     }
     await setRulers(rulers); await reset();

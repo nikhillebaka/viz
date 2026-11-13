@@ -1,11 +1,16 @@
 /* Liquid glass (from study 01, extended).
  *
- * Three ways to render, chosen automatically. All three share one look: the same filter, the
+ * Four ways to render, chosen automatically. All three share one look: the same filter, the
  * same rim width and bend in pixels whatever the control's size, so a 38px pill and a 68px lens
  * read as the same material.
  *  - "refract":  bends a copy of an SVG `source` (the chart) inside the element. Works in every
  *                browser. Requirements: the source <svg> fills `container` from its top-left, and
  *                the source paints its own opaque background.
+ *  - "canvas":   for a chart drawn on a <canvas> (pass { canvas }). One WebGL pass refracts the canvas's
+ *                pixels for every glass over it, with the same math as the SVG filter below (same
+ *                displacement map, per-channel dispersion, blur, saturation, brightness). No copies of
+ *                the chart, so its cost doesn't grow with what the chart draws. Call LiquidGlass.frame()
+ *                after each redraw of the canvas. Falls back to "frost" without WebGL.
  *  - "backdrop": bends whatever is behind the element on the page, using backdrop-filter: url().
  *                Chromium only (Chrome, Edge, Arc). Used when there is no `source`.
  *  - "frost":    a plain backdrop blur. The fallback for other browsers, for { frosted: true }
@@ -105,11 +110,12 @@ const FILTER = `<feImage preserveAspectRatio="none" result="map"/>
   <feComponentTransfer in="sat"><feFuncR type="linear"/><feFuncG type="linear"/><feFuncB type="linear"/></feComponentTransfer>`;
 
 export class LiquidGlass {
-  constructor(el, { source = null, container = null, frosted = false, highlight = false, adaptive = true } = {}) {
+  constructor(el, { source = null, canvas = null, container = null, frosted = false, highlight = false, adaptive = true } = {}) {
     this.el = el;
     this.container = container || el.offsetParent || el.parentElement;
     this.source = typeof source === "string" ? source : source ? `#${source.id}` : null;
-    this.mode = frosted || reducedTransparency() ? "frost" : this.source ? "refract" : isChromium() ? "backdrop" : "frost";
+    this.comp = canvas && !frosted && !reducedTransparency() ? Compositor.for(this.container, canvas) : null;
+    this.mode = frosted || reducedTransparency() ? "frost" : this.comp ? "canvas" : this.source ? "refract" : isChromium() ? "backdrop" : "frost";
     this.adaptive = adaptive;
     this.visible = true;
     this.L = null;            // smoothed luminance underneath
@@ -134,7 +140,8 @@ export class LiquidGlass {
     }
     layer("lg-veil");
     layer("lg-tint");
-    if (this.mode !== "frost") {
+    if (this.mode === "canvas") this.comp.add(this);
+    else if (this.mode !== "frost") {
       const id = `lg-f${++uid}`;
       this.filter = document.createElementNS(NS, "filter");
       this.filter.setAttribute("id", id);
@@ -161,7 +168,8 @@ export class LiquidGlass {
 
   /** Re-position the lens and re-check appearance. Call after moving the element yourself. */
   update() {
-    if (this.mode !== "frost") this.#place();
+    if (this.mode === "canvas") this.comp.watch();
+    else if (this.mode !== "frost") this.#place();
     schedule(this, true);
   }
 
@@ -252,6 +260,7 @@ export class LiquidGlass {
   }
 
   destroy() {
+    this.comp?.remove(this);
     this.ro?.disconnect();
     visibility.unobserve(this.el);
     this.filter?.remove();
@@ -262,9 +271,13 @@ export class LiquidGlass {
     delete this.el.dataset.under;
   }
 
+  /** Call after redrawing a chart canvas that "canvas" glass refracts. */
+  static frame() { Compositor.all.forEach((c) => c.render()); }
+
   /** After a theme change or a token change. */
   static updateAll() {
     tokCache.clear();
+    Compositor.all.forEach((c) => c.watch());
     all.forEach((g) => { g.L = null; g.pending = null; g.lastKey = ""; g.update(); });
   }
 }
@@ -329,6 +342,8 @@ function luminanceAt(x, y) {
   const layers = [];
   for (const el of document.elementsFromPoint(x, y)) {
     if (el.closest(".lg")) continue;
+    const comp = Compositor.bySource.get(el);
+    if (comp) { const c = comp.colorAt(x, y); if (c) { layers.push(c); break; } }
     const cs = getComputedStyle(el);
     let c;
     if (el instanceof SVGElement && !(el instanceof SVGSVGElement)) {
@@ -341,3 +356,175 @@ function luminanceAt(x, y) {
   for (let i = layers.length - 1; i >= 0; i--) col = over(layers[i], col);
   return lum(col);
 }
+
+/* ---------- "canvas" mode: one WebGL pass for every glass over a chart canvas ----------
+ * The refraction is the SVG filter's, evaluated per pixel in a shader:
+ *  - the displacement map's value at each point (same rounded-rect SDF, rim falloff and magnify as
+ *    displacementMap(), quantised to 8 bits like the map image), turned into an offset exactly as
+ *    feDisplacementMap does: scale * (C - 0.5), with red, green and blue at scale * (1 -/0/+ dispersion);
+ *  - then the Gaussian blur (σ = --glass-blur, 3×3 taps), saturation, and the brightness slope.
+ * It draws into one canvas laid just above the chart and below the controls, only inside each glass's
+ * rounded rectangle, faded with the glass's own opacity. The chart canvas is uploaded once per frame. */
+class Compositor {
+  static all = new Set();
+  static bySource = new Map();
+  static for(container, source) {
+    for (const c of Compositor.all) if (c.source === source) return c;
+    const c = new Compositor(container, source);
+    return c.gl ? c : null;
+  }
+  constructor(container, source) {
+    this.container = container; this.source = source; this.glass = new Set(); this.raf = 0; this.still = 0;
+    const cv = document.createElement("canvas");
+    cv.className = "lg-compositor"; cv.setAttribute("aria-hidden", "true");
+    Object.assign(cv.style, { position: "absolute", inset: "0", width: "100%", height: "100%", pointerEvents: "none" });
+    const gl = cv.getContext("webgl", { premultipliedAlpha: true, alpha: true, antialias: false });
+    if (!gl) return;
+    this.gl = gl; this.cv = cv;
+    source.after(cv);
+    const sh = (type, src) => { const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VERT)); gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FRAG)); gl.linkProgram(prog);
+    gl.useProgram(prog);
+    this.u = {};
+    for (const n of ["uView", "uDpr", "uTex", "uTexSize", "uRect", "uRadius", "uRim", "uPow", "uMag", "uScale", "uDisp", "uBlur", "uSat", "uBright", "uAlpha"]) this.u[n] = gl.getUniformLocation(prog, n);
+    this.buf = gl.createBuffer(); this.aPos = gl.getAttribLocation(prog, "aPos");
+    this.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    Compositor.all.add(this); Compositor.bySource.set(source, this);
+    // controls move by CSS transitions and animations (fades, the press scale, the picker sliding things
+    // aside); while anything is moving, follow it every frame, then stop
+    for (const ev of ["transitionrun", "transitionend", "animationstart", "animationend"]) document.addEventListener(ev, () => this.watch(), true);
+    addEventListener("resize", () => this.watch());
+  }
+  add(g) { this.glass.add(g); this.watch(); }
+  remove(g) { this.glass.delete(g); this.watch(); }
+  /* render every frame until nothing has moved for a while */
+  watch() { this.still = 0; if (!this.raf) this.raf = requestAnimationFrame(() => this.#tick()); }
+  #tick() {
+    this.raf = 0;
+    const key = this.render();
+    this.still = key === this.lastKey ? this.still + 1 : 0;
+    this.lastKey = key;
+    if (this.still < 20) this.raf = requestAnimationFrame(() => this.#tick());
+  }
+  render() {
+    const { gl, cv, source } = this;
+    const dpr = window.devicePixelRatio || 1, cr = this.container.getBoundingClientRect();
+    const W = Math.round(cr.width * dpr), H = Math.round(cr.height * dpr);
+    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    this.dirty = true; // the chart may have changed: the luminance snapshot is stale, re-check appearance
+    for (const g of this.glass) if (g.visible) schedule(g); // throttled and idle-time, like DOM changes
+    if (!source.width || !source.height) return "";
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    const sr = source.getBoundingClientRect();
+    const u = this.u;
+    gl.uniform2f(u.uView, cr.width, cr.height); gl.uniform1f(u.uDpr, dpr);
+    gl.uniform1i(u.uTex, 0);
+    // the source's box within the container, in CSS px (texture covers it)
+    gl.uniform4f(u.uTexSize, sr.left - cr.left, sr.top - cr.top, sr.width, sr.height);
+    const scale = tok("--glass-refraction", 28);
+    gl.uniform1f(u.uPow, tok("--glass-rim-power", 2)); gl.uniform1f(u.uMag, tok("--glass-magnify", 0.1));
+    gl.uniform1f(u.uScale, scale); gl.uniform1f(u.uDisp, tok("--glass-dispersion", 0.025));
+    gl.uniform1f(u.uBlur, tok("--glass-blur", 0.6)); gl.uniform1f(u.uSat, tok("--glass-saturate", 1.35)); gl.uniform1f(u.uBright, tok("--glass-brightness", 1.06));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+    gl.enableVertexAttribArray(this.aPos); gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
+    let key = "";
+    for (const g of this.glass) {
+      const el = g.el;
+      if (!el.isConnected) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      // the glass's own opacity, and its ancestors' up to the container (fades, the picker hiding chrome)
+      let a = 1;
+      for (let n = el; n && n !== this.container; n = n.parentElement) { a *= parseFloat(getComputedStyle(n).opacity); if (a < 0.003) break; }
+      if (a < 0.003) continue;
+      const x = r.left - cr.left, y = r.top - cr.top;
+      // radius, rim and size in the element's own (untransformed) pixels; the press scale shrinks them all
+      const w0 = el.offsetWidth || r.width, k = r.width / w0;
+      const rad = Math.min(parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0, el.offsetHeight / 2, w0 / 2) * k;
+      const rim = Math.max(4, Math.min(tok("--glass-rim", 14), Math.min(w0, el.offsetHeight) / 2 - 1)) * k;
+      gl.uniform4f(u.uRect, x, y, r.width, r.height); gl.uniform1f(u.uRadius, rad); gl.uniform1f(u.uRim, rim); gl.uniform1f(u.uAlpha, a);
+      const x0 = x - 1, y0 = y - 1, x1 = x + r.width + 1, y1 = y + r.height + 1;
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([x0, y0, x1, y0, x0, y1, x0, y1, x1, y0, x1, y1]), gl.DYNAMIC_DRAW);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      key += `${x.toFixed(1)},${y.toFixed(1)},${r.width.toFixed(1)},${a.toFixed(3)};`;
+    }
+    return key;
+  }
+  /* The chart's color at a page point, for the glass's light/dark adaptation. Read from a small copy of
+   * the canvas, refreshed at most once per chart frame and only when asked. */
+  colorAt(px, py) {
+    const s = this.source, sr = s.getBoundingClientRect();
+    if (px < sr.left || py < sr.top || px >= sr.right || py >= sr.bottom) return null;
+    if (this.dirty || !this.snap) {
+      const k = 0.25, w = Math.max(1, Math.round(sr.width * k)), h = Math.max(1, Math.round(sr.height * k));
+      this.snapCv ||= document.createElement("canvas");
+      if (this.snapCv.width !== w || this.snapCv.height !== h) { this.snapCv.width = w; this.snapCv.height = h; }
+      const c2 = this.snapCv.getContext("2d", { willReadFrequently: true });
+      c2.drawImage(s, 0, 0, w, h);
+      this.snap = { data: c2.getImageData(0, 0, w, h).data, w, h, k };
+      this.dirty = false;
+    }
+    const { data, w, h, k } = this.snap;
+    const ix = Math.min(w - 1, Math.floor((px - sr.left) * k)), iy = Math.min(h - 1, Math.floor((py - sr.top) * k)), i = (iy * w + ix) * 4;
+    return [data[i], data[i + 1], data[i + 2], 1];
+  }
+}
+
+const VERT = `attribute vec2 aPos; uniform vec2 uView; varying vec2 vP;
+void main() { vP = aPos; gl_Position = vec4(aPos.x / uView.x * 2.0 - 1.0, 1.0 - aPos.y / uView.y * 2.0, 0.0, 1.0); }`;
+const FRAG = `precision highp float;
+varying vec2 vP;
+uniform sampler2D uTex; uniform vec4 uTexSize; uniform vec4 uRect;
+uniform float uRadius, uRim, uPow, uMag, uScale, uDisp, uBlur, uSat, uBright, uAlpha, uDpr;
+float sdr(vec2 p, vec2 hb, float r) { vec2 q = abs(p) - (hb - r); return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r; }
+// the displacement map at a point (local, from the rect's top-left), as feDisplacementMap reads it (0..1)
+vec2 mapAt(vec2 l) {
+  vec2 hb = uRect.zw * 0.5, p = floor(l) + 0.5 - hb;
+  float inside = -sdr(p, hb, uRadius), mr = min(hb.x, hb.y);
+  vec2 d = vec2(0.0);
+  if (inside > 0.0) {
+    d += p / mr * uMag * 0.5;
+    if (inside < uRim) {
+      float e = 0.5;
+      vec2 n = vec2(sdr(p + vec2(e, 0.0), hb, uRadius) - sdr(p - vec2(e, 0.0), hb, uRadius), sdr(p + vec2(0.0, e), hb, uRadius) - sdr(p - vec2(0.0, e), hb, uRadius));
+      float nl = max(length(n), 1e-4);
+      d += n / nl * pow(1.0 - inside / uRim, uPow);
+    }
+  }
+  return floor(clamp(128.0 - d * 127.0, 0.0, 255.0) + 0.5) / 255.0;
+}
+vec3 refracted(vec2 p) {
+  vec2 l = p - uRect.xy, o = mapAt(l) - 0.5;
+  vec2 tr = (p + o * uScale * (1.0 - uDisp) - uTexSize.xy) / uTexSize.zw;
+  vec2 tg = (p + o * uScale - uTexSize.xy) / uTexSize.zw;
+  vec2 tb = (p + o * uScale * (1.0 + uDisp) - uTexSize.xy) / uTexSize.zw;
+  return vec3(texture2D(uTex, tr).r, texture2D(uTex, tg).g, texture2D(uTex, tb).b);
+}
+void main() {
+  vec2 p = vP;
+  float s2 = 2.0 * uBlur * uBlur, wsum = 0.0;
+  vec3 c = vec3(0.0);
+  for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) {
+    vec2 o = vec2(float(i), float(j));
+    float w = exp(-dot(o, o) / s2);
+    c += refracted(p + o) * w; wsum += w;
+  }
+  c /= wsum;
+  // feColorMatrix type=saturate, then the brightness slope
+  float s = uSat;
+  mat3 m = mat3(0.213 + 0.787 * s, 0.213 - 0.213 * s, 0.213 - 0.213 * s,
+                0.715 - 0.715 * s, 0.715 + 0.285 * s, 0.715 - 0.715 * s,
+                0.072 - 0.072 * s, 0.072 - 0.072 * s, 0.072 + 0.928 * s);
+  c = clamp(m * c * uBright, 0.0, 1.0);
+  // only inside the glass's rounded rectangle, antialiased over a pixel
+  float cov = clamp(0.5 - sdr(p - uRect.xy - uRect.zw * 0.5, uRect.zw * 0.5, uRadius) * uDpr, 0.0, 1.0) * uAlpha;
+  gl_FragColor = vec4(c * cov, cov);
+}`;

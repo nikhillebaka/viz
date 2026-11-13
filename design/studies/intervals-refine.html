@@ -103,8 +103,11 @@ svg { display: block; }
 .pk-row.sel .pk-check svg { opacity: 1; transform: none; }
 .pk-foot { padding: 8px 10px 2px; color: var(--ink-tertiary); font-size: 12px; }
 
+/* visually hidden, still reachable by keyboard and screen readers */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
 /* benchmark only: glass without refraction, to measure what refraction costs */
-#view.no-glass .lg-refr { display: none !important; }
+#view.no-glass .lg-refr, #view.no-glass .lg-compositor { display: none !important; }
 
 /* shown when the view is panned away from the forecast: points at it, and brings it back */
 #recenter-wrap { position: absolute; z-index: var(--z-chrome); top: 50%; transform: translateY(-50%); }
@@ -116,7 +119,8 @@ svg { display: block; }
 </head>
 <body>
 <div id="view" data-view>
-  <svg id="chart" role="img" aria-label="Forecast chart with 95% intervals. Left and right arrow keys change the forecast date."></svg>
+  <canvas id="chart" role="img" aria-label="Forecast chart with 95% intervals. Left and right arrow keys change the forecast date."></canvas>
+  <div id="label-a11y" class="sr-only" aria-label="Models on the chart"></div>
   <div class="readout" id="readout" hidden></div>
   <div id="recenter-wrap" hidden><button class="c-pill sm" id="recenter"><span class="arr"></span><span class="lb"></span></button></div>
   <div id="more-wrap" hidden><div class="c-pill sm" id="more"><span class="t"></span><button type="button" class="link" id="more-btn"></button></div></div>
