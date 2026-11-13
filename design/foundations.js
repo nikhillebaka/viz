@@ -147,7 +147,7 @@ for (const [k, v] of Object.entries(tokens.stroke)) {
 /* ---------- glass stage ---------- */
 const stage = document.getElementById("stage");
 const glassModels = [...top8.slice(0, 3).map((m, i) => ({ m, slot: i })), { m: data.D.baseline, slot: "baseline" }];
-const drawGlassChart = () => fanChart(d3.select("#glass-chart"), data, { models: glassModels, id: "glass-src", band: 0.8, pad: { r: 180, t: 96, b: 72 } });
+const drawGlassChart = () => fanChart(d3.select("#glass-chart"), data, { models: glassModels, id: "glass-src", pad: { r: 180, t: 96, b: 80 } });
 drawGlassChart();
 const reduce = matchMedia("(prefers-reduced-transparency: reduce)").matches;
 const panel = document.getElementById("g-panel");

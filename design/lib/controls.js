@@ -32,6 +32,35 @@ export const icon = {
   alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg>',
 };
 
+/* ---------------------------------------------------------------- input modality
+ * Focus rings are for keyboard users. Track whether the last interaction was a pointer or a key, and
+ * when we move focus ourselves (returning it after a menu closes, focusing a menu's first item), only
+ * show the ring if the user is on the keyboard. */
+let modality = "pointer";
+document.addEventListener("pointerdown", () => (modality = "pointer"), true);
+document.addEventListener("keydown", (e) => { if (!["ArrowLeft", "ArrowRight"].includes(e.key) || modality !== "pointer") modality = "keyboard"; }, true);
+const focusQuietly = (el) => el?.focus({ preventScroll: true, focusVisible: modality === "keyboard" });
+
+/* ---------------------------------------------------------------- time keys
+ * While a time chart is on screen, left and right always move backward and forward in time, wherever
+ * focus is. Only text fields and open menus keep their own arrows. Segmented controls then become plain
+ * tab stops (Tab to an option, Space or Enter to pick it), since their arrows are taken.
+ * step(dir, repeat): dir is -1 or 1; repeat is true for a held key. active(): false to stand down. */
+let timeKeysOn = false;
+export function timeKeys(step, { active = () => true } = {}) {
+  timeKeysOn = true;
+  document.querySelectorAll(".c-seg-item").forEach((b) => (b.tabIndex = 0));
+  document.addEventListener("keydown", (e) => {
+    if ((e.key !== "ArrowLeft" && e.key !== "ArrowRight") || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    const t = e.target;
+    if (t.closest?.("input, textarea, select, [contenteditable], .c-float") || !active()) return;
+    e.preventDefault(); e.stopPropagation();
+    // a control that was clicked keeps focus, but pressing an arrow shouldn't light up its ring
+    if (modality === "pointer" && t !== document.body && typeof t.blur === "function") t.blur();
+    step(e.key === "ArrowRight" ? 1 : -1, e.repeat);
+  }, true);
+}
+
 /* ---------------------------------------------------------------- glass helper */
 export function glassify(el, glass) {
   if (!glass) return new LiquidGlass(el, { frosted: true });
@@ -158,7 +187,7 @@ function floating(anchor, { className = "", role = "dialog", label = "", sheetTi
       a.onfinish = fin; setTimeout(fin, 400); if (!a.effect || reducedMotion()) fin();
       // return focus to the control that opened the layer (Safari never focuses clicked buttons, so don't rely on the opener)
       const back = anchor.matches("button, [tabindex], input, a[href]") ? anchor : opener;
-      if (restoreFocus && back && document.contains(back) && !anchor.closest(".c-search")) back.focus({ preventScroll: true });
+      if (restoreFocus && back && document.contains(back) && !anchor.closest(".c-search")) focusQuietly(back);
       onClose?.();
     },
   };
@@ -210,7 +239,7 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
     }
   });
   layer.open();
-  requestAnimationFrame(() => { const c = layer.body.querySelector("[aria-checked=true]") || all()[0]; c?.focus({ preventScroll: true }); c?.scrollIntoView({ block: "nearest" }); });
+  requestAnimationFrame(() => { const c = layer.body.querySelector("[aria-checked=true]") || all()[0]; focusQuietly(c); c?.scrollIntoView({ block: "nearest" }); });
   return layer;
 }
 
@@ -229,7 +258,7 @@ export function openPopover(anchor, { title = "", content, placement = "bottom-s
   const inner = document.createElement("div"); inner.className = "c-popover-content"; layer.body.appendChild(inner);
   if (typeof content === "function") content(inner, layer); else if (content) inner.appendChild(content);
   layer.open();
-  requestAnimationFrame(() => (layer.panel.querySelector("input, button:not(.c-icon-btn), [tabindex='0']") || layer.panel).focus({ preventScroll: true }));
+  requestAnimationFrame(() => focusQuietly(layer.panel.querySelector("input, button:not(.c-icon-btn), [tabindex='0']") || layer.panel));
   return layer;
 }
 
@@ -305,7 +334,7 @@ export class Segmented {
   }
   set(v, fire, instant) {
     this.value = v;
-    this.btns.forEach((b) => { const on = b.dataset.value === String(v); b.setAttribute("aria-checked", on); b.tabIndex = on ? 0 : -1; });
+    this.btns.forEach((b) => { const on = b.dataset.value === String(v); b.setAttribute("aria-checked", on); b.tabIndex = on || timeKeysOn ? 0 : -1; });
     this.compactBtn.querySelector(".lb").textContent = this.items.find((x) => x.value === v)?.label ?? "";
     this.moveThumb(instant);
     if (fire) this.onChange?.(v);

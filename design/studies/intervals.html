@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Interval study</title>
+<link rel="stylesheet" href="../tokens/tokens.css">
+<link rel="stylesheet" href="../lib/glass.css">
+<link rel="stylesheet" href="../lib/controls.css">
+<style>
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--surface-page); color: var(--ink-primary); font-family: var(--font-sans); font-size: 14px; line-height: 21px; -webkit-font-smoothing: antialiased; }
+svg { display: block; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+a { color: inherit; }
+
+.topbar { position: fixed; z-index: 50; top: var(--space-16); left: var(--space-16); right: var(--space-16); display: flex; justify-content: space-between; gap: var(--space-8); pointer-events: none; }
+.topbar > * { pointer-events: auto; }
+.brand { text-decoration: none; }
+.brand b { font-weight: 600; } .brand .dim { color: var(--ink-tertiary); }
+.nav { display: flex; gap: 2px; padding: 3px; height: var(--size-control); border-radius: var(--radius-pill); overflow-x: auto; scrollbar-width: none; }
+.nav a { position: relative; z-index: 4; display: inline-flex; align-items: center; height: 32px; padding: 0 12px; border-radius: var(--radius-pill); color: var(--ink-secondary); text-decoration: none; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.nav a:hover { color: var(--ink-primary); }
+.nav a.on { background: var(--fill-selected); color: var(--ink-primary); }
+
+main { max-width: 1120px; margin: 0 auto; padding: 0 var(--space-24) 160px; }
+.hero { padding: 152px 0 32px; max-width: 760px; }
+.hero p { color: var(--ink-secondary); margin: var(--space-16) 0 0; max-width: 660px; }
+
+/* shared controls: they float over the charts while you scroll, so they are glass */
+.toolbar { position: fixed; z-index: 40; left: var(--space-16); right: var(--space-16); bottom: var(--space-16); display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-8); pointer-events: none; }
+.toolbar > * { pointer-events: auto; }
+.toolbar .c-pill[aria-pressed="true"]::before { background: var(--fill-selected); }
+.toolbar .c-pill .tick { width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1.5px var(--ink-tertiary); display: inline-grid; place-items: center; position: relative; z-index: 4; }
+.toolbar .c-pill[aria-pressed="true"] .tick { background: var(--accent); box-shadow: none; }
+.toolbar .c-pill[aria-pressed="true"] .tick::after { content: ""; width: 7px; height: 4px; border: solid #fff; border-width: 0 0 1.75px 1.75px; transform: translateY(-1px) rotate(-45deg); }
+
+.study { padding-top: 56px; }
+.study header { display: grid; grid-template-columns: auto 1fr; gap: 0 var(--space-12); align-items: baseline; max-width: 760px; margin-bottom: var(--space-16); }
+.study .letter { font-family: var(--font-serif); font-style: italic; font-size: 30px; line-height: 30px; color: var(--ink-tertiary); }
+.study h2 { margin: 0; font-weight: inherit; }
+.study header p { grid-column: 2; margin: var(--space-4) 0 0; color: var(--ink-secondary); }
+.study header .look { color: var(--ink-tertiary); }
+
+.stage { position: relative; height: 420px; margin: 0 auto; border-radius: var(--radius-card); background: var(--surface-chart); overflow: hidden; box-shadow: inset 0 0 0 1px var(--line-hairline); touch-action: pan-y; }
+body.phone .stage { width: 390px; height: 380px; }
+.stage > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.stage .label-hit { cursor: pointer; }
+
+/* hover readout: solid, never glass (it carries exact numbers) */
+.readout { position: absolute; top: 14px; z-index: 5; min-width: 220px; padding: 10px 12px; border-radius: var(--radius-menu); background: var(--surface-raised); box-shadow: 0 0 0 0.5px var(--line-axis), 0 8px 28px rgba(0,0,0,.28); pointer-events: none; font-size: 12px; line-height: 18px; }
+.readout .when { color: var(--ink-tertiary); margin-bottom: 6px; display: flex; justify-content: space-between; gap: 12px; }
+.readout table { border-collapse: collapse; width: 100%; }
+.readout td { padding: 1px 0; white-space: nowrap; }
+.readout td + td { padding-left: 12px; text-align: right; }
+.readout .nm { display: flex; align-items: center; gap: 6px; color: var(--ink-secondary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.readout .nm .t { overflow: hidden; text-overflow: ellipsis; }
+.readout .nm i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.readout .rng { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-primary); }
+.readout .wd { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
+.readout .obs { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-hairline); color: var(--ink-secondary); display: flex; justify-content: space-between; gap: 12px; }
+.readout .miss { color: var(--ink-primary); }
+/* phone: dock bottom-left, over the low early history, so the bands on the right stay visible */
+body.phone .readout { left: 10px !important; top: auto; bottom: 46px; min-width: 0; width: 236px; padding: 8px 10px; }
+body.phone .readout .nm { max-width: 86px; }
+
+.notes { max-width: 760px; margin-top: 72px; color: var(--ink-secondary); }
+.notes h2 { font-weight: inherit; margin: 0 0 var(--space-12); color: var(--ink-primary); }
+.notes li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <a class="c-pill brand" id="brand" href="../index.html"><b>viz</b><span class="dim">design system</span></a>
+  <nav class="nav" id="nav" aria-label="Pages">
+    <a href="../index.html">Foundations</a><a href="../components.html">Components</a><a class="on" href="intervals.html" aria-current="page">Interval study</a><a href="intervals-refine.html">Refinement</a>
+  </nav>
+  <button class="c-pill icon" id="theme" aria-label="Switch between light and dark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17a8.5 8.5 0 0 0 0-17z" fill="currentColor"/></svg></button>
+</div>
+
+<main>
+  <header class="hero">
+    <h1 class="t-display-lg" style="margin:0">Intervals</h1>
+    <p class="t-body">Six ways to draw the 95% interval for two or three models, all on the same data. The goal: no clutter, and every band's edges readable exactly, even where bands overlap. Hover or tap any chart for exact values. Click a model's label to focus it.</p>
+    <p class="t-small" style="color:var(--ink-tertiary)">Judged against <a href="intervals-goals.md">intervals-goals.md</a>. US, weekly flu hospital admissions.</p>
+  </header>
+
+  <div class="toolbar" id="toolbar">
+    <div id="t-set"></div>
+    <div id="t-count"></div>
+    <div id="t-date"></div>
+    <div id="t-anchor"></div>
+    <button class="c-pill" id="t-rulers" aria-pressed="false"><span class="tick"></span><span>Width rulers</span></button>
+    <button class="c-pill" id="t-calib" aria-pressed="true"><span class="tick"></span><span>Misses</span></button>
+    <div id="t-size"></div>
+  </div>
+
+  <div id="studies"></div>
+
+  <section class="notes">
+    <h2 class="t-title-2">What to check</h2>
+    <ul>
+      <li>With three models, which is the most uncertain three weeks out? How long did that take?</li>
+      <li>Where two bands overlap, can you still trace both edges of each?</li>
+      <li>Do the medians and observed data still read first?</li>
+      <li>Switch to <b>Apart</b>: is disagreement obvious? Switch to <b>8</b>: does it fall apart gracefully?</li>
+      <li>Step back to an earlier date with <b>Misses</b> on: are the marked weeks easy to find without shouting?</li>
+      <li>Try <b>Phone</b> and the light theme.</li>
+    </ul>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script type="module" src="intervals.js"></script>
+</body>
+</html>

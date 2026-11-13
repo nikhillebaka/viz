@@ -1,6 +1,6 @@
 import { LiquidGlass } from "./lib/glass.js";
 import { loadData, fanChart, seriesVar, short } from "./lib/chart.js";
-import { Segmented, Stepper, Search, StatusIsland, openMenu, openPopover, tooltip, toast, icon } from "./lib/controls.js";
+import { Segmented, Stepper, Search, StatusIsland, openMenu, openPopover, tooltip, toast, icon, timeKeys } from "./lib/controls.js";
 import { sizeClass } from "./lib/position.js";
 
 const root = document.documentElement;
@@ -78,13 +78,13 @@ function openModelPicker(anchor, sel, onChange) {
 const demo = $("demo"), chrome = $("demo-chrome"), frame = $("frame");
 const G = { source: "#demo-chart-src", container: demo };
 const demoSel = selection(top.slice(0, 3).concat([D.baseline]));
-const demoState = { di: DI0, band: 0.8 };
+const demoState = { di: DI0, band: 0.95 };
 let chromeTop = 70, chromeBottom = 70;
 function drawDemo() {
   const compact = sizeClass(demo) === "compact";
   fanChart(d3.select("#demo-chart"), data, {
     id: "demo-chart-src", models: demoSel.list, di: demoState.di, band: demoState.band || null,
-    pad: { t: chromeTop + 32, b: chromeBottom + 40, r: compact ? 104 : 160, l: compact ? 44 : 56 },
+    topClear: chromeTop, pad: { t: chromeTop + 32, b: chromeBottom + 52, r: compact ? 104 : 160, l: compact ? 44 : 56 },
     domain: compact ? [new Date(+DATES[demoState.di] - 8 * 6048e5), new Date(+DATES[demoState.di] + 4 * 6048e5)] : undefined,
   });
 }
@@ -167,12 +167,16 @@ const modelsPill = $("d-models"); new LiquidGlass(modelsPill, G);
 const refreshModels = () => { renderModelPill($("d-dots"), $("d-models-label"), modelsPill, demoSel); drawDemo(); };
 modelsPill.addEventListener("click", () => openModelPicker(modelsPill, demoSel, refreshModels));
 // date
-new Stepper($("d-stepper"), { values: DATES, index: DI0, label: "Forecast date", format: { long: fmtLong, short: fmtShort }, glass: G, onChange: (i) => { demoState.di = i; drawDemo(); } });
+const demoStepper = new Stepper($("d-stepper"), { values: DATES, index: DI0, label: "Forecast date", format: { long: fmtLong, short: fmtShort }, glass: G, onChange: (i) => { demoState.di = i; drawDemo(); } });
+// left/right step the demo's date whenever the demo chart is on screen
+let demoVisible = false;
+new IntersectionObserver(([e]) => (demoVisible = e.isIntersecting), { threshold: 0.3 }).observe(demo);
+timeKeys((d) => demoStepper.step(d), { active: () => demoVisible });
 // interval
 const band = $("d-band"); new LiquidGlass(band, G);
 const BANDS = [[0, "No interval"], [0.5, "50% interval"], [0.8, "80% interval"], [0.95, "95% interval"]];
 band.addEventListener("click", () => openMenu(band, { title: "Interval", placement: "top-end", items: BANDS.map(([v, l]) => ({ label: l, value: v, checked: v === demoState.band, onSelect: (v) => { demoState.band = v; $("d-band-label").textContent = BANDS.find((b) => b[0] === v)[1]; band.setAttribute("aria-label", BANDS.find((b) => b[0] === v)[1]); drawDemo(); } })) }));
-band.setAttribute("aria-label", "80% interval");
+band.setAttribute("aria-label", "95% interval");
 renderModelPill($("d-dots"), $("d-models-label"), modelsPill, demoSel);
 drawDemo();
 
@@ -278,12 +282,11 @@ const stage = (svgId, opts = {}) => {
   // tags at the 2-week horizon, nudged apart vertically so they never overlap
   const tags = $("tip-tags");
   const placeTags = () => {
-    P = fanChart(d3.select("#tip-chart"), data, { id: "tip-chart-src", models: top.slice(0, 3).map((m, i) => ({ m, slot: i })), pad: { t: 64, b: 48, r: 150 }, band: 0.8 });
-    const items = P.series.map((sr) => { const p = sr.pts.find((q) => q.h === 2); return p && { sr, p, x: P.x(p.date), y: P.y(p.a[data.MED]) }; }).filter(Boolean).sort((a, b) => a.y - b.y);
+    P = fanChart(d3.select("#tip-chart"), data, { id: "tip-chart-src", models: top.slice(0, 3).map((m, i) => ({ m, slot: i })), pad: { t: 64, b: 60, r: 150 } });
+    const items = P.bands.map((sr) => { const p = sr.pts.find((q) => q.h === 2); return p && { sr, p, x: P.x(p.date), y: P.y(p.med) }; }).filter(Boolean).sort((a, b) => a.y - b.y);
     for (let i = 1; i < items.length; i++) items[i].y = Math.max(items[i].y, items[i - 1].y + 24);
-    const qi = (q) => d3.minIndex(data.Q, (v) => Math.abs(v - q));
     const fmt = d3.format(".3~s");
-    tags.innerHTML = items.map((d) => `<span class="c-tag" style="position:absolute;left:${d.x + 10}px;top:${d.y - 10}px;z-index:5"><i style="background:${d.sr.c}"></i>${fmt(d.p.a[data.MED])}<span class="rng">${fmt(d.p.a[qi(0.1)])}–${fmt(d.p.a[qi(0.9)])}</span></span>`).join("");
+    tags.innerHTML = items.map((d) => `<span class="c-tag" style="position:absolute;left:${d.x + 10}px;top:${d.y - 10}px;z-index:5"><i style="background:${d.sr.c}"></i>${fmt(d.p.med)}<span class="rng">${fmt(d.p.lo)}–${fmt(d.p.hi)}</span></span>`).join("");
   };
   new ResizeObserver(() => requestAnimationFrame(placeTags)).observe(s.st);
   placeTags();

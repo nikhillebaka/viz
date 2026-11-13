@@ -46,6 +46,8 @@ export const color = {
     "series-1": "#83e5bc", "series-2": "#71c9fa", "series-3": "#ffb481", "series-4": "#f1a1ce",
     "series-5": "#f1d680", "series-6": "#f599a5", "series-7": "#c2a7f4", "series-8": "#bcdf90",
     "series-baseline": "#9a9a9a",
+    // interval band fill strength: default (every model) and focused. Dark needs a touch more.
+    "band-whisper": "0.075", "band-focus": "0.15",
     "heat-better": "#38bdf8",
     "heat-neutral": "#2b2b2b",
     "heat-worse": "#fb7185",
@@ -77,6 +79,7 @@ export const color = {
     "series-1": "#05ac7d", "series-2": "#0891c9", "series-3": "#ec6f00", "series-4": "#de03a2",
     "series-5": "#d6a20a", "series-6": "#ec0050", "series-7": "#8738f8", "series-8": "#72ad04",
     "series-baseline": "#8a8a8f",
+    "band-whisper": "0.06", "band-focus": "0.13",
     "heat-better": "#268bd2",
     "heat-neutral": "#e6e6ea",
     "heat-worse": "#cb4b16",
