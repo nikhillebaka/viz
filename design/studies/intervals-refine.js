@@ -104,8 +104,10 @@ function hoverAt(clientX) {
   const far = px < G.x(G.ref) - reach || px > G.x(new Date(+G.ref + 3 * WEEK)) + reach;
   setHover(far ? null : near);
 }
-chartEl.addEventListener("pointermove", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
-chartEl.addEventListener("pointerdown", (e) => { if (!e.target.closest(".fc-label")) hoverAt(e.clientX); });
+// hover runs everywhere, including over the labels: their invisible hit areas reach to the screen's edge,
+// and skipping them there left the 3-weeks-ahead readout up far past its half-week reach
+chartEl.addEventListener("pointermove", (e) => hoverAt(e.clientX));
+chartEl.addEventListener("pointerdown", (e) => hoverAt(e.clientX));
 chartEl.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") { mouse = null; setHover(null); previewUnderPointer(); } });
 
 /* Focus preview follows whatever label is under the mouse, checked after every frame. Enter/leave
