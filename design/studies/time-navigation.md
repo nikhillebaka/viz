@@ -1,6 +1,6 @@
 # Moving through time
 
-Regression check: `tests/time-nav-check.js` covers every behaviour below (34 cases;
+Regression check: `tests/time-nav-check.js` covers every behaviour below (47 cases;
 `run({ rulers: true })` repeats them with the width rulers on). Run it on the
 prototype page after any change: `(await import("/tests/time-nav-check.js")).run()`.
 
@@ -82,6 +82,14 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **Panning into the past was slow** because the model labels, pushed off the right edge, were being
   fitted into negative room one dropped letter (and one text measurement) at a time, every frame.
   Off-screen labels are now skipped; a frame costs under 1 ms in every pan position.
+- **Height zoom: shift + scroll, or shift + vertical drag.** Independent of everything else: it never
+  changes the date, the time zoom or the pan, and changing those keeps it. Scroll up (or drag up) to
+  stretch the data taller. Zero stays on the axis (there's no vertical pan); the axis maximum is the
+  normal rounded one divided by the zoom, without re-rounding, so it moves continuously. 1/3× to ~6.7×,
+  rubber-banding at both ends; 0 resets it with everything else. Shift no longer turns a vertical
+  mouse wheel into side scroll, because macOS already sends shift + trackpad swipes sideways and the
+  two can't be told apart; mouse users scrub with drag or the arrow keys. Gridline spacing still
+  changes in steps (every 10k, then every 5k…) as the zoom crosses thresholds.
 - **Scroll speed adapts to zoom.** Side-scroll scrubbing is 1:1 with the content at the home span,
   but never faster than 1 week per 3/4 of a home-span week's width, so wide zooms and Season don't fly
   through dates (Season went ~4 weeks per small flick; now 100 px ≈ 1.1 weeks, close to the home

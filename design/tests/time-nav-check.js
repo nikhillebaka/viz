@@ -115,6 +115,32 @@ export async function run({ rulers = false } = {}) {
     nav.zoomTo(1e9); await settle(); { const T0 = nav.T; await drag(150); await settle();
       check("drag at the full season: the forecast follows the pointer (right = later)", nav.T > T0, { T: nav.T }); }
     await reset();
+    // --- height zoom: shift + scroll / shift + vertical drag, independent of date, zoom and pan
+    { const top0 = window.__G.y.domain()[1];
+      // normal height: the season's peak observed value fits under a round axis maximum
+      check("the drawn y-axis at normal height fits the season and is a round number", top0 > 42626 && top0 % 10000 === 0, { top: top0 });
+      const before = { T: nav.T, span: nav.span, P: nav.P };
+      await wheel(8, { deltaY: -10, shiftKey: true }); await settle();
+      const z1 = nav.heightZoom, same = nav.T === before.T && near(nav.span, before.span, 1e-9) && near(nav.P, before.P, 1e-9);
+      check("shift + scroll up stretches height only (date, zoom and pan unchanged)", z1 > 1.5 && same, { z: +z1.toFixed(2), same });
+      check("…and the drawn y-axis maximum shrinks by the same factor", near(window.__G.y.domain()[1], top0 / z1, top0 * 0.01), { top: Math.round(window.__G.y.domain()[1]), expect: Math.round(top0 / z1) });
+      key("ArrowRight"); await settle();
+      check("changing the date keeps the height zoom", near(nav.heightZoom, z1, 1e-6), { z: +nav.heightZoom.toFixed(2) });
+      await wheel(80, { deltaY: 25, shiftKey: true }); await settle();
+      check("height zoom stops at 1/3 (springs back from past it)", near(nav.heightZoom, 1 / 3, 1e-3), { z: +nav.heightZoom.toFixed(3) });
+      await wheel(120, { deltaY: -25, shiftKey: true }); await settle();
+      check("height zoom stops at ~6.7×", near(nav.heightZoom, 1 / 0.15, 1e-2), { z: +nav.heightZoom.toFixed(2) });
+      key("0"); await settle();
+      check("0 resets height", near(nav.heightZoom, 1, 1e-6), { z: nav.heightZoom });
+      // shift + drag up stretches
+      const r = el.getBoundingClientRect(), x0 = r.left + r.width * 0.45, y0 = r.top + r.height * 0.6, p = ++id;
+      el.dispatchEvent(new PointerEvent("pointerdown", { clientX: x0, clientY: y0, pointerId: p, button: 0, bubbles: true, pointerType: "mouse", shiftKey: true }));
+      for (let i = 1; i <= 10; i++) { el.dispatchEvent(new PointerEvent("pointermove", { clientX: x0, clientY: y0 - i * 10, pointerId: p, bubbles: true, pointerType: "mouse", shiftKey: true })); await sleep(16); }
+      el.dispatchEvent(new PointerEvent("pointerup", { clientX: x0, clientY: y0 - 100, pointerId: p, button: 0, bubbles: true, pointerType: "mouse" }));
+      await settle();
+      check("shift + drag up stretches height, date unchanged", nav.heightZoom > 1.5 && nav.T === Math.round(nav.T), { z: +nav.heightZoom.toFixed(2) });
+      key("0"); await settle(); }
+    await reset();
     // --- focus: clicking a label focuses that model, and every frame still draws while focused
     { const l = window.__G.labels[0], r = el.getBoundingClientRect(), cx = r.left + l.x + 20, cy = r.top + l.y, p = ++id;
       el.dispatchEvent(new PointerEvent("pointerdown", { clientX: cx, clientY: cy, pointerId: p, button: 0, bubbles: true, pointerType: "mouse" }));

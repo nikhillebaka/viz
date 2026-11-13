@@ -109,6 +109,7 @@ export function bandsAt(data, models, t, level = 0.95) {
  *  misses: true to ring observed weeks outside the focused (or only) model's interval
  *  marks: false to skip the cutoff shade and date labels
  *  topClear: y above which y-axis labels are hidden (the bottom of the top chrome); default pad.t - 32
+ *  ymax, nice: the y-axis maximum, rounded up to a nice value unless nice is false
  *  labels: false to skip direct labels
  *  context: model ids drawn as grey context medians (Show all); hot: a context id to highlight and name
  */
@@ -148,7 +149,9 @@ export function layoutFan(data, opts, w, h) {
   const rk = typeof opts.rulers === "number" ? Math.max(0, Math.min(1, opts.rulers)) : opts.rulers ? 1 : 0;
   const rulerW = 18 + models.length * rulerStep;
   const x = d3.scaleUtc(opts.domain || [new Date(+ref - 14 * WEEK), new Date(+ref + 3 * WEEK)], [pad.l, w - pad.r]);
-  const y = d3.scaleLinear([0, opts.ymax ?? YMAX], [h - pad.b, pad.t]).nice(5);
+  // nice: false keeps the maximum exactly as given (a continuous height zoom must not snap)
+  const y = d3.scaleLinear([0, opts.ymax ?? YMAX], [h - pad.b, pad.t]);
+  if (opts.nice !== false) y.nice(5);
   const ay = h - pad.b;
   const cutoff = whole ? cutoffFor(truth, ref) : new Date(+ref - WEEK);
   const level = opts.band === null || opts.band === 0 ? 0 : opts.band ?? 0.95;

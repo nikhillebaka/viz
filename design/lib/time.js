@@ -24,6 +24,10 @@
  *    and drag pan too (as if ⌘ were held) until the view is back at its home position (where the
  *    recenter pill would put it), the same point from either side; from there the same gesture scrubs. Keys and the stepper with the forecast off-screen bring it back to its home
  *    position; so do zooming fully out, double-click and 0.
+ *  - shift + scroll (up to stretch, down to shrink) or shift + vertical drag: height zoom H, independent
+ *    of everything above. Zero stays on the axis; 1/3× to ~6.7×, rubber-banding at both ends; 0 resets it.
+ *    (Shift no longer turns a vertical wheel into side scroll: macOS already sends shift + trackpad swipes
+ *    sideways, so the two can't be told apart.)
  *  - double-click: zoom fully out to the season; when fully out, zoom back in on the date you clicked.
  *  - left / right: step a week (timeKeys).
  * Past the first and last date, and below minSpan, the gesture rubber-bands and springs back. */
@@ -57,6 +61,7 @@ export class TimeNav {
     this.T = this.tT = this.index; this.vT = 0; this.wT = 38;
     this.Z = this.tZ = Math.log(this.home); this.vZ = 0; this.wZ = 30;
     this.P = this.tP = 0; this.vP = 0; this.wP = 30;          // camera offset from the forecast, in weeks
+    this.H = this.tH = 0; this.vH = 0; this.wH = 30;          // height zoom, log scale (0 = normal)
     this.busy = false; this.raf = 0; this.queued = 0; this.mode = "close";
     this.#bind();
   }
@@ -126,7 +131,10 @@ export class TimeNav {
     return [Math.min(lo, 0), Math.max(hi, 0)];
   }
   /* any gesture in progress (the page hides hover while this is true) */
-  get moving() { return !!(this.busy || this.panning || this.pinching); }
+  get moving() { return !!(this.busy || this.panning || this.pinching || this.heightZooming); }
+  /* how much taller the data is drawn than normal (1 = normal); divide the y-axis maximum by it */
+  get heightZoom() { return Math.exp(this.H); }
+  setHeight(z = 1) { this.tH = Math.log(z); this.wH = 30; this.#run(); }
   /* the reference date's x on screen, from the live camera (not the last drawn frame) */
   refX() {
     const [r0, r1] = this.scale().range(), [d0, d1] = this.domain();
@@ -142,7 +150,7 @@ export class TimeNav {
   /* ---- motion ---- */
   #mode(m) { if (m !== this.mode) { this.mode = m; this.onZoom(m); } }
   #run() {
-    if (reduced.matches) { this.T = this.tT; this.Z = this.tZ; this.P = this.tP; this.vT = this.vZ = this.vP = 0; this.request(); return; }
+    if (reduced.matches) { this.T = this.tT; this.Z = this.tZ; this.P = this.tP; this.H = this.tH; this.vT = this.vZ = this.vP = this.vH = 0; this.request(); return; }
     if (this.raf) return;                                        // the running loop picks up new targets
     let last = performance.now();
     const tick = () => {
@@ -150,6 +158,7 @@ export class TimeNav {
       if (!this.busy) [this.T, this.vT] = spring(this.T, this.vT, this.tT, this.wT, dt);
       if (!this.pinching) [this.Z, this.vZ] = spring(this.Z, this.vZ, this.tZ, this.wZ, dt);
       if (!this.panning) [this.P, this.vP] = spring(this.P, this.vP, this.tP, this.wP, dt);
+      if (!this.heightZooming) [this.H, this.vH] = spring(this.H, this.vH, this.tH, this.wH, dt);
       const doneT = this.busy || (Math.abs(this.T - this.tT) < 5e-4 && Math.abs(this.vT) < 0.01);
       const doneZ = this.pinching || (Math.abs(this.Z - this.tZ) < 5e-4 && Math.abs(this.vZ) < 0.01);
       if (doneT && !this.busy) { this.T = this.tT; this.vT = 0; }
@@ -157,7 +166,9 @@ export class TimeNav {
       const doneP = this.panning || (Math.abs(this.P - this.tP) < 5e-4 && Math.abs(this.vP) < 0.01);
       if (doneP && !this.panning) { this.P = this.tP; this.vP = 0; }
       this.onFrame();
-      this.raf = doneT && doneZ && doneP ? 0 : requestAnimationFrame(tick);
+      const doneH = this.heightZooming || (Math.abs(this.H - this.tH) < 5e-4 && Math.abs(this.vH) < 0.01);
+      if (doneH && !this.heightZooming) { this.H = this.tH; this.vH = 0; }
+      this.raf = doneT && doneZ && doneP && doneH ? 0 : requestAnimationFrame(tick);
     };
     this.raf = requestAnimationFrame(tick);
   }
@@ -227,6 +238,16 @@ export class TimeNav {
     this.panIdle = setTimeout(() => { this.panning = false; this.tP = Math.max(p0, Math.min(p1, this.P)); this.wP = 26; this.#run(); }, 140);
   }
 
+  #zoomHeight(f) { // 1:1 height zoom from a gesture, rubber-banding at both ends
+    this.#stop(); this.heightZooming = true; this.vH = 0;
+    const lo = Math.log(1 / 3), hi = Math.log(1 / 0.15);
+    const raw = (this.H < lo ? lo - unrubber(lo - this.H, 4) : this.H > hi ? hi + unrubber(this.H - hi, 4) : this.H) + Math.log(f);
+    this.H = this.tH = raw < lo ? lo - rubber(lo - raw, 4) : raw > hi ? hi + rubber(raw - hi, 4) : raw;
+    this.request();
+    clearTimeout(this.heightIdle);
+    this.heightIdle = setTimeout(() => { this.heightZooming = false; this.tH = Math.max(lo, Math.min(hi, this.H)); this.wH = 26; this.#run(); }, 160);
+  }
+
   /* ---- inputs ---- */
   #bind() {
     const el = this.surface;
@@ -236,13 +257,15 @@ export class TimeNav {
       const fan = this.follow < 0.5;                            // zoomed far out: the drag moves the forecast
       this.#stop(); this.vT = 0;
       // ⌘ + drag pans, exactly like ⌘ + side scroll: the view moves, the forecast stays on its date
-      drag = { id: e.pointerId, x0: e.clientX, lastX: e.clientX, fan, pan: e.metaKey, moved: false, scrubbed: false, hist: [{ t: e.timeStamp, T: this.T }] };
+      // shift + drag zooms height (up to stretch), independent of the date and the time view
+      drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, lastX: e.clientX, lastY: e.clientY, fan, pan: e.metaKey, height: e.shiftKey && !e.metaKey, moved: false, scrubbed: false, hist: [{ t: e.timeStamp, T: this.T }] };
       if (drag.pan) this.returning = false;
     });
     el.addEventListener("pointermove", (e) => {
       if (!drag || e.pointerId !== drag.id) return;
-      if (!drag.moved && Math.abs(e.clientX - drag.x0) < 4) return;
+      if (!drag.moved && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 4) return;
       if (!drag.moved) { drag.moved = true; try { el.setPointerCapture(e.pointerId); } catch {} el.style.cursor = "grabbing"; }
+      if (drag.height) { this.#zoomHeight(Math.exp(-(e.clientY - drag.lastY) * 0.006)); drag.lastY = e.clientY; return; }
       const dx = e.clientX - drag.lastX, pxw = this.#pxPerWeek(), f = this.follow;
       if (drag.pan) this.#panBy(-dx / pxw);                    // the content follows the pointer, 1:1
       else if (drag.fan) {                                           // the fan follows the pointer: drag right = later
@@ -278,6 +301,12 @@ export class TimeNav {
     el.addEventListener("wheel", (e) => {
       if (e.target.closest?.(".c-float")) return;
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientWidth : 1;
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey) {               // shift + scroll: height zoom only
+        e.preventDefault();
+        const d = Math.max(-25, Math.min(25, (e.deltaY || e.deltaX) * unit));
+        this.#zoomHeight(Math.exp(-d * 0.01));                   // scroll up (negative) stretches
+        return;
+      }
       if (e.metaKey && !e.ctrlKey && Math.abs(e.deltaX || (e.shiftKey ? e.deltaY : 0)) > Math.abs(e.shiftKey ? 0 : e.deltaY)) {
         e.preventDefault();                                      // ⌘ + side scroll: pan, the forecast stays put
         this.returning = false;                                  // a deliberate pan sets a new resting place
@@ -291,8 +320,7 @@ export class TimeNav {
         this.#zoomBy(Math.exp(d * 0.012));
         return;
       }
-      let dx = e.deltaX;
-      if (!dx && e.shiftKey) dx = e.deltaY;
+      const dx = e.deltaX;
       if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || this.pinching) return;
       e.preventDefault();
       const did = this.#advance((dx * unit) / this.#pxPerWeek());
@@ -316,7 +344,7 @@ export class TimeNav {
       if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.("input, textarea, select, [contenteditable], .c-float")) return;
       if (e.key === "=" || e.key === "+") { e.preventDefault(); this.zoomIn(); }
       else if (e.key === "-" || e.key === "_") { e.preventDefault(); this.zoomOut(); }
-      else if (e.key === "0") { e.preventDefault(); this.zoomTo(this.home, { recenter: true }); }
+      else if (e.key === "0") { e.preventDefault(); this.zoomTo(this.home, { recenter: true }); this.setHeight(1); }
     });
   }
 }

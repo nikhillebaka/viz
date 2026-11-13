@@ -39,6 +39,7 @@ const sel = new ModelSelection({
 });
 
 const view = $("view"), chartEl = $("chart");
+const baseYmax = d3.scaleLinear().domain([0, data.YMAX]).nice(5).domain()[1]; // the axis maximum at normal height
 let chromeTop = 70, chromeBottom = 70, G = null;
 
 // charted models in a stable order (by color slot), then the baseline if it's on
@@ -54,6 +55,7 @@ function draw() {
   const u = nav.mix; // 0 close up, 1 fully zoomed out
   const P = fanCanvas(chartEl, data, {
     models: models(), t: nav.T, domain: nav.domain(),
+    ymax: baseYmax / nav.heightZoom, nice: false, // height zoom: the normal (rounded) axis maximum, divided
     // the right margin holds the model labels close up; in Season they sit at the fan's end instead
     // while the model picker is open, the plot moves into the space to its right (pickerInset)
     pad: { l: 64 + pickerInset, r: 168 + (56 - 168) * u, t: chromeTop + 24, b: chromeBottom + 48 }, topClear: chromeTop,
