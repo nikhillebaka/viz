@@ -64,6 +64,29 @@
 .ev-legend canvas { width: 120px; height: 6px; border-radius: 3px; }
 .ev-heat-canvas { display: block; width: 100%; }
 
+/* figures */
+.ev-figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 40px 48px; margin-top: 64px; align-items: start; }
+.ev-fig { margin: 0; min-width: 0; }
+.ev-fig figcaption { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; font-size: 15px; line-height: 24px; letter-spacing: -0.01em; }
+.ev-fig figcaption b { font-weight: 600; }
+.ev-fig figcaption .sub { color: var(--ink-tertiary); font-size: 12px; }
+.ev-fig figcaption .tog { color: var(--ink-tertiary); font-size: 12px; border-radius: 6px; padding: 0 4px; }
+.ev-fig figcaption .tog.on { color: var(--ink-primary); }
+.ev-fig figcaption .tog:hover { background: var(--fill-hover); }
+.ev-fig figcaption .dot { color: var(--ink-faint); font-size: 12px; }
+.ev-fig .key { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--ink-tertiary); font-size: 11.5px; }
+.ev-fig .key i { width: 10px; height: 6px; border-radius: 2px; display: inline-block; margin-left: 6px; }
+.ev-fig svg { display: block; width: 100%; overflow: visible; }
+.ev-fig .tk { font-family: var(--font-mono); font-size: 10.5px; fill: var(--ink-tertiary); }
+.ev-fig .lb text, .ev-fig .nm { font-size: 12px; fill: var(--ink-secondary); }
+.ev-fig .lb.on text, .ev-fig .an.on .nm { fill: var(--ink-primary); font-weight: 600; }
+.ev-fig .lb.dim { opacity: 0.4; }
+.ev-fig .hit { cursor: default; }
+/* anatomy: three ink tones, no hue (color in the scores means better/worse) */
+.ev-fig .k1, .ev-fig .key .k1 { fill: var(--ink-faint); background: var(--ink-faint); }
+.ev-fig .k2, .ev-fig .key .k2 { fill: var(--ink-tertiary); background: var(--ink-tertiary); }
+.ev-fig .k3, .ev-fig .key .k3 { fill: var(--ink-primary); background: var(--ink-primary); }
+
 .ev-readout { position: fixed; z-index: 60; min-width: 200px; padding: 10px 12px; border-radius: var(--radius-menu); background: var(--surface-raised); box-shadow: 0 0 0 0.5px var(--line-axis), 0 8px 28px rgba(0,0,0,.28); pointer-events: none; font-size: 12px; line-height: 18px; }
 .ev-readout .when { color: var(--ink-tertiary); margin-bottom: 6px; }
 .ev-readout table { border-collapse: collapse; width: 100%; }

@@ -47,6 +47,18 @@ export async function run() {
       const resting = Math.abs(head.getBoundingClientRect().top - rowsEl.getBoundingClientRect().bottom) < 2;
       check("the column titles ride the bottom of the screen while the table runs past it", riding, { headBottom: Math.round(head.getBoundingClientRect().bottom), h: innerHeight });
       check("…and rest under the last row once the table ends", resting); }
+    // figures: every selected model on each one; hovering a row brings that model up in every figure
+    { const figs = [...document.querySelectorAll("#scores .ev-fig")], n = ev.result.rows.filter((r) => (sel.selected.includes(r.m) || r.m === ev.result.baseline) && r.rel === r.rel && r.n).length;
+      const counts = figs.map((f) => f.dataset.fig === "an" ? f.querySelectorAll("g.an").length : f.querySelectorAll("path.hit").length);
+      check("Calibration, Horizon and Anatomy each show every selected model", figs.length === 3 && counts.every((c) => c === n), { counts, n });
+      const m = sel.selected[1];
+      document.querySelector(`#scores .ev-row[data-m="${CSS.escape(m)}"]`).dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      await sleep(60);
+      check("hovering a row brings that model up in every figure", figs.every((f) => f.querySelector(`.on[data-m="${CSS.escape(m)}"]`)), {});
+      const hit = figs[0].querySelector(`path.hit[data-m="${CSS.escape(sel.selected[2])}"]`);
+      hit?.dispatchEvent(new PointerEvent("pointerover", { bubbles: true })); await sleep(60);
+      check("hovering a figure line lights that model's leaderboard row", !!document.querySelector(`#scores .ev-row.hot[data-m="${CSS.escape(sel.selected[2])}"]`));
+      document.querySelector("#scores .ev-figs").dispatchEvent(new PointerEvent("pointerleave")); await sleep(60); }
     // the lift, the tuck, frosted glass
     await go(document.getElementById("view").offsetHeight + 40);
     const bubble = document.getElementById("scope-bubble");

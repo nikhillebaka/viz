@@ -446,6 +446,19 @@ Built on the fan chart page (`studies/intervals-refine.html`), with the section 
 Checks: `tests/scores-check.js` (page behaviour: scrolling, lift, frosted glass, links), alongside
 `tests/time-nav-check.js` and `tests/selection-check.mjs`.
 
+**Figures** (Nov 13): Calibration, Horizon and Anatomy under the heatmap, each with every selected model
+on one chart, so models compare directly (the expanded row will show one model's detail; the figures
+compare them):
+- **Calibration** plots coverage minus nominal at every level (10–98%): 0 is perfect, above is intervals
+  too wide, below too narrow. The difference spreads the lines apart where a coverage-vs-nominal plot
+  crowds them along the diagonal.
+- **Horizon**: relative WIS at 0–3 weeks ahead, log scale, a line at 1 (the baseline, dashed).
+- **Anatomy**: each model's WIS as spread, over- and under-prediction, sorted like the leaderboard;
+  WIS / Share toggle in the title. Three ink tones, no hue (color in the scores means better/worse).
+- Lines and bars are ink; line ends are labelled when every label fits, cut to fit, with the chart's color
+  dot for charted models. Hovering a model anywhere (a row, a line, a bar, the chart) brings it to full
+  ink in every figure and the rest recede; hovering a figure line lights its row.
+
 Not built yet: the expanded row, the + column chooser, export, the Dates popover with a week range,
 Locations as a heatmap → chart link (the prototype chart only has US forecasts), Back returning to the
 cell after a jump, the worker for live scoring, ⌘Z for scope changes, the URL.

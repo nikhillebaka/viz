@@ -40,7 +40,12 @@ export function mountScores(el, opts) {
   el.classList.add("ev");
   el.innerHTML = `<div class="ev-scope on-paper"></div>
     <section class="ev-board"><div class="ev-rows"></div><div class="ev-head ev-grid"></div></section>
-    <section class="ev-heat"><div class="ev-heat-line"></div><canvas class="ev-heat-canvas"></canvas></section>`;
+    <section class="ev-heat"><div class="ev-heat-line"></div><canvas class="ev-heat-canvas"></canvas></section>
+    <section class="ev-figs">
+      <figure class="ev-fig" data-fig="cal"><figcaption><b>Calibration</b><span class="sub">coverage − nominal</span></figcaption><svg></svg></figure>
+      <figure class="ev-fig" data-fig="hz"><figcaption><b>Horizon</b><span class="sub">rel. WIS by weeks ahead</span></figcaption><svg></svg></figure>
+      <figure class="ev-fig" data-fig="an"><figcaption><b>Anatomy</b><button class="tog" data-v="abs">WIS</button><span class="dot">·</span><button class="tog" data-v="share">Share</button><span class="key"><i class="k1"></i>Spread<i class="k2"></i>Over<i class="k3"></i>Under</span></figcaption><svg></svg></figure>
+    </section>`;
   const q = (s) => el.querySelector(s);
   const scopeEl = q(".ev-scope"), headEl = q(".ev-head"), rowsEl = q(".ev-rows"), heatLine = q(".ev-heat-line"), heatCv = q(".ev-heat-canvas");
   const readout = document.createElement("div"); readout.className = "ev-readout"; readout.hidden = true; document.body.appendChild(readout);
@@ -271,6 +276,112 @@ export function mountScores(el, opts) {
   heatCv.addEventListener("pointerleave", () => { readout.hidden = true; opts.onPreview?.(null); });
   heatCv.addEventListener("click", (e) => { const h = cellAt(e); if (h && h.ci >= 0) { readout.hidden = true; opts.onCell?.({ m: h.m, axis: S.heatAxis, col: heat.cols[h.ci] }); } });
 
+
+  /* ---------------- figures: every selected model on one chart ----------------
+   * Lines and bars are ink; the hovered model (a row, a line, the chart) comes up to full ink and the
+   * rest recede. Line ends are labelled when every label fits (all or nothing, like grey lines on the
+   * chart); otherwise a model is named on hover. Charted models carry their color dot in the label. */
+  const figsEl = q(".ev-figs");
+  S.anatomy = "abs";
+  figsEl.querySelectorAll(".tog").forEach((b) => b.addEventListener("click", () => { S.anatomy = b.dataset.v; renderFigures(); }));
+  const NS = "http://www.w3.org/2000/svg";
+  const figRows = () => shownRows().filter((r) => r.rel === r.rel && r.n).sort((a, b) => a.rel - b.rel);
+  const label = (m) => (m === result.baseline ? "Baseline" : short(m));
+  // a name cut to fit max px at the figures' 12px label size (measured, cached)
+  const mctx = document.createElement("canvas").getContext("2d"), fitCache = new Map();
+  const fitName = (m, max) => {
+    const k = `${m}|${max}`; if (fitCache.has(k)) return fitCache.get(k);
+    mctx.font = `12px ${getComputedStyle(root).getPropertyValue("--font-sans")}`;
+    let t = label(m); if (mctx.measureText(t).width > max) { while (t.length > 3 && mctx.measureText(t + "…").width > max) t = t.slice(0, -1); t += "…"; }
+    fitCache.set(k, t); return t;
+  };
+  // stack labels so they never overlap: sorted by y, at least gap apart, kept inside [lo, hi]
+  function dodge(items, gap, lo, hi) {
+    const a = [...items].sort((p, q2) => p.y - q2.y);
+    for (let i = 1; i < a.length; i++) a[i].ly = Math.max(a[i].y, (a[i - 1].ly ?? a[i - 1].y) + gap);
+    if (a.length) a[0].ly ??= a[0].y;
+    const over = (a.at(-1)?.ly ?? 0) - hi;
+    if (over > 0) for (const d of a) d.ly -= over;
+    for (let i = 0; i < a.length; i++) { a[i].ly = Math.max(a[i].ly, lo + i * gap); }
+    return a;
+  }
+  function lineFigure(svg, rows, { xs, xLabel, y, yTicks, ref, pts, w, h, pad }) {
+    const hot = S.hot, any = hot && rows.some((r) => r.m === hot);
+    const sx = (i) => pad.l + ((xs[i] - xs[0]) / (xs.at(-1) - xs[0])) * (w - pad.l - pad.r);
+    let html = "";
+    for (const t of yTicks) html += `<line x1="${pad.l}" x2="${w - pad.r}" y1="${y(t)}" y2="${y(t)}" stroke="var(--line-hairline)"/><text x="${pad.l - 8}" y="${y(t) + 3.5}" text-anchor="end" class="tk">${t.label ?? t}</text>`;
+    html += `<line x1="${pad.l}" x2="${w - pad.r}" y1="${y(ref)}" y2="${y(ref)}" stroke="var(--ink-tertiary)" stroke-width="1"/>`;
+    xs.forEach((v, i) => { html += `<text x="${sx(i)}" y="${h - 8}" text-anchor="middle" class="tk">${xLabel(v)}</text>`; });
+    const lines = rows.map((r) => ({ r, p: pts(r) })).filter((d) => d.p.every((v) => v === v));
+    // draw: the hot line last, on top
+    lines.sort((a, b) => (a.r.m === hot) - (b.r.m === hot));
+    for (const { r, p } of lines) {
+      const on = r.m === hot, base = r.m === result.baseline;
+      const stroke = on ? "var(--ink-primary)" : any ? "var(--ink-faint)" : base ? "var(--ink-tertiary)" : "var(--ink-secondary)";
+      const d = p.map((v, i) => `${i ? "L" : "M"}${sx(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+      html += `<path d="${d}" fill="none" stroke="${stroke}" stroke-width="${on ? 2 : 1.25}" stroke-linejoin="round" ${base && !on ? 'stroke-dasharray="3 3"' : ""}/>`
+        + p.map((v, i) => `<circle cx="${sx(i)}" cy="${y(v)}" r="${on ? 2.75 : 2}" fill="${stroke}"/>`).join("")
+        + `<path d="${d}" fill="none" stroke="transparent" stroke-width="12" data-m="${esc(r.m)}" class="hit"/>`;
+    }
+    // labels at the right end: all, if they fit; otherwise only the hot one
+    const ends = lines.map(({ r, p }) => ({ m: r.m, y: y(p.at(-1)) }));
+    const fit = ends.length * 14 <= h - pad.t - pad.b + 14;
+    const show = fit ? ends : ends.filter((e) => e.m === hot);
+    for (const e of dodge(show, 14, pad.t, h - pad.b)) {
+      const slot = opts.slotOf(e.m), on = e.m === hot;
+      html += `<g class="lb${on ? " on" : ""}${any && !on ? " dim" : ""}" data-m="${esc(e.m)}">${slot != null ? `<circle cx="${w - pad.r + 10}" cy="${e.ly}" r="3" fill="${opts.seriesColor(slot)}"/>` : ""}<text x="${w - pad.r + 17}" y="${e.ly + 4}">${esc(fitName(e.m, pad.r - 20))}</text><title>${esc(e.m)}</title></g>`;
+    }
+    svg.innerHTML = html;
+  }
+  function renderFigures() {
+    if (!result) return;
+    const rows = figRows();
+    const figW = (f) => Math.max(260, f.clientWidth);
+    // Calibration: empirical minus nominal coverage at every level; above 0 too wide, below too narrow
+    { const f = figsEl.querySelector('[data-fig="cal"]'), svg = f.querySelector("svg"), w = figW(f), h = 240;
+      const levels = man.levels, devs = rows.flatMap((r) => levels.map((l) => r.cov[l] - l));
+      const lim = Math.max(10, Math.ceil(Math.max(...devs.map(Math.abs), 0) / 10) * 10);
+      const pad = { l: 36, r: 150, t: 10, b: 26 };
+      const y = (v) => pad.t + ((lim - v) / (2 * lim)) * (h - pad.t - pad.b);
+      svg.setAttribute("viewBox", `0 0 ${w} ${h}`); svg.setAttribute("height", h);
+      const tk = [-lim, -lim / 2, lim / 2, lim].map((v) => ({ valueOf: () => v, label: (v > 0 ? "+" : "") + v }));
+      lineFigure(svg, rows, { xs: levels, xLabel: (v) => (v % 20 === 10 || v === 98 ? `${v}` : ""), y: (v) => y(+v), yTicks: tk, ref: 0, pts: (r) => levels.map((l) => r.cov[l] - l), w, h, pad }); }
+    // Horizon: relative WIS at each horizon, log scale, the baseline at 1
+    { const f = figsEl.querySelector('[data-fig="hz"]'), svg = f.querySelector("svg"), w = figW(f), h = 240;
+      const vals = rows.flatMap((r) => r.byH).filter((v) => v === v && v > 0);
+      const lo = Math.min(0.5, ...vals), hi = Math.max(1.25, ...vals);
+      const pad = { l: 36, r: 150, t: 10, b: 26 };
+      const y = (v) => pad.t + ((Math.log(hi) - Math.log(v)) / (Math.log(hi) - Math.log(lo))) * (h - pad.t - pad.b);
+      svg.setAttribute("viewBox", `0 0 ${w} ${h}`); svg.setAttribute("height", h);
+      const tk = [0.5, 0.75, 1.25, 1.5, 2].filter((v) => v >= lo && v <= hi).map((v) => ({ valueOf: () => v, label: `${v}` }));
+      lineFigure(svg, rows, { xs: [0, 1, 2, 3], xLabel: (v) => `${v} wk`, y: (v) => y(+v), yTicks: tk, ref: 1, pts: (r) => r.byH, w, h, pad }); }
+    // Anatomy: each model's WIS split into spread, over- and under-prediction; sorted like the leaderboard
+    { const f = figsEl.querySelector('[data-fig="an"]'), svg = f.querySelector("svg"), w = figW(f);
+      figsEl.querySelectorAll(".tog").forEach((b) => b.classList.toggle("on", b.dataset.v === S.anatomy));
+      const rh = 18, pad = { l: 150, r: 48, t: 4, b: 4 }, h = pad.t + rows.length * rh + pad.b;
+      const max = Math.max(...rows.map((r) => r.wis)), bw = w - pad.l - pad.r, hot = S.hot, any = hot && rows.some((r) => r.m === hot);
+      svg.setAttribute("viewBox", `0 0 ${w} ${h}`); svg.setAttribute("height", h);
+      let html = "";
+      rows.forEach((r, i) => {
+        const yy = pad.t + i * rh, tot = r.disp + r.over + r.under, k = S.anatomy === "share" ? bw / tot : bw / max;
+        const slot = opts.slotOf(r.m), on = r.m === hot, op = any && !on ? 0.35 : 1;
+        html += `<g data-m="${esc(r.m)}" class="an${on ? " on" : ""}" opacity="${op}">`
+          + (slot != null ? `<circle cx="8" cy="${yy + rh / 2}" r="3" fill="${opts.seriesColor(slot)}"/>` : "")
+          + `<text x="18" y="${yy + rh / 2 + 4}" class="nm">${esc(fitName(r.m, pad.l - 26))}</text><title>${esc(r.m)}</title>`;
+        let x = pad.l;
+        for (const [v, cls] of [[r.disp, "k1"], [r.over, "k2"], [r.under, "k3"]]) {
+          const ww = Math.max(0, v * k - 2);
+          if (ww > 0) html += `<rect x="${x}" y="${yy + 4}" width="${ww}" height="${rh - 8}" rx="2" class="${cls}"/>`;
+          x += v * k;
+        }
+        html += `<text x="${S.anatomy === "share" ? w - pad.r + 6 : x + 4}" y="${yy + rh / 2 + 4}" class="tk">${S.anatomy === "share" ? `${Math.round((100 * r.under) / tot)}% under` : fmtW(r.wis)}</text>`
+          + `<rect x="0" y="${yy}" width="${w}" height="${rh}" fill="transparent" class="hit" data-m="${esc(r.m)}"/></g>`;
+      });
+      svg.innerHTML = html; }
+  }
+  figsEl.addEventListener("pointerover", (e) => { const t = e.target.closest("[data-m]"); opts.onPreview?.(t ? t.dataset.m : null); });
+  figsEl.addEventListener("pointerleave", () => opts.onPreview?.(null));
+
   /* ---------------- public ---------------- */
   let seq = 0;
   async function update() {
@@ -281,18 +392,18 @@ export function mountScores(el, opts) {
     heatSl = null;
     renderScope(); scopeClone && renderScope(scopeClone); redraw();
   }
-  function redraw() { readRamp(); renderBoard(); renderHeatLine(); renderHeat(); }
+  function redraw() { readRamp(); renderBoard(); renderHeatLine(); renderHeat(); renderFigures(); }
   function highlight(m) {
     if (m === S.hot) return;
     S.hot = m;
     rowsEl.querySelectorAll(".ev-row.hot").forEach((r) => r.classList.remove("hot"));
     if (m) rowsEl.querySelector(`.ev-row[data-m="${CSS.escape(m)}"]`)?.classList.add("hot");
-    renderHeat();
+    renderHeat(); renderFigures();
   }
   // a second copy of the scope line, for the floating bubble; kept in sync by update()
   let scopeClone = null;
   function cloneScope(target) { scopeClone = target; target.classList.add("ev-scope"); renderScope(target); return target; }
   let rz = 0;
-  new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { renderBoard(); renderHeat(); }); }).observe(el);
+  new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { renderBoard(); renderHeat(); renderFigures(); }); }).observe(el);
   return { update, redraw, highlight, renderHeat, cloneScope, scopeEl, get result() { return result; }, state: S };
 }
