@@ -63,19 +63,31 @@ export class TimeNav {
   get week() { return this.tT; }
   get ref() { return new Date(+this.dates[0] + this.T * WEEK); }
   get span() { return Math.exp(this.Z); }
-  /* 0 = close up, 1 = Season, in between only while zooming across */
+  /* how far toward the full season the zoom is: 0 up to maxSpan, 1 at the full season (log space) */
+  get mix() { return this.#mixAt(this.span); }
   /* how much the camera follows the date: 1 up to maxSpan, easing to 0 at the full season */
-  get follow() { const u = this.mix; return 1 - u * u * (3 - 2 * u); }
-  get mix() {
+  get follow() { return this.#followAt(this.span); }
+  #mixAt(E) {
     const a = Math.log(this.maxSpan), b = Math.log(this.seasonSpan);
-    return Math.max(0, Math.min(1, (this.Z - a) / (b - a)));
+    return Math.max(0, Math.min(1, (Math.log(E) - a) / (b - a)));
+  }
+  #followAt(E) { const u = this.#mixAt(E); return 1 - u * u * (3 - 2 * u); }
+
+  /* The camera, one model for date, zoom and pan. The window is exactly `span` weeks wide. Its centre
+   * follows the date, keeping the reference date where it sits at that span (from maxSpan on, where it
+   * sits at maxSpan), and fades toward the season's centre as `follow` goes to 0. That centre is kept
+   * inside the season. The pan P (weeks) is added on top and is not clamped, so a pan past the season's
+   * ends can rubber-band; panRange() says where those ends are. */
+  #c0(E = this.span, ref = +this.ref) {
+    const W = WEEK, fw = this.forecastWeeks, s0 = +this.season[0], s1 = +this.season[1];
+    const lead = Math.min(E, this.maxSpan), frac = (lead - fw) / lead; // the reference date's place across the view
+    const cF = ref + (0.5 - frac) * E * W, cS = (s0 + s1) / 2;
+    const c = cF + (cS - cF) * (1 - this.#followAt(E)), half = (E * W) / 2;
+    return E * W >= s1 - s0 ? cS : Math.max(s0 + half, Math.min(s1 - half, c));
   }
   domain() {
-    const ref = +this.ref, fw = this.forecastWeeks * WEEK;
-    const E = Math.min(this.span, this.maxSpan) * WEEK;
-    const p = this.P * WEEK, close = [ref - (E - fw) + p, ref + fw + p];
-    const u = this.mix, s = u * u * (3 - 2 * u);                  // smoothstep: eases in and out of the blend
-    return [new Date(close[0] + (this.season[0] - close[0]) * s), new Date(close[1] + (this.season[1] - close[1]) * s)];
+    const c = this.#c0() + this.P * WEEK, half = (this.span * WEEK) / 2;
+    return [new Date(c - half), new Date(c + half)];
   }
 
   /* ---- commands ---- */
@@ -88,10 +100,13 @@ export class TimeNav {
   }
   step(d) { this.goTo(this.tT + d); }
   zoomTo(E, { w = 30, recenter = false } = {}) {
-    const from = Math.min(this.span, this.maxSpan);
+    const mid = this.#c0() + this.tP * WEEK;                    // where the view's middle is heading
     this.tZ = Math.log(Math.max(this.minSpan, Math.min(this.seasonSpan, E))); this.wZ = w;
     if (recenter || this.tZ >= Math.log(this.seasonSpan) - 1e-6) { this.tP = 0; this.returning = false; }
-    else if (Math.abs(this.tP) > 1e-3) this.tP += (Math.min(Math.exp(this.tZ), this.maxSpan) - from) / 2; // panned: keep the middle still
+    else if (Math.abs(this.tP) > 1e-3) {                         // panned: keep the middle still, within the season
+      const [p0, p1] = this.panRange(Math.exp(this.tZ));
+      this.tP = Math.max(p0, Math.min(p1, (mid - this.#c0(Math.exp(this.tZ))) / WEEK));
+    }
     this.#mode(this.tZ >= Math.log(this.seasonSpan) - 1e-6 ? "season" : "close");
     this.#run();
   }
@@ -99,11 +114,11 @@ export class TimeNav {
   zoomOut() { this.zoomTo(Math.exp(this.tZ) * 1.25); }
   recenter() { this.tP = 0; this.wP = 30; this.returning = false; this.#run(); }
   setSeason(on) { this.zoomTo(on ? this.seasonSpan : this.home, { recenter: true }); }
-  /* how far the view can pan at span E (weeks): its edges stay within the season */
-  panRange(E = Math.min(this.span, this.maxSpan)) {
-    const ref = (+this.dates[0] + this.tT * WEEK), fw = this.forecastWeeks;
-    const lo = (this.season[0] - ref) / WEEK + (E - fw), hi = (this.season[1] - ref) / WEEK - fw;
-    return lo <= hi ? [Math.min(lo, 0), Math.max(hi, 0)] : [0, 0];
+  /* how far the view can pan at span E (weeks) before its edges leave the season */
+  panRange(E = this.span) {
+    const c0 = this.#c0(E), half = (E * WEEK) / 2;
+    const lo = (+this.season[0] + half - c0) / WEEK, hi = (+this.season[1] - half - c0) / WEEK;
+    return [Math.min(lo, 0), Math.max(hi, 0)];
   }
   /* any gesture in progress (the page hides hover while this is true) */
   get moving() { return !!(this.busy || this.panning || this.pinching); }
@@ -182,7 +197,7 @@ export class TimeNav {
     const target = Math.max(lo, Math.min(b, z)); // any span can rest; below the minimum it springs back
     this.tZ = target; this.wZ = 26;
     if (target >= b - 1e-6) this.tP = 0;
-    else { const [p0, p1] = this.panRange(Math.min(Math.exp(target), this.maxSpan)); this.tP = Math.max(p0, Math.min(p1, this.tP)); }
+    else { const [p0, p1] = this.panRange(Math.exp(target)); this.tP = Math.max(p0, Math.min(p1, this.tP)); }
     this.#mode(target >= b - 1e-6 ? "season" : "close");
     this.#run();
   }
@@ -190,9 +205,9 @@ export class TimeNav {
     this.#stop(); this.pinching = true; this.vZ = 0;
     const lo = Math.log(this.minSpan), b = Math.log(this.seasonSpan);
     const raw = (this.Z < lo ? lo - unrubber(lo - this.Z, 4) : this.Z) + Math.log(f);
-    const before = Math.min(this.span, this.maxSpan);
+    const mid = this.#c0() + this.P * WEEK;
     this.Z = raw < lo ? lo - rubber(lo - raw, 4) : Math.min(raw, b);
-    if (Math.abs(this.P) > 1e-3) { this.P += (Math.min(this.span, this.maxSpan) - before) / 2; this.tP = this.P; } // panned: keep the middle still
+    if (Math.abs(this.P) > 1e-3) { this.P = this.tP = (mid - this.#c0()) / WEEK; } // panned: keep the middle still
     this.request();
     clearTimeout(this.zoomIdle); this.zoomIdle = setTimeout(() => this.#settleZ(), 160);
   }
@@ -255,7 +270,6 @@ export class TimeNav {
       if (e.metaKey && !e.ctrlKey && Math.abs(e.deltaX || (e.shiftKey ? e.deltaY : 0)) > Math.abs(e.shiftKey ? 0 : e.deltaY)) {
         e.preventDefault();                                      // ⌘ + side scroll: pan, the forecast stays put
         this.returning = false;                                  // a deliberate pan sets a new resting place
-        if (this.mix > 0.001) return;                            // Season already shows everything
         const dx = (e.deltaX || e.deltaY) * unit;
         this.#panBy(dx / this.#pxPerWeek());
         return;

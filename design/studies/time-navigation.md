@@ -1,5 +1,8 @@
 # Moving through time
 
+Regression check: `tests/time-nav-check.js` covers every behaviour below (23 cases). Run it on the
+prototype page after any change: `(await import("/tests/time-nav-check.js")).run()`.
+
 Prototype: `studies/intervals-refine.html`. Motion, gestures and zoom live in `lib/time.js` (`TimeNav`);
 the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 
@@ -40,6 +43,10 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **The camera follows the date.** Zoom state is a span in weeks, never absolute dates, so it survives
   date, model and location changes. Close up, the reference date keeps its place with 3 forecast weeks to
   its right, and zoom pivots on it, never the cursor. The y-axis stays fixed.
+- **One camera for date, zoom and pan.** The view is exactly `span` weeks wide. Its centre follows the
+  date (keeping the reference date where it sits at that span; past 20 weeks, where it sits at 20),
+  fading toward the season's centre as zoom approaches the full season, and kept inside the season.
+  The pan is added on top, so ⌘ + side scroll works at every zoom short of the full season.
 - **One continuous zoom, no modes.** Pinch anywhere from 6 weeks to the whole season (about 48
   weeks, a hard stop) and leave it at any span. Up to 20 weeks the camera follows the date. From 20
   weeks to the full season it gradually stops following (log space, smoothstep) until, fully out, it
