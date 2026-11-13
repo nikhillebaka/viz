@@ -324,8 +324,31 @@ export class TimeNav {
       const dx = e.deltaX;
       if (!dx || Math.abs(dx) < Math.abs(e.deltaY) || drag || this.pinching) return;
       e.preventDefault();
+      /* Snap without waiting out the trackpad's coast. After the fingers lift, macOS keeps sending a
+       * decaying tail of tiny deltas for up to a second; waiting for it to end (plus an idle timeout)
+       * read as a pause. When the deltas have shrunk for several events in a row and are now tiny, snap
+       * right away with the remaining speed, and swallow the rest of the tail so it can't nudge the
+       * chart after it lands. A delta that grows again, changes direction, or comes after a gap is a
+       * new gesture. */
+      const now = e.timeStamp, mag = Math.abs(dx * unit), sign = Math.sign(dx);
+      const W = (this.wheelState ||= { hist: [], tail: null });
+      if (W.tail) {
+        const fresh = now - W.tail.t > 120 || sign !== W.tail.sign || mag > W.tail.mag * 1.3 + 0.5;
+        if (!fresh) { W.tail.t = now; W.tail.mag = mag; return; }   // the coast after a snap: ignore
+        W.tail = null; W.hist = [];
+      }
+      if (W.hist.length && (now - W.hist.at(-1).t > 120 || sign !== W.hist.at(-1).sign)) W.hist = [];
+      W.hist.push({ t: now, mag, sign, T: this.T }); if (W.hist.length > 8) W.hist.shift();
       const did = this.#advance((dx * unit) / this.#pxPerWeek());
-      if (did === "scrub") { clearTimeout(wheelIdle); wheelIdle = setTimeout(() => this.#settleT(0), 140); }
+      if (did !== "scrub") return;
+      clearTimeout(wheelIdle);
+      const h = W.hist, n = h.length;
+      const decaying = n >= 6 && h.slice(-6).every((p, i, a) => i === 0 || p.mag <= a[i - 1].mag) && mag < 3;
+      if (decaying) {
+        const a = h[n - 4], dt = Math.max(1, now - a.t), v = ((this.T - a.T) / dt) * 1000; // weeks per second
+        W.tail = { t: now, mag, sign }; W.hist = [];
+        this.#settleT(v);
+      } else wheelIdle = setTimeout(() => { W.hist = []; this.#settleT(0); }, 80);
     }, { passive: false });
 
     // Safari sends pinches as gesture events

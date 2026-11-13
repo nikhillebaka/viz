@@ -1,6 +1,6 @@
 # Moving through time
 
-Regression check: `tests/time-nav-check.js` covers every behaviour below (47 cases;
+Regression check: `tests/time-nav-check.js` covers every behaviour below (48 cases;
 `run({ rulers: true })` repeats them with the width rulers on). Run it on the
 prototype page after any change: `(await import("/tests/time-nav-check.js")).run()`.
 
@@ -17,10 +17,13 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
 - **Drag scrubs the date.** It follows the pointer 1:1 (one week per week-width dragged, drag right for
   earlier). Past the first and last date it rubber-bands, with resistance topping out under two weeks.
   On release it snaps to a week, carrying a flick's momentum (~120 ms worth), in 200 ms.
-- **Side scroll scrubs too** (trackpad swipe, or shift + mouse wheel): 1:1 with the scroll, the same
-  rubber band at the ends, and a snap to the nearest week 140 ms after scrolling stops (so a trackpad's
-  own momentum plays out first). Mostly-vertical scrolls are ignored. No scrollbars, and the page
-  can't overscroll or trigger swipe-to-go-back.
+- **Side scroll scrubs too** (trackpad swipe): 1:1 with the scroll, the same rubber band at the ends.
+  It snaps without waiting out the trackpad's coast: once the deltas have shrunk for several events in a
+  row and are tiny, it snaps right away with the remaining speed and ignores the rest of the coast (a
+  delta that grows, reverses or follows a gap starts a new gesture). Without a coast (mouse wheels), it
+  snaps 80 ms after the last event. Mostly-vertical scrolls are ignored. No scrollbars, and the page
+  can't overscroll or trigger swipe-to-go-back. (It used to wait for the coast to end plus 140 ms,
+  which read as a half-second pause.)
 - **Buttons and keys glide** on a critically damped spring that chases the target week (about 100 ms to
   look settled). It starts from the current position and velocity, so a new press mid-motion bends the
   path instead of restarting it: no speed surge per press, no backward step, and an exact landing. The

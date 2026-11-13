@@ -58,6 +58,16 @@ export async function run({ rulers = false } = {}) {
       nav.goTo(5, { recenter: true }); await settle();
     }
     await reset();
+    // --- a trackpad flick: it snaps during the coast's tail, not after it, and the tail can't move it
+    { const T0 = nav.T, seq = [...Array(8).fill(24), ...Array.from({ length: 30 }, (_, k) => 24 * 0.8 ** (k + 1))];
+      let snappedAt = -1, landed = null;
+      for (let i = 0; i < seq.length; i++) {
+        el.dispatchEvent(new WheelEvent("wheel", { deltaX: seq[i], bubbles: true, cancelable: true })); await sleep(16);
+        if (snappedAt < 0 && !nav.busy && i > 8) { snappedAt = i; landed = nav.week; }
+      }
+      await settle();
+      check("trackpad flick: snaps while the coast is still tailing off, and the tail doesn't move it", snappedAt > 0 && snappedAt < seq.length - 5 && nav.T === landed && nav.T > T0, { snappedAt, of: seq.length, T: nav.T, landed }); }
+    await reset();
     // --- zoom
     await pinch(12, 8); await settle(); const rest = nav.span;
     check("pinch out a little: rests between 20 weeks and the season", rest > 20 && rest < nav.seasonSpan - 1, { span: +rest.toFixed(1) });
