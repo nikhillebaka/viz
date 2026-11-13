@@ -120,8 +120,8 @@ export class TimeNav {
   zoomIn() { this.zoomTo(Math.exp(this.tZ) / 1.25); }
   zoomOut() { this.zoomTo(Math.exp(this.tZ) * 1.25); }
   /* the view (zoom and pan) as a value, to save and later restore exactly (e.g. around a model picker) */
-  view() { return { Z: this.tZ, P: this.tP, returning: this.returning }; }
-  setView(v, { w = 26 } = {}) { this.tZ = v.Z; this.tP = v.P; this.returning = !!v.returning; this.wZ = this.wP = w; this.#mode(this.tZ >= Math.log(this.seasonSpan) - 1e-6 ? "season" : "close"); this.#run(); }
+  view() { return { Z: this.tZ, P: this.tP, H: this.tH, returning: this.returning }; }
+  setView(v, { w = 26 } = {}) { this.tZ = v.Z; this.tP = v.P; if (v.H != null) { this.tH = v.H; this.wH = w; } this.returning = !!v.returning; this.wZ = this.wP = w; this.#mode(this.tZ >= Math.log(this.seasonSpan) - 1e-6 ? "season" : "close"); this.#run(); }
   recenter() { this.tP = 0; this.wP = 30; this.returning = false; this.#run(); }
   setSeason(on) { this.zoomTo(on ? this.seasonSpan : this.home, { recenter: true }); }
   /* how far the view can pan at span E (weeks) before its edges leave the season */

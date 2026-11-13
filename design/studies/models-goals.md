@@ -255,7 +255,7 @@ can't be collapsed. Grey context lines are now as wide as the colored medians.
   (one column) when the list is short (24 or fewer showing, e.g. after a search). The chrome on the left
   fades away while it's open, and the date control slides to the middle of the chart half.
 - The chart moves its plot into the right half and previews at **14 weeks** (recentered), close enough
-  that the four forecast weeks stay distinct. Left and right keep stepping the date (the panel opts in
+  that the four forecast weeks stay distinct, at normal height (any height zoom is set aside). Left and right keep stepping the date (the panel opts in
   to time keys; only search typing keeps its arrows). Closing restores the zoom and pan exactly.
 - No "Selected" section: the checkmarks already show selection, and Select all no longer duplicates
   rows into it.

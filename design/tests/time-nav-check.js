@@ -180,8 +180,8 @@ export async function run({ rulers = false } = {}) {
     // --- model picker: previews most of the season, keeps arrow keys, restores the view exactly on close
     const pill = document.getElementById("c-models");
     if (pill) {
-      nav.zoomTo(8); await settle(); await pan(4, -15); await settle();
-      const v0 = { span: nav.span, P: nav.P, x: nav.refX() };
+      nav.zoomTo(8); await settle(); await pan(4, -15); await settle(); nav.setHeight(2); await settle();
+      const v0 = { span: nav.span, P: nav.P, x: nav.refX(), H: nav.heightZoom };
       pill.click(); await settle(8000);
       const panel = document.querySelector(".pk-panel");
       // layout size, not getBoundingClientRect: the open animation is a scale transform (frozen in hidden tabs)
@@ -189,7 +189,7 @@ export async function run({ rulers = false } = {}) {
       for (let i = 0; i < 80 && !sized(); i++) await sleep(100); // the open morph
       const wide = panel.offsetWidth > el.clientWidth * 0.4;
       const half = Math.abs(panel.offsetHeight - el.clientHeight) < 40 && !!document.querySelector("#view.picker-open");
-      check("picker: the left half, full height; chart previews at 14 weeks", wide && half && near(nav.span, 14, 0.01), { span: +nav.span.toFixed(2), h: Math.round(panel.offsetHeight) });
+      check("picker: the left half, full height; chart previews at 14 weeks, normal height", wide && half && near(nav.span, 14, 0.01) && near(nav.heightZoom, 1, 1e-6), { span: +nav.span.toFixed(2), h: Math.round(panel.offsetHeight), z: nav.heightZoom });
       const T0 = nav.T; key("ArrowRight"); await settle();
       check("picker: left/right still step the date while it's open", nav.T === T0 + 1, { T: nav.T });
       const input = panel.querySelector("input"); input.value = "ar6"; input.dispatchEvent(new Event("input", { bubbles: true })); await sleep(400);
@@ -198,7 +198,8 @@ export async function run({ rulers = false } = {}) {
       check("picker: a short list shrinks to one column", !panel.querySelector(".pk-list").classList.contains("two") && setW < el.clientWidth * 0.4, { w: Math.round(setW) });
       key("ArrowLeft"); await settle();
       panel.querySelector(".c-popover-head .c-icon-btn, .c-icon-btn")?.click(); await settle(8000);
-      check("picker: closing restores the zoom and pan exactly", near(nav.span, v0.span, 1e-6) && near(nav.P, v0.P, 1e-6) && near(nav.refX(), v0.x, 0.5), { span: nav.span, P: nav.P });
+      check("picker: closing restores the zoom, pan and height exactly", near(nav.span, v0.span, 1e-6) && near(nav.P, v0.P, 1e-6) && near(nav.refX(), v0.x, 0.5) && near(nav.heightZoom, v0.H, 1e-6), { span: nav.span, P: nav.P, z: nav.heightZoom });
+      nav.setHeight(1); await settle();
       await reset();
     }
   } finally {

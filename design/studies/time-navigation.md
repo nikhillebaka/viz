@@ -86,7 +86,8 @@ the drawing is `fanChart({ t, domain })` in `lib/chart.js`.
   changes the date, the time zoom or the pan, and changing those keeps it. Scroll up (or drag up) to
   stretch the data taller. Zero stays on the axis (there's no vertical pan); the axis maximum is the
   normal rounded one divided by the zoom, without re-rounding, so it moves continuously. 1/3× to ~6.7×,
-  rubber-banding at both ends; 0 resets it with everything else. Shift no longer turns a vertical
+  rubber-banding at both ends; 0 resets it with everything else. Opening the model picker resets
+  it to normal height for the preview, and closing the picker restores it with the zoom and pan. Shift no longer turns a vertical
   mouse wheel into side scroll, because macOS already sends shift + trackpad swipes sideways and the
   two can't be told apart; mouse users scrub with drag or the arrow keys. Gridline spacing still
   changes in steps (every 10k, then every 5k…) as the zoom crosses thresholds.

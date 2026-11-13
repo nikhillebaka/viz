@@ -325,6 +325,7 @@ function openModelPicker() {
   });
   view.classList.add("picker-open");
   nav.zoomTo(PREVIEW_WEEKS, { recenter: true });
+  nav.setHeight(1); // normal height while previewing; closing restores the user's height zoom with the rest
 }
 let insetGoal = 0;
 
