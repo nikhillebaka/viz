@@ -260,9 +260,8 @@ function pickerWidth(n) { // the left half (two columns) or quarter (one), minus
   return n > 24 ? vw * 0.5 - inset * 1.5 : Math.max(vw * 0.25 - inset * 1.5, 360);
 }
 function openModelPicker() {
-  const anchor = $("c-models");
-  savedView = nav.view();
-  openPopover(anchor, {
+  const anchor = $("c-models"), before = nav.view();
+  const opened = openPopover(anchor, {
     title: "Models", width: pickerWidth(ALL.length), className: "pk-panel", timeKeys: true,
     onClose: () => { pickerRefresh = null; view.classList.remove("picker-open"); document.body.classList.remove("picker-open"); if (savedView) nav.setView(savedView); savedView = null; insetGoal = 0; animateInset(0); },
     content: (el, layer) => {
@@ -349,6 +348,8 @@ function openModelPicker() {
       render();
     },
   });
+  if (!opened) return; // the Models button again: that closed the picker (and restored the view)
+  savedView = before;
   view.classList.add("picker-open"); document.body.classList.add("picker-open");
   nav.zoomTo(PREVIEW_WEEKS, { recenter: true });
   nav.setHeight(1); // normal height while previewing; closing restores the user's height zoom with the rest

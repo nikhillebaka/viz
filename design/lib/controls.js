@@ -232,6 +232,7 @@ function trapFocus(e, root) {
  * items: [{ label, value, icon, shortcut, checked, disabled, danger, onSelect } | "-" | { header }]
  * role "menu" with menuitem / menuitemradio. Arrow keys, Home/End, type-ahead, Enter/Space, Escape. */
 export function openMenu(anchor, { items, placement = "bottom-start", label = "", title = "", onClose } = {}) {
+  if (openLayer?.anchor === anchor) { openLayer.close(true); return null; } // its own button again: close, don't reopen
   const layer = floating(anchor, { className: "c-menu", role: "menu", label: label || title, sheetTitle: title, placement, onClose });
   const radio = items.some((i) => i && i.checked !== undefined);
   for (const it of items) {
@@ -273,6 +274,7 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
  * content: an element or (body) => void. morph: the anchor pill grows into the panel (study 2). */
 export function openPopover(anchor, { title = "", content, placement = "bottom-start", width = null, morph = true, onClose, className = "", timeKeys = false } = {}) {
   const w = width || num("--layout-popover-width", 360);
+  if (openLayer?.anchor === anchor) { openLayer.close(true); return null; } // its own button again: close, don't reopen
   const layer = floating(anchor, { className: `c-popover ${className}`.trim(), role: "dialog", label: title, sheetTitle: title, placement, width: w, morph, onClose, modal: true });
   if (title && !layer.compact) {
     const h = document.createElement("div"); h.className = "c-popover-head";

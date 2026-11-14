@@ -84,6 +84,19 @@ export async function run() {
     day?.click(); await settle();
     check("…and a day goes there, crossing seasons", date() === "2024-01-13" && /2023–24/.test(ev.scopeEl.textContent), { date: date() });
 
+    // a popover's own button closes it (no reopening, no second open animation)
+    for (const [name, sel2, panelSel] of [["date", "#c-date .c-step-label", ".dp-panel"], ["location", "#c-place", ".lp-panel"], ["models", "#c-models", ".pk-panel"]]) {
+      const v0 = nav.view();
+      document.querySelector(sel2).click(); await sleep(700);
+      const opened = !!document.querySelector(panelSel);
+      document.querySelector(sel2).click();
+      for (let i = 0; i < 20 && document.querySelector(panelSel); i++) await sleep(100);
+      await settle();
+      const v1 = nav.view();
+      check(`clicking the ${name} button again closes its popover`, opened && !document.querySelector(panelSel) && document.querySelectorAll(".c-float").length === 0, { opened });
+      if (name === "models") check("…and closing the Models picker that way restores the chart's view", Math.abs(v1.Z - v0.Z) < 0.01 && Math.abs(v1.P - v0.P) < 0.05, { v0, v1 });
+    }
+
     // places: search + Enter; the date, zoom and focus stay; the axis rescales
     const d0 = date(), topUS = top();
     document.getElementById("c-place").click(); await sleep(500);
