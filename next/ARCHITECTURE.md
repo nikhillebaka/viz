@@ -63,7 +63,7 @@ next/
 
 ```
 { hub, default_target, baseline, recommended: [modelId],
-  targets:   [{ id, label, unit, is_rate, non_negative, scale: "count" | "proportion" }],
+  targets:   [{ id, label, short, unit, is_rate, non_negative, scale: "count" | "proportion" }],
   locations: [{ id, abbr, name, population }],                // "US" first is not guaranteed
   seasons:   [{ id: "2025-2026", label: "2025–26", rounds: [iso asc], hub_rounds: [iso], start, end }],  // asc
   models:    [{ id, abbr, team, team_name, family, source: "repo"|"local"|"hub"|"synthetic", hub,
@@ -202,6 +202,43 @@ scale object from `lib/scale.js` instead of d3.
 Pure functions over `{ selected: [id], charted: [{ id, slot, seq }], showAll, baseline, taken: [id] }`:
 `select, deselect, toggle, setMany, chart, unchart, toggleChart, setShowAll, setBaseline, context(sel)`,
 each returning a new value. Rules: `design/studies/models-goals.md` ("Which five are charted").
+
+### features/ (the app)
+
+`app.js` builds one context and hands it to every feature:
+```js
+ctx = { manifest, store, chart }      // chart: the FanChart instance (set once it exists)
+```
+Features talk through the store. A picker writes `store.set({ sel })` or `store.set({ location })`;
+the chart, the bubbles and the URL react. Nothing calls into another feature except through these:
+
+```js
+// features/FanChart.js
+new FanChart(viewEl, ctx) → chart
+  chart.fan                 the Fan on screen (null until loaded)
+  chart.week()              the round the chart is on or heading to, ms
+  chart.setInset(px)        room taken at the left by an open panel; the plot moves aside (animated)
+  chart.preview(on)         true: zoom to 14 weeks at normal height for judging models; false: restore exactly
+  chart.goTo(iso)           any round in any season (cuts when the season differs)
+  chart.idle()              nothing animating or loading (for tests)
+  chart.destroy()
+
+// features/ModelPicker.js
+openModelPicker(anchor, { manifest, store, chart }) → layer | null
+// features/LocationPicker.js
+openLocationPicker(anchor, { manifest, store, chart }) → layer | null
+// features/DatePicker.js
+openDatePicker(anchor, { manifest, store, chart }) → layer | null
+// features/TargetMenu.js
+openTargetMenu(anchor, { manifest, store }) → layer | null
+// features/Shell.js
+mountShell(root, ctx) → { view }      // builds the page: the chart view, fixed bubbles, loading and error states
+// features/url.js
+readUrl(manifest) → partial state;  syncUrl(store) → stop()
+```
+
+Browser storage (through `lib/dom.js` `storage`): `viz.theme`, `viz.location`, `viz.places` (the last
+four), `viz.selection` (`{ selected, charted, showAll, baseline }`), `viz.level`, `viz.rulers`.
 
 ## App state (the store) and the URL
 

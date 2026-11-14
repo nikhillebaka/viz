@@ -105,6 +105,8 @@ class NextData:
             target_meta.append({
                 "id": t,
                 "label": m.get("display_name") or t,
+                # a short name for the Target bubble; config can set target_metadata.<target>.short_name
+                "short": m.get("short_name") or ("Flu admissions" if "hosp" in t.lower() else "ED visits" if "visit" in t.lower() else (m.get("display_name") or t)),
                 "unit": m.get("unit") or "",
                 "is_rate": bool(m.get("is_rate")),
                 # how values read: whole counts, or a share of something (drawn and formatted as percent)
