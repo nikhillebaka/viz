@@ -281,8 +281,13 @@ export function mount(el, ctx) {
       g.fillStyle = o.final ? ink("primary") : cssColor("var(--surface-paper)"); g.fill();
       g.strokeStyle = ink("primary"); g.lineWidth = 1.25; g.stroke();
     }
-    // the hovered row's box: 50% × 50% soft fill, 90% whiskers, medians as a dot
+    // a box is 50% × 50% soft fill, 90% whiskers, medians as a dot. At rest: the models on the fan
+    // chart, in their colors. While a row is hovered: that model alone.
     if (hov) box(g, hov, X, y, W);
+    else {
+      const sel = store.get().sel;
+      for (const r of rows) { const rec = recs.get(r); if (rec?.kind === "model" && isCharted(sel, rec.id)) box(g, rec, X, y, W); }
+    }
     strip.setAttribute("aria-label", `${resp.location_name} · observed this season${past.length ? ` and ${past.length} past seasons` : ""}`);
   }
   function box(g, rec, X, y, W) {
