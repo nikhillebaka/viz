@@ -62,7 +62,9 @@ export function springStep(x, v, target, w, dt) {
  * @param {number} E span, weeks @param {number} maxSpan @param {number} seasonSpan @returns {number} 0–1
  */
 export function mixAt(E, maxSpan, seasonSpan) {
-  const a = Math.log(maxSpan), b = Math.log(seasonSpan);
+  // a season shorter than maxSpan (one that has barely begun) fades over its last third instead, so the
+  // camera still follows the date at the home span
+  const a = Math.log(Math.min(maxSpan, seasonSpan / 1.5)), b = Math.log(seasonSpan);
   return Math.max(0, Math.min(1, (Math.log(E) - a) / (b - a)));
 }
 /**

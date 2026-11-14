@@ -1,0 +1,87 @@
+/* The page: the chart view, the fixed bubbles, where the chart's own bubbles and the readout sit, the
+ * loading hairline, the empty and error lines, and the room an open panel takes. Layout only: kit parts
+ * keep their look (controls.css). Tokens only. */
+
+/* the scores will sit under the chart with a peek of --peek (tokens.css); not built yet, so no peek */
+.app { --peek: 0px; --inset-goal: 0px; }
+
+/* ---------- the chart view ---------- */
+/* not clipped: the bubbles' shadows fall onto the page below */
+.app-view { position: relative; height: max(480px, calc(100svh - var(--peek))); }
+.fc-canvas {
+  position: absolute; inset: 0; display: block; width: 100%; height: 100%;
+  touch-action: pan-y; user-select: none; -webkit-user-select: none; outline: none;
+  transition: opacity var(--dur) var(--ease-out);
+}
+/* new data is taking a moment: the old plot stays, dimmed */
+.app-view.is-loading .fc-canvas { opacity: 0.72; }
+.fc-snapshot { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+/* the fixed bubbles: one row over the top of the view, on screen whatever scrolls */
+.app-fixed { position: fixed; inset: 0 0 auto 0; z-index: var(--z-fixed); grid-template-rows: auto; grid-template-areas: "tl tc tr"; }
+
+/* every bubble arrives with the data, and gives way while a panel is open at the left */
+.app :is(.c-zone > *, .fc-note, .fc-recenter) { transition: opacity var(--dur) var(--ease-out), transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.app:not(.is-ready) :is(.c-zone > *, .fc-note) { opacity: 0; pointer-events: none; }
+.app.is-inset .app-fixed [data-zone="tl"] > :not([aria-expanded="true"]),
+.app.is-inset .fc-chrome [data-zone="bl"] > * { opacity: 0; transform: scale(var(--scale-enter)); pointer-events: none; }
+/* the date stepper centres on the chart area that is left */
+.fc-chrome [data-zone="bc"] { transition: transform var(--dur-move) var(--ease-out); }
+.app.is-inset .fc-chrome [data-zone="bc"] { transform: translateX(calc(var(--inset-goal) / 2)); }
+
+/* "Showing 5 of 9 · Show all": under the top bubbles, at the right */
+.fc-note {
+  position: absolute; z-index: var(--z-chrome);
+  top: calc(var(--top-clear, calc(var(--inset) + var(--size-control))) + var(--space-8)); right: var(--inset);
+}
+.fc-note:not(.is-shown) { opacity: 0; pointer-events: none; }
+
+/* "← Dec 27 forecast": at the edge the forecast went off */
+.fc-recenter { position: absolute; z-index: var(--z-chrome); top: 50%; margin-top: calc(var(--size-control-sm) / -2); }
+.fc-recenter.left { left: calc(var(--inset) + var(--inset-goal)); }
+.fc-recenter.right { right: var(--inset); }
+.fc-recenter:not(.is-shown) { opacity: 0; pointer-events: none; }
+
+/* ---------- the readout: solid, under the top bubbles, placed by the chart ---------- */
+.fc-readout { position: absolute; left: 0; top: 0; z-index: var(--z-chart); pointer-events: none; will-change: transform; }
+.fc-readout .c-readout-name { max-width: 200px; }
+.fc-readout-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fc-readout-only { margin-top: 0; padding-top: 0; border-top: 0; }
+.fc-readout-misses { display: inline-flex; gap: var(--gap-dot); margin-left: var(--space-6); vertical-align: middle; }
+.fc-readout-misses .c-dot { width: var(--space-6); height: var(--space-6); }
+
+/* ---------- empty, loading, error ---------- */
+.fc-empty {
+  position: absolute; z-index: var(--z-chart); transform: translate(-50%, -50%);
+  font-size: var(--text-small); color: var(--ink-tertiary); white-space: nowrap; pointer-events: none;
+}
+.app-error {
+  position: absolute; inset: 0; z-index: var(--z-chrome);
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--text-small); color: var(--ink-tertiary);
+}
+#app > .app-error { position: fixed; }
+
+/* a hairline under the top edge while the first data loads; it waits a moment so a fast load shows nothing */
+.app-progress {
+  position: fixed; z-index: var(--z-toast); inset: 0 0 auto 0; height: var(--space-2); overflow: hidden;
+  pointer-events: none; opacity: 0;
+  animation: app-progress-in var(--dur) var(--ease-out) var(--dur) forwards;
+}
+.app-progress::before {
+  content: ""; position: absolute; inset: 0; width: 40%;
+  background: linear-gradient(90deg, transparent, var(--ink-tertiary), transparent);
+  animation: app-progress calc(var(--dur-move) * 4) linear infinite;
+}
+.app-progress.is-done { animation: none; opacity: 0; transition: opacity var(--dur) var(--ease-out); }
+@keyframes app-progress-in { to { opacity: 1; } }
+@keyframes app-progress { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+
+/* ---------- the date picker: season chips, then a calendar of rounds ---------- */
+.dp .c-float-body { padding: var(--space-12); }
+.dp-seasons { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-bottom: var(--space-12); }
+.dp-grid { display: grid; gap: var(--space-4); }
+.dp-row { display: flex; align-items: center; gap: var(--space-4); }
+.dp-month { flex: none; width: var(--space-40); font-size: var(--text-small); color: var(--ink-tertiary); }
+.dp-row .c-tile { width: var(--space-40); }
+.dp-foot { display: flex; justify-content: flex-end; margin-top: var(--space-8); font-size: var(--text-small); }

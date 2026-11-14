@@ -1,1 +1,23 @@
-<!doctype html><meta charset="utf-8"><title>viz</title><p>next</p>
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viz</title>
+<script>
+  // the stored theme before first paint, so a light page never flashes dark (default dark)
+  try { if (JSON.parse(localStorage.getItem("viz.theme")) === "light") document.documentElement.dataset.theme = "light"; } catch (e) {}
+</script>
+<link rel="stylesheet" href="styles/tokens.css">
+<link rel="stylesheet" href="styles/base.css">
+<link rel="stylesheet" href="styles/glass.css">
+<link rel="stylesheet" href="styles/controls.css">
+<link rel="stylesheet" href="styles/pickers.css">
+<link rel="stylesheet" href="styles/app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<div class="app-progress" role="progressbar" aria-label="Loading"></div>
+<main id="app"></main>
+</body>
+</html>
