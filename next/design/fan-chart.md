@@ -94,8 +94,10 @@ charted first), click again or Escape to clear.
 - Hidden while moving, while a popover is open, and when the pointer leaves.
 
 ### The interval pill
-`95% interval ▾` → menu: 95% · 80% · 50% · None (radio), a separator, Width rulers (check). With None
-the pill reads "No interval". Medians are always drawn. The readout and rulers use the chosen level.
+`95% interval ▾` → menu: 95% · 80% · 50% · None (radio), a separator, Width rulers and Outcome (checks).
+With None the pill reads "No interval". Outcome off hides everything observed after the data cutoff
+(the dotted line, the hollow points, misses, the readout's Observed row), to show a forecast as it
+stood when it was made; old viz called this Truth. Medians are always drawn. The readout and rulers use the chosen level.
 A model without that level's quantiles (some submit 7) draws its median only, and its readout row
 shows "–" for the range.
 

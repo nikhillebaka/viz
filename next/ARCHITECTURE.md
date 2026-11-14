@@ -188,7 +188,7 @@ fields and layers that keep their arrows).
 layoutFan(fan, opts, w, h) → scene          // pure: pixels, strings, alphas; no DOM
 drawFan(canvas, scene)                      // paints; resolves tokens through lib/dom.js
 opts = { models: [{ id, slot | "baseline", label }], t, domain: [ms, ms], ymax, pad: { l, r, t, b },
-         topClear, level (0.95 | 0.8 | 0.5 | 0), focus, hover: { t } | null, rulers (0–1),
+         topClear, level (0.95 | 0.8 | 0.5 | 0), outcome (false hides what was observed after the cutoff), focus, hover: { t } | null, rulers (0–1),
          context: [{ id, label }], hot, absent: string | null, format }
 scene exposes what interaction needs: x, y scales, ref, di, cutoff, labels (with hit boxes),
 series, bands, context, rulers.
@@ -208,13 +208,14 @@ each returning a new value. Rules: `design/studies/models-goals.md` ("Which five
 | Key | Meaning | URL | Default |
 |---|---|---|---|
 | `target` | target id | `target` | manifest default |
-| `location` | location id | `location` (also reads `loc`) | last used, else `US` |
+| `location` | location id | `loc` (old viz's name) | last used, else `US` |
 | `date` | forecast round, ISO | `date` | latest round |
 | `sel.selected` | selected models, in order | `models` (comma list; `none` = explicitly empty) | last used, else the first 3 recommended |
 | `sel.charted` | up to five, with color slots | `chart` (ids by slot, empty for a free slot) | first five selected |
 | `sel.showAll` | grey context lines | `all=1` | off |
 | `sel.baseline` | baseline drawn | `base=0` when off | on |
-| `level` | interval level | `pi` = 95 · 80 · 50 · 0 | 95 |
+| `level` | interval level | `pi` = 95 · 80 · 50 · `none` (an old link's list such as `95,80` reads as its widest) | 95 |
+| `outcome` | observed data after the cutoff is shown | not in the URL (as old viz's Truth toggle) | on |
 | `rulers` | width rulers | `rulers=1` | off |
 | `focus` | focused model | `focus` | none |
 | `theme` | light / dark | not in the URL (storage) | dark |
