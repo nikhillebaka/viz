@@ -7,6 +7,8 @@ import errno
 import http.server
 import json
 import logging
+import mimetypes
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -16,12 +18,15 @@ import threading
 import urllib.parse
 from typing import List, Optional, Any
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+# The hub is the folder viz sits in. VIZ_HUB_DIR points a development copy of viz (a git worktree, say)
+# at a hub it does not sit in; see next/dev/serve.py.
+BASE_DIR = Path(os.environ.get("VIZ_HUB_DIR") or Path(__file__).resolve().parent.parent).resolve()
 sys.path.insert(0, str(BASE_DIR))
 
 from viz.core.config import VizConfig
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.next_api import NextData
 from viz.core.synthetic_ensemble import SyntheticEnsembleConfig
 from viz.remote.s3 import S3Error
 from viz.remote.sync import RemoteManager, current_season
@@ -35,6 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger("viz.server")
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+NEXT_DIR = Path(__file__).resolve().parent / "next"  # the new frontend, served beside the old one at /next/
 DATA_LOADER = SandboxDataLoader(BASE_DIR)
 VIZ_CONFIG = VizConfig(BASE_DIR)
 EVAL_ENGINE = EvaluationEngine(BASE_DIR, DATA_LOADER)
@@ -77,6 +83,9 @@ REMOTE_MGR = RemoteManager(
     local_as_of_max=_local_as_of_max,
     on_inventory_change=_on_hub_inventory_change,
 )
+
+
+NEXT_DATA = NextData(DATA_LOADER, VIZ_CONFIG, remote_mgr=REMOTE_MGR)
 
 
 class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -174,7 +183,11 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         # API Routes
-        if path == "/api/metadata":
+        if path == "/next" or path.startswith("/next/"):
+            self._serve_next(path)
+        elif path.startswith("/api/next/"):
+            self._handle_next_api(path, query)
+        elif path == "/api/metadata":
             self._handle_metadata()
         elif path in ("/api/ensemble/list", "/api/ensembles"):
             self._handle_ensemble_list()
@@ -219,6 +232,48 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         else:
             # Fall back to static files in STATIC_DIR
             super().do_GET()
+
+    # ---- the new frontend (/next/) and its data (/api/next/); nothing old viz uses changes here ----
+    def _serve_next(self, path: str):
+        if path == "/next":
+            self.send_response(301)
+            self.send_header("Location", "/next/")
+            self.end_headers()
+            return
+        rel = urllib.parse.unquote(path[len("/next/"):]) or "index.html"
+        target = (NEXT_DIR / rel).resolve()
+        if NEXT_DIR.resolve() not in target.parents or not target.is_file():
+            self.send_error(404, "File not found")
+            return
+        ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if target.suffix in (".js", ".mjs"):
+            ctype = "text/javascript"
+        if ctype.startswith("text/") or ctype in ("application/json", "image/svg+xml"):
+            ctype += "; charset=utf-8"
+        self._serve_file(target, ctype)
+
+    def _handle_next_api(self, path: str, query: dict):
+        name = path[len("/api/next/"):]
+        if name == "manifest":
+            self._send_json(NEXT_DATA.manifest())
+        elif name == "fan":
+            target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+            season = query.get("season", [""])[0]
+            location = query.get("location", ["US"])[0]
+            if not season:
+                self._send_json({"error": "Missing 'season' parameter"}, status=400)
+                return
+            payload = NEXT_DATA.fan(target, season, location)
+            if payload is None:
+                self._send_json({"error": f"No forecast rounds in season '{season}'"}, status=404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        else:
+            self._send_json({"error": f"Unknown endpoint '{path}'"}, status=404)
 
     def _send_json(self, data: Any, status: int = 200):
         body = json.dumps(data).encode("utf-8")

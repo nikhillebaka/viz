@@ -1,0 +1,164 @@
+/* Design tokens: the one place a color, size, weight or duration is decided.
+ *
+ * Rules for everything built on these:
+ *  - Use a token. If the value you need isn't here, it probably shouldn't exist; add a token only
+ *    when a new role appears, never a one-off number in a component.
+ *  - Color has jobs. --series-* identify the charted models and nothing else. --score-* mark
+ *    better / worse. --accent marks the one interactive thing that is "on". Everything else is ink.
+ *  - Dark is the default theme; light applies with data-theme="light".
+ *  - JavaScript that draws on canvas reads these with getComputedStyle (see lib/dom.js `token`).
+ */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=Geist+Mono:wght@400;500&display=swap");
+
+:root {
+  /* ---- type ---- */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* sizes: one scale, used everywhere (px) */
+  --text-axis: 10.5px;     /* axis ticks, quiet numbers (mono) */
+  --text-micro: 11px;      /* section labels (uppercase), tags */
+  --text-chart: 11.5px;    /* model names and month labels on the chart */
+  --text-small: 12px;      /* metadata, secondary lines, readouts */
+  --text-control: 13px;    /* pills, menu items, table cells */
+  --text-body: 14px;       /* running text, inputs */
+  --text-title: 16px;      /* popover titles, section titles */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-strong: 600;
+
+  /* ---- space (px): 4-based, plus 2 and 6 for optical nudges ---- */
+  --space-2: 2px; --space-4: 4px; --space-6: 6px; --space-8: 8px; --space-12: 12px;
+  --space-16: 16px; --space-20: 20px; --space-24: 24px; --space-32: 32px; --space-40: 40px; --space-56: 56px;
+
+  /* ---- shape ---- */
+  --radius-tag: 6px;       /* tiles, tags, small cells */
+  --radius-item: 9px;      /* rows inside menus and lists */
+  --radius-menu: 14px;     /* menus, readouts */
+  --radius-panel: 22px;    /* popovers, panels */
+  --radius-pill: 999px;
+  --size-control: 38px;    /* every floating control */
+  --size-control-sm: 30px; /* notes and secondary pills */
+  --size-row: 34px;        /* menu items, list rows (one line) */
+  --size-icon: 16px;
+  --stroke-hairline: 1px;
+  --stroke-series: 1.75px; /* medians */
+  --stroke-observed: 1.5px;
+  --stroke-edge: 0.75px;   /* interval edges */
+  --stroke-glass: 0.5px;
+
+  /* ---- layout ---- */
+  --inset: 16px;           /* floating chrome to the view's edge */
+  --gap: 8px;              /* between controls in a zone */
+  --peek: 52px;            /* how much of the scores shows under the chart */
+  --popover-width: 360px;
+  --menu-max-width: 320px;
+
+  /* ---- layers: lowest to highest; never invent a z-index outside this list ---- */
+  --z-chart: 0; --z-chrome: 10; --z-fixed: 12; --z-popover: 20; --z-toast: 40; --z-tooltip: 50;
+
+  /* ---- motion: quick, critically damped, never past the target ---- */
+  --dur-fast: 120ms;       /* hover, press, small state changes */
+  --dur: 200ms;            /* fades, things appearing */
+  --dur-move: 300ms;       /* things travelling: morphs, panels, thumbs, rolling digits */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: linear(0, 0.0754, 0.2275, 0.3908, 0.5372, 0.6575, 0.7513, 0.8222, 0.8743, 0.912, 0.9389, 0.9579, 0.9711, 0.9803, 0.9866, 0.9909, 1);
+  --time-tooltip-delay: 500ms;
+  --time-tooltip-skip: 300ms;
+  --time-toast: 3200ms;
+  --time-long-press: 400ms;
+  --time-repeat: 90ms;
+
+  /* ---- glass: the material of floating controls (unitless numbers read by lib/glass.js) ---- */
+  --glass-refraction: 28;  /* px the content is displaced at the very edge */
+  --glass-rim: 14;         /* px width of the refracting rim */
+  --glass-rim-power: 2;
+  --glass-magnify: 0.1;
+  --glass-dispersion: 0.025;
+  --glass-blur: 0.6;       /* px */
+  --glass-saturate: 1.35;
+  --glass-brightness: 1.06;
+  --glass-frost-blur: 24;  /* px, for panels that hold text */
+}
+
+:root, :root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-paper: #0b0b0b;   /* the page: charts and scores are printed on it */
+  --surface-raised: #171717;  /* solid things above the paper: readouts, tooltips */
+  --ink-primary: #f5f5f5;
+  --ink-secondary: #b3b3b3;
+  --ink-tertiary: #7a7a7a;
+  --ink-faint: #474747;
+  --line-hairline: #1f1f1f;
+  --line-axis: #2e2e2e;
+  --fill-hover: rgba(255, 255, 255, 0.06);
+  --fill-selected: rgba(255, 255, 255, 0.14);
+  --fill-field: rgba(255, 255, 255, 0.08);
+  --accent: #0a84ff;
+  --on-accent: #ffffff;
+  --shadow-raised: 0 0 0 0.5px var(--line-axis), 0 8px 28px rgba(0, 0, 0, 0.32);
+
+  --glass-tint: rgba(12, 12, 12, 0.28);
+  --glass-frost: rgba(28, 28, 28, 0.55);
+  --glass-stroke: rgba(255, 255, 255, 0.12);
+  --glass-highlight: rgba(255, 255, 255, 0.22);
+  --glass-shade: rgba(0, 0, 0, 0.18);
+  --glass-shadow: 0 18px 40px rgba(0, 0, 0, 0.35), 0 2px 6px rgba(0, 0, 0, 0.25);
+  --glass-text-shadow: 0 1px 8px rgba(0, 0, 0, 0.25);
+
+  /* charted models: pastel on dark. Up to five are used at once; eight exist so freed slots stay distinct */
+  --series-1: #83e5bc; --series-2: #71c9fa; --series-3: #ffb481; --series-4: #f1a1ce;
+  --series-5: #f1d680; --series-6: #f599a5; --series-7: #c2a7f4; --series-8: #bcdf90;
+  --series-baseline: #9a9a9a;
+  --band-whisper: 0.075;      /* interval fill, every charted model */
+  --band-focus: 0.15;         /* interval fill, the focused model */
+  --shade-forecast: rgba(255, 255, 255, 0.035); /* everything after the data cutoff */
+
+  /* scores: better (cool, 1) → same as baseline (5) → worse (warm, 9) */
+  --score-1: #4b92ea; --score-2: #3e77be; --score-3: #325e95; --score-4: #26466d; --score-5: #2e2e2e;
+  --score-6: #65371b; --score-7: #894a22; --score-8: #af5d28; --score-9: #d7712e;
+
+  --status-good: #30d158;
+  --status-warning: #ff9f0a;
+  --status-error: #ff453a;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --surface-paper: #fafafb;
+  --surface-raised: #ffffff;
+  --ink-primary: #1d1d1f;
+  --ink-secondary: #5d5d63;
+  --ink-tertiary: #8e8e93;
+  --ink-faint: #c7c7cc;
+  --line-hairline: #e3e3e8;
+  --line-axis: #d1d1d6;
+  --fill-hover: rgba(0, 0, 0, 0.045);
+  --fill-selected: rgba(0, 0, 0, 0.08);
+  --fill-field: rgba(118, 118, 128, 0.12);
+  --accent: #007aff;
+  --on-accent: #ffffff;
+  --shadow-raised: 0 0 0 0.5px var(--line-axis), 0 8px 28px rgba(0, 0, 0, 0.12);
+
+  --glass-tint: rgba(255, 255, 255, 0.44);
+  --glass-frost: rgba(250, 250, 252, 0.72);
+  --glass-stroke: rgba(0, 0, 0, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.9);
+  --glass-shade: rgba(0, 0, 0, 0.06);
+  --glass-shadow: 0 18px 40px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08);
+  --glass-text-shadow: 0 1px 8px rgba(255, 255, 255, 0.6);
+
+  /* the same hues, vivid on light */
+  --series-1: #05ac7d; --series-2: #0891c9; --series-3: #ec6f00; --series-4: #de03a2;
+  --series-5: #d6a20a; --series-6: #ec0050; --series-7: #8738f8; --series-8: #72ad04;
+  --series-baseline: #8a8a8f;
+  --band-whisper: 0.06;
+  --band-focus: 0.13;
+  --shade-forecast: rgba(0, 0, 0, 0.045);
+
+  --score-1: #0267c7; --score-2: #4689db; --score-3: #75abef; --score-4: #a3ccff; --score-5: #ebebeb;
+  --score-6: #f8b996; --score-7: #e19164; --score-8: #ca6a2b; --score-9: #b13f00;
+
+  --status-good: #34c759;
+  --status-warning: #ff9500;
+  --status-error: #ff3b30;
+}
