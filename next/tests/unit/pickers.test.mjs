@@ -125,11 +125,11 @@ test("sub lines: facts, never the section's title or what the name says", () => 
   assert.equal(sub("UMass-trends_ensemble", "Other"), "UMass · Ensemble");
   assert.equal(sub("me-test_run", "Local"), "me · Transformer");
   assert.equal(sub("ens-mean", "Local"), "ens · Ensemble");
-  assert.equal(sub("flusight:ZTeam-alpha", "FluSight"), "designated");      // the name already says ZTeam
+  assert.equal(sub("flusight:ZTeam-alpha", "FluSight"), "ZTeam");           // never empty; "designated" is searchable, not printed
   assert.equal(sub("flusight:ATeam-beta", "FluSight"), "ATeam");
   assert.equal(sub("flusight:ATeam-beta", "Not in 2025–26"), "ATeam · FluSight");
   assert.equal(sub("flusight:FluSight-ensemble", "FluSight"), "FluSight");  // never empty
-  assert.equal(sub("flusight:UMass-gbqr", "FluSight"), "designated");
+  assert.equal(sub("flusight:UMass-gbqr", "FluSight"), "UMass");
 });
 
 test("panel width: half the viewport past 24 rows, else a quarter, at least --popover-width", () => {

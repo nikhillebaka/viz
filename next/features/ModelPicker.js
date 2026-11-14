@@ -147,7 +147,8 @@ export function groupModels(manifest, { target, season, query = "", sel = null }
 
 /**
  * A row's second line: facts only, never repeating the section's title or what the name already says.
- * Repo and local models: team · family; hub models: team (· designated); then the source when the
+ * Repo and local models: team · family; hub models: team (most hub models are their team's designated
+ * one, so that is searchable but not printed on every row); then the source when the
  * section doesn't say it (Local, Ensemble, the hub). Never empty.
  * @param {object} manifest
  * @param {object} m a manifest model
@@ -162,7 +163,7 @@ export function subLine(manifest, m, label, sectionTitle) {
   if (m.source !== "hub") {
     const f = m.family || "", fl = lower(f);
     if (f && fl !== title && fl !== tl && !name.startsWith(fl) && !name.includes(`-${fl}`)) parts.push(f);
-  } else if (m.designated) parts.push("designated");
+  }
   const src = manifest.sourceLabel(m);
   if (src && lower(src) !== title && !parts.some((x) => lower(x) === lower(src))) parts.push(src);
   // nothing left to say: the team's full name when it is one (not just the model id), else the team
