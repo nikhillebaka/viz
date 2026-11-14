@@ -1,0 +1,36 @@
+/* Page foundations. Load after tokens.css, before glass.css and controls.css. */
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body, h1, h2, h3, h4, p, figure, ul, ol, dl, dd, table { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+
+html, body { background: var(--surface-paper); color: var(--ink-primary); }
+/* the page scrolls down to the scores without a visible bar; no swipe-to-go-back */
+html { overscroll-behavior-x: none; overflow-x: clip; scrollbar-width: none; }
+html::-webkit-scrollbar { display: none; }
+body {
+  font-family: var(--font-sans); font-size: var(--text-body); line-height: 1.5;
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+svg { display: block; }
+
+[hidden] { display: none !important; }
+/* visually hidden, still read by screen readers */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* the one focus ring: keyboard focus only */
+:focus { outline: none; }
+:focus-visible { outline: var(--stroke-focus) solid var(--accent); outline-offset: var(--stroke-focus); }
+
+::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0s !important; transition-delay: 0s !important;
+    animation-duration: 0s !important; animation-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}

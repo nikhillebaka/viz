@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control kit</title>
+<link rel="stylesheet" href="../styles/tokens.css">
+<link rel="stylesheet" href="../styles/base.css">
+<link rel="stylesheet" href="../styles/glass.css">
+<link rel="stylesheet" href="../styles/controls.css">
+<style>
+  /* kit page layout only */
+  #top { position: fixed; inset: 0 0 auto 0; z-index: var(--z-fixed); grid-template-rows: auto; grid-template-areas: "tl tc tr"; }
+  #stage { position: relative; height: 460px; }
+  #stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #stage .c-chrome { padding-top: calc(var(--inset) * 2 + var(--size-control)); }
+  main { max-width: 1120px; margin: 0 auto; padding: var(--space-40) var(--space-24) var(--space-56); display: grid; gap: var(--space-40); }
+  .k-label { margin-bottom: var(--space-12); font-size: var(--text-micro); font-weight: var(--weight-strong); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-tertiary); }
+  .k-states { display: grid; grid-template-columns: 120px repeat(5, max-content); gap: var(--space-16) var(--space-24); align-items: center; }
+  .k-states .k-h { font-size: var(--text-small); color: var(--ink-tertiary); }
+  .k-row { display: flex; flex-wrap: wrap; gap: var(--space-16); align-items: center; }
+  .k-cols { display: flex; flex-wrap: wrap; gap: var(--space-24); align-items: flex-start; }
+  .k-panel { width: var(--popover-width); }
+  .k-menu { width: 240px; }
+  .k-panel .c-float-body, .k-menu .c-float-body { overflow: visible; }
+  .k-tip { position: static; opacity: 1; display: inline-block; }
+  .k-sub { padding: var(--space-4) var(--space-8) var(--space-12); }
+  .k-chips { display: flex; flex-wrap: wrap; gap: var(--space-6); padding: 0 var(--space-8) var(--space-12); }
+  .k-tiles { grid-template-columns: repeat(8, 1fr); padding: 0 var(--space-8) var(--space-8); }
+  .k-checks { display: flex; gap: var(--space-16); padding: var(--space-8); align-items: center; font-size: var(--text-small); color: var(--ink-secondary); }
+  .k-checks label { display: inline-flex; gap: var(--space-8); align-items: center; }
+</style>
+</head>
+<body>
+  <div class="c-chrome" id="top">
+    <div class="c-zone" data-zone="tl" id="top-left"></div>
+    <div class="c-zone" data-zone="tr" id="top-right"></div>
+  </div>
+  <div id="stage">
+    <canvas id="chart" aria-hidden="true"></canvas>
+    <div class="c-chrome">
+      <div class="c-zone" data-zone="tr" id="stage-tr"></div>
+      <div class="c-zone" data-zone="bl" id="stage-bl"></div>
+      <div class="c-zone" data-zone="bc" id="stage-bc"></div>
+      <div class="c-zone" data-zone="br" id="stage-br"></div>
+    </div>
+  </div>
+  <main>
+    <section><div class="k-label">Pills · states</div><div class="k-states" id="states"></div></section>
+    <section><div class="k-label">Stepper · segmented</div><div class="k-row" id="inline-controls"></div></section>
+    <section><div class="k-label">Layers</div><div class="k-row" id="layers"></div></section>
+    <section><div class="k-label">Panel parts</div><div class="k-cols" id="parts"></div></section>
+    <section><div class="k-label">Readout · note · tooltip</div><div class="k-row" id="solid"></div></section>
+  </main>
+  <script type="module" src="kit.js"></script>
+</body>
+</html>

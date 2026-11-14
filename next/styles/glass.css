@@ -1,0 +1,53 @@
+/* Liquid glass: the material of floating controls. Pair with ui/glass.js, which adds the
+ * classes and layers. One look in every mode; the modes differ only in what makes the refraction:
+ *  .c-glass--canvas    the WebGL compositor draws the refracted chart under the element
+ *  .c-glass--backdrop  backdrop-filter: url(#svg-filter), set inline by glass.js (Chromium)
+ *  .c-glass--blur      the same blur, saturation and brightness without the bending (other browsers)
+ *  .c-glass--frost     panels that hold text, and reduced transparency */
+
+.c-glass {
+  position: relative;
+  isolation: isolate;
+  color: var(--ink-primary);
+  box-shadow: var(--glass-shadow);
+  text-shadow: var(--glass-text-shadow);
+}
+/* edge: a hairline, a highlight along the top, depth at the bottom, a soft inner glow */
+.c-glass::after {
+  content: "";
+  position: absolute; inset: 0; z-index: 3;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 0 var(--stroke-glass) var(--glass-stroke),
+    inset 0 1.5px 1px var(--glass-highlight),
+    inset 0 -1.5px 2px var(--glass-shade),
+    inset 0 0 14px var(--glass-glow);
+}
+.c-glass > .c-glass-layer { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; }
+.c-glass > .c-glass-tint { z-index: 1; background: var(--glass-tint); }
+.c-glass > .c-glass-rim {
+  z-index: 3; padding: 1.25px;
+  background: var(--glass-rim-light);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  mix-blend-mode: var(--glass-rim-blend);
+}
+/* content above the layers. Zero specificity, so a component's own position (an absolutely placed
+ * thumb, a visually hidden live region) still wins. */
+:where(.c-glass) > :where(:not(.c-glass-layer)) { position: relative; z-index: 4; }
+
+.c-glass--blur {
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 1px)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+  backdrop-filter: blur(calc(var(--glass-blur) * 1px)) saturate(var(--glass-saturate)) brightness(var(--glass-brightness));
+}
+.c-glass--frost {
+  -webkit-backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
+  backdrop-filter: blur(calc(var(--glass-frost-blur) * 1px)) saturate(180%);
+}
+.c-glass--frost > .c-glass-tint { background: var(--glass-frost); }
+
+/* the compositor's canvas, laid directly above the chart canvas */
+.c-glass-compositor { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.c-glass-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
