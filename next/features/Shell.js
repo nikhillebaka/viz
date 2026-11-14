@@ -11,6 +11,7 @@ import { pill, icon, timeKeys } from "../ui/controls.js";
 import { seriesColor } from "../chart/layout.js";
 import { FanChart } from "./FanChart.js";
 import { openTargetMenu } from "./TargetMenu.js";
+import { mountSections } from "../sections/index.js";
 
 const pickers = {
   models: () => import("./ModelPicker.js").then((m) => m.openModelPicker),
@@ -113,6 +114,9 @@ export function mountShell(root, ctx) {
     },
   });
   ctx.chart = chart;
+  const sections = mountSections(root, ctx);
+  // ⋯ bubble (hubs, warnings, shortcuts, methods): loaded when idle; the page works without it
+  import("./More.js").then((m) => m.mountMore(tr, ctx)).catch(() => {});
 
   // the chart's plot starts under the fixed top bubbles
   const measureTop = () => chart.setTop(Math.max(tl.getBoundingClientRect().bottom, tr.getBoundingClientRect().bottom));
@@ -143,7 +147,7 @@ export function mountShell(root, ctx) {
 
   return {
     view,
-    destroy() { offs.forEach((off) => off()); chart.destroy(); glasses.forEach((g) => g.destroy()); view.remove(); fixed.remove(); },
+    destroy() { offs.forEach((off) => off()); sections.destroy(); chart.destroy(); glasses.forEach((g) => g.destroy()); view.remove(); fixed.remove(); },
   };
 }
 
