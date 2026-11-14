@@ -19,28 +19,28 @@ intended behaviour is, and the row below says so.
 
 | Old viz | In `next/` | Phase | Status |
 |---|---|---|---|
-| Target switch | Target bubble (only with more than one target) | 1 | building |
-| Location quick picks + dropdown | Location bubble: search, recent places, tile map | 1 | building |
-| Date stepper, date popover (search, season tabs, badges) | Date stepper + picker: season chips, a calendar of rounds | 1 | building |
-| Model bar: search, family and season filters, chips, hub shelves, Select all / Clear | Model picker: search, sections (Local, families, hubs, not this season), bulk select | 1 | building |
-| Fan chart: truth, forecasts, PI levels, width rulers, Truth toggle | The fan chart (`design/fan-chart.md`) | 1 | building |
-| URL parameters, share link | `features/url.js`; Copy link in the ↓ menu | 1 (chart keys), 3 (rest) | building |
-| Theme | Theme bubble | 1 | building |
-| Signals & Indicators drawer (as-of reports, NSSP, ILINet, FluSurv-NET, past seasons, peaks; modes, palettes) | Layers on the fan chart | 2 | to design |
-| Leaderboard, telemetry strip, scope toolbar | Scores section: scope line, leaderboard | 3 | designed (`design/studies/evaluation-goals.md`) |
-| Diagnostics tabs (anatomy, calibration, horizon) | Figures under the leaderboard; expanded rows | 3 | designed |
-| Evaluation window popover | Dates popover in the scope line | 3 | designed |
-| Heatmap view | Heatmap section, sharing the scope | 3 | designed |
-| Exports, Copy CLI | ↓ menu in the scope line | 3 | designed |
-| Model detail modal | Expanded leaderboard row; details in the picker | 3 | to design |
-| Spatial map view | Map section | 4 | to design |
-| Season peak view | Peaks section | 4 | to design |
-| Ensemble studio | "Combine" on a selection, from the picker | 4 | to design |
-| Live hubs modal, brand menu | ⋯ bubble | 4 | to design |
-| Validation warnings | ⋯ bubble count; a glyph on affected rows | 4 | to design |
-| Guide / Methodology modal, glossary popovers | Definitions beside their settings; a Methods page | 4 | to design |
-| Presentation mode | To decide: the new chart is already full-screen | 4 | **owner** |
-| Keyboard shortcuts | Kept where the action exists; modifier keys respected | 1–4 | building |
+| Target switch | Target bubble (only with more than one target) | 1 | built, first pass |
+| Location quick picks + dropdown | Location bubble: search, recent places, tile map | 1 | built, first pass |
+| Date stepper, date popover (search, season tabs, badges) | Date stepper + picker: season chips, a calendar of rounds | 1 | built, first pass |
+| Model bar: search, family and season filters, chips, hub shelves, Select all / Clear | Model picker: search, sections (Local, families, hubs, not this season), bulk select | 1 | built, first pass |
+| Fan chart: truth, forecasts, PI levels, width rulers, Truth toggle | The fan chart (`design/fan-chart.md`) | 1 | built, first pass |
+| URL parameters, share link | `features/url.js`; Copy link in the ↓ menu | 1 (chart keys), 3 (rest) | built, first pass |
+| Theme | Theme bubble | 1 | built, first pass |
+| Signals & Indicators drawer (as-of reports, NSSP, ILINet, FluSurv-NET, past seasons, peaks; modes, palettes) | Layers on the fan chart | 2 | built, first pass |
+| Leaderboard, telemetry strip, scope toolbar | Scores section: scope line, leaderboard | 3 | built, first pass |
+| Diagnostics tabs (anatomy, calibration, horizon) | Figures under the leaderboard; expanded rows | 3 | built, first pass |
+| Evaluation window popover | Dates popover in the scope line | 3 | built, first pass |
+| Heatmap view | Heatmap section, sharing the scope | 3 | built, first pass |
+| Exports, Copy CLI | ↓ menu in the scope line | 3 | built, first pass |
+| Model detail modal | Expanded leaderboard row; details in the picker | 3 | built, first pass |
+| Spatial map view | Map section | 4 | built, first pass |
+| Season peak view | Peaks section | 4 | built, first pass |
+| Ensemble studio | "Combine" on a selection, from the picker | 4 | built, first pass |
+| Live hubs modal, brand menu | ⋯ bubble | 4 | built, first pass |
+| Validation warnings | ⋯ bubble count; a glyph on affected rows | 4 | built, first pass |
+| Guide / Methodology modal, glossary popovers | Definitions beside their settings; a Methods page | 4 | built, first pass |
+| Presentation mode | To decide: the new chart is already full-screen | 4 | built, first pass |
+| Keyboard shortcuts | Kept where the action exists; modifier keys respected | 1–4 | built, first pass |
 
 ## Deliberate changes
 
