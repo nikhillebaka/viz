@@ -1,28 +1,84 @@
 /* The evaluation scope: what the scores, heatmap, map and peaks are computed over. Stored as
  * `state.scope` (partial; anything missing takes its default). By default the scope follows the
- * chart: its season, every week, every horizon, every location.
+ * chart: its season, every week, every horizon, every state.
  *
- * Read it only through scopeOf(); write it with setScope(). */
+ * Read it only through scopeOf(); write it with setScope(). Pure apart from setScope (node tests run it). */
 
 export const DEFAULT_SCOPE = Object.freeze({
   seasons: null,   // null: follow the chart's season. Else an array of season ids
-  from: null,      // ISO date or null (the season's start)
-  to: null,        // ISO date or null (the season's end)
+  weeks: null,     // null: every week. Else [a, b], season weeks 1..53 (week 1 = MMWR week 31), applied to each season
   phase: null,     // null (full) | "pre" | "peak" | "post"
   horizons: null,  // null: all. Else an array of horizons (0..3)
-  place: "all",    // "all" | "states" | "current" (the chart's location)
+  place: "all",    // "all" (every state, pooled) | "US" | "current" (the chart's location)
+  fair: false,     // score only the forecasts every selected model shares
+  baseline: null,  // null: the hub's baseline. Else a model id
+  rank: "all",     // "all": relative WIS among every model with forecasts in scope | "selected"
+  scale: "natural",// "natural" | "log"
 });
 
+export const PHASES = Object.freeze(["pre", "peak", "post"]);
+export const HORIZONS = Object.freeze([0, 1, 2, 3]);
+const DAY = 864e5, WEEK = 7 * DAY;
+
 /**
- * The scope in force.
- * @returns {{ seasons: string[], following: boolean, from: string|null, to: string|null,
- *   phase: string|null, horizons: number[]|null, place: string }}
+ * The Saturday ending a season week. Season week 1 is MMWR week 31 of the season's first year (the
+ * backend's rule, core/data_loader.py), so week 1 of 2025–26 ends Aug 2, 2025.
+ * @param {number} startYear the season's first year (2025 for "2025-2026")
+ * @param {number} w season week, 1..53
+ * @returns {number} UTC ms
+ */
+export function seasonWeekEnd(startYear, w) {
+  const jan4 = Date.UTC(startYear, 0, 4);
+  const sunday = jan4 - new Date(jan4).getUTCDay() * DAY;
+  return sunday + 30 * WEEK + 6 * DAY + (w - 1) * WEEK;
+}
+
+/** The season week (1..53, clamped) a date falls in, for a season starting in `startYear`. */
+export function seasonWeekOf(startYear, ms) {
+  return Math.min(53, Math.max(1, Math.round((ms - seasonWeekEnd(startYear, 1)) / WEEK) + 1));
+}
+
+/** "2025-2026" → 2025 (NaN when the id has no leading year). */
+export const startYearOf = (seasonId) => parseInt(String(seasonId), 10);
+
+const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+/**
+ * The scope in force, every field resolved.
+ * @param {{ scope?: object, date?: string, location?: string }} state
+ * @param {{ seasonOf(iso: string): string | null, baseline?: string, seasons?: { id: string }[] }} manifest
+ * @returns {{ seasons: string[], following: boolean, weeks: [number, number] | null, from: string | null,
+ *   to: string | null, phase: string | null, horizons: number[] | null, place: string, location: string,
+ *   fair: boolean, baseline: string, rank: string, scale: string }}
+ *   seasons newest first; horizons null when all four; `location` is what /api/metrics takes
+ *   ("states", "US" or a location id); from / to are the window's dates in the newest scoped season
+ *   (null for an open end).
  */
 export function scopeOf(state, manifest) {
   const sc = { ...DEFAULT_SCOPE, ...(state.scope || {}) };
-  const following = !Array.isArray(sc.seasons) || !sc.seasons.length;
+  const known = new Set((manifest.seasons || []).map((s) => s.id));
+  const pinned = Array.isArray(sc.seasons) ? sc.seasons.filter((s) => !known.size || known.has(s)) : [];
+  const following = !pinned.length;
   const chartSeason = manifest.seasonOf(state.date);
-  return { ...sc, following, seasons: following ? (chartSeason ? [chartSeason] : []) : sc.seasons };
+  const seasons = (following ? (chartSeason ? [chartSeason] : []) : [...new Set(pinned)]).sort().reverse();
+  const weeks = Array.isArray(sc.weeks) && sc.weeks.length === 2 && !(sc.weeks[0] <= 1 && sc.weeks[1] >= 53)
+    ? [Math.max(1, Math.min(sc.weeks[0], sc.weeks[1])), Math.min(53, Math.max(sc.weeks[0], sc.weeks[1]))] : null;
+  const y = startYearOf(seasons[0]);
+  const hs = Array.isArray(sc.horizons) ? HORIZONS.filter((h) => sc.horizons.includes(h)) : [];
+  const place = ["US", "current"].includes(sc.place) ? sc.place : "all";
+  const location = place === "US" ? "US" : place === "current" ? state.location || "US" : "states";
+  return {
+    seasons, following, weeks,
+    from: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[0])) : null,
+    to: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[1])) : null,
+    phase: PHASES.includes(sc.phase) ? sc.phase : null,
+    horizons: hs.length && hs.length < HORIZONS.length ? hs : null,
+    place, location,
+    fair: !!sc.fair,
+    baseline: sc.baseline || manifest.baseline || "",
+    rank: sc.rank === "selected" ? "selected" : "all",
+    scale: sc.scale === "log" ? "log" : "natural",
+  };
 }
 
 /** Merge a change into the stored scope. */

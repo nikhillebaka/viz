@@ -97,6 +97,7 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
 
   // everything inside the plot is clipped at the x-axis
   ctx.save(); ctx.beginPath(); ctx.rect(0, 0, w, ay); ctx.clip();
+  if (S.layers) layerLines(ctx, S.layers);
   const whisper = tokenNum("--band-whisper", 0.075), focusA = tokenNum("--band-focus", 0.15);
   for (const b of S.bands) {
     const c = cssColor(b.c);
@@ -134,6 +135,7 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
     for (let i = 0; i < b.dots.length; i += 2) { circle(b.dots[i], b.dots[i + 1], 2.9); ctx.fillStyle = c; ctx.fill(); ctx.strokeStyle = surface; ctx.lineWidth = 1.75; ctx.stroke(); }
     ctx.globalAlpha = 1;
   }
+  if (S.layers) layerMarks(ctx, S.layers, surface);
   if (S.hot) { ctx.save(); ctx.beginPath(); ctx.rect(0, 0, w, ay); ctx.clip(); path(S.hot.line); stroke(ink1, 2); ctx.restore(); }
   if (S.rulers) {
     const R = S.rulers;
@@ -160,4 +162,49 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
     ctx.strokeStyle = surface; ctx.lineWidth = 4; ctx.strokeText(d.text, d.x + 10, by);
     ctx.fillStyle = cssColor(d.fill); ctx.fillText(d.text, d.x + 10, by);
   }
+}
+
+/* ---------------- context layers (features/chart/layers.js) ----------------
+ * scene.layers = { lines: [{ n, xy, brk, c, w, alpha, dash?, clipX }], marks: [{ kind: "peak" | "observed",
+ * x, y, c, alpha, x0?, x1?, y0?, y1? }], labels: [{ x, y, text, c, alpha }], font }. Lines go under
+ * everything else in the plot; marks and labels over the medians, under the model labels. */
+function layerLines(ctx, L) {
+  for (const l of L.lines) {
+    ctx.save();
+    if (l.clipX != null) { ctx.beginPath(); ctx.rect(0, 0, Math.max(0, l.clipX), ctx.canvas.height); ctx.clip(); }
+    ctx.beginPath();
+    for (let i = 0; i < l.n; i++) { if (l.brk[i]) ctx.moveTo(l.xy[2 * i], l.xy[2 * i + 1]); else ctx.lineTo(l.xy[2 * i], l.xy[2 * i + 1]); }
+    if (l.dash) ctx.setLineDash(l.dash);
+    ctx.strokeStyle = cssColor(l.c); ctx.lineWidth = l.w; ctx.globalAlpha = l.alpha; ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function layerMarks(ctx, L, surface) {
+  const edge = tokenNum("--stroke-edge", 0.75);
+  for (const m of L.marks) {
+    const c = cssColor(m.c);
+    ctx.globalAlpha = m.alpha;
+    if (m.kind === "peak") {
+      // 50% whiskers, then a small triangle with a paper halo
+      ctx.strokeStyle = c; ctx.lineWidth = edge; ctx.globalAlpha = m.alpha * 0.6; ctx.beginPath();
+      if (Number.isFinite(m.x0) && Number.isFinite(m.x1)) { ctx.moveTo(m.x0, m.y); ctx.lineTo(m.x1, m.y); }
+      if (Number.isFinite(m.y0) && Number.isFinite(m.y1)) { ctx.moveTo(m.x, m.y0); ctx.lineTo(m.x, m.y1); }
+      ctx.stroke(); ctx.globalAlpha = m.alpha;
+      ctx.beginPath(); ctx.moveTo(m.x, m.y - 4.5); ctx.lineTo(m.x + 4, m.y + 2.5); ctx.lineTo(m.x - 4, m.y + 2.5); ctx.closePath();
+      ctx.fillStyle = c; ctx.fill(); ctx.strokeStyle = surface; ctx.lineWidth = 1.25; ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.moveTo(m.x, m.y - 4.5); ctx.lineTo(m.x + 4.5, m.y); ctx.lineTo(m.x, m.y + 4.5); ctx.lineTo(m.x - 4.5, m.y); ctx.closePath();
+      ctx.fillStyle = surface; ctx.fill(); ctx.strokeStyle = c; ctx.lineWidth = 1.25; ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+  if (!L.labels.length) return;
+  ctx.font = L.font; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.lineJoin = "round";
+  for (const d of L.labels) {
+    ctx.globalAlpha = d.alpha;
+    ctx.strokeStyle = surface; ctx.lineWidth = 4; ctx.strokeText(d.text, d.x, d.y);
+    ctx.fillStyle = cssColor(d.c); ctx.fillText(d.text, d.x, d.y);
+  }
+  ctx.globalAlpha = 1; ctx.textAlign = "left";
 }

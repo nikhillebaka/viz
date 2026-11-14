@@ -48,6 +48,14 @@
 .fc-readout-only { margin-top: 0; padding-top: 0; border-top: 0; }
 .fc-readout-misses { display: inline-flex; gap: var(--gap-dot); margin-left: var(--space-6); vertical-align: middle; }
 .fc-readout-misses .c-dot { width: var(--space-6); height: var(--space-6); }
+/* layer rows (features/chart/layers.js): a short stroke in the layer's ink, or a peak's mark */
+.fc-readout-layers { margin-top: var(--space-6); padding-top: var(--space-6); border-top: var(--stroke-hairline) solid var(--line-hairline); }
+.fc-readout-layers.fc-readout-only { margin-top: 0; padding-top: 0; border-top: 0; }
+.fc-readout-layers .c-readout-name { color: var(--ink-tertiary); }
+.fc-swatch { flex: none; width: var(--size-dot); height: 0; border-top: var(--stroke-layer) solid currentColor; }
+.fc-swatch.is-dash { border-top-style: dashed; }
+.fc-swatch.is-dot { height: var(--space-6); width: var(--space-6); border: var(--stroke-layer) solid currentColor; transform: rotate(45deg); }
+.fc-swatch.is-peak { height: 0; border-top: 0; border-left: var(--space-4) solid transparent; border-right: var(--space-4) solid transparent; border-bottom: var(--space-6) solid currentColor; }
 
 /* ---------- empty, loading, error ---------- */
 .fc-empty {

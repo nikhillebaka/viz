@@ -1,0 +1,66 @@
+/* What the view sections (heatmap, map, peaks) share on the paper: a small heading, one quiet line of
+ * fragment controls, a loading hairline, one quiet empty line, and the pointer readout. */
+
+.v-section { position: relative; padding-top: var(--space-40); }
+.v-head {
+  display: flex; align-items: baseline; gap: var(--space-16); flex-wrap: wrap;
+  padding-bottom: var(--space-12);
+  border-bottom: var(--stroke-hairline) solid var(--line-hairline);
+}
+.v-title { margin: 0; font-size: var(--text-title); font-weight: var(--weight-strong); color: var(--ink-primary); letter-spacing: -0.01em; }
+.v-line {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 var(--space-6); flex: 1; min-width: 0;
+  font-size: var(--text-control); color: var(--ink-secondary);
+}
+.v-sep { color: var(--ink-faint); }
+
+/* a fragment: text that opens a small menu; primary ink once it differs from its default */
+.v-frag {
+  margin: 0; padding: var(--space-2) var(--space-4); border: 0; border-radius: var(--radius-tag); background: none;
+  font: inherit; color: var(--ink-secondary); cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.v-frag:hover, .v-frag[aria-expanded="true"] { background-color: var(--fill-hover); color: var(--ink-primary); }
+.v-frag.is-set { color: var(--ink-primary); }
+.v-frag.is-on { color: var(--ink-primary); background-color: var(--fill-selected); }
+.v-act { font-family: var(--font-mono); }
+.v-push { margin-left: auto; }
+
+/* loading: a hairline under the heading, after a moment (a fast load shows nothing) */
+.v-progress { position: relative; height: var(--stroke-hairline); margin-top: calc(-1 * var(--stroke-hairline)); overflow: hidden; opacity: 0; }
+.v-progress::before {
+  content: ""; position: absolute; inset: 0; width: 40%;
+  background: linear-gradient(90deg, transparent, var(--ink-tertiary), transparent);
+  animation: v-progress calc(var(--dur-move) * 4) linear infinite;
+}
+.v-section.is-loading .v-progress { animation: v-progress-in var(--dur) var(--ease-out) var(--dur) forwards; }
+.v-section.is-loading .v-body { opacity: 0.55; transition: opacity var(--dur) var(--ease-out) var(--dur); }
+@keyframes v-progress-in { to { opacity: 1; } }
+@keyframes v-progress { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+
+.v-empty { margin: 0; padding: var(--space-24) 0; font-size: var(--text-small); color: var(--ink-tertiary); }
+.v-body { padding-top: var(--space-20); }
+
+/* the readout that follows the pointer */
+.v-readout { position: absolute; left: 0; top: 0; z-index: var(--z-tooltip); pointer-events: none; min-width: 180px; max-width: var(--menu-max-width); }
+.v-readout .c-readout-head span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* small typographic tables on the paper (peaks) */
+.v-table { width: 100%; border-collapse: collapse; font-size: var(--text-control); }
+.v-table th {
+  padding: 0 var(--space-12) var(--space-8) 0; text-align: right; white-space: nowrap;
+  font-size: var(--text-micro); font-weight: var(--weight-medium); color: var(--ink-tertiary);
+  border-bottom: var(--stroke-hairline) solid var(--line-hairline);
+}
+.v-table th:first-child, .v-table td:first-child { text-align: left; }
+.v-table td { padding: var(--space-6) var(--space-12) var(--space-6) 0; text-align: right; white-space: nowrap; color: var(--ink-primary); border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.v-table td.num, .v-table .num { font-family: var(--font-mono); font-size: var(--text-small); font-variant-numeric: tabular-nums; }
+.v-table td.quiet { color: var(--ink-tertiary); }
+.v-table td.lead { color: var(--ink-primary); font-weight: var(--weight-strong); }
+.v-table tr.is-dim td { color: var(--ink-tertiary); }
+.v-name { display: inline-flex; align-items: center; gap: var(--space-8); max-width: 260px; overflow: hidden; text-overflow: ellipsis; color: var(--ink-secondary); }
+.v-name > i { flex: none; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; background: var(--c, transparent); box-shadow: inset 0 0 0 var(--stroke-hairline) var(--line-axis); }
+.v-name[style*="--c"] > i { box-shadow: none; }
+.v-note { margin: var(--space-12) 0 0; font-size: var(--text-small); color: var(--ink-tertiary); }
+.v-note b { font-weight: var(--weight-medium); color: var(--ink-secondary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.v-sub { margin: 0 0 var(--space-8); font-size: var(--text-micro); font-weight: var(--weight-medium); color: var(--ink-tertiary); }

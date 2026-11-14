@@ -238,7 +238,7 @@ readUrl(manifest) → partial state;  syncUrl(store) → stop()
 ```
 
 Browser storage (through `lib/dom.js` `storage`): `viz.theme`, `viz.location`, `viz.places` (the last
-four), `viz.selection` (`{ selected, charted, showAll, baseline }`), `viz.level`, `viz.rulers`.
+four), `viz.selection` (`{ selected, charted, showAll, baseline }`), `viz.level`, `viz.rulers`, `viz.layers`.
 
 ## App state (the store) and the URL
 
@@ -255,6 +255,7 @@ four), `viz.selection` (`{ selected, charted, showAll, baseline }`), `viz.level`
 | `outcome` | observed data after the cutoff is shown | not in the URL (as old viz's Truth toggle) | on |
 | `rulers` | width rulers | `rulers=1` | off |
 | `focus` | focused model | `focus` | none |
+| `layers` | context layers on the chart (`features/chart/layers.js`): asof · seasons · peaks · nssp · ili · flusurv | `lay` (comma list; old viz's `indicators` read where they map) | none |
 | `theme` | light / dark | not in the URL (storage) | dark |
 
 `features/url.js`: `readUrl(manifest) → partial state` (invalid values dropped, unknown parameters

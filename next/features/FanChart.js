@@ -1,9 +1,10 @@
 /* The fan chart view (design/fan-chart.md): the canvas, time navigation, the per-frame draw, data for one
  * (target, season, place) at a time and the transitions between them. Hover, focus and the hidden label
- * buttons are in chart/interact.js, the readout in chart/readout.js, the chart's bubbles in chart/bubbles.js.
+ * buttons are in chart/interact.js, the readout in chart/readout.js, the chart's bubbles in chart/bubbles.js,
+ * the optional context layers (and their pill) in chart/layers.js.
  *
  * It reads and writes the store: `date` (the round the chart is on), `focus`, `sel` (a grey line clicked
- * is charted); and reacts to target, location, date, sel, level, rulers, outcome and focus. Zoom, pan and
+ * is charted); and reacts to target, location, date, sel, level, rulers, outcome, focus and layers. Zoom, pan and
  * height are view state, kept here (TimeNav), not in the store.
  *
  * Frames: at most one draw per animation frame (TimeNav's loop and every request share it):
@@ -22,6 +23,7 @@ import { chart as chartModel, context as contextOf, isCharted } from "./selectio
 import { Interaction } from "./chart/interact.js";
 import { Readout } from "./chart/readout.js";
 import { ChartBubbles } from "./chart/bubbles.js";
+import { Layers } from "./chart/layers.js";
 
 const PREVIEW_WEEKS = 14;   // the model picker's preview: the four forecast weeks stay distinct
 const RULER_MS = 180;       // width rulers fade and slide in or out
@@ -81,6 +83,8 @@ export class FanChart {
     /** the last scene drawn (tests and interaction read it) */
     this.scene = null;
     this.bubbles = null;
+    /** @type {Layers | null} */
+    this.layers = null;
     this.loading = false;
 
     this.canvas = h("canvas", { class: "fc-canvas", role: "img", "aria-label": "Forecast chart" });
@@ -248,7 +252,7 @@ export class FanChart {
   idle() {
     const n = this.nav;
     return !!(this.fan && n && !this.loading && !this._cutting && !n.raf && !n.queued && !n.moving
-      && !this.y.active && !this.rk.active && !this.inset.active);
+      && !this.y.active && !this.rk.active && !this.inset.active && !this.layers?.busy);
   }
 
   /** One draw on the next animation frame. */
@@ -262,6 +266,7 @@ export class FanChart {
     this.offs.forEach((off) => off());
     this.nav?.destroy();
     this.interact.destroy();
+    this.layers?.destroy();
     this.bubbles?.destroy();
     this.canvas.remove(); this.empty.remove(); this.readout.el.remove();
   }
@@ -322,6 +327,7 @@ export class FanChart {
         onWeek: (i) => this.#onWeek(i),
       });
       this.bubbles = new ChartBubbles(this, index);
+      this.layers = new Layers(this);
       this.#resize();
       this.#onWeek(index);
       this.view.classList.add("is-ready");
@@ -334,6 +340,7 @@ export class FanChart {
         this.nav.setTimeline({ dates: fan.dates, season: fan.window, index });
         this.nav.setHeight(1);
         if (crossed) this.bubbles.setDates(fan.dates, index);
+        this.layers.sync();
         this.draw(true);
       });
     }
@@ -429,6 +436,7 @@ export class FanChart {
     if (changed.has("sel") && this.fan) this.#prepare(true);
     if (changed.has("rulers")) this.rk.set(s.rulers ? 1 : 0, RULER_MS);
     if (changed.has("sel") || changed.has("level")) this.bubbles?.sync(s);
+    if (["layers", "date", "sel"].some((k) => changed.has(k))) this.layers?.sync();
     this.request();
   }
 
@@ -483,6 +491,7 @@ export class FanChart {
     if (hoverT != null) { this.hoverAt.t = hoverT; o.hover = this.hoverAt; } else o.hover = null;
     o.fonts = chartFonts();
     const scene = (this.scene = layoutFan(fan, o, w, h));
+    scene.layers = this.layers?.layout(scene) ?? null;
     drawFan(this.canvas, scene);
     Glass.frame();
 
@@ -490,6 +499,7 @@ export class FanChart {
       this.readout.show(hoverInfo(fan, scene, hoverT), scene, {
         value: o.format.value, level: s.level, rulers: s.rulers, showAll: s.sel.showAll, more: this.more,
         focus: scene.focus, minX: this.inset.v + tokenNum("--inset", 16),
+        layers: this.layers?.rows(hoverT, scene, o.format.value),
       });
     } else this.readout.hide();
     ia.syncLabels(scene);

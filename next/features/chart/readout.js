@@ -26,9 +26,10 @@ export class Readout {
    * @param {ReturnType<import("../../chart/layout.js").hoverInfo>} info
    * @param {object} scene the scene just drawn
    * @param {{ value: (v: number) => string, level: number, rulers: boolean, showAll: boolean,
-   *           more: number, focus: string | null, minX: number }} o  more: every grey (context) model in
-   *   the selection; focus: the focused (or previewed) model on the chart; minX: the readout's leftmost x
-   *   (right of a panel taking room at the left)
+   *           more: number, focus: string | null, minX: number, layers?: object[] }} o  more: every grey
+   *   (context) model in the selection; focus: the focused (or previewed) model on the chart; minX: the
+   *   readout's leftmost x (right of a panel taking room at the left); layers: rows for the visible layers
+   *   at this week (features/chart/layers.js rows())
    */
   show(info, scene, o) {
     const model = this.#model(info, o);
@@ -45,6 +46,12 @@ export class Readout {
 
   // what the readout says, as plain values (also its cache key)
   #model(info, o) {
+    const m = this.#base(info, o), layers = o.layers?.length ? o.layers : null;
+    if (!layers) return m;
+    return m ? { ...m, layers } : { head: fmtDay(info.t), right: "", history: true, obs: null, layers };
+  }
+
+  #base(info, o) {
     const v = o.value, inWindow = info.h != null;
     const obs = info.observed;
     if (!inWindow) return obs === undefined ? null : { head: fmtDay(info.t), right: "", obs: v(obs), history: true };
@@ -79,9 +86,21 @@ export class Readout {
   }
 
   #render(m) {
+    const out = this.#main(m);
+    if (m.layers) {
+      out.push(h("table", { class: out.length > 1 ? "fc-readout-layers" : "fc-readout-layers fc-readout-only" }, m.layers.map((r) => h("tr", null,
+        h("td", null, h("span", { class: "c-readout-name" },
+          h("i", { class: `fc-swatch is-${r.mark}`, style: { color: r.c } }),
+          h("span", { class: "fc-readout-label" }, r.name))),
+        h("td", { class: "num quiet" }, r.value)))));
+    }
+    return out;
+  }
+
+  #main(m) {
     const head = h("div", { class: "c-readout-head" }, h("span", null, m.head), m.right ? h("span", null, m.right) : null);
     if (m.history) {
-      return [head, h("table", null, h("tr", null,
+      return m.obs == null ? [head] : [head, h("table", null, h("tr", null,
         h("td", null, h("span", { class: "c-readout-name" }, "Observed")),
         h("td", { class: "num" }, m.obs)))];
     }

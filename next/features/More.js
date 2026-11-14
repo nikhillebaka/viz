@@ -1,0 +1,155 @@
+/* The ⋯ bubble at the top right, beside the theme bubble: data sources (live hubs), warnings, refresh,
+ * copy link, presentation mode, shortcuts and Methods. Each panel is its own module, loaded on first use.
+ * Also the small helpers those panels share (JSON requests, sizes, relative times). */
+import { h, on } from "../lib/dom.js";
+import { glass } from "../ui/glass.js";
+import { activeLayer, openMenu, tooltip } from "../ui/floating.js";
+import { pill, icon, toast } from "../ui/controls.js";
+
+const TEXT_FIELD = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
+
+/* ---------- shared helpers ---------- */
+
+/**
+ * GET JSON.
+ * @param {string} url
+ * @returns {Promise<any>} the body; rejects with the server's `error` text, else "HTTP n"
+ */
+export async function getJSON(url) {
+  const r = await fetch(url);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+/**
+ * POST JSON (the server requires the JSON content type on /api/remote/* and /api/ensemble/*).
+ * @param {string} url
+ * @param {object} body
+ * @param {{ okStatuses?: number[] }} [opts] statuses that carry a normal answer (e.g. 422 from /api/remote/add)
+ * @returns {Promise<any>}
+ */
+export async function postJSON(url, body = {}, { okStatuses = [] } = {}) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok && !okStatuses.includes(r.status)) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+
+/** "94.6 MB" */
+export function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const u = ["B", "KB", "MB", "GB"], i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1000)));
+  return `${(n / 1000 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+/** "just now", "5 min ago", "3 h ago", "2 d ago" from an ISO timestamp */
+export function fmtAgo(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const s = (Date.now() - t) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+
+/** Reload the page (and so the manifest) after a short pause, so a toast can be read first. */
+export function reloadSoon(ms = 1200) { setTimeout(() => location.reload(), ms); }
+
+/* ---------- warnings count (shown in the menu) ---------- */
+
+/**
+ * Dataset warnings from /api/status plus each enabled synced hub's quality notes.
+ * @returns {Promise<{ status: string[], hubs: object[], count: number }>}
+ */
+export async function loadWarningSummary() {
+  const [st, rh] = await Promise.all([getJSON("/api/status").catch(() => ({})), getJSON("/api/remote/hubs").catch(() => ({ hubs: [] }))]);
+  const status = (st.validation_warnings || []).map(String);
+  const hubs = (rh.hubs || []).filter((x) => x.synced && x.warnings_count);
+  return { status, hubs, count: status.length + hubs.reduce((n, x) => n + x.warnings_count, 0) };
+}
+
+/* ---------- the bubble ---------- */
+
+const panels = {
+  hubs: () => import("./Hubs.js").then((m) => m.openHubs),
+  warnings: () => import("./Hubs.js").then((m) => m.openWarnings),
+  methods: () => import("./Methods.js").then((m) => m.openMethods),
+  shortcuts: () => import("./Methods.js").then((m) => m.openShortcuts),
+};
+
+/**
+ * Put the ⋯ bubble in a zone (after what is there) and wire its menu and keys (F presents, ? shortcuts).
+ * @param {HTMLElement} zone the fixed top-right zone
+ * @param {{ manifest: object, store: object, chart: object | null }} ctx
+ * @returns {{ destroy(): void }}
+ */
+export function mountMore(zone, ctx) {
+  const doc = document.documentElement;
+  const btn = pill({ icon: icon.more, ariaLabel: "More", className: "app-more" });
+  btn.setAttribute("aria-haspopup", "menu");
+  zone.append(btn);
+  const g = glass(btn);
+  const tip = tooltip(btn, "More", { placement: "bottom" });
+  let warnings = { count: 0 };
+  const refreshWarnings = () => loadWarningSummary().then((w) => { warnings = w; }).catch(() => {});
+  (window.requestIdleCallback ?? setTimeout)(() => {
+    refreshWarnings();
+    import("./Hubs.js").then((m) => m.resumeSync(ctx)).catch(() => {});
+  });
+
+  const open = (name) => panels[name]().then((fn) => fn(btn, ctx)).catch((err) => console.error(`viz: ${name} could not open`, err));
+  const present = (onOff = !doc.classList.contains("is-present")) => {
+    if (onOff) activeLayer()?.close(false);
+    doc.classList.toggle("is-present", onOff);
+  };
+
+  btn.addEventListener("click", () => {
+    const items = [
+      { label: "Data sources", onSelect: () => open("hubs") },
+      warnings.count ? { label: "Warnings", shortcut: warnings.count.toLocaleString(), onSelect: () => open("warnings") } : null,
+      "-",
+      { label: "Refresh data", onSelect: refresh },
+      { label: "Copy link", onSelect: copyLink },
+      { label: "Present", shortcut: "F", onSelect: () => present(true) },
+      "-",
+      { label: "Shortcuts", shortcut: "?", onSelect: () => open("shortcuts") },
+      { label: "Methods", onSelect: () => open("methods") },
+    ].filter(Boolean);
+    openMenu(btn, { items, placement: "bottom-end", label: "More" });
+    refreshWarnings();
+  });
+
+  const offKeys = on(document, "keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    if (e.key === "Escape" && doc.classList.contains("is-present") && !activeLayer()) { present(false); return; }
+    if (activeLayer() || e.target.closest?.(TEXT_FIELD)) return;
+    if (e.key === "f" || e.key === "F") { e.preventDefault(); present(); }
+    else if (e.key === "?") { e.preventDefault(); open("shortcuts"); }
+  });
+
+  return { destroy() { offKeys(); tip.destroy(); g.destroy(); btn.remove(); present(false); } };
+}
+
+async function refresh() {
+  const t = toast("Refreshing data…", { duration: 60000 });
+  try {
+    const r = await postJSON("/api/cache/refresh");
+    t.dismiss();
+    toast(`Refreshed · ${r.models_cached ?? 0} models`);
+    reloadSoon();
+  } catch (err) {
+    t.dismiss();
+    toast(`Refresh failed · ${err.message}`);
+  }
+}
+
+async function copyLink() {
+  try {
+    await navigator.clipboard.writeText(location.href);
+    toast("Link copied");
+  } catch {
+    toast("Couldn't copy the link");
+  }
+}

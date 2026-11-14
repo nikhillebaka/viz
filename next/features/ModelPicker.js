@@ -231,9 +231,14 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
       const base = h("button", { type: "button", class: "pk-base", role: "checkbox" }, h("span", { class: "c-check" }), "Baseline");
       const cols = h("div", { class: "pk-cols" });
       const list = h("div", { class: "pk-list", role: "group", "aria-label": "Models" }, cols);
-      const foot = h("div", { class: "pk-foot" });
+      const footText = h("span");
+      const combine = h("button", { type: "button", class: "c-link pk-combine", hidden: true, onclick: () => {
+        lay.close(false);
+        import("./Ensemble.js").then((m) => m.openCombine(anchor, { manifest, store })).catch((err) => console.error("viz: Combine could not open", err));
+      } }, "Combine…");
+      const foot = h("div", { class: "pk-foot" }, footText, combine);
       body.append(h("div", { class: "pk-head" }, h("label", { class: "c-search", html: icon.search }, input), base), list, foot);
-      els = { panel: lay.panel, input, base, cols, list, foot };
+      els = { panel: lay.panel, input, base, cols, list, foot, footText, combine };
       wire();
       rebuild(first);
     },
@@ -321,7 +326,8 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     }
     els.base.setAttribute("aria-checked", String(sel.baseline));
     const n = sel.selected.length, c = sel.charted.length, grey = S.context(sel).length;
-    els.foot.textContent = [`${n} selected`, `${c} charted`, grey ? `${grey} grey` : null].filter(Boolean).join(" · ");
+    els.combine.hidden = n < 2;
+    els.footText.textContent = [`${n} selected`, `${c} charted`, grey ? `${grey} grey` : null].filter(Boolean).join(" · ");
   }
 
   // "no forecast Dec 27" on rows without a forecast on the chart's round (only once the chart's fan is this

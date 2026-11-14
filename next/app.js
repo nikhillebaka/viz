@@ -6,6 +6,7 @@ import { h, storage } from "./lib/dom.js";
 import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted } from "./features/selection.js";
 import { defaults, defaultDate, readUrl, syncUrl } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
+import { parseLayers } from "./features/chart/layers.js";
 
 const LEVELS = [0.95, 0.8, 0.5, 0];
 const root = document.getElementById("app");
@@ -28,6 +29,8 @@ function fromStorage(manifest) {
   if (LEVELS.includes(level)) out.level = level;
   const rulers = storage.get("viz.rulers");
   if (typeof rulers === "boolean") out.rulers = rulers;
+  const layers = storage.get("viz.layers");
+  if (Array.isArray(layers)) out.layers = parseLayers(layers);
   return out;
 }
 
@@ -42,6 +45,7 @@ function persist(store) {
     if (changed.has("sel")) storage.set("viz.selection", { selected: s.sel.selected, charted: chartedBySlot(s.sel), showAll: s.sel.showAll, baseline: s.sel.baseline });
     if (changed.has("level")) storage.set("viz.level", s.level);
     if (changed.has("rulers")) storage.set("viz.rulers", s.rulers);
+    if (changed.has("layers")) storage.set("viz.layers", s.layers);
     if (changed.has("theme")) storage.set("viz.theme", s.theme);
   });
 }
@@ -65,7 +69,7 @@ async function boot() {
     return;
   }
   const { selFlags, ...url } = readUrl(manifest);
-  const state = { ...defaults(manifest), outcome: true, theme: storedTheme(), ...fromStorage(manifest), ...url };
+  const state = { ...defaults(manifest), outcome: true, layers: [], theme: storedTheme(), ...fromStorage(manifest), ...url };
   if (selFlags) {
     if (selFlags.showAll !== undefined) state.sel = setShowAll(state.sel, selFlags.showAll);
     if (selFlags.baseline !== undefined) state.sel = setBaseline(state.sel, selFlags.baseline);

@@ -1,0 +1,145 @@
+/* An expanded leaderboard row: one model's detail (design/studies/evaluation-goals.md, "Expanding a
+ * row"). Anatomy by horizon, coverage curve against the baseline's, a state tile grid in the score
+ * colors, one tick per round, and facts from /api/model-details. Paper, not a panel. */
+import { h } from "../../lib/dom.js";
+import { linear } from "../../lib/scale.js";
+import { tooltip } from "../../ui/floating.js";
+import { TILES, COLUMNS } from "../../features/LocationPicker.js";
+import { LEVELS, fmtScore, fmtRel, relLevel } from "./model.js";
+import { loadDetails, loadPlaces } from "./data.js";
+import { s } from "./figures.js";
+
+const MON = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+const fmtIso = (iso) => MON.format(Date.parse(`${iso}T00:00:00Z`));
+
+/**
+ * @param {object} row the model's leaderboard row
+ * @param {object | undefined} base the baseline's row
+ * @param {{ ctx: object, scope: object, goTo(patch: { date?: string, location?: string }): void }} o
+ * @returns {HTMLElement}
+ */
+export function detail(row, base, { ctx, scope, goTo }) {
+  const { manifest, store } = ctx;
+  const el = h("div", { class: "sc-detail", role: "region", "aria-label": `${row.label} detail` });
+  const block = (title, ...kids) => h("div", { class: "sc-block" }, h("div", { class: "sc-block-title" }, title), ...kids);
+
+  // anatomy by horizon: spread, over, under as one thin bar per horizon
+  const hs = [0, 1, 2, 3].filter((k) => row.byH[k]?.wis != null);
+  const tot = (c) => (c.spread || 0) + (c.over || 0) + (c.under || 0);
+  const max = Math.max(1e-9, ...hs.map((k) => tot(row.byH[k].comp)));
+  const anatomy = h("div", { class: "sc-anat" }, hs.length ? hs.map((k) => {
+    const c = row.byH[k].comp, t = tot(c);
+    return h("div", { class: "sc-anat-row" },
+      h("span", { class: "sc-anat-h mono" }, `${k} wk`),
+      h("span", { class: "sc-anat-bar", style: { "--w": `${(t / max) * 100}%` } },
+        ...[["spread", "sc-c1"], ["over", "sc-c2"], ["under", "sc-c3"]].map(([key, cls]) => h("i", { class: cls, style: { flexGrow: String(t ? (c[key] || 0) / t : 0) } }))),
+      h("span", { class: "sc-anat-v mono" }, fmtScore(t)));
+  }) : h("span", { class: "sc-quiet" }, "–"));
+  const key = h("div", { class: "sc-key" }, ...[["sc-c1", "spread"], ["sc-c2", "over"], ["sc-c3", "under"]].map(([c, l]) => h("span", null, h("i", { class: c }), l)));
+
+  // coverage: empirical vs nominal at every level, the baseline in grey
+  const cov = s("svg", { class: "sc-cov", role: "img", "aria-label": "Coverage by interval level" });
+  requestAnimationFrame(() => drawCoverage(cov, row, base));
+
+  const tiles = h("div", { class: "sc-tiles", style: { "--cols": String(COLUMNS) } });
+  const subs = h("div", { class: "sc-subs" });
+  const facts = h("div", { class: "sc-facts" });
+
+  el.append(
+    block("Anatomy", anatomy, key),
+    block("Coverage", h("div", { class: "sc-cov-wrap" }, cov)),
+    block("Locations", tiles),
+    h("div", { class: "sc-block sc-wide" }, h("div", { class: "sc-block-title" }, "Submissions"), subs),
+    h("div", { class: "sc-block sc-wide" }, facts),
+  );
+
+  // per state: the model's mean WIS over the baseline's (the newest scoped season)
+  const season = scope.seasons[0];
+  const byAbbr = new Map(manifest.locations.map((l) => [l.abbr, l]));
+  if (season && !row.baseline) {
+    tiles.append(h("span", { class: "sc-quiet" }, "Loading"));
+    loadPlaces(store.get().target, season, row.id, scope.baseline).then(({ model, base: b }) => {
+      tiles.replaceChildren(...Object.entries(TILES).map(([abbr, [cx, cy]]) => {
+        const loc = byAbbr.get(abbr), m = model.get(abbr), bv = b.get(abbr);
+        const rel = m != null && bv > 0 ? m / bv : null, lvl = relLevel(rel);
+        const t = h("button", {
+          type: "button", class: ["sc-tile", lvl == null && "is-empty"], disabled: !loc || null,
+          style: { gridColumn: String(cx + 1), gridRow: String(cy + 1), "--c": lvl ? `var(--score-${lvl})` : null },
+          "aria-label": loc?.name || abbr, onclick: () => loc && goTo({ location: loc.id }),
+        });
+        tooltip(t, `${loc?.name || abbr} · ${rel == null ? "–" : `${fmtRel(rel)} · WIS ${fmtScore(m)}`}`);
+        return t;
+      }));
+    }, () => tiles.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load locations")));
+  } else tiles.append(h("span", { class: "sc-quiet" }, row.baseline ? "Baseline · 1.00 everywhere" : "–"));
+
+  loadDetails(row.id).then((d) => {
+    renderSubs(subs, d, scope, manifest, goTo);
+    renderFacts(facts, d, row, manifest);
+  }, () => { subs.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load details")); });
+  return el;
+}
+
+function drawCoverage(svg, row, base) {
+  const w = svg.clientWidth || 220, hh = svg.clientHeight || 150;
+  svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);
+  const pad = { l: 28, r: 8, t: 6, b: 18 };
+  const X = linear([0, 100], [pad.l, w - pad.r]), Y = linear([0, 100], [hh - pad.b, pad.t]);
+  const g = s("g", { class: "sc-axis" });
+  for (const t of [0, 50, 100]) {
+    g.append(s("line", { x1: pad.l, x2: w - pad.r, y1: Y(t), y2: Y(t), class: "sc-grid" }));
+    g.append(s("text", { x: pad.l - 6, y: Y(t), class: "sc-tick", "text-anchor": "end", "dominant-baseline": "middle", text: String(t) }));
+    g.append(s("text", { x: X(t), y: hh - 4, class: "sc-tick", "text-anchor": "middle", text: `${t}%` }));
+  }
+  g.append(s("line", { x1: X(0), y1: Y(0), x2: X(100), y2: Y(100), class: "sc-ref" }));
+  svg.append(g);
+  const line = (r, cls) => {
+    const pts = LEVELS.map((l, i) => [l * 100, r?.cal[i]]).filter(([, v]) => v != null);
+    if (!pts.length) return;
+    svg.append(s("path", { d: pts.map(([x, y], i) => `${i ? "L" : "M"}${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(""), class: cls }));
+    if (cls.includes("is-emph")) for (const [x, y] of pts) svg.append(s("circle", { cx: X(x), cy: Y(y), r: 2, class: "sc-pt-solid" }));
+  };
+  if (base && base.id !== row.id) line(base, "sc-line-base");
+  line(row, "sc-line-solid is-emph");
+}
+
+/* one tick per hub round in the scoped seasons: full, partial (some locations), missing */
+function renderSubs(el, d, scope, manifest, goTo) {
+  const label = (id) => manifest.seasonById.get(id)?.label || id;
+  const rows = (d.seasons || []).filter((x) => scope.seasons.includes(x.season)).sort((a, b) => b.season.localeCompare(a.season));
+  if (!rows.length) { el.replaceChildren(h("span", { class: "sc-quiet" }, "No rounds in scope")); return; }
+  el.replaceChildren(...rows.map((x) => {
+    const dates = [...(x.dates || [])].sort((a, b) => a.date.localeCompare(b.date));
+    return h("div", { class: "sc-sub-row" },
+      h("span", { class: "sc-sub-season mono" }, label(x.season)),
+      h("span", { class: "sc-ticks" }, dates.map((dt) => {
+        const full = dt.submitted && dt.loc_info?.is_full_coverage !== false;
+        const kind = !dt.submitted ? "is-missing" : full ? "is-full" : "is-partial";
+        const miss = dt.loc_info?.missing_locations?.length;
+        const b = h("button", { type: "button", class: ["sc-tick-mark", kind], "aria-label": fmtIso(dt.date), onclick: () => goTo({ date: dt.date }) });
+        tooltip(b, `${fmtIso(dt.date)} · ${!dt.submitted ? "missing" : full ? "submitted" : `${miss} locations missing`}`);
+        return b;
+      })),
+      h("span", { class: "sc-sub-n mono" }, `${x.submitted_count}/${x.total_hub_rounds}`));
+  }));
+}
+
+function renderFacts(el, d, row, manifest) {
+  const md = d.metadata || {}, m = manifest.modelById.get(row.id) || {};
+  const hub = d.hub ? manifest.hubs?.find((x) => x.id === d.hub)?.short_label || d.hub : null;
+  const line = [
+    md.team_name || m.team_name || m.team,
+    md.model_name,
+    (d.family || m.family) && `${d.family || m.family} family`,
+    hub ? `${hub} hub` : d.source,
+    row.q && `${row.q} quantiles`,
+    md.license,
+    (md.designated_model ?? d.designated) ? "designated" : null,
+  ].filter(Boolean);
+  const methods = md.methods || md.methods_long;
+  el.replaceChildren(...[
+    h("div", { class: "sc-fact-line" }, line.join(" · ")),
+    methods ? h("p", { class: "sc-methods" }, methods) : null,
+    md.website_url ? h("a", { class: "c-link sc-fact-link", href: md.website_url, target: "_blank", rel: "noopener" }, "Website") : null,
+  ].filter(Boolean));
+}

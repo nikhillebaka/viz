@@ -1,7 +1,9 @@
 /* App state ⇄ URL (next/ARCHITECTURE.md, "App state (the store) and the URL").
  *
  *   target  loc  date  models (comma list, "none" = explicitly empty)  chart (ids by color slot, "" for a
- *   free slot)  all=1  base=0  pi (95 · 80 · 50 · none)  rulers=1  focus
+ *   free slot)  all=1  base=0  pi (95 · 80 · 50 · none)  rulers=1  focus  lay (layer ids, comma list)
+ *   scores' scope: ss (seasons) wk (a-b) ph (pre|peak|post) hz (horizons) pl (US|current) fair=1 bl (baseline)
+ *   rk=sel sc=log; the leaderboard: sort ("-" prefix reverses) cols (optional columns) open (expanded rows)
  *
  * Values that equal the defaults are left out, so a default view has a clean URL. Parameters this page
  * doesn't know (old viz's view, scale, indicators…) are kept as they are. Invalid values are dropped:
@@ -10,9 +12,11 @@
  * parseUrl() and writeUrl() are pure (node tests run them); readUrl() and syncUrl() add the browser. */
 import { parseIso } from "../lib/scale.js";
 import { create, fromLists, chartedBySlot } from "./selection.js";
+import { parseLayers } from "./chart/layers.js";
 
 /** The parameters this module owns, in the order they are written. */
-export const KEYS = Object.freeze(["target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus"]);
+export const KEYS = Object.freeze(["target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus", "lay",
+  "ss", "wk", "ph", "hz", "pl", "fair", "bl", "rk", "sc", "sort", "cols", "open"]);
 const LEVELS = [0.95, 0.8, 0.5];
 const DEFAULT_LEVEL = 0.95;
 
@@ -72,7 +76,7 @@ const isModel = (manifest, id) => !!id && id !== manifest.baseline && manifest.m
  * Reads the parameters this module owns. Pure.
  * @param {string | URLSearchParams} search a query string ("?a=b" or "a=b") or params
  * @param {import("../lib/api.js").Manifest} manifest
- * @returns {object} a partial state: any of target, location, date, sel, level, rulers, focus; plus
+ * @returns {object} a partial state: any of target, location, date, sel, level, rulers, focus, layers; plus
  *   `selFlags` ({ showAll?, baseline? }) when the URL sets all / base without a model list, to apply to
  *   whatever selection the page starts with. Invalid values are simply absent.
  */
@@ -113,7 +117,71 @@ export function parseUrl(search, manifest) {
   if (q.has("rulers")) out.rulers = q.get("rulers") === "1";
   const focus = q.get("focus");
   if (focus && manifest.modelById.has(focus)) out.focus = focus;
+  if (q.has("lay")) out.layers = parseLayers(q.get("lay"));
+  else if (q.has("indicators")) { // an old viz link's signals, where they have a layer
+    const OLD = { nssp: "nssp", ilinet: "ili", flusurvnet: "flusurv", unrevised: "asof", peak_forecasts: "peaks", prior_season: "seasons" };
+    const ids = q.get("indicators").split(",").map((k) => OLD[k.trim()] ?? (k.trim().startsWith("season_") ? "seasons" : ""));
+    if (ids.some(Boolean)) out.layers = parseLayers(ids);
+  }
+  const scope = parseScope(q, manifest);
+  if (scope) out.scope = scope;
+  const scores = parseScores(q, manifest);
+  if (scores) out.scores = scores;
   return out;
+}
+
+const list = (q, k) => (q.get(k) || "").split(",").map((s) => s.trim()).filter(Boolean);
+const SORT_KEYS = ["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name", "h0", "h1", "h2", "h3"];
+const COL_KEYS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3"];
+
+/* the evaluation scope (sections/scope.js), only what differs from its defaults */
+function parseScope(q, manifest) {
+  const sc = {};
+  const ss = list(q, "ss").filter((s) => manifest.seasonById?.has(s));
+  if (ss.length) sc.seasons = ss;
+  const wk = /^(\d{1,2})[-:](\d{1,2})$/.exec(q.get("wk") || "");
+  if (wk) { const a = Math.max(1, Math.min(53, +wk[1])), b = Math.max(1, Math.min(53, +wk[2])); sc.weeks = [Math.min(a, b), Math.max(a, b)]; }
+  if (["pre", "peak", "post"].includes(q.get("ph"))) sc.phase = q.get("ph");
+  const hz = [...new Set(list(q, "hz").map(Number))].filter((h) => [0, 1, 2, 3].includes(h)).sort();
+  if (hz.length && hz.length < 4) sc.horizons = hz;
+  if (["US", "current"].includes(q.get("pl"))) sc.place = q.get("pl");
+  if (q.get("fair") === "1") sc.fair = true;
+  if (q.get("bl") && manifest.modelById.has(q.get("bl"))) sc.baseline = q.get("bl");
+  if (q.get("rk") === "sel") sc.rank = "selected";
+  if (q.get("sc") === "log") sc.scale = "log";
+  return Object.keys(sc).length ? sc : null;
+}
+
+/* the leaderboard's view: sort, optional columns, expanded rows */
+function parseScores(q, manifest) {
+  const o = {};
+  const sort = q.get("sort") || "";
+  if (SORT_KEYS.includes(sort.replace(/^-/, ""))) { o.sort = sort.replace(/^-/, ""); o.rev = sort.startsWith("-"); }
+  const cols = list(q, "cols").filter((c) => COL_KEYS.includes(c));
+  if (cols.length) o.cols = cols;
+  const open = list(q, "open").filter((id) => manifest.modelById.has(id));
+  if (open.length) o.open = open;
+  return Object.keys(o).length ? o : null;
+}
+
+function writeScope(p, sc) {
+  if (!sc) return;
+  if (Array.isArray(sc.seasons) && sc.seasons.length) p.push(["ss", sc.seasons.join(",")]);
+  if (Array.isArray(sc.weeks) && sc.weeks.length === 2) p.push(["wk", `${sc.weeks[0]}-${sc.weeks[1]}`]);
+  if (sc.phase) p.push(["ph", sc.phase]);
+  if (Array.isArray(sc.horizons) && sc.horizons.length && sc.horizons.length < 4) p.push(["hz", sc.horizons.join(",")]);
+  if (sc.place === "US" || sc.place === "current") p.push(["pl", sc.place]);
+  if (sc.fair) p.push(["fair", "1"]);
+  if (sc.baseline) p.push(["bl", sc.baseline]);
+  if (sc.rank === "selected") p.push(["rk", "sel"]);
+  if (sc.scale === "log") p.push(["sc", "log"]);
+}
+
+function writeScores(p, o) {
+  if (!o) return;
+  if (o.sort && (o.sort !== "rel" || o.rev)) p.push(["sort", `${o.rev ? "-" : ""}${o.sort}`]);
+  if (o.cols?.length) p.push(["cols", o.cols.join(",")]);
+  if (o.open?.length) p.push(["open", o.open.join(",")]);
 }
 
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -145,6 +213,9 @@ export function writeUrl(state, manifest, search = "") {
   if (state.level != null && state.level !== DEFAULT_LEVEL) p.push(["pi", state.level ? String(Math.round(state.level * 100)) : "none"]);
   if (state.rulers) p.push(["rulers", "1"]);
   if (state.focus) p.push(["focus", state.focus]);
+  if (state.layers?.length) p.push(["lay", state.layers.join(",")]);
+  writeScope(p, state.scope);
+  writeScores(p, state.scores);
   const q = search instanceof URLSearchParams ? search : new URLSearchParams(search);
   for (const [k, v] of q) if (!KEYS.includes(k)) p.push([k, v]);
   const enc = (s) => encodeURIComponent(s).replace(/%2C/gi, ",");
@@ -160,7 +231,7 @@ export function readUrl(manifest) {
   return parseUrl(location.search, manifest);
 }
 
-const WATCHED = ["target", "location", "date", "sel", "level", "rulers", "focus"];
+const WATCHED = ["target", "location", "date", "sel", "level", "rulers", "focus", "layers", "scope", "scores"];
 
 /**
  * Keeps the URL in step with the store: written with history.replaceState (no history entries),

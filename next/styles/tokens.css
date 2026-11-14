@@ -54,6 +54,7 @@
   --stroke-series: 1.75px; /* medians */
   --stroke-observed: 1.5px;
   --stroke-edge: 0.75px;   /* interval edges */
+  --stroke-layer: 1.25px;  /* context layers on the chart: as reported, signals */
   --stroke-glass: 0.5px;
 
   /* ---- layout ---- */
