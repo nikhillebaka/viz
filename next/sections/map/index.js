@@ -3,9 +3,8 @@
  * (hovered, else the chart's location, else the highest) is read out beside it. Clicking a state makes
  * it the chart's location.
  *
- * Proportion targets: /api/spatial rounds forecast quantiles to one decimal, which turns proportions
- * into 0.0 (an old-viz bug that lives in the server). Until /api/next/ serves them unrounded, only the
- * layers that survive (observed, weekly change) are offered for proportions. */
+ * Data: /api/next/spatial (/api/spatial unrounded, so proportion targets keep their values). Per-100k
+ * layers are offered for count targets only. */
 import { storage, onThemeChange } from "../../lib/dom.js";
 import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
@@ -21,15 +20,15 @@ const PLAY_MS = 1200;
 const ROWS = 8;
 const fin = (x) => typeof x === "number" && Number.isFinite(x);
 
-/** The layers, in menu order. `counts`: only for count targets (see the header). */
+/** The layers, in menu order. `counts`: only for count targets (per 100k means nothing for a share). */
 const LAYERS = [
   { id: "f_rate", label: "Forecast / 100k", counts: true, kind: "seq" },
-  { id: "f_count", label: "Forecast", counts: true, kind: "seq" },
+  { id: "f_count", label: "Forecast", kind: "seq" },
   { id: "o_rate", label: "Observed / 100k", counts: true, kind: "seq" },
   { id: "observed", label: "Observed", kind: "seq" },
-  { id: "error", label: "Error", counts: true, kind: "div" },
+  { id: "error", label: "Error", kind: "div" },
   { id: "trend", label: "Change vs. nowcast", kind: "div" },
-  { id: "wis", label: "WIS", counts: true, kind: "seq" },
+  { id: "wis", label: "WIS", kind: "seq" },
 ];
 
 /** @returns {{ destroy(): void }} */
@@ -144,7 +143,7 @@ export function mount(el, ctx) {
     if (key === reqKey && data && !force) { render(); return; }
     reqKey = key;
     f.loading(true);
-    getJson(`/api/spatial?${key}`, { slot }).then((j) => {
+    getJson(`/api/next/spatial?${key}`, { slot }).then((j) => {
       if (key !== reqKey) return;
       data = j; f.loading(false);
       pickModel();
@@ -202,16 +201,16 @@ export function mount(el, ctx) {
 
   function drawSummary() {
     let top = null, rising = 0, falling = 0, steady = 0, total = 0, n = 0;
-    const rateId = counts() ? "f_rate" : null;
+    const rateId = counts() ? "f_rate" : "f_count";
     for (const abbr of tiles.keys()) {
       const e = entry(abbr);
       if (!e) continue;
-      if (rateId) { const r = valueAt(abbr, rateId); if (fin(r) && (!top || r > top.v)) top = { abbr, v: r }; }
+      { const r = valueAt(abbr, rateId); if (fin(r) && (!top || r > top.v)) top = { abbr, v: r }; }
       if (horizon > 0 && fin(e.trend_pct)) { if (e.trend_pct > 5) rising++; else if (e.trend_pct < -5) falling++; else steady++; }
       if (counts() && fin(e.median)) { total += e.median; n++; }
     }
     const parts = [];
-    if (top) parts.push(["Highest", `${top.abbr} ${fmt("f_rate", top.v)} / 100k`]);
+    if (top) parts.push(["Highest", `${top.abbr} ${fmt(rateId, top.v)}${counts() ? " / 100k" : ""}`]);
     if (horizon > 0 && rising + falling + steady) parts.push(["Rising", rising], ["Falling", falling], ["Steady", steady]);
     if (n) parts.push([`Sum of ${n}`, vf().value(total)]);
     summary.replaceChildren(...parts.flatMap(([k, v], i) => [i ? " · " : "", `${k} `, h("b", null, String(v))]));
@@ -232,15 +231,15 @@ export function mount(el, ctx) {
     const row = (k, v, sub, cls) => rows.push(h("div", { class: ["mp-row", cls] }, h("dt", null, k), h("dd", null, v, sub ? h("small", null, sub) : null)));
     if (!e) row("Forecast", "–", "none from this model");
     else {
-      if (counts()) row("Forecast", V.value(e.median), fin(e.q025) && fin(e.q975) ? `95% ${V.value(e.q025)}–${V.value(e.q975)}` : null);
+      row("Forecast", V.value(e.median), fin(e.q025) && fin(e.q975) ? `95% ${V.value(e.q025)}–${V.value(e.q975)}` : null);
       row("Observed", fin(truth) ? V.value(truth) : "Pending", null, fin(truth) ? null : "is-quiet");
-      if (counts() && fin(truth) && fin(e.median)) {
+      if (fin(truth) && fin(e.median)) {
         const where = fin(e.q025) && fin(e.q975) ? (truth < e.q025 ? "below 95%" : truth > e.q975 ? "above 95%" : "inside 95%") : null;
         row("Error", fmt("error", e.median - truth), where);
       }
       if (counts() && fin(e.rate_per_100k)) row("Per 100k", e.rate_per_100k.toFixed(2));
       if (horizon > 0 && fin(e.trend_pct)) row("vs. nowcast", fmt("trend", e.trend_pct));
-      if (counts() && fin(e.wis)) row("WIS", V.value(e.wis));
+      if (fin(e.wis)) row("WIS", V.value(e.wis));
     }
     const sl = slotOf(s.sel, model);
     const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % 8) + 1})`;

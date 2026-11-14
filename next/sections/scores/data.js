@@ -1,4 +1,4 @@
-/* The scores' data: /api/metrics, /api/model-details, /api/season-curves and the per-location WIS from
+/* The scores' data: /api/next/metrics, /api/model-details, /api/season-curves and the per-location WIS from
  * /api/heatmap. Responses are cached (FIFO); a metrics request supersedes the one in flight. */
 
 const LIMIT = 50;
@@ -26,24 +26,29 @@ function cached(map, key, url) {
 
 let inflight = null;
 /**
- * The metrics for a request query (model.metricsRequest). A newer call aborts the older one, which then
- * rejects with an AbortError.
+ * The metrics for a request (model.metricsRequest): its query and, with a horizon subset, the same scope
+ * on every horizon (`full`). A newer call aborts the older one, which then rejects with an AbortError.
  * @param {string} query
- * @returns {Promise<object>}
+ * @param {string | null} [full]
+ * @returns {Promise<{ resp: object, full: object | null }>}
  */
-export function loadMetrics(query) {
-  const hit = caches.metrics.get(query);
-  if (hit) return Promise.resolve(hit);
+export function loadMetrics(query, full = null) {
+  const wanted = [query, full].filter(Boolean);
+  if (wanted.every((q) => caches.metrics.has(q))) {
+    return Promise.resolve({ resp: caches.metrics.get(query), full: full ? caches.metrics.get(full) : null });
+  }
   inflight?.abort();
   const ctl = (inflight = new AbortController());
-  return getJson(`/api/metrics?${query}`, ctl.signal).then((j) => {
+  const one = (q) => (caches.metrics.has(q) ? Promise.resolve(caches.metrics.get(q))
+    : getJson(`/api/next/metrics?${q}`, ctl.signal).then((j) => remember(caches.metrics, q, j)));
+  return Promise.all(wanted.map(one)).then(([resp, all]) => {
     if (inflight === ctl) inflight = null;
-    return remember(caches.metrics, query, j);
+    return { resp, full: full ? all : null };
   });
 }
 
-/** True when the metrics for this query are already here (no loading state needed). */
-export const hasMetrics = (query) => caches.metrics.has(query);
+/** True when the metrics for this request are already here (no loading state needed). */
+export const hasMetrics = (query, full = null) => [query, full].filter(Boolean).every((q) => caches.metrics.has(q));
 
 /** @returns {Promise<object>} /api/model-details for one model */
 export const loadDetails = (id) => cached(caches.details, id, `/api/model-details?model=${encodeURIComponent(id)}`);

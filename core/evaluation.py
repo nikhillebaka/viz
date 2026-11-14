@@ -45,6 +45,9 @@ class EvaluationParams:
     # weeks = "start-end" in season weeks (1 = MMWR week 31, early August); phase = pre | peak | post
     weeks: Optional[str] = None
     phase: Optional[str] = None
+    # Optional horizons to score (e.g. [0, 1]); forecasts at other horizons are dropped before scoring,
+    # so every number (relative WIS included) is computed on those horizons alone. None: all of them.
+    horizons: Optional[List[int]] = None
 
 
 PHASES = ("pre", "peak", "post")
@@ -258,6 +261,8 @@ class EvaluationEngine:
             f"{params.target}|{params.location}|{params.date}|{params.season}|{params.weeks}|{params.phase}|"
             f"{sorted(models)}|{params.baseline}|{params.fair}|{oracle_mtime}|{mtimes}"
         )
+        if params.horizons is not None:
+            raw += f"|horizons={sorted(set(int(h) for h in params.horizons))}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _build_window_filter(self, target: str, weeks: Optional[str], phase: Optional[str]) -> Optional[WindowFilter]:
@@ -446,9 +451,13 @@ class EvaluationEngine:
             if eval_dates:
                 to_load.append((mid, eval_dates))
 
+        horizon_set = sorted(set(int(h) for h in params.horizons)) if params.horizons is not None else None
+
         def _load(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
             mid, eval_dates = item
             m_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
+            if m_df is not None and horizon_set is not None and not m_df.is_empty():
+                m_df = m_df.filter(pl.col("horizon").cast(pl.Int64).is_in(horizon_set))
             if m_df is not None and window_filter is not None:
                 m_df = window_filter.apply(m_df)
             return m_df

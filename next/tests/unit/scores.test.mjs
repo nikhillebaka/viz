@@ -46,6 +46,12 @@ test("metricsRequest: every model unless shared-only or rank among selected", ()
   assert.equal(q.get("season"), "all");
   assert.equal(q.get("weeks"), "3-9");
   assert.equal(q.get("phase"), "peak");
+  assert.equal(c.full, null);
+  assert.equal(q.get("horizons"), null);
+  const d = metricsRequest({ ...sc, horizons: [1, 0] }, { target: "t", selected: [], allSeasons: ["2025-2026"] });
+  assert.equal(new URLSearchParams(d.query).get("horizons"), "0,1");
+  assert.equal(new URLSearchParams(d.full).get("horizons"), null);
+  assert.equal(d.key, d.query);
 });
 
 const H = (wis, count, comp = [1, 1, 1]) => ({ wis, wis_log: wis / 100, count, cov50: 50, cov95: 90, sharpness_component: comp[0], overprediction_penalty: comp[1], underprediction_penalty: comp[2], calibration: { "0.5": 50 } });
@@ -58,19 +64,30 @@ const resp = {
     { model_id: "m3", has_data_in_scope: false, count: 0, wis: null, status_note: "x", active_seasons: ["2023-2024"] },
   ],
 };
-const opts = { ids: ["m1", "m2", "m3"], baseline: "B", horizons: null, scale: "natural", label: (id) => id };
+const opts = { ids: ["m1", "m2", "m3"], baseline: "B", scale: "natural", label: (id) => id };
 
-test("rowsFrom: overall, then a horizon subset as a ratio of means", () => {
+test("rowsFrom: overall, then a horizon-subset response with by-horizon from the full one", () => {
   const rows = rowsFrom(resp, opts);
   assert.deepEqual(rows.map((r) => r.id), ["m1", "m2", "m3", "B"]);
   assert.equal(rows[0].rel, 0.8);
   assert.equal(rows[0].byH[0].rel, 0.5);
   assert.equal(rows[2].active, false);
   assert.equal(rows[3].rel, 1);
-  const sub = rowsFrom(resp, { ...opts, horizons: [0] });
+  // the server scored horizon 0 alone: its numbers are used as they are (relative WIS from the server)
+  const h0 = {
+    baseline_model: "B",
+    rankings: [
+      { model_id: "B", has_data_in_scope: true, count: 10, wis: 50, relative_wis: 1, by_horizon: { 0: H(50, 10) } },
+      { model_id: "m1", has_data_in_scope: true, count: 10, wis: 25, relative_wis: 0.47, by_horizon: { 0: H(25, 10) } },
+      { model_id: "m2", has_data_in_scope: false, count: 0, wis: null },
+    ],
+  };
+  const sub = rowsFrom(h0, { ...opts, full: resp });
   assert.equal(sub[0].wis, 25);
-  assert.equal(sub[0].rel, 0.5);
-  assert.equal(sub[0].approx, true);
+  assert.equal(sub[0].rel, 0.47);
+  assert.equal(sub[0].n, 10);
+  assert.equal(sub[0].byH[1].wis, 135, "by-horizon columns read the full response");
+  assert.equal(sub[0].byH[1].rel, 0.9);
   assert.equal(sub[1].active, false, "no forecasts at that horizon");
 });
 

@@ -959,10 +959,14 @@ class SandboxDataLoader:
         location: str = "US",
         reference_date: Optional[str] = None,
         history_weeks: int = 24,
+        precise: bool = False,
     ) -> Dict[str, Any]:
         """
         Load auxiliary surveillance streams (NSSP, ILINet, FluSurv-NET) and prior season waves
         for the given location and reference date window.
+
+        precise=True leaves the as-of series unrounded (old viz rounds it to 1 decimal, which turns
+        proportions into 0.0); the default output is unchanged.
         """
         if not reference_date:
             reference_date = self.get_latest_reference_date() or datetime.now().strftime("%Y-%m-%d")
@@ -1190,7 +1194,7 @@ class SandboxDataLoader:
                         if s_str == ref_season:
                             as_of_data.append({
                                 "date": d_str,
-                                "value": round(v_val, 1),
+                                "value": v_val if precise else round(v_val, 1),
                             })
             except Exception as exc:
                 logger.warning("Failed querying as_of admissions: %s", exc)
@@ -1291,12 +1295,21 @@ class SandboxDataLoader:
         }
 
     def get_spatial_data(
-        self, target: str, reference_date: str, model_ids: List[str], horizon: Optional[Union[int, str]] = None
+        self, target: str, reference_date: str, model_ids: List[str], horizon: Optional[Union[int, str]] = None,
+        precise: bool = False,
     ) -> Dict[str, Any]:
         """
         Extract multi-model spatial predictions, population-adjusted rates,
         growth trajectories, and evaluation metrics across all 50 states + DC + PR.
+
+        precise=True leaves forecast values, errors and WIS unrounded (the default rounds them, which
+        turns proportion targets into 0.0); the default output is unchanged.
         """
+        def rnd(v: Optional[float], n: int) -> Optional[float]:
+            if v is None:
+                return None
+            return v if precise else round(v, n)
+
         locations = self.get_locations()
         # Per-100k rates only make sense for counts; rate/proportion targets are already normalized
         per_100k = not self.config.get_target_metadata(target)["is_rate"]
@@ -1421,20 +1434,20 @@ class SandboxDataLoader:
                     trend_pct = round(((med - h0_val) / h0_val) * 100, 1)
 
                 truth_val = states_data[abbr]["truth"].get(ted)
-                error = round(med - truth_val, 1) if med is not None and truth_val is not None else None
+                error = rnd(med - truth_val, 1) if med is not None and truth_val is not None else None
 
                 if mid not in states_data[abbr]["models"]:
                     states_data[abbr]["models"][mid] = {}
 
                 states_data[abbr]["models"][mid][h] = {
-                    "median": round(med, 1) if med is not None else None,
+                    "median": rnd(med, 1),
                     "rate_per_100k": rate,
-                    "q025": round(q025, 1) if q025 is not None else None,
-                    "q975": round(q975, 1) if q975 is not None else None,
-                    "q25": round(q25, 1) if q25 is not None else None,
-                    "q75": round(q75, 1) if q75 is not None else None,
+                    "q025": rnd(q025, 1),
+                    "q975": rnd(q975, 1),
+                    "q25": rnd(q25, 1),
+                    "q75": rnd(q75, 1),
                     "trend_pct": trend_pct,
-                    "wis": round(wis, 2) if wis is not None else None,
+                    "wis": rnd(wis, 2),
                     "error": error,
                     "target_end_date": ted,
                 }

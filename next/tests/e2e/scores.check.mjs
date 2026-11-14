@@ -1,4 +1,4 @@
-// Scores: the section mounts when scrolled to, ranks real models from /api/metrics with the baseline at
+// Scores: the section mounts when scrolled to, ranks real models from /api/next/metrics with the baseline at
 // 1.00, sorts, expands a row into its detail, opens the Dates popover, and logs no errors.
 // SCORES_SHOTS=<dir> saves screenshots for a visual pass.
 import { join } from "node:path";

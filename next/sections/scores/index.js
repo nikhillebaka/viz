@@ -89,7 +89,7 @@ export function mount(el, ctx) {
   el.append(root);
 
   /* ---------------- state ---------------- */
-  let resp = null, respKey = null, wantKey = null, failed = false;
+  let resp = null, respFull = null, respKey = null, wantKey = null, failed = false;
   let rows = [], order = { ranked: [], unranked: [], ranks: new Map() };
   let hover = null, share = false, previewed = null;
 
@@ -98,15 +98,15 @@ export function mount(el, ctx) {
 
   function request() {
     const st = store.get(), sc = scope();
-    if (!sc.seasons.length) { resp = null; respKey = null; render(); return; }
+    if (!sc.seasons.length) { resp = null; respFull = null; respKey = null; render(); return; }
     const req = metricsRequest(sc, { target: st.target, selected: st.sel.selected, allSeasons });
     if (req.key === respKey || req.key === wantKey) { render(); return; }
     wantKey = req.key;
     failed = false;
-    root.classList.toggle("is-loading", !hasMetrics(req.query));
-    loadMetrics(req.query).then((j) => {
+    root.classList.toggle("is-loading", !hasMetrics(req.query, req.full));
+    loadMetrics(req.query, req.full).then((j) => {
       if (wantKey !== req.key) return;
-      resp = j; respKey = req.key; wantKey = null;
+      resp = j.resp; respFull = j.full; respKey = req.key; wantKey = null;
       root.classList.remove("is-loading");
       render();
     }, (err) => {
@@ -170,7 +170,7 @@ export function mount(el, ctx) {
     const ids = st.sel.selected;
     const label = (id) => manifest.label(id, [...ids, sc.baseline]);
     const team = (id) => { const m = manifest.modelById.get(id); return m ? (m.team && m.team !== label(id) ? m.team : "") : ""; };
-    rows = resp ? rowsFrom(resp, { ids, baseline: sc.baseline, horizons: sc.horizons, scale: sc.scale, label, team }) : [];
+    rows = resp ? rowsFrom(resp, { ids, baseline: sc.baseline, full: respFull, scale: sc.scale, label, team }) : [];
     for (const r of rows) r.dot = dotOf(st, r.id);
     order = sortRows(rows, ui.sort, ui.rev);
     renderNotice(sc);
@@ -311,7 +311,7 @@ export function mount(el, ctx) {
         const lvl = relLevel(r.rel);
         const pos = (x) => `${((Math.max(-1, Math.min(1, Math.log2(x))) + 1) / 2) * 100}%`;
         return h("span", { class: "sc-rel", role: "cell" },
-          h("span", { class: ["sc-relnum mono", r.approx && "is-approx"] }, fmtRel(r.rel)),
+          h("span", { class: "sc-relnum mono" }, fmtRel(r.rel)),
           r.rel != null ? h("span", { class: "sc-lolli", style: { "--x": pos(r.rel), "--c": lvl ? `var(--score-${lvl})` : null }, "aria-hidden": "true" }, h("i"), h("b")) : h("span", { class: "sc-lolli" }));
       }
       case "wis": return v(fmtScore(r.wis));
@@ -345,7 +345,7 @@ export function mount(el, ctx) {
         "aria-sort": active ? (asc ? "ascending" : "descending") : "none",
         onclick: () => setUi(active ? { rev: !ui.rev } : { sort: key, rev: false }),
       }, text, active ? h("span", { class: "sc-arrow", "aria-hidden": "true" }, asc ? "↑" : "↓") : null);
-      if (COLUMNS[key]?.tip) tooltip(b, COLUMNS[key].tip + (key === "rel" && sc.horizons ? " · ratio of means on these horizons" : ""));
+      if (COLUMNS[key]?.tip) tooltip(b, COLUMNS[key].tip);
       return b;
     };
     const relHead = h("span", { class: "sc-head-rel" }, head("rel", COLUMNS.rel.label),
@@ -479,7 +479,7 @@ export function mount(el, ctx) {
     const st = store.get(), sc = scope();
     const ids = [...order.ranked, ...order.unranked].map((r) => r.id);
     const data = exportRows(resp, {
-      order: ids, ranks: order.ranks, scope: sc, target: st.target, sourceOf,
+      order: ids, ranks: order.ranks, scope: sc, target: st.target, sourceOf, full: respFull,
       scopeLabel: [fPlace.textContent, fDates.textContent, fHz.textContent].join(" · "),
     });
     const text = kind === "json" ? JSON.stringify({ scope: sc, target: st.target, baseline_model: resp.baseline_model, rows: data }, null, 2) : delimited(data, kind);

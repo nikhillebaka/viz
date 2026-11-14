@@ -1,4 +1,4 @@
-/* The leaderboard's logic, without DOM: the /api/metrics request for a scope, rows from its response
+/* The leaderboard's logic, without DOM: the /api/next/metrics request for a scope, rows from its response
  * (horizon subsets, log scale), sorting and ranks, score colors, the scope line's words, exports and the
  * CLI command. Pure (node tests run it). */
 import { HORIZONS, seasonWeekEnd, startYearOf } from "../scope.js";
@@ -10,10 +10,11 @@ export const DASH = "–";
 /* ------------------------------------------------------------------ request */
 
 /**
- * The /api/metrics query for a scope.
+ * The /api/next/metrics query for a scope. With a horizon subset the server scores only those horizons
+ * (`query`); `full` is the same scope on every horizon, for the by-horizon columns (null without a subset).
  * @param {ReturnType<import("../scope.js").scopeOf>} scope
  * @param {{ target: string, selected: string[], allSeasons: string[] }} o
- * @returns {{ query: string, key: string, models: "all" | string[] }} key identifies the response
+ * @returns {{ query: string, full: string | null, key: string, models: "all" | string[] }} key identifies the response
  */
 export function metricsRequest(scope, { target, selected, allSeasons }) {
   const p = new URLSearchParams();
@@ -30,8 +31,11 @@ export function metricsRequest(scope, { target, selected, allSeasons }) {
   if (scope.baseline) p.set("baseline", scope.baseline);
   if (scope.weeks) p.set("weeks", `${scope.weeks[0]}-${scope.weeks[1]}`);
   if (scope.phase) p.set("phase", scope.phase);
+  const hs = scope.horizons && scope.horizons.length < HORIZONS.length ? [...scope.horizons].sort((a, b) => a - b) : null;
+  const full = hs ? p.toString() : null;
+  if (hs) p.set("horizons", hs.join(","));
   const query = p.toString();
-  return { query, key: query, models };
+  return { query, full, key: query, models };
 }
 
 /* ------------------------------------------------------------------ rows */
@@ -43,40 +47,28 @@ const calOf = (cal) => LEVELS.map((l) => {
   return k == null ? null : num(cal[k]);
 });
 
-/* count-weighted mean of one field over some horizons' summaries */
-function pool(byH, hs, f) {
-  let s = 0, n = 0;
-  for (const h of hs) {
-    const b = byH?.[h], v = b ? num(f(b)) : null, c = b ? num(b.count) : null;
-    if (v == null || !c) continue;
-    s += v * c; n += c;
-  }
-  return n ? s / n : null;
-}
-
 /**
- * Leaderboard rows from a /api/metrics response.
- * @param {object} resp the response
- * @param {{ ids: string[], baseline: string, horizons: number[] | null, scale: "natural" | "log",
+ * Leaderboard rows from a /api/next/metrics response.
+ * @param {object} resp the response (scored on the scope's horizons)
+ * @param {{ ids: string[], baseline: string, scale: "natural" | "log", full?: object | null,
  *           label(id: string): string, team?(id: string): string }} o
- *   ids: the models to show (the baseline is added); horizons: a subset, or null for all four
+ *   ids: the models to show (the baseline is added); full: the response on every horizon, read for
+ *   `byH` when `resp` covers a horizon subset (default `resp`)
  * @returns {object[]} one row per id (and the baseline), in `ids` order, baseline last. A row: { id,
  *   label, team, baseline, active, pending, note, seasons, n, rounds: [available, total], q, rel, wis,
  *   mae, cov50, cov80, cov95, sharp, per100k, delta, wins, competed, comp: { spread, over, under },
- *   cal: (number|null)[] by LEVELS, byH: { [h]: { wis, rel, comp, cal, n } }, approx }.
- *   With a horizon subset, scores are pooled over those horizons and relative WIS is the ratio of mean
- *   WIS to the baseline's on the same horizons (`approx` true: not the pairwise tournament).
+ *   cal: (number|null)[] by LEVELS, byH: { [h]: { wis, rel, comp, cal, n } } }.
+ *   byH's rel is the ratio of mean WIS to the baseline's at that horizon.
  */
-export function rowsFrom(resp, { ids, baseline, horizons, scale, label, team = () => "" }) {
+export function rowsFrom(resp, { ids, baseline, scale, full = null, label, team = () => "" }) {
   const byId = new Map((resp?.rankings || []).map((r) => [r.model_id, r]));
+  const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
   const log = scale === "log";
   const eff = resp?.baseline_model || baseline;
-  const base = byId.get(eff) || byId.get(baseline);
-  const hs = horizons && horizons.length < HORIZONS.length ? horizons : null;
+  const base = allH.get(full?.baseline_model || eff) || allH.get(baseline);
   const wisKey = log ? "wis_log" : "wis";
   const baseH = {};
   for (const h of HORIZONS) baseH[h] = num(base?.by_horizon?.[h]?.[wisKey]);
-  const baseSub = hs ? pool(base?.by_horizon, hs, (b) => b[wisKey]) : null;
 
   const want = [...ids.filter((id) => id !== baseline), baseline].filter((id, i, a) => id && a.indexOf(id) === i);
   return want.map((id) => {
@@ -84,8 +76,9 @@ export function rowsFrom(resp, { ids, baseline, horizons, scale, label, team = (
     const isBase = id === baseline;
     const active = !!(r && r.has_data_in_scope && num(r.wis) != null && r.count > 0);
     const byH = {};
+    const rh = allH.get(id);
     for (const h of HORIZONS) {
-      const b = r?.by_horizon?.[h];
+      const b = rh?.by_horizon?.[h];
       const w = num(b?.[wisKey]);
       byH[h] = b ? {
         wis: w, n: num(b.count) || 0,
@@ -103,33 +96,20 @@ export function rowsFrom(resp, { ids, baseline, horizons, scale, label, team = (
       q: r?.quantile_count ?? null, q23: r ? r.has_23_quantiles !== false : true,
       rel: null, wis: null, mae: null, cov50: null, cov80: null, cov95: null, sharp: null, per100k: null,
       delta: null, wins: null, competed: null, comp: { spread: null, over: null, under: null },
-      cal: LEVELS.map(() => null), byH, approx: !!hs,
+      cal: LEVELS.map(() => null), byH,
     };
     if (!active) return row;
-    if (hs) {
-      const f = (fn) => pool(r.by_horizon, hs, fn);
-      row.wis = f((b) => b[wisKey]);
-      row.mae = f((b) => b[log ? "mae_log" : "mae"]);
-      row.cov50 = f((b) => b.cov50); row.cov95 = f((b) => b.cov95);
-      row.sharp = f((b) => b.sharpness); row.per100k = f((b) => b.wis_per_100k);
-      row.comp = { spread: f((b) => b.sharpness_component), over: f((b) => b.overprediction_penalty), under: f((b) => b.underprediction_penalty) };
-      row.cal = LEVELS.map((_, i) => f((b) => calOf(b.calibration)[i]));
-      row.n = hs.reduce((s, h) => s + (byH[h]?.n || 0), 0);
-      row.rel = isBase ? 1 : row.wis != null && baseSub ? row.wis / baseSub : null;
-      row.delta = row.rel != null ? (row.rel - 1) * 100 : null;
-    } else {
-      row.wis = num(r[wisKey]);
-      row.mae = num(r[log ? "mae_log" : "mae"]);
-      row.cov50 = num(r.cov50); row.cov95 = num(r.cov95);
-      row.sharp = num(r.sharpness); row.per100k = num(r.wis_per_100k);
-      row.comp = { spread: num(r.decomp_sharpness), over: num(r.decomp_overpred), under: num(r.decomp_underpred) };
-      row.cal = calOf(r.calibration);
-      row.rel = num(r[log ? "relative_wis_log" : "relative_wis"]);
-      if (isBase && id === eff) row.rel = 1;
-      row.delta = num(r[log ? "pct_diff_vs_baseline_log" : "pct_diff_vs_baseline"]);
-      row.wins = num(r[log ? "weeks_won_log" : "weeks_won"]);
-      row.competed = num(r.weeks_competed) || null;
-    }
+    row.wis = num(r[wisKey]);
+    row.mae = num(r[log ? "mae_log" : "mae"]);
+    row.cov50 = num(r.cov50); row.cov95 = num(r.cov95);
+    row.sharp = num(r.sharpness); row.per100k = num(r.wis_per_100k);
+    row.comp = { spread: num(r.decomp_sharpness), over: num(r.decomp_overpred), under: num(r.decomp_underpred) };
+    row.cal = calOf(r.calibration);
+    row.rel = num(r[log ? "relative_wis_log" : "relative_wis"]);
+    if (isBase && id === eff) row.rel = 1;
+    row.delta = num(r[log ? "pct_diff_vs_baseline_log" : "pct_diff_vs_baseline"]);
+    row.wins = num(r[log ? "weeks_won_log" : "weeks_won"]);
+    row.competed = num(r.weeks_competed) || null;
     row.cov80 = row.cal[LEVELS.indexOf(0.8)];
     if (row.n === 0) row.active = false;
     return row;
@@ -276,17 +256,18 @@ export function horizonsLabel(horizons) {
 
 /**
  * The export's rows, in table order with the table's ranks (old viz's columns, natural scale).
- * @param {object} resp the /api/metrics response
+ * @param {object} resp the /api/next/metrics response
  * @param {{ order: string[], ranks: Map<string, number>, scope: object, target: string, scopeLabel: string,
- *           sourceOf(id: string): string }} o
+ *           sourceOf(id: string): string, full?: object | null }} o  full: as in rowsFrom, for the h columns
  * @returns {object[]}
  */
-export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sourceOf }) {
+export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sourceOf, full = null }) {
   const byId = new Map((resp?.rankings || []).map((r) => [r.model_id, r]));
+  const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
   const r2 = (v, d) => (typeof v === "number" && Number.isFinite(v) ? +v.toFixed(d) : null);
   return order.map((id) => {
     const r = byId.get(id) || {};
-    const bh = (h) => r2(r.by_horizon?.[h]?.wis, 2);
+    const bh = (h) => r2(allH.get(id)?.by_horizon?.[h]?.wis, 2);
     return {
       rank: ranks.get(id) ?? null, model_id: id, model_type: sourceOf(id), quantiles: r.quantile_count ?? null,
       tasks_evaluated: r.count ?? 0, overall_wis: r2(r.wis, 2), relative_wis: r2(r.relative_wis, 3),

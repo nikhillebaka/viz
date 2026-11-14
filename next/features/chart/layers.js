@@ -7,7 +7,8 @@
  *            (timing, not size, is what they say); labelled at their end, raw values in the readout
  *
  * The Layers pill sits beside the interval pill. Store key `layers` (ids, canonical order). Data comes from
- * old viz's endpoints (/api/surveillance, /api/season-curves, /api/peaks), fetched per (target, place,
+ * /api/next/surveillance (old viz's /api/surveillance, as-reported values unrounded) and old viz's
+ * /api/season-curves and /api/peaks, fetched per (target, place,
  * season) — the as-reported line per round — only for layers that are on (and when the menu opens, to
  * list what exists here); responses are cached. Everything that doesn't depend on the view is prepared
  * once per response; a frame only maps prepared points through the scene's scales into reused buffers. */
@@ -149,7 +150,7 @@ export class Layers {
     if (this.sig || this._sigP?.sk === this.sk) return this._sigP?.p;
     const fan = this.chart.fan, sk = this.sk;
     const dates = [...new Set([fan.rounds[0], fan.rounds.at(-1)])].filter(Boolean);
-    const p = this.#track(Promise.all(dates.map((date) => getJson("/api/surveillance", { target: fan.target, location: fan.location, date }))), sk, (rs) => {
+    const p = this.#track(Promise.all(dates.map((date) => getJson("/api/next/surveillance", { target: fan.target, location: fan.location, date }))), sk, (rs) => {
       const w1 = seasonWeek1(+fan.season.slice(0, 4)), w2 = w1 + 52 * WEEK;
       let ref = 0;
       for (const o of fan.observed) if (o.v > ref) ref = o.v;
@@ -167,9 +168,7 @@ export class Layers {
         const line = makeLine([...by].map(([t, v]) => ({ t, v })), { id: L.id, kind: "signal", name: L.name, end: L.end, unit: L.unit, k: ref / max, c: "var(--ink-tertiary)", alpha: 0.9 });
         if (line) lines.set(L.id, line);
       }
-      // as published: the server rounds it to one decimal, which loses proportion targets entirely
-      const target = this.chart.ctx.manifest.targetById.get(fan.target);
-      this.sig = { lines, asof: !!rs.at(-1)?.as_of?.available && target?.scale !== "proportion" };
+      this.sig = { lines, asof: !!rs.at(-1)?.as_of?.available };
     });
     this._sigP = { sk, p };
     return p;
@@ -201,7 +200,7 @@ export class Layers {
     this._asofTimer = setTimeout(() => {
       if (sk !== this.sk || this.wanted.asof !== iso) return;
       const ref = parseIso(iso);
-      this.#track(getJson("/api/surveillance", { target: fan.target, location: fan.location, date: iso }), sk, (r) => {
+      this.#track(getJson("/api/next/surveillance", { target: fan.target, location: fan.location, date: iso }), sk, (r) => {
         if (this.wanted.asof !== iso) return;
         const a = r?.as_of;
         const pts = a?.available ? (a.data || []).map((d) => ({ t: parseIso(d.date), v: d.value })).filter((p) => p.t < ref) : [];

@@ -272,6 +272,23 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+        elif name == "spatial":
+            # /api/spatial with values unrounded (proportions would round to 0.0)
+            self._handle_spatial(query, precise=True)
+        elif name == "surveillance":
+            # /api/surveillance with the as-of series unrounded
+            self._handle_surveillance(query, precise=True)
+        elif name == "metrics":
+            # /api/metrics, plus horizons=0,1 to score only those horizons (relative WIS computed on them)
+            raw = query.get("horizons", [""])[0].strip()
+            horizons = None
+            if raw and raw.lower() != "all":
+                try:
+                    horizons = sorted({int(h) for h in raw.split(",") if h.strip()}) or None
+                except ValueError:
+                    self._send_json({"error": f"Invalid horizons '{raw}' (expected e.g. '0,1')"}, status=400)
+                    return
+            self._handle_metrics(query, horizons=horizons)
         else:
             self._send_json({"error": f"Unknown endpoint '{path}'"}, status=404)
 
@@ -489,17 +506,17 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         self._send_json(DATA_LOADER.peaks.map_layer(target, ref_date, model_id))
 
-    def _handle_surveillance(self, query: dict):
+    def _handle_surveillance(self, query: dict, precise: bool = False):
         target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
         location = query.get("location", ["US"])[0]
         models = DATA_LOADER.scan_models()
         dates = [m.get("max_date") for m in models.values() if m.get("max_date")]
         fallback_date = max(dates) if dates else "2024-01-13"
         ref_date = query.get("date", [fallback_date])[0]
-        surv = DATA_LOADER.get_surveillance_streams(target, location, ref_date)
+        surv = DATA_LOADER.get_surveillance_streams(target, location, ref_date, precise=precise)
         self._send_json(surv)
 
-    def _handle_spatial(self, query: dict):
+    def _handle_spatial(self, query: dict, precise: bool = False):
         target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
@@ -513,7 +530,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "Missing 'date' parameter"}, status=400)
             return
 
-        spatial_data = DATA_LOADER.get_spatial_data(target, ref_date, model_ids, horizon=horizon_param)
+        spatial_data = DATA_LOADER.get_spatial_data(target, ref_date, model_ids, horizon=horizon_param, precise=precise)
         self._send_json(spatial_data)
 
     def _handle_heatmap(self, query: dict):
@@ -567,7 +584,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         seasons = [s.strip() for s in seasons_param.split(",") if s.strip()] or DATA_LOADER.get_forecast_seasons()
         self._send_json(DATA_LOADER.get_season_curves(target, location, seasons))
 
-    def _handle_metrics(self, query: dict):
+    def _handle_metrics(self, query: dict, horizons: Optional[List[int]] = None):
         target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
         loc_param = query.get("location", ["all"])[0]
         date_param = query.get("date", ["all"])[0]
@@ -590,6 +607,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             fair=fair_flag,
             weeks=weeks_param,
             phase=phase_param,
+            horizons=horizons,
         )
 
         try:
