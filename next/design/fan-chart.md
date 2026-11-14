@@ -86,20 +86,42 @@ charted first), click again or Escape to clear.
 ### Hover and the readout
 - The pointer's week gets a hairline. The readout is a solid panel (never glass) left of the reference
   date, under the top bubbles; if there is no room there, right of the hovered week.
-- In the forecast window: `Jan 3 · 1 wk ahead · 95%`, then a row per charted model (dot, name, median,
-  range; the focused model first, others dimmed while one is focused), a hovered grey model as its own
+- In the forecast window: `Jan 3 · 1 wk ahead · 95 · 50%`, then a row per charted model (dot, name,
+  median, one range per level, widest first; the focused model first, others dimmed while one is focused), a hovered grey model as its own
   row on top, "and 12 more selected" with the span of their medians under Show all, then Observed with
   a dot for each model whose interval missed it.
 - Outside it: the week and the observed value only.
 - Hidden while moving, while a popover is open, and when the pointer leaves.
 
 ### The interval pill
-`95% interval ▾` → menu: 95% · 80% · 50% · None (radio), a separator, Width rulers and Outcome (checks).
-With None the pill reads "No interval". Outcome off hides everything observed after the data cutoff
+`95% interval ▾` → menu: 95% · 80% · 50% (checks: any combination, as old viz allowed), a separator,
+Width rulers and Outcome (checks). The pill reads "95% interval", "95 · 50% intervals",
+"95 · 80 · 50% intervals", or "No interval" with none (medians only).
+Several levels draw as nested bands per model: each level a fill at the same whisper alpha (focus alpha
+for the focused model), so the centre reads darker and one level looks exactly as before; the thin edge
+only on the widest level the model has, so nested bands never become a stack of lines. The readout names
+the levels once in its header and gives each row a compact range per level (`42,980 · 28.3–60.2k ·
+37.7–47.9k`); with three, the ranges drop to the axis size. One level keeps its spaced, unabbreviated
+range. URL `pi=95,50` (old viz's format), `pi=none`/`pi=0`; storage `viz.levels`. Outcome off hides everything observed after the data cutoff
 (the dotted line, the hollow points, misses, the readout's Observed row), to show a forecast as it
-stood when it was made; old viz called this Truth. Medians are always drawn. The readout and rulers use the chosen level.
-A model without that level's quantiles (some submit 7) draws its median only, and its readout row
-shows "–" for the range.
+stood when it was made; old viz called this Truth. Medians are always drawn. Rulers and misses use the widest selected level.
+A model without a level's quantiles (some submit 7) skips that band (with none, its median only), and its
+readout row shows "–" for that range.
+
+### Layers
+Surveillance signals (NSSP ED visits %, ILINet %, FluSurv-NET per 100k) are not in the target's units, so
+the chart never draws one against the left axis as if it were:
+- **One signal on:** it gets its own right-hand axis in its units: tick labels at the right edge in the
+  left labels' style (mono, `--text-axis`, tertiary, above their lines), on the left axis's gridlines (no
+  gridlines of its own). Its scale is a round step per left gridline (1, 2, 2.5, 5 × 10ⁿ), the smallest
+  that keeps its season peak at or under the observed peak's height. A label hides where the top
+  bubbles, the "Showing 5 of 9" note or a model label would cover it. The end label names the unit
+  ("ILI+ %").
+- **Two or more:** each is scaled so its season peak meets the observed peak, and the end labels say so
+  ("ILI+ % · scaled"). Several right axes on one chart are unreadable; this is old viz's normalized mode,
+  anchored to the data instead of 0–100.
+- The readout always gives the real values. Scales are set when the data, the signals on, or the axis
+  goal change, never per frame (during a height zoom the right labels stay exact, just less round).
 
 ### Empty, loading and missing
 - **First load:** the paper with a hairline progress bar under the top edge; bubbles appear with the data.

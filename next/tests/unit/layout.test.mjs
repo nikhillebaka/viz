@@ -120,6 +120,20 @@ test("a model without the level's quantiles has a median and no band", () => {
   assert.ok(Number.isFinite(row.med) && Number.isNaN(row.lo) && row.missed === false);
 });
 
+test("several levels: nested bands, edges on the widest the model has; a range per level", () => {
+  const s = layoutFan(fan, base({ levels: [0.95, 0.8, 0.5] }), W, H);
+  const m0 = s.bands.find((b) => b.id === "m0"), seven = s.bands.find((b) => b.id === "seven");
+  assert.equal(m0.inner.length, 2);
+  assert.equal(seven.inner.length, 1, "seven lacks the 80% quantiles: that band is skipped");
+  const info = hoverInfo(fan, s, parseIso("2026-01-03"));
+  const r0 = info.rows.find((r) => r.id === "m0"), r7 = info.rows.find((r) => r.id === "seven");
+  assert.equal(r0.ranges.length, 3);
+  assert.ok(r0.ranges[0][0] < r0.ranges[1][0] && r0.ranges[1][0] < r0.ranges[2][0], "widest first");
+  assert.deepEqual([r0.lo, r0.hi], r0.ranges[0]);
+  assert.ok(Number.isNaN(r7.ranges[1][0]) && Number.isFinite(r7.ranges[2][0]));
+  assert.equal(layoutFan(fan, base({ levels: [] }), W, H).bands.length, 0);
+});
+
 test("focus orders, fills and dims; misses ring the focused model's misses", () => {
   const models = [{ id: "narrow", slot: 0, label: "narrow" }, { id: "m0", slot: 1, label: "m0" }];
   const s = layoutFan(fan, base({ models, focus: "narrow" }), W, H);

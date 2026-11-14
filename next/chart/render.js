@@ -81,6 +81,7 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
   for (const d of S.ticks) { hline(d.y, 0, w); stroke(hair, hairW); }
   ctx.textBaseline = "alphabetic";
   for (const d of S.ticks) if (d.text) text(d.text, S.tickX, d.y - 6, F_AXIS, ink3);
+  if (S.layers?.axis) for (const d of S.layers.axis.ticks) text(d.text, S.layers.axis.x, d.y, F_AXIS, ink3, "right");
   if (S.shade != null) { ctx.fillStyle = cssColor("var(--shade-forecast, var(--fill-hover))"); ctx.fillRect(S.shade, 0, Math.max(0, w - S.shade), ay); }
   hline(ay, 0, w); stroke(cssColor("var(--line-axis)"), 1);
   for (const d of S.months) text(d.text, d.x, ay + 20, F_LABEL, ink3);
@@ -104,7 +105,14 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
     if (b.fill) {
       path(b.lo);
       for (let i = b.hi.length - 2; i >= 0; i -= 2) ctx.lineTo(b.hi[i], b.hi[i + 1]);
-      ctx.closePath(); ctx.fillStyle = c; ctx.globalAlpha = b.fill === "focus" ? focusA : whisper; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.closePath(); ctx.fillStyle = c; ctx.globalAlpha = b.fill === "focus" ? focusA : whisper; ctx.fill();
+      // narrower levels: the same alpha again inside, so the centre reads darker; no edges
+      for (const r of b.inner) {
+        path(r.lo);
+        for (let i = r.hi.length - 2; i >= 0; i -= 2) ctx.lineTo(r.hi[i], r.hi[i + 1]);
+        ctx.closePath(); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
     }
     path(b.lo); stroke(c, edge, b.edgeAlpha); path(b.hi); stroke(c, edge, b.edgeAlpha);
   }
@@ -166,7 +174,8 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
 
 /* ---------------- context layers (features/chart/layers.js) ----------------
  * scene.layers = { lines: [{ n, xy, brk, c, w, alpha, dash?, clipX }], marks: [{ kind: "peak" | "observed",
- * x, y, c, alpha, x0?, x1?, y0?, y1? }], labels: [{ x, y, text, c, alpha }], font }. Lines go under
+ * x, y, c, alpha, x0?, x1?, y0?, y1? }], labels: [{ x, y, text, c, alpha }], font, axis: { x, ticks: [{ y,
+ * text }] } | null (one signal's right-hand axis, drawn with the left tick labels) }. Lines go under
  * everything else in the plot; marks and labels over the medians, under the model labels. */
 function layerLines(ctx, L) {
   for (const l of L.lines) {

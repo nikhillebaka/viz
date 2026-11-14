@@ -4,11 +4,10 @@ import { loadManifest } from "./lib/api.js";
 import { createStore } from "./lib/store.js";
 import { h, storage } from "./lib/dom.js";
 import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted } from "./features/selection.js";
-import { defaults, defaultDate, readUrl, syncUrl } from "./features/url.js";
+import { defaults, defaultDate, readUrl, syncUrl, parseLevels } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
 
-const LEVELS = [0.95, 0.8, 0.5, 0];
 const root = document.getElementById("app");
 
 /* What this browser remembers, validated against the manifest (anything unknown is ignored). */
@@ -25,8 +24,12 @@ function fromStorage(manifest) {
       showAll: !!s.showAll, baseline: s.baseline !== false,
     });
   }
-  const level = storage.get("viz.level");
-  if (LEVELS.includes(level)) out.level = level;
+  const levels = storage.get("viz.levels");
+  if (Array.isArray(levels)) out.levels = parseLevels(levels);
+  else { // an older browser's single level, once (0: none)
+    const level = storage.get("viz.level");
+    if (typeof level === "number") storage.set("viz.levels", (out.levels = parseLevels([level])));
+  }
   const rulers = storage.get("viz.rulers");
   if (typeof rulers === "boolean") out.rulers = rulers;
   const layers = storage.get("viz.layers");
@@ -45,7 +48,7 @@ function persist(store) {
       storage.set("viz.places", [...new Set([s.location, prev.location, ...(Array.isArray(places) ? places : [])].filter((x) => typeof x === "string" && x))].slice(0, 4));
     }
     if (changed.has("sel")) storage.set("viz.selection", { selected: s.sel.selected, charted: chartedBySlot(s.sel), showAll: s.sel.showAll, baseline: s.sel.baseline });
-    if (changed.has("level")) storage.set("viz.level", s.level);
+    if (changed.has("levels")) storage.set("viz.levels", s.levels);
     if (changed.has("rulers")) storage.set("viz.rulers", s.rulers);
     if (changed.has("layers")) storage.set("viz.layers", s.layers);
     if (changed.has("theme")) storage.set("viz.theme", s.theme);

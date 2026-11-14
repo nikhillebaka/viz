@@ -18,7 +18,7 @@ const rec = manifest.recommended.filter((id) => id !== manifest.baseline && mani
 const more = ["UMass-gbqr", "UMass-AR2", "flusight:FluSight-ensemble", "flusight:ACCIDDA-Chromantis", "UMass-gbqr_1src", "axial-tfm_L4v5"].filter((id) => manifest.modelById.has(id));
 const store = createStore({
   target: manifest.default_target, location: "US", date: rounds.at(-1).iso,
-  sel: S.create({ selected: [...rec, ...more] }), level: 0.95, rulers: false, outcome: true, focus: null, theme: "dark",
+  sel: S.create({ selected: [...rec, ...more] }), levels: [0.95], rulers: false, outcome: true, focus: null, theme: "dark",
 });
 
 /* ?chart=1: a stand-in for FanChart with the real fan for the store's target, season and place */

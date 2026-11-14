@@ -30,7 +30,7 @@ export default async function smoke(page, t) {
 
   await t.step("input helpers reach the page", async () => {
     // a blank page, so the app's own keys (← → step the date, = zooms) can't take the events
-    await page.goto("about:blank");
+    await page.goto("data:text/html,<!doctype html><title>pad</title><body></body>");
     await page.eval(() => {
       document.body.innerHTML = "";
       document.body.style.margin = "0";

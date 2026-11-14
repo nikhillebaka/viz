@@ -12,7 +12,8 @@
  *    the cutoff is drawn.
  *  - everything after the cutoff is faintly shaded; the cutoff and reference date are ticks under the
  *    axis, labelled outward on two lines (name, then date).
- *  - one interval level: a whisper fill plus fine edges at half strength, anchored at the cutoff.
+ *  - interval levels (any of 95 · 80 · 50): nested fills, each layer at the whisper alpha so the centre
+ *    reads darker, and fine edges at half strength on the widest level only, anchored at the cutoff.
  *    Medians are the only solid lines with week dots.
  *  - focus: the focused model gets a stronger fill and edge; the others keep only their edges, and their
  *    medians and labels dim.
@@ -26,7 +27,8 @@
  *   domain   [ms, ms] the x view (default: 14 weeks before the reference date to the last horizon)
  *   ymax     the continuous y-axis maximum (already divided by the height zoom)
  *   pad      { l, r, t, b } plot insets; topClear: y above which y tick labels hide (default pad.t − 32)
- *   level    0.95 | 0.8 | 0.5 | 0 (no bands; medians always)       focus: a charted id, or null
+ *   levels   [0.95, 0.8, 0.5] any of them, widest first ([]: no bands; medians always)
+ *            (or level: one of them, 0 for none)                     focus: a charted id, or null
  *   hover    { t: ms week } | null: a hairline at that week          rulers: 0–1 (animates in and out)
  *   context  [{ id, label }] grey medians (Show all)                 hot: a context id lifted and named
  *   absent   one quiet line under the labels ("2 not in 2023–24"), or null
@@ -36,13 +38,15 @@
  *
  * The scene (plain numbers, strings and arrays, plus the two scales):
  *   w, h, pad, ay (axis y), topClear, x, y (lib/scale.js linear scales: ms → px, value → px)
- *   t, di (the nearest timeline index), settle (the index the labels name), whole (t is on a week), ref (ms), cutoff (ms), level, lastH,
+ *   t, di (the nearest timeline index), settle (the index the labels name), whole (t is on a week), ref (ms), cutoff (ms), level (the widest, or 0), levels, lastH,
  *   ymax, outcome, focus (the focused id when it is charted, else null), fonts { label, axis }
  *   ticks    [{ v, y, text | null }]  gridlines from the round step, up to the top edge; tickX
  *   months   [{ x, text }]            shade: x where the forecast shade starts
  *   dates    { cut: { x, date }, ref: { x, date } }   the two date ticks
- *   series   [{ id, slot, label, c, pts }]  charted models with a forecast (pts: { t, h, lo, hi, med, anchor? })
- *   bands    [{ id, c, fill: "whisper" | "focus" | null, edgeAlpha, lo, hi }]  drawing order
+ *   series   [{ id, slot, label, c, pts }]  charted models with a forecast (pts: { t, h, lo, hi, med, anchor? } at
+ *            the widest level; lv: pts per level, null where the model has none)
+ *   bands    [{ id, c, fill: "whisper" | "focus" | null, edgeAlpha, lo, hi, inner: [{ lo, hi }] }]  lo/hi:
+ *            the widest level the model has (with edges); inner: the narrower ones (fill only)
  *   medians  [{ id, c, alpha, line, dots }]                                   drawing order
  *   context  [{ id, label, pts, line }]  contextAlpha;  hot: { id, line } | null (drawn over the rest)
  *   observed { all: [path], known: [path], points: [{ x, y, alpha, fill }] }  (paths split at gaps)
@@ -161,7 +165,8 @@ export function layoutFan(fan, opts, w, h) {
   const pad = { l: 56, r: 150, t: 72, b: 64, ...opts.pad };
   const D = fan.dates, n = D.length;
   const lastH = fan.horizons.length ? Math.max(...fan.horizons) : 3;
-  const level = opts.level ?? 0.95, outcome = opts.outcome !== false;
+  const levels = Array.isArray(opts.levels) ? opts.levels : opts.level === 0 ? [] : [opts.level ?? 0.95];
+  const level = levels[0] ?? 0, outcome = opts.outcome !== false;
   // t: fractional timeline index. Integer t is an ordinary week; in between, everything interpolates.
   const t = opts.t ?? n - 1, di = clamp(Math.round(t), 0, Math.max(0, n - 1)), whole = Math.abs(t - di) < 1e-4;
   const ref = whole ? D[di] : D[0] + t * WEEK;
@@ -181,8 +186,10 @@ export function layoutFan(fan, opts, w, h) {
   const S = [], missing = [];
   for (const m of models) {
     const pts = pointsAt(fan, m.id, t, level);
-    if (pts) S.push({ id: m.id, slot: m.slot, label: m.label, c: seriesColor(m.slot), pts });
-    else missing.push(m);
+    if (!pts) { missing.push(m); continue; }
+    const lv = [pts];
+    for (let k = 1; k < levels.length; k++) lv.push(pointsAt(fan, m.id, t, levels[k]));
+    S.push({ id: m.id, slot: m.slot, label: m.label, c: seriesColor(m.slot), pts, lv });
   }
   const B = level ? S.filter((s) => bandable(s.pts)) : [];
   const C = [];
@@ -213,11 +220,17 @@ export function layoutFan(fan, opts, w, h) {
   // while between weeks, the labels name the week the chart will settle on (what the stepper shows)
   const dates = { cut: { x: xc, date: day(whole && si === di ? cutoff : cutoffFor(fan, D[si])) }, ref: { x: xr, date: day(D[si]) } };
 
-  // bands: unfocused first so the focused one sits on top
-  const bands = order(B).map((b) => ({
+  // bands: unfocused first so the focused one sits on top; per model, the levels it has quantiles for
+  const BL = [];
+  for (const s of S) {
+    const ls = s.lv.filter((pts) => pts && bandable(pts));
+    if (ls.length) BL.push({ id: s.id, c: s.c, ls });
+  }
+  const bands = order(BL).map((b) => ({
     id: b.id, c: b.c, fill: dim(b.id) ? null : hasFocus ? "focus" : "whisper",
     edgeAlpha: Math.min(1, 0.55 * (hasFocus ? (b.id === f ? 1.5 : 0.7) : 1)),
-    lo: path(b.pts, "lo"), hi: path(b.pts, "hi"),
+    lo: path(b.ls[0], "lo"), hi: path(b.ls[0], "hi"),
+    inner: b.ls.slice(1).map((pts) => ({ lo: path(pts, "lo"), hi: path(pts, "hi") })),
   }));
   const hoverX = opts.hover && Number.isFinite(opts.hover.t) ? x(opts.hover.t) : null;
   const context = C.map((c) => ({ id: c.id, label: c.label, pts: c.pts, line: path(c.pts, "med") }));
@@ -335,7 +348,7 @@ export function layoutFan(fan, opts, w, h) {
   }
 
   return {
-    w, h, pad, ay, topClear, x, y, t, di, settle: si, whole, ref, cutoff, level, lastH, ymax, outcome,
+    w, h, pad, ay, topClear, x, y, t, di, settle: si, whole, ref, cutoff, level, levels, lastH, ymax, outcome,
     focus: hasFocus ? f : null,
     fonts: { label: font(500, F.chart, F.sans), axis: font(400, F.axis, F.mono) },
     ticks, tickX: Math.min(20, pad.l), months, shade: xc, dates,
@@ -350,12 +363,13 @@ export function layoutFan(fan, opts, w, h) {
  * @param {object} scene from layoutFan
  * @param {number} t the hovered week, ms
  * @returns {{ t: number, h: number | null, observed: number | undefined,
- *   rows: { id: string, label: string, slot: number | "baseline", med: number, lo: number, hi: number, missed: boolean }[],
+ *   rows: { id: string, label: string, slot: number | "baseline", med: number, lo: number, hi: number,
+ *     ranges: [lo, hi][], missed: boolean }[],
  *   hot: { id: string, label: string, med: number, lo: number, hi: number } | null,
  *   context: { n: number, min: number | null, max: number | null } }}
  *   h is the horizon when t is in the forecast window, else null (then rows are empty). rows are the
- *   charted models with a value there, the focused one first. lo/hi are NaN without the level's
- *   quantiles. observed is undefined for an unobserved week, and for weeks after the cutoff when the
+ *   charted models with a value there, the focused one first. lo/hi are the widest level's, ranges one
+ *   [lo, hi] per scene level (widest first); NaN without that level's quantiles. observed is undefined for an unobserved week, and for weeks after the cutoff when the
  *   outcome is hidden; missed is true when the observed value is outside the row's interval.
  */
 export function hoverInfo(fan, scene, t) {
@@ -367,7 +381,8 @@ export function hoverInfo(fan, scene, t) {
     const p = at(s.pts);
     if (!p) continue;
     const missed = observed !== undefined && Number.isFinite(p.lo) && Number.isFinite(p.hi) && (observed < p.lo || observed > p.hi);
-    rows.push({ id: s.id, label: s.label, slot: s.slot, med: p.med, lo: p.lo, hi: p.hi, missed });
+    const ranges = s.lv.map((pts, k) => { const q = k ? pts && at(pts) : p; return q ? [q.lo, q.hi] : [NaN, NaN]; });
+    rows.push({ id: s.id, label: s.label, slot: s.slot, med: p.med, lo: p.lo, hi: p.hi, ranges, missed });
   }
   if (scene.focus != null) rows.sort((a, b) => (b.id === scene.focus) - (a.id === scene.focus));
   let n = 0, min = Infinity, max = -Infinity, hot = null;

@@ -7,6 +7,18 @@ import { seriesColor } from "../../chart/layout.js";
 
 const DASH = "–";
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const ok = (lo, hi) => Number.isFinite(lo) && Number.isFinite(hi);
+
+/* "95 · 50%": the levels, named once */
+export const levelsText = (levels) => levels.map((l) => Math.round(l * 100)).join(" · ") + "%";
+
+/* A compact range for several levels: three significant digits above a thousand, the unit once
+ * ("9.1–15.8k", "1.2–2.31%"). */
+function tightRange(value, lo, hi) {
+  const f = (v) => { const a = Math.abs(v); return a >= 1e6 ? `${+(v / 1e6).toPrecision(3)}M` : a >= 1e3 ? `${+(v / 1e3).toPrecision(3)}k` : value(v); };
+  const a = f(lo), b = f(hi), unit = /[^\d.,]*$/.exec(b)[0];
+  return `${unit && a.endsWith(unit) ? a.slice(0, -unit.length) : a}–${b}`;
+}
 
 export class Readout {
   /** @param {HTMLElement} parent the chart view */
@@ -25,7 +37,7 @@ export class Readout {
    * Shows the readout for one hovered week, or hides it when there is nothing to say.
    * @param {ReturnType<import("../../chart/layout.js").hoverInfo>} info
    * @param {object} scene the scene just drawn
-   * @param {{ value: (v: number) => string, level: number, rulers: boolean, showAll: boolean,
+   * @param {{ value: (v: number) => string, levels: number[], rulers: boolean, showAll: boolean,
    *           more: number, focus: string | null, minX: number, layers?: object[] }} o  more: every grey
    *   (context) model in the selection; focus: the focused (or previewed) model on the chart; minX: the
    *   readout's leftmost x (right of a panel taking room at the left); layers: rows for the visible layers
@@ -55,12 +67,16 @@ export class Readout {
     const v = o.value, inWindow = info.h != null;
     const obs = info.observed;
     if (!inWindow) return obs === undefined ? null : { head: fmtDay(info.t), right: "", obs: v(obs), history: true };
-    const range = o.level > 0, width = range && o.rulers;
+    const L = o.levels || [], range = L.length > 0, width = range && o.rulers;
+    // one level: "9,120 – 15,800" as ever; several: one compact range each, widest first
+    const ranges = (r) => (L.length === 1
+      ? [ok(r.lo, r.hi) ? `${v(r.lo)} – ${v(r.hi)}` : DASH]
+      : L.map((_, k) => { const [lo, hi] = r.ranges?.[k] ?? [NaN, NaN]; return ok(lo, hi) ? tightRange(v, lo, hi) : DASH; }));
     const rows = [];
     const row = (r, c, dim) => ({
       c, name: r.label, med: v(r.med),
-      range: range ? (Number.isFinite(r.lo) && Number.isFinite(r.hi) ? `${v(r.lo)} – ${v(r.hi)}` : DASH) : null,
-      width: width ? (Number.isFinite(r.lo) && Number.isFinite(r.hi) ? v(r.hi - r.lo) : DASH) : null,
+      ranges: range ? ranges(r) : null,
+      width: width ? (ok(r.lo, r.hi) ? v(r.hi - r.lo) : DASH) : null,
       dim,
     });
     if (info.hot) rows.push(row(info.hot, "var(--ink-tertiary)", false));
@@ -78,8 +94,8 @@ export class Readout {
     if (!rows.length && !more && !hasObs) return null;
     return {
       head: `${fmtDay(info.t)} · ${info.h === 0 ? "this week" : `${info.h} wk ahead`}`,
-      right: range ? `${Math.round(o.level * 100)}%` : "",
-      range, width, rows, more,
+      right: range ? levelsText(L) : "",
+      range: range ? L.length : 0, width, rows, more,
       obs: hasObs ? v(obs) : null,
       misses: hasObs ? info.rows.filter((r) => r.missed).map((r) => seriesColor(r.slot)) : [],
     };
@@ -104,10 +120,11 @@ export class Readout {
         h("td", null, h("span", { class: "c-readout-name" }, "Observed")),
         h("td", { class: "num" }, m.obs)))];
     }
+    const rc = m.range > 2 ? "num quiet fc-readout-tight" : "num quiet";
     const cells = (r) => [
       h("td", null, h("span", { class: "c-readout-name" }, h("i", { class: "c-dot", style: { background: r.c } }), h("span", { class: "fc-readout-label" }, r.name))),
       h("td", { class: "num" }, r.med),
-      m.range ? h("td", { class: "num quiet" }, r.range) : null,
+      ...(m.range ? r.ranges.map((x) => h("td", { class: rc }, x)) : []),
       m.width ? h("td", { class: "num quiet" }, r.width) : null,
     ];
     const rows = m.rows.map((r) => h("tr", { class: r.dim ? "dim" : null }, cells(r)));
@@ -115,7 +132,7 @@ export class Readout {
       rows.push(h("tr", { class: "fc-readout-more" },
         h("td", null, h("span", { class: "c-readout-name quiet" }, m.more.name)),
         m.range ? h("td") : null,
-        h("td", { class: "num quiet" }, m.more.span),
+        h("td", { class: "num quiet", colspan: m.range > 1 ? String(m.range) : null }, m.more.span),
         m.width ? h("td") : null));
     }
     const out = [head];

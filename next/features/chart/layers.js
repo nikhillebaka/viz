@@ -3,8 +3,10 @@
  *   seasons  Past seasons: earlier seasons' observed data, aligned by week of season, end-labelled
  *   peaks    each charted model's peak forecast for the round (▲ at median week × size, 50% whiskers) and
  *            the observed peak (◇)
- *   nssp · ili · flusurv  surveillance signals, each scaled so its season peak meets the observed peak
- *            (timing, not size, is what they say); labelled at their end, raw values in the readout
+ *   nssp · ili · flusurv  surveillance signals, in their own units (design/fan-chart.md, "Layers"): one on,
+ *            it gets a right-hand axis whose round ticks sit on the left axis's gridlines, its end label
+ *            naming the unit; two or more, each is scaled so its season peak meets the observed peak and
+ *            labelled "· scaled". Raw values in the readout either way
  *
  * The Layers pill sits beside the interval pill. Store key `layers` (ids, canonical order). Data comes from
  * /api/next/surveillance (old viz's /api/surveillance, as-reported values unrounded) and old viz's
@@ -13,7 +15,7 @@
  * list what exists here); responses are cached. Everything that doesn't depend on the view is prepared
  * once per response; a frame only maps prepared points through the scene's scales into reused buffers. */
 import { h, on, tokenNum } from "../../lib/dom.js";
-import { WEEK, DAY, parseIso } from "../../lib/scale.js";
+import { WEEK, DAY, parseIso, niceStep } from "../../lib/scale.js";
 import { glass } from "../../ui/glass.js";
 import { openMenu, activeLayer } from "../../ui/floating.js";
 import { pill } from "../../ui/controls.js";
@@ -34,6 +36,14 @@ const PAST = 4;                  // past seasons drawn, newest first
 const SEASON_ALPHA = [0.6, 0.45, 0.34, 0.26];
 const LABEL_GAP = 12;
 const ASOF_DASH = [4, 3];
+const AXIS_CHAR = 6.3;           // ≈ px per character of the mono axis font (the right ticks' room)
+
+// the smallest round step (1, 2, 2.5, 5 × 10ⁿ) at or above v
+function stepAtLeast(v) {
+  const p = 10 ** Math.floor(Math.log10(v));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v * (1 - 1e-9)) return m * p;
+  return 10 * p;
+}
 
 /**
  * Valid layer ids from a list or a comma string, in canonical order, without duplicates.
@@ -108,7 +118,10 @@ export class Layers {
     this.wanted = { asof: "", peaks: "" };
     this.pending = 0;
     this._asofTimer = 0;
-    this.marks = { lines: [], marks: [], labels: [], font: "" };
+    this.marks = { lines: [], marks: [], labels: [], font: "", axis: null };
+    this.axisTicks = [];
+    this.goal = 0;          // the chart's resting axis maximum (FanChart #axis)
+    this.right = null;      // the one signal on, which owns the right-hand axis, or null
 
     this.pill = pill({ label: "Layers", chevron: true, className: "fc-layers", onClick: () => this.#open() });
     this.pill.setAttribute("aria-haspopup", "menu");
@@ -141,7 +154,28 @@ export class Layers {
     if (this.on.has("seasons")) this.#loadCurves();
     if (this.on.has("asof")) this.#loadAsof(s.date);
     if (this.on.has("peaks")) this.#loadPeaks();
+    this.#fit();
     this.#label();
+  }
+
+  /** The chart's axis maximum settled on a new goal: the right-hand axis follows (never per frame). */
+  axis(goal) { if (goal !== this.goal) { this.goal = goal; this.#fit(); } }
+
+  /* Signal scales, when the signals on, their data or the axis change. One signal: a round step of its
+   * own on each left gridline (its peak at or under the observed peak's height); several: each to the
+   * observed peak, labelled as scaled. */
+  #fit() {
+    const sig = this.sig;
+    if (!sig) { this.right = null; return; }
+    const vis = SIGNALS.filter((L) => this.on.has(L.id) && sig.lines.has(L.id)).map((L) => sig.lines.get(L.id));
+    const one = vis.length === 1 ? vis[0] : null;
+    for (const l of sig.lines.values()) {
+      let k = l.k0;
+      if (l === one) { const step = niceStep(this.goal > 0 ? this.goal : l.ref, 5); k = step / stepAtLeast(step / l.k0); }
+      if (k !== l.k) { l.k = k; for (let i = 0; i < l.n; i++) l.vs[i] = l.raw[i] * k; }
+      l.lab.text = vis.length > 1 ? `${l.end} · scaled` : l.end;
+    }
+    this.right = one;
   }
 
   /* ---------------- loading ---------------- */
@@ -173,10 +207,11 @@ export class Layers {
         let max = 0;
         for (const v of by.values()) if (v > max) max = v;
         if (!(max > 0)) continue;
-        const line = makeLine([...by].map(([t, v]) => ({ t, v })), { id: L.id, kind: "signal", name: L.name, end: L.end, unit: L.unit, k: ref / max, c: "var(--ink-tertiary)", alpha: 0.9 });
+        const line = makeLine([...by].map(([t, v]) => ({ t, v })), { id: L.id, kind: "signal", name: L.name, end: L.end, unit: L.unit, k: ref / max, k0: ref / max, ref, c: "var(--ink-tertiary)", alpha: 0.9 });
         if (line) lines.set(L.id, line);
       }
       this.sig = { lines, asof: !!rs.at(-1)?.as_of?.available };
+      this.#fit();
     });
     this._sigP = { sk, p };
     return p;
@@ -291,7 +326,7 @@ export class Layers {
    */
   layout(scene) {
     const M = this.marks, onL = this.on;
-    M.lines.length = 0; M.marks.length = 0; M.labels.length = 0;
+    M.lines.length = 0; M.marks.length = 0; M.labels.length = 0; M.axis = null;
     if (!onL.size || !this.chart.fan) return null;
     const { x, y } = scene, xc = x(scene.cutoff);
     const after = scene.outcome ? null : xc;   // without the outcome nothing observed after the cutoff
@@ -336,7 +371,30 @@ export class Layers {
     }
 
     if (onL.has("peaks") && this.peaks) this.#peakMarks(scene, xc);
+    if (this.right && M.lines.includes(this.right)) this.#rightAxis(scene);
     return M.lines.length || M.marks.length ? M : null;
+  }
+
+  /* The one signal's axis: its values at the left axis's labelled gridlines, right-aligned at the right
+   * edge, above their lines. Hidden under the "Showing 5 of 9" note and where a model label sits. */
+  #rightAxis(scene) {
+    const l = this.right, ticks = this.axisTicks, x = scene.w - scene.tickX;
+    const note = this.chart.bubbles?.note;
+    const clear = note?.classList.contains("is-shown") ? note.offsetTop + note.offsetHeight : -Infinity;
+    ticks.length = 0;
+    for (const d of scene.ticks) {
+      if (d.text == null) continue;
+      const ty = d.y - 6;
+      if (ty - 12 < clear) continue;
+      const text = String(+(d.v / l.k).toPrecision(4)), x0 = x - text.length * AXIS_CHAR - 6;
+      if (scene.labels.some((b) => b.x + 10 + b.len > x0 && Math.abs(b.y - (ty - 4)) < 12)) continue;
+      ticks.push({ y: ty, text });
+    }
+    // the topmost tick names the unit, so the axis reads on its own when the end label is hidden
+    let top = null;
+    for (const d of ticks) if (!top || d.y < top.y) top = d;
+    if (top) top.text = `${l.end} · ${top.text}`;
+    this.marks.axis = { x, ticks };
   }
 
   #peakMarks(scene, xc) {

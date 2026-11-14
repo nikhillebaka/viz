@@ -12,7 +12,7 @@ last. Product-shaping ones are marked **owner** until the owner has seen them.
 | 5 | Glass: fixed bubbles use the backdrop refraction, chart bubbles the WebGL pass, panels are frosted. No renderer switching on scroll. | The prototype's switch-on-scroll. | The trailing image came from mixing a fixed element with a pass that redraws a frame late. Choosing by where the element lives removes the case. |
 | 6 | Glass no longer flips text between light and dark by sampling what's under it. | Keep the sampler (a MutationObserver on the whole document, `elementsFromPoint` per sample). | Costly and fragile for a case the tint already covers. Revisit if a bubble becomes unreadable over the heatmap. **owner** |
 | 7 | One motion curve, critically damped. The prototype's default spring overshot by 1.6%. | — | "No bouncy springs." |
-| 8 | Rulers and Misses pills become one "95% interval" pill; misses have no toggle. | Keep two toggles; add a third for the level. | See `design/fan-chart.md`. **owner** |
+| 8 | Rulers and Misses pills become one "95% interval" pill; misses have no toggle. Its levels are checks: any combination of 95 · 80 · 50, nested bands (owner's choice). | Keep two toggles; add a third for the level. One level at a time. | See `design/fan-chart.md`. |
 | 9 | The readout leads with the median and works over the observed history. | — | See `design/fan-chart.md`. |
 | 10 | Model names are the metadata abbreviation, disambiguated by team, then hub, only when needed. | Full ids everywhere; regex stripping. | 134 synced hub models share abbreviations with local ones. |
 | 11 | Family names are merged case-insensitively in the manifest ("Ar" + "AR" → "AR"). | Fix `infer_model_family` in `core/`. | `core/` behaviour must not change for old viz. |

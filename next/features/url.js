@@ -19,8 +19,18 @@ import { parseLayers } from "./chart/layers.js";
 /** The parameters this module owns, in the order they are written. */
 export const KEYS = Object.freeze(["target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus", "lay",
   "ss", "wk", "ph", "hz", "pl", "fair", "bl", "rk", "sc", "sort", "cols", "open", "hm", "mp", "pk"]);
-const LEVELS = [0.95, 0.8, 0.5];
-const DEFAULT_LEVEL = 0.95;
+export const LEVELS = Object.freeze([0.95, 0.8, 0.5]);
+const DEFAULT_LEVELS = Object.freeze([0.95]);
+
+/**
+ * Valid interval levels, widest first, without duplicates ([] = medians only).
+ * @param {unknown} v an array of levels (0.95 …)
+ * @returns {number[]}
+ */
+export function parseLevels(v) {
+  const set = new Set(Array.isArray(v) ? v : []);
+  return LEVELS.filter((l) => set.has(l));
+}
 
 /**
  * The state a view has when nothing says otherwise (no URL, no storage): the manifest's default target,
@@ -28,14 +38,14 @@ const DEFAULT_LEVEL = 0.95;
  * that default selection), 95%, no rulers.
  * @param {import("../lib/api.js").Manifest} manifest
  * @param {{ selected: string[] }} [sel] the selection the view starts with, which picks the date
- * @returns {{ target: string, location: string, date: string, sel: object, level: number, rulers: boolean, focus: null }}
+ * @returns {{ target: string, location: string, date: string, sel: object, levels: number[], rulers: boolean, focus: null }}
  */
 export function defaults(manifest, sel) {
   const target = manifest.targetById.has(manifest.default_target) ? manifest.default_target : manifest.targets?.[0]?.id ?? "";
   const location = manifest.locationById.has("US") ? "US" : manifest.locations?.[0]?.id ?? "US";
   const picks = (manifest.recommended || []).filter((id) => id !== manifest.baseline && manifest.modelById.has(id)).slice(0, 3);
   const def = create({ selected: picks });
-  return { target, location, date: defaultDate(manifest, sel ?? def), sel: def, level: DEFAULT_LEVEL, rulers: false, focus: null };
+  return { target, location, date: defaultDate(manifest, sel ?? def), sel: def, levels: [...DEFAULT_LEVELS], rulers: false, focus: null };
 }
 
 /**
@@ -83,7 +93,7 @@ const isModel = (manifest, id) => !!id && id !== manifest.baseline && manifest.m
  * Reads the parameters this module owns. Pure.
  * @param {string | URLSearchParams} search a query string ("?a=b" or "a=b") or params
  * @param {import("../lib/api.js").Manifest} manifest
- * @returns {object} a partial state: any of target, location, date, sel, level, rulers, focus, layers; plus
+ * @returns {object} a partial state: any of target, location, date, sel, levels, rulers, focus, layers; plus
  *   `selFlags` ({ showAll?, baseline? }) when the URL sets all / base without a model list, to apply to
  *   whatever selection the page starts with. Invalid values are simply absent.
  */
@@ -115,10 +125,10 @@ export function parseUrl(search, manifest) {
 
   if (q.has("pi")) {
     const v = q.get("pi").trim().toLowerCase();
-    if (v === "none" || v === "0") out.level = 0;
+    if (v === "none" || v === "0") out.levels = [];
     else {
-      const ls = v.split(",").map((s) => +s.trim() / 100).filter((l) => LEVELS.includes(l));
-      if (ls.length) out.level = Math.max(...ls); // an old link's list reads as its widest
+      const ls = parseLevels(v.split(",").map((s) => +s.trim() / 100));
+      if (ls.length) out.levels = ls;
     }
   }
   if (q.has("rulers")) out.rulers = q.get("rulers") === "1";
@@ -218,7 +228,7 @@ const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]
 /**
  * The query string for a state. Pure. Defaults are left out; parameters in `search` that this module
  * doesn't own are kept, after its own, in their original order.
- * @param {{ target: string, location: string, date: string, sel: object, level: number, rulers: boolean, focus: string | null }} state
+ * @param {{ target: string, location: string, date: string, sel: object, levels: number[], rulers: boolean, focus: string | null }} state
  * @param {import("../lib/api.js").Manifest} manifest
  * @param {string | URLSearchParams} [search=""] the current query, for the parameters to keep
  * @returns {string} "" or "?a=b&…" (commas left readable)
@@ -239,7 +249,7 @@ export function writeUrl(state, manifest, search = "") {
     if (sel.showAll) p.push(["all", "1"]);
     if (!sel.baseline) p.push(["base", "0"]);
   }
-  if (state.level != null && state.level !== DEFAULT_LEVEL) p.push(["pi", state.level ? String(Math.round(state.level * 100)) : "none"]);
+  if (state.levels && !sameList(state.levels, DEFAULT_LEVELS)) p.push(["pi", state.levels.length ? state.levels.map((l) => Math.round(l * 100)).join(",") : "none"]);
   if (state.rulers) p.push(["rulers", "1"]);
   if (state.focus) p.push(["focus", state.focus]);
   if (state.layers?.length) p.push(["lay", state.layers.join(",")]);
@@ -261,7 +271,7 @@ export function readUrl(manifest) {
   return parseUrl(location.search, manifest);
 }
 
-const WATCHED = ["target", "location", "date", "sel", "level", "rulers", "focus", "layers", "scope", "scores", "views"];
+const WATCHED = ["target", "location", "date", "sel", "levels", "rulers", "focus", "layers", "scope", "scores", "views"];
 
 /**
  * Keeps the URL in step with the store: written with history.replaceState (no history entries),

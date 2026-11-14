@@ -1,6 +1,7 @@
 /* The chart's own bubbles (design/fan-chart.md): they belong to the chart view and scroll away with it,
  * so they are glass in canvas mode (the WebGL pass refracts the chart under them).
- *  - bottom left: the interval pill, "95% interval ▾" / "No interval", and its menu;
+ *  - bottom left: the interval pill, "95% interval ▾" / "95 · 50% intervals" / "No interval", and its
+ *    menu (any combination of levels);
  *  - bottom centre: the date stepper, which walks forecast rounds and crosses seasons at its ends (its
  *    label opens the date picker);
  *  - under the top bubbles at the right: "Showing 5 of 9 · Show all", only when more are selected than charted;
@@ -12,8 +13,8 @@ import { openMenu } from "../../ui/floating.js";
 import { pill, Stepper } from "../../ui/controls.js";
 import { setShowAll } from "../selection.js";
 import { openDatePicker } from "../DatePicker.js";
-
-const LEVELS = [[0.95, "95%"], [0.8, "80%"], [0.5, "50%"], [0, "None"]];
+import { LEVELS, parseLevels } from "../url.js";
+import { levelsText } from "./readout.js";
 
 /* The kit's Stepper, stepping through forecast rounds rather than every week of the timeline: the chart
  * decides where a step lands (the next week with a round, or the next season). */
@@ -73,7 +74,8 @@ export class ChartBubbles {
 
   /** The interval pill's label and the "Showing 5 of 9" note, from the store. */
   sync(s) {
-    const label = s.level ? `${Math.round(s.level * 100)}% interval` : "No interval";
+    const L = s.levels || [];
+    const label = !L.length ? "No interval" : `${levelsText(L)} interval${L.length > 1 ? "s" : ""}`;
     const lab = this.interval.querySelector(".c-pill-label");
     if (lab.textContent !== label) lab.textContent = label;
     const n = s.sel.selected.length, on = s.sel.charted.length, show = n > on;
@@ -114,7 +116,10 @@ export class ChartBubbles {
     openMenu(this.interval, {
       placement: "top-start", label: "Interval",
       items: [
-        ...LEVELS.map(([v, label]) => ({ label, value: v, checked: s.level === v, onSelect: () => store.set({ level: v }) })),
+        ...LEVELS.map((v) => ({
+          label: `${Math.round(v * 100)}%`, toggle: true, checked: s.levels.includes(v),
+          onSelect: () => { const cur = store.get().levels; store.set({ levels: parseLevels(cur.includes(v) ? cur.filter((l) => l !== v) : [...cur, v]) }); },
+        })),
         "-",
         { label: "Width rulers", toggle: true, checked: s.rulers, onSelect: () => store.set({ rulers: !store.get().rulers }) },
         { label: "Outcome", toggle: true, checked: s.outcome, onSelect: () => store.set({ outcome: !store.get().outcome }) },

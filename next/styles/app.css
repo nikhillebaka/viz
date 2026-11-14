@@ -45,6 +45,7 @@
 .fc-readout { position: absolute; left: 0; top: 0; z-index: var(--z-chart); pointer-events: none; will-change: transform; }
 .fc-readout .c-readout-name { max-width: 200px; }
 .fc-readout-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.fc-readout td.fc-readout-tight { font-size: var(--text-axis); padding-left: var(--space-8); }
 .fc-readout-only { margin-top: 0; padding-top: 0; border-top: 0; }
 .fc-readout-misses { display: inline-flex; gap: var(--gap-dot); margin-left: var(--space-6); vertical-align: middle; }
 .fc-readout-misses .c-dot { width: var(--space-6); height: var(--space-6); }

@@ -25,7 +25,7 @@ test("defaults: manifest target, US, latest round, first three recommended witho
   assert.equal(D.location, "US");
   assert.equal(D.date, "2025-12-27");
   assert.deepEqual(D.sel.selected, ["UMass-flusion", "UMass-gbqr", "CMU-ar"]);
-  assert.equal(D.level, 0.95);
+  assert.deepEqual(D.levels, [0.95]);
 });
 
 test("default date: the latest round a selected model forecast, else any model's, else the latest", () => {
@@ -51,9 +51,9 @@ test("round trips every key", () => {
   let sel = create({ selected: ["X-a", "X-b", "X-c", "X-d", "UMass-ar2", "CMU-ar"], showAll: true, baseline: false });
   sel = chart(sel, "CMU-ar");          // the queue: X-a comes off, CMU-ar takes slot 0
   sel = unchart(sel, "X-c");            // a free slot in the middle
-  const s = state({ target: "wk inc flu prop ed visits", location: "56", date: "2025-11-22", sel, level: 0.5, rulers: true, focus: "CMU-ar" });
+  const s = state({ target: "wk inc flu prop ed visits", location: "56", date: "2025-11-22", sel, levels: [0.8, 0.5], rulers: true, focus: "CMU-ar" });
   const q = writeUrl(s, manifest);
-  assert.match(q, /^\?target=wk%20inc%20flu%20prop%20ed%20visits&loc=56&date=2025-11-22&models=X-a,X-b,X-c,X-d,UMass-ar2,CMU-ar&chart=CMU-ar,X-b,,X-d,UMass-ar2&all=1&base=0&pi=50&rulers=1&focus=CMU-ar$/);
+  assert.match(q, /^\?target=wk%20inc%20flu%20prop%20ed%20visits&loc=56&date=2025-11-22&models=X-a,X-b,X-c,X-d,UMass-ar2,CMU-ar&chart=CMU-ar,X-b,,X-d,UMass-ar2&all=1&base=0&pi=80,50&rulers=1&focus=CMU-ar$/);
   const back = roundTrip(s);
   assert.equal(back.target, s.target);
   assert.equal(back.location, "56");
@@ -62,7 +62,7 @@ test("round trips every key", () => {
   assert.deepEqual(chartedBySlot(back.sel), chartedBySlot(sel));
   assert.equal(back.sel.showAll, true);
   assert.equal(back.sel.baseline, false);
-  assert.equal(back.level, 0.5);
+  assert.deepEqual(back.levels, [0.8, 0.5]);
   assert.equal(back.rulers, true);
   assert.equal(back.focus, "CMU-ar");
   assert.equal(writeUrl(back, manifest), q, "writes the same URL again");
@@ -97,7 +97,7 @@ test("invalid values are dropped", () => {
   assert.equal(p.date, undefined);
   assert.deepEqual(p.sel.selected, ["X-a"], "unknown ids and the baseline are not selectable");
   assert.deepEqual(chartedBySlot(p.sel), [null, "X-a"]);
-  assert.equal(p.level, undefined);
+  assert.equal(p.levels, undefined);
   assert.equal(p.focus, undefined);
 });
 
@@ -111,14 +111,17 @@ test("a date that isn't a round snaps to the nearest round", () => {
 
 test("old viz links", () => {
   assert.equal(parseUrl("?loc=25", manifest).location, "25");
-  assert.equal(parseUrl("?pi=95,80", manifest).level, 0.95);
-  assert.equal(parseUrl("?pi=80,50", manifest).level, 0.8, "an old list reads as its widest");
-  assert.equal(parseUrl("?pi=none", manifest).level, 0);
+  assert.deepEqual(parseUrl("?pi=95,80", manifest).levels, [0.95, 0.8]);
+  assert.deepEqual(parseUrl("?pi=50,95,33", manifest).levels, [0.95, 0.5], "sorted widest first; unknown levels dropped");
+  assert.deepEqual(parseUrl("?pi=none", manifest).levels, []);
+  assert.deepEqual(parseUrl("?pi=0", manifest).levels, []);
   assert.deepEqual(parseUrl("?models=none", manifest).sel.selected, []);
   assert.equal(parseUrl("?rulers=1", manifest).rulers, true);
   assert.equal(parseUrl("?rulers=yes", manifest).rulers, false);
   assert.equal(parseUrl("?target=wk+inc+flu+prop+ed+visits", manifest).target, "wk inc flu prop ed visits", "spaces as +");
-  assert.equal(writeUrl(state({ level: 0 }), manifest), "?pi=none");
+  assert.equal(writeUrl(state({ levels: [] }), manifest), "?pi=none");
+  assert.equal(writeUrl(state({ levels: [0.95] }), manifest), "", "the default stays out of the URL");
+  assert.equal(writeUrl(state({ levels: [0.95, 0.8, 0.5] }), manifest), "?pi=95,80,50");
 });
 
 test("unknown parameters are preserved, after this module's own", () => {
