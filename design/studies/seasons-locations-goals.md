@@ -51,21 +51,15 @@ cross a season boundary:
 
 ### 3. The date picker
 
-The stepper's label is a button (as old viz's date was): it opens a popover. Revised Nov 13 after trying a
-compact month grid: old viz's picker told you more about each date, and that's worth keeping.
+The stepper's label is a button: it opens a popover with a chip per season (newest first, the chart's
+selected) and that season's forecast rounds as a calendar, one row per month (Dec · 6 13 20 27), the
+chart's round marked. Nothing else per date. Arrow keys move through the days, a letter jumps to a month,
+Enter goes, Escape closes; ← → don't move the chart while it's open.
 
-- **Search** at the top ("dec 27", "jan", "2024"); typing searches every season.
-- **All** or one season, as chips; the chart's season by default.
-- **One row per round**, newest first, grouped by season and month (plain labels, no header bar): the
-  date; a thin bar for that week's observed admissions against the season's peak, so you can see where
-  in the season a date sits and find the peak; and "55 models", how many forecast it at the chart's
-  place (constant in this sandbox, varies in a real hub). The chart's round is highlighted and centred
-  when the picker opens. (A first version put a dot per charted model on each row: dropped, it repeated
-  the chart and was the same on nearly every row.)
-- Off-season and surveillance-only weeks (old viz listed them) aren't here: the chart steps through
-  forecast rounds only.
-- Keys: ↑ ↓ move through rows, Enter goes (from the search field, the first match), Escape closes;
-  ← → don't move the chart while it's open.
+Tried and dropped (Nov 13): a list with model counts, per-model dots, observed-level bars and search.
+Counts are near-constant and not useful on their own, anything tied to the selected models repeats the
+chart, and where-in-the-season is better read on the fan itself. Other ideas pitched and set aside: quick
+jumps ("same week last season"), data-status tags, off-season weeks, typed dates.
 
 ### Popover placement (all popovers)
 

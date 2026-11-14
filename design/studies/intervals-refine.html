@@ -134,26 +134,17 @@ body.picker-open [data-zone="tl"] > *, body.picker-open [data-zone="tc"] > *, bo
 .lp-tile.on, .lp-us.on { background: var(--accent); color: #fff; }
 .lp-panel.filtering .lp-tile:not(.match), .filtering .lp-tile:not(.match) { opacity: 0.25; }
 .filtering .lp-tile.match { color: var(--ink-primary); box-shadow: inset 0 0 0 1.5px var(--accent); }
-/* date picker: search, All or a season, one row per round (charted models' dots, how many models) */
+/* date picker: season chips, then the season's rounds as a calendar (a row per month) */
 .dp-chip { height: 28px; padding: 0 11px; border-radius: var(--radius-pill); border: 0; background: var(--fill-field); color: var(--ink-secondary); font: 500 12.5px var(--font-sans); cursor: pointer; }
 .dp-chip:hover { color: var(--ink-primary); background: var(--fill-hover); }
 .dp-chip.on { background: var(--fill-selected); color: var(--ink-primary); }
-.dp-seasons { display: flex; gap: 6px; padding: 0 6px 10px; }
-.dp-panel .c-float-body { display: flex; flex-direction: column; }
-.dp-panel .c-popover-content { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-.dp-list { position: relative; flex: 1; min-height: 0; max-height: 420px; overflow: auto; scrollbar-width: thin; padding: 0 2px 4px; }
-.dp-sh { padding: 10px 10px 2px; font: 600 12px var(--font-sans); color: var(--ink-secondary); }
-.dp-mh { padding: 6px 10px 2px; font-size: 11.5px; color: var(--ink-tertiary); }
-.dp-r { display: grid; grid-template-columns: 64px 1fr 84px; align-items: center; gap: 14px; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: none; color: var(--ink-primary); font: 13px var(--font-sans); cursor: pointer; text-align: left; }
-.dp-r:hover, .dp-r:focus-visible { background: var(--fill-hover); outline: none; }
-.dp-r.cur { background: var(--fill-selected); font-weight: 600; }
-.dp-r.faint .d, .dp-r.faint .n { color: var(--ink-tertiary); }
-.dp-r .n { text-align: right; font: 12px var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
-/* the week's observed admissions against the season's peak: where in the season it is */
-.dp-r .bar { height: 2px; border-radius: 1px; background: var(--line-hairline); overflow: hidden; }
-.dp-r .bar i { display: block; height: 100%; border-radius: 1px; background: var(--ink-tertiary); }
-.dp-r.cur .bar i, .dp-r:hover .bar i { background: var(--ink-primary); }
-.dp-empty { padding: 16px 10px; color: var(--ink-tertiary); }
+.dp-seasons { display: flex; gap: 6px; padding: 4px 6px 12px; }
+.dp-grid { display: grid; gap: 2px; padding: 0 6px 6px; }
+.dp-row { display: flex; align-items: center; gap: 4px; }
+.dp-m { width: 40px; color: var(--ink-tertiary); font-size: 12px; }
+.dp-day { width: 38px; height: 30px; border: 0; border-radius: 8px; background: none; color: var(--ink-primary); font: 13px var(--font-mono); font-variant-numeric: tabular-nums; cursor: pointer; }
+.dp-day:hover, .dp-day:focus-visible { background: var(--fill-hover); outline: none; }
+.dp-day.on { background: var(--accent); color: #fff; }
 
 /* visually hidden, still reachable by keyboard and screen readers */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

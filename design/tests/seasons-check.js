@@ -63,13 +63,12 @@ export async function run() {
     check("…and none of them gets its own ghost label", !window.__G.labels.some((l) => l.ghost && !l.summary && !window.__data().present.has(l.m)));
     key("ArrowRight"); await settle();
 
-    // the date picker: All or a season, a row per round with the observed level and a model count, search
+    // the date picker: season chips, then that season's rounds as a calendar; nothing else per date
     document.querySelector("#c-date .c-step-label").click(); await sleep(700);
-    const chips = [...document.querySelectorAll(".dp-chip[data-tab]")].map((b) => b.textContent);
-    check("the date label opens a picker: All, then every season, newest first", chips.join() === "All,2025–26,2024–25,2023–24", { chips });
-    const cur = document.querySelector(".dp-r.cur");
-    check("…the chart's round is marked, with how many models forecast it and that week's observed level", !!cur && /^\d+ models$/.test(cur.querySelector(".n").textContent) && parseFloat(cur.querySelector(".bar i")?.style.width) > 0, { n: cur?.querySelector(".n").textContent });
-    check("…and no header bar: season labels have no background of their own", [...document.querySelectorAll(".dp-sh")].every((h) => getComputedStyle(h).backgroundColor === "rgba(0, 0, 0, 0)" && getComputedStyle(h).position !== "sticky"));
+    const chips = [...document.querySelectorAll(".dp-chip[data-sid]")].map((b) => b.textContent);
+    check("the date label opens a picker with a chip per season, newest first", chips.join() === "2025–26,2024–25,2023–24", { chips });
+    check("…the chart's season shows as a calendar, a row per month, the chart's round marked", document.querySelectorAll(".dp-row").length >= 6 && document.querySelector(".dp-day.on")?.dataset.r === date(), { on: document.querySelector(".dp-day.on")?.dataset.r });
+    check("…with nothing per date but the day", [...document.querySelectorAll(".dp-day")].every((b) => /^\d{1,2}$/.test(b.textContent)));
     { const panel = document.querySelector(".dp-panel"), h0 = panel.offsetHeight, t0 = panel.getBoundingClientRect().top;
       scrollTo(0, 120); dispatchEvent(new Event("scroll")); await sleep(300);
       const h1 = panel.offsetHeight, t1 = panel.getBoundingClientRect().top;
@@ -79,12 +78,11 @@ export async function run() {
       check("…and once its button scrolls off screen, it closes", !document.querySelector(".dp-panel"));
       scrollTo(0, 0); await sleep(300); }
     document.querySelector("#c-date .c-step-label").click(); await sleep(700);
-    const inp = document.querySelector('input[aria-label="Search dates"]');
-    inp.value = "jan 13"; inp.dispatchEvent(new Event("input", { bubbles: true })); await sleep(700);
-    const found = [...document.querySelectorAll(".dp-r")].map((b) => b.dataset.r);
-    check("searching \"jan 13\" finds that date in every season", found.includes("2024-01-13") && found.every((r) => r.slice(5) === "01-13"), { found });
-    document.querySelector('.dp-r[data-r="2024-01-13"]')?.click(); await settle();
-    check("…and choosing it goes there, crossing seasons", date() === "2024-01-13" && /2023–24/.test(ev.scopeEl.textContent), { date: date() });
+    [...document.querySelectorAll(".dp-chip[data-sid]")].find((b) => b.textContent === "2023–24").click(); await sleep(300);
+    const day = document.querySelector('.dp-day[data-r="2024-01-13"]');
+    check("…a season chip shows that season's calendar", !!day && !document.querySelector(".dp-day.on"));
+    day?.click(); await settle();
+    check("…and a day goes there, crossing seasons", date() === "2024-01-13" && /2023–24/.test(ev.scopeEl.textContent), { date: date() });
 
     // places: search + Enter; the date, zoom and focus stay; the axis rescales
     const d0 = date(), topUS = top();
