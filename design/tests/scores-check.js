@@ -19,6 +19,7 @@ export async function run() {
   const wheel = (o) => { const e = new WheelEvent("wheel", { bubbles: true, cancelable: true, ...o }); el.dispatchEvent(e); return e.defaultPrevented; };
 
   try {
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); // start with nothing focused
     await go(0);
     nav.goTo(5, { recenter: true }); await settle();
     const padT = window.__G.pad.t;

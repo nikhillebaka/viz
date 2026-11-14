@@ -4,7 +4,7 @@
 import { LiquidGlass } from "../lib/glass.js";
 import { fanCanvas, short, seriesVar, WEEK } from "../lib/chart.js";
 import { loadFan, timeline, seasonLabel, isoDay } from "../lib/fandata.js";
-import { Stepper, tooltip, openPopover, icon } from "../lib/controls.js";
+import { Stepper, tooltip, openPopover, icon, revealInList } from "../lib/controls.js";
 import { ModelSelection, groupModels, inferFamily, teamOf } from "../lib/selection.js";
 import { TimeNav } from "../lib/time.js";
 import { sizeClass } from "../lib/position.js";
@@ -498,31 +498,59 @@ async function setPlace(loc) {
   } finally { switching = false; }
 }
 
-/* ---------------- the date picker: seasons, then that season's rounds by month ---------------- */
+/* ---------------- the date picker ----------------
+ * Old viz's picker told you more about each date: how many models forecast it, across every season, with
+ * search. This keeps that, in this design: search; All or one season; one row per round, grouped by
+ * season and month, with which charted models forecast it (their color dots, hollow when missing) and how
+ * many models did in all, at the chart's place. Rows where none of the charted models forecast are faint.
+ * ↑ ↓ move, Enter goes, typing searches ("dec 27", "2024", "jan"). */
 function openDatePicker(btn) {
-  let shown = data.sid;
-  openPopover(btn, { width: 340, placement: "top", morph: false, className: "dp-panel", content: (body, layer) => {
+  let tab = data.sid, q = "";
+  openPopover(btn, { width: 380, placement: "top", morph: false, className: "dp-panel", content: (body, layer) => {
+    body.innerHTML = `<div class="lp-head"><label class="pop-search">${icon.search}<input type="search" placeholder="Search dates" aria-label="Search dates"></label></div>
+      <div class="dp-seasons"></div><div class="dp-list" role="listbox" aria-label="Forecast dates"></div>`;
+    const input = body.querySelector("input"), chipsEl = body.querySelector(".dp-seasons"), list = body.querySelector(".dp-list");
+    const charted = () => [...sel.charted].sort((a, b) => a.slot - b.slot);
+    const fmtRow = d3.utcFormat("%b %-d"), fmtSearch = d3.utcFormat("%b %-d %Y %B %Y-%m-%d");
     const paint = async () => {
-      const tl = timeline(man, shown), nd = shown === data.sid ? data : await loadFan(man, shown, place);
-      const charted = sel.charted.map((c) => c.m);
-      const any = (iso) => charted.some((m) => nd.FC[m]?.[iso]);
-      const months = d3.groups(man.seasonById.get(shown).rounds, (r) => r.slice(0, 7));
-      const cur = shown === data.sid ? D.dates[nav.week] : null;
-      const latest = man.seasons.at(-1).rounds.at(-1);
-      body.innerHTML = `<div class="dp-seasons">${[...SEASONS].reverse().map((sid) => `<button type="button" class="dp-chip${sid === shown ? " on" : ""}" data-sid="${sid}">${seasonLabel(sid)}</button>`).join("")}<button type="button" class="dp-chip latest" data-latest>Latest</button></div>
-        <div class="dp-grid" role="grid">${months.map(([ym, rs]) => `<div class="dp-row"><span class="dp-m">${d3.utcFormat("%b")(new Date(ym + "-01T00:00:00Z"))}</span>${rs.map((r) => `<button type="button" class="dp-day${r === cur ? " on" : ""}${any(r) ? "" : " faint"}" data-r="${r}" aria-label="${fmtLong(new Date(r + "T00:00:00Z"))}">${+r.slice(8)}</button>`).join("")}</div>`).join("")}</div>`;
-      body.querySelectorAll(".dp-chip[data-sid]").forEach((b) => b.addEventListener("click", () => { shown = b.dataset.sid; paint(); }));
-      body.querySelector("[data-latest]").addEventListener("click", () => { layer.close(true); goToRound(man.seasons.at(-1).id, latest); });
-      body.querySelectorAll(".dp-day").forEach((b) => b.addEventListener("click", () => { layer.close(true); goToRound(shown, b.dataset.r); }));
-      (body.querySelector(".dp-day.on") || body.querySelector(".dp-day:not(.faint)") || body.querySelector(".dp-day"))?.focus({ preventScroll: true });
+      chipsEl.innerHTML = [["all", "All"], ...[...SEASONS].reverse().map((sid) => [sid, seasonLabel(sid)])].map(([k, l]) => `<button type="button" class="dp-chip${k === tab ? " on" : ""}" data-tab="${k}">${l}</button>`).join("");
+      const seasons = tab === "all" ? [...SEASONS].reverse() : [tab];
+      const fans = await Promise.all(seasons.map((sid) => (sid === data.sid ? data : loadFan(man, sid, place))));
+      const terms = q.toLowerCase().split(/\s+/).filter(Boolean), cur = D.dates[nav.week], cs = charted();
+      let html = "";
+      seasons.forEach((sid, k) => {
+        const fd = fans[k], rounds = man.seasonById.get(sid).rounds.slice().reverse()
+          .filter((r) => { const t = `${fmtSearch(new Date(r + "T00:00:00Z")).toLowerCase()} ${seasonLabel(sid)}`; return terms.every((w) => t.includes(w)); });
+        if (!rounds.length) return;
+        html += `<div class="dp-sh"><span>${seasonLabel(sid)}</span><span class="n">Models</span></div>`;
+        let month = null;
+        for (const r of rounds) {
+          const d = new Date(r + "T00:00:00Z"), m = r.slice(0, 7);
+          if (m !== month) { month = m; html += `<div class="dp-mh">${d3.utcFormat("%B")(d)}</div>`; }
+          const n = Object.values(fd.FC).filter((x) => x[r]).length;
+          const dots = cs.map((c) => `<i class="${fd.FC[c.m]?.[r] ? "on" : ""}" style="--c:${seriesVar(c.slot)}"></i>`).join("");
+          const some = cs.some((c) => fd.FC[c.m]?.[r]);
+          html += `<button type="button" class="dp-r${sid === data.sid && r === cur ? " cur" : ""}${some || !cs.length ? "" : " faint"}" role="option" data-sid="${sid}" data-r="${r}" aria-label="${fmtLong(d)}, ${n} models">
+            <span class="d">${fmtRow(d)}</span><span class="dots">${dots}</span><span class="n">${n}</span></button>`;
+        }
+      });
+      list.innerHTML = html || `<div class="dp-empty">No dates match</div>`;
+      // centre the chart's round in the list by scrolling the list only (scrollIntoView would scroll the page too)
+      const c = list.querySelector(".dp-r.cur"); if (c) list.scrollTop = c.offsetTop - list.clientHeight / 2 + c.offsetHeight / 2;
     };
+    chipsEl.addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) { tab = b.dataset.tab; paint(); } });
+    list.addEventListener("click", (e) => { const b = e.target.closest(".dp-r"); if (b) { layer.close(true); goToRound(b.dataset.sid, b.dataset.r); } });
+    input.addEventListener("input", () => { q = input.value.trim(); if (q && tab !== "all") tab = "all"; paint(); });
     body.addEventListener("keydown", (e) => {
-      const days = [...body.querySelectorAll(".dp-day")], i = days.indexOf(document.activeElement);
-      const d = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -4, ArrowDown: 4 }[e.key];
-      if (d && i >= 0) { e.preventDefault(); e.stopPropagation(); days[Math.max(0, Math.min(days.length - 1, i + d))].focus(); }
-      if (/^[a-z]$/i.test(e.key)) { const row = [...body.querySelectorAll(".dp-row")].find((r) => r.querySelector(".dp-m").textContent.toLowerCase().startsWith(e.key.toLowerCase())); row?.querySelector(".dp-day")?.focus(); }
+      const rows = [...list.querySelectorAll(".dp-r")], i = rows.indexOf(document.activeElement);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault(); e.stopPropagation();
+        const from = i >= 0 ? i : Math.max(0, rows.findIndex((r) => r.classList.contains("cur")));
+        const t = rows[Math.max(0, Math.min(rows.length - 1, from + (e.key === "ArrowDown" ? 1 : -1)))]; t?.focus({ preventScroll: true }); revealInList(t);
+      } else if (e.key === "Enter" && document.activeElement === input) { rows[0]?.click(); }
+      else if (e.key === "ArrowLeft" || e.key === "ArrowRight") e.stopPropagation(); // not the chart's date while choosing one
     });
-    paint();
+    paint().then(() => requestAnimationFrame(() => input.focus({ preventScroll: true })));
   } });
 }
 
@@ -550,17 +578,17 @@ function openPlacePicker() {
     tiles.forEach((b) => { b.addEventListener("click", () => pick(b.dataset.loc)); b.addEventListener("pointerenter", () => loadFan(man, data.sid, b.dataset.loc)); }); // hover prefetches
     const matches = () => { const q = input.value.trim().toLowerCase(); return q ? man.locations.filter((l) => l.name.toLowerCase().includes(q) || l.abbr.toLowerCase() === q || l.id.toLowerCase() === q).sort((a, b) => (b.abbr.toLowerCase() === q) - (a.abbr.toLowerCase() === q) || (b.name.toLowerCase().startsWith(q)) - (a.name.toLowerCase().startsWith(q))) : []; };
     input.addEventListener("input", () => { const ms = new Set(matches().map((l) => l.id)); body.classList.toggle("filtering", !!input.value.trim()); tiles.forEach((b) => b.classList.toggle("match", ms.has(b.dataset.loc))); });
-    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { const m = matches()[0]; if (m) pick(m.id); } if (e.key === "ArrowDown") { e.preventDefault(); body.querySelector(".lp-tile.on, .lp-us.on, .lp-tile")?.focus(); } });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") { const m = matches()[0]; if (m) pick(m.id); } if (e.key === "ArrowDown") { e.preventDefault(); body.querySelector(".lp-tile.on, .lp-us.on, .lp-tile")?.focus({ preventScroll: true }); } });
     // arrows move across the tile map by its grid
     body.querySelector(".lp-map").addEventListener("keydown", (e) => {
       const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key], at = document.activeElement?.dataset.abbr;
       if (!d) return; e.preventDefault(); e.stopPropagation();
-      if (!at) { body.querySelector(".lp-tile")?.focus(); return; }
+      if (!at) { body.querySelector(".lp-tile")?.focus({ preventScroll: true }); return; }
       const [x, y] = TILES[at]; let best = null, bd = Infinity;
       for (const [ab, [tx, ty]] of Object.entries(TILES)) { const dx = tx - x, dy = ty - y; if ((d[0] && Math.sign(dx) === d[0]) || (d[1] && Math.sign(dy) === d[1])) { const dist = (d[0] ? Math.abs(dx) + 2 * Math.abs(dy) : Math.abs(dy) + 2 * Math.abs(dx)); if (dist < bd) { bd = dist; best = ab; } } }
-      if (best) body.querySelector(`[data-abbr="${best}"]`)?.focus();
+      if (best) body.querySelector(`[data-abbr="${best}"]`)?.focus({ preventScroll: true });
     });
-    requestAnimationFrame(() => input.focus());
+    requestAnimationFrame(() => input.focus({ preventScroll: true }));
   } });
 }
 
@@ -612,4 +640,4 @@ function onScroll() {
 }
 addEventListener("scroll", onScroll, { passive: true });
 onScroll();
-window.__ev = ev; window.__setPlace = setPlace; window.__data = () => data; // for tests
+window.__ev = ev; window.__setPlace = setPlace; window.__data = () => data; window.__goToRound = goToRound; // for tests

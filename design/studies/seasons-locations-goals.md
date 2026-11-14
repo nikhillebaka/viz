@@ -51,15 +51,27 @@ cross a season boundary:
 
 ### 3. The date picker
 
-The stepper's label is a button (as old viz's date was): it opens a popover.
+The stepper's label is a button (as old viz's date was): it opens a popover. Revised Nov 13 after trying a
+compact month grid: old viz's picker told you more about each date, and that's worth keeping.
 
-- **Seasons** as chips across the top, newest first; the current one selected.
-- **The rounds** of that season as a compact month grid (Dec · 6 13 20 27), the chart's round marked. A
-  round where none of the charted models forecast is drawn faint, not hidden (you can still go there).
-- **Latest** as one chip: the most recent round with forecasts.
-- Keys: ← → move through rounds (crossing seasons), Enter goes, Escape closes. Typing a month ("feb")
-  jumps to it.
-- Copy: none beyond month names, day numbers, season labels and "Latest".
+- **Search** at the top ("dec 27", "jan", "2024"); typing searches every season.
+- **All** or one season, as chips; the chart's season by default.
+- **One row per round**, newest first, grouped by season (a sticky header, with "Models" over the counts)
+  and month: the date; a dot per charted model, in its color when it forecast that round and hollow when
+  it didn't; and how many models forecast it at the chart's place. Rows where none of the charted models
+  forecast are faint. The chart's round is highlighted and centred when the picker opens.
+- Off-season and surveillance-only weeks (old viz listed them) aren't here: the chart steps through
+  forecast rounds only.
+- Keys: ↑ ↓ move through rows, Enter goes (from the search field, the first match), Escape closes;
+  ← → don't move the chart while it's open.
+
+### Popover placement (all popovers)
+
+A popover's size and side are settled when it opens (or its content changes), against the screen. When
+the page scrolls, it keeps its size and moves with its button; when its button leaves the screen, it
+closes. Before, every scroll re-fitted it to the room left inside the chart, so it shrank and grew, and
+the date picker's "scroll the current date into view" also scrolled the page. Lists now scroll only
+themselves (`revealInList` in `lib/controls.js`).
 
 ### 4. Models across seasons
 
@@ -189,7 +201,8 @@ Built on the fan chart page (`studies/intervals-refine.html`):
 - **Scores** follow the chart's season (unless seasons were picked by hand), and gain a third Locations
   option, the chart's location, which follows the bubble. A Locations heatmap cell sets the place; a
   Weeks cell in another season crosses to it.
-- **Checks**: `tests/seasons-check.js` (23 cases), with time-nav (48), scores (33) and selection (14).
+- **Checks**: `tests/seasons-check.js` (26 cases), with time-nav (48), scores (33) and selection (14). The
+  browser checks can run back to back on one page: each restores what it changed.
 
 Not built: per-100k rates; the URL; prefetching the neighbouring season; the picker's availability by
 place (it's by season only).

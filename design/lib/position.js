@@ -7,7 +7,8 @@
  *   - returns maxHeight / maxWidth for the side it chose, so long lists scroll instead of overflowing
  *   - returns the transform-origin pointing back at the anchor, so open/close animations grow from it
  *
- * autoUpdate(anchor, floating, fn) re-runs fn on scroll, resize and size changes, once per frame.
+ * autoUpdate(anchor, floating, fn) re-runs fn on scroll, resize and size changes, once per frame, saying
+ * which: fn("scroll") when only the page moved, fn("layout") otherwise.
  * No layout thrash: reads happen in fn, writes are a single transform.
  */
 const opposite = { top: "bottom", bottom: "top", left: "right", right: "left" };
@@ -18,7 +19,7 @@ export function viewportRect() {
             : { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight };
 }
 
-export function computePosition(a, f, { placement = "bottom-start", offset = 8, padding = 12, boundary = viewportRect() } = {}) {
+export function computePosition(a, f, { placement = "bottom-start", offset = 8, padding = 12, boundary = viewportRect(), flip = true } = {}) {
   let [side, align = "center"] = placement.split("-");
   const space = {
     top: a.top - boundary.top - offset - padding,
@@ -27,7 +28,7 @@ export function computePosition(a, f, { placement = "bottom-start", offset = 8, 
     right: boundary.right - a.right - offset - padding,
   };
   const need = side === "top" || side === "bottom" ? f.height : f.width;
-  if (space[side] < need && space[opposite[side]] > space[side]) side = opposite[side];
+  if (flip && space[side] < need && space[opposite[side]] > space[side]) side = opposite[side];
 
   let x, y;
   const vertical = side === "top" || side === "bottom";
@@ -50,18 +51,19 @@ export function computePosition(a, f, { placement = "bottom-start", offset = 8, 
 }
 
 export function autoUpdate(anchor, floating, fn) {
-  let raf = 0;
-  const run = () => { raf = 0; fn(); };
-  const schedule = () => { if (!raf) raf = requestAnimationFrame(run); };
-  addEventListener("scroll", schedule, { passive: true, capture: true });
+  let raf = 0, layout = false;
+  const run = () => { raf = 0; const why = layout ? "layout" : "scroll"; layout = false; fn(why); };
+  const onScroll = () => { if (!raf) raf = requestAnimationFrame(run); };
+  const schedule = () => { layout = true; if (!raf) raf = requestAnimationFrame(run); };
+  addEventListener("scroll", onScroll, { passive: true, capture: true });
   addEventListener("resize", schedule);
   window.visualViewport?.addEventListener("resize", schedule);
   const ro = new ResizeObserver(schedule);
   ro.observe(anchor); ro.observe(floating);
-  fn();
+  fn("layout");
   return () => {
     cancelAnimationFrame(raf);
-    removeEventListener("scroll", schedule, { capture: true });
+    removeEventListener("scroll", onScroll, { capture: true });
     removeEventListener("resize", schedule);
     window.visualViewport?.removeEventListener("resize", schedule);
     ro.disconnect();

@@ -63,15 +63,26 @@ export async function run() {
     check("…and none of them gets its own ghost label", !window.__G.labels.some((l) => l.ghost && !l.summary && !window.__data().present.has(l.m)));
     key("ArrowRight"); await settle();
 
-    // the date picker
-    document.querySelector("#c-date .c-step-label").click(); await sleep(500);
-    const chips = [...document.querySelectorAll(".dp-chip[data-sid]")].map((b) => b.textContent);
-    check("the date label opens a picker with every season, newest first", chips.join() === "2025–26,2024–25,2023–24", { chips });
-    [...document.querySelectorAll(".dp-chip[data-sid]")].find((b) => b.textContent === "2023–24").click(); await sleep(600);
-    const day = [...document.querySelectorAll(".dp-day")].find((b) => b.dataset.r === "2024-01-13");
-    check("…choosing a season shows its rounds by month", !!day && document.querySelectorAll(".dp-row").length >= 7);
-    day?.click(); await settle();
-    check("…and a round goes there, crossing seasons", date() === "2024-01-13" && /2023–24/.test(ev.scopeEl.textContent), { date: date() });
+    // the date picker: All or a season, a row per round with the charted models' dots and a model count, search
+    document.querySelector("#c-date .c-step-label").click(); await sleep(700);
+    const chips = [...document.querySelectorAll(".dp-chip[data-tab]")].map((b) => b.textContent);
+    check("the date label opens a picker: All, then every season, newest first", chips.join() === "All,2025–26,2024–25,2023–24", { chips });
+    const cur = document.querySelector(".dp-r.cur");
+    check("…the chart's round is marked, with a dot per charted model and how many models forecast it", !!cur && cur.querySelectorAll(".dots i").length === sel.charted.length && +cur.querySelector(".n").textContent > 0, { n: cur?.querySelector(".n").textContent });
+    { const panel = document.querySelector(".dp-panel"), h0 = panel.offsetHeight, t0 = panel.getBoundingClientRect().top;
+      scrollTo(0, 120); dispatchEvent(new Event("scroll")); await sleep(300);
+      const h1 = panel.offsetHeight, t1 = panel.getBoundingClientRect().top;
+      check("scrolling a little keeps the picker's size and moves it with its button", Math.abs(h1 - h0) < 1 && Math.abs((t0 - t1) - 120) < 4, { h0, h1, moved: Math.round(t0 - t1) });
+      scrollTo(0, innerHeight * 1.5); dispatchEvent(new Event("scroll")); await sleep(700); // the exit animation is removed by 400 ms at the latest
+      check("…and once its button scrolls off screen, it closes", !document.querySelector(".dp-panel"));
+      scrollTo(0, 0); await sleep(300); }
+    document.querySelector("#c-date .c-step-label").click(); await sleep(700);
+    const inp = document.querySelector('input[aria-label="Search dates"]');
+    inp.value = "jan 13"; inp.dispatchEvent(new Event("input", { bubbles: true })); await sleep(700);
+    const found = [...document.querySelectorAll(".dp-r")].map((b) => b.dataset.r);
+    check("searching \"jan 13\" finds that date in every season", found.includes("2024-01-13") && found.every((r) => r.slice(5) === "01-13"), { found });
+    document.querySelector('.dp-r[data-r="2024-01-13"]')?.click(); await settle();
+    check("…and choosing it goes there, crossing seasons", date() === "2024-01-13" && /2023–24/.test(ev.scopeEl.textContent), { date: date() });
 
     // places: search + Enter; the date, zoom and focus stay; the axis rescales
     const d0 = date(), topUS = top();
@@ -94,8 +105,13 @@ export async function run() {
     ev.setHeatAxis("weeks");
     await window.__setPlace("US"); await settle();
   } finally {
-    window.requestAnimationFrame = raf; window.cancelAnimationFrame = caf;
+    // leave the page as the other checks expect it: 2025–26, the US, the default date, nothing focused
     scrollTo(0, 0);
+    try { if (window.__data().sid !== "2025-26") { window.__goToRound("2025-26", "2025-12-27"); await settle(); } } catch {}
+    try { await window.__setPlace("US"); } catch {}
+    nav.goTo(Math.max(0, window.__data().D.dates.indexOf("2025-12-27"))); await settle();
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    window.requestAnimationFrame = raf; window.cancelAnimationFrame = caf;
   }
   const failed = results.filter((r) => !r.ok);
   console.table(results.map((r) => ({ ok: r.ok ? "✓" : "✗", name: r.name, detail: r.ok ? "" : JSON.stringify(r.detail ?? "") })));

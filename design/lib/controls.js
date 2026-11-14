@@ -68,6 +68,18 @@ export function glassify(el, glass) {
   return new LiquidGlass(el, glass);
 }
 
+/* Bring an item into view inside its scrolling list, without scrolling the page (scrollIntoView scrolls
+ * every scrollable ancestor, the page included, which made open popovers jump). */
+export function revealInList(el) {
+  if (!el) return;
+  let box = el.parentElement;
+  while (box && !(box.scrollHeight > box.clientHeight && /auto|scroll/.test(getComputedStyle(box).overflowY))) box = box.parentElement;
+  if (!box || box === document.body || box === document.documentElement) return;
+  const r = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+  if (r.top < b.top) box.scrollTop -= b.top - r.top;
+  else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom;
+}
+
 /* ---------------------------------------------------------------- floating layer
  * Shared by menu, popover and search results. Handles: portal into the view, anchored placement
  * or a bottom sheet, open/close animation from the anchor, outside-click and Escape, focus return. */
@@ -103,19 +115,31 @@ function floating(anchor, { className = "", role = "dialog", label = "", sheetTi
   const g = new LiquidGlass(panel, { frosted: true });
 
   // placement
-  let stop = () => {};
-  const place = () => {
+  /* Size and side are settled when the panel opens or its content changes ("layout"), against the screen.
+   * When only the page scrolls, the panel keeps its size and side and moves with its anchor; once the
+   * anchor leaves the screen, the panel closes. (It used to re-fit on every scroll, so it shrank and grew
+   * as the chart scrolled away.) */
+  let stop = () => {}, side = null;
+  const place = (why = "layout") => {
     const vr = view === document.body ? { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight } : view.getBoundingClientRect();
-    const boundary = { left: Math.max(0, vr.left), top: Math.max(0, vr.top), right: Math.min(innerWidth, vr.right), bottom: Math.min(innerHeight, vr.bottom) };
-    boundary.width = boundary.right - boundary.left; boundary.height = boundary.bottom - boundary.top;
+    const boundary = { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight };
     if (compact) {
       panel.style.maxHeight = `${vr.height * num("--layout-sheet-max-height", 0.85)}px`;
       return;
     }
     const ar = anchor.getBoundingClientRect();
+    if (why === "scroll") {
+      if (ar.bottom < 0 || ar.top > innerHeight || !anchor.isConnected) { layer.close(false); return; }
+      const fr = { width: panel.offsetWidth, height: panel.offsetHeight };
+      const p = computePosition(ar, fr, { placement: side, boundary: { ...boundary, top: -1e5, bottom: 1e5, height: 2e5 }, padding: num("--layout-inset-regular", 16), flip: false });
+      panel.style.left = `${p.x - vr.left}px`; panel.style.top = `${p.y - vr.top}px`;
+      g.update();
+      return;
+    }
     panel.style.maxHeight = "";
     const fr = { width: panel.offsetWidth, height: panel.offsetHeight };
     const p = computePosition(ar, fr, { placement, boundary, padding: num("--layout-inset-regular", 16) });
+    side = `${p.side}-${placement.split("-")[1] || "center"}`;
     panel.style.maxHeight = `${Math.floor(p.maxHeight)}px`;
     panel.style.left = `${p.x - vr.left}px`; panel.style.top = `${p.y - vr.top}px`;
     panel.style.transformOrigin = p.origin;
@@ -229,7 +253,7 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
   let typed = "", typedT = 0;
   layer.panel.addEventListener("keydown", (e) => {
     const list = all(), i = list.indexOf(document.activeElement);
-    const go = (n) => { const t = list[(n + list.length) % list.length]; t?.focus(); t?.scrollIntoView({ block: "nearest" }); };
+    const go = (n) => { const t = list[(n + list.length) % list.length]; t?.focus({ preventScroll: true }); revealInList(t); };
     if (e.key === "ArrowDown") { e.preventDefault(); go(i + 1); }
     else if (e.key === "ArrowUp") { e.preventDefault(); go(i < 0 ? list.length - 1 : i - 1); }
     else if (e.key === "Home") { e.preventDefault(); go(0); }
@@ -241,7 +265,7 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
     }
   });
   layer.open();
-  requestAnimationFrame(() => { const c = layer.body.querySelector("[aria-checked=true]") || all()[0]; focusQuietly(c); c?.scrollIntoView({ block: "nearest" }); });
+  requestAnimationFrame(() => { const c = layer.body.querySelector("[aria-checked=true]") || all()[0]; focusQuietly(c); revealInList(c); });
   return layer;
 }
 
@@ -569,7 +593,7 @@ export class Search {
       this.active = (this.active + (e.key === "ArrowDown" ? 1 : -1) + this.results.length) % this.results.length;
       this.list.querySelectorAll(".c-option").forEach((o) => o.setAttribute("aria-selected", +o.dataset.i === this.active));
       this.input.setAttribute("aria-activedescendant", `${this.lid}-${this.active}`);
-      this.list.querySelector(`[data-i="${this.active}"]`)?.scrollIntoView({ block: "nearest" });
+      revealInList(this.list.querySelector(`[data-i="${this.active}"]`));
     } else if (e.key === "Enter") { if (this.active >= 0) { e.preventDefault(); this.choose(this.active); } }
     else if (e.key === "Escape") { e.preventDefault(); if (this.input.value) { this.input.value = ""; this.update(); } else { this.collapse(); this.input.blur(); } }
   }
