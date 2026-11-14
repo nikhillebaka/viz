@@ -119,7 +119,7 @@ function floating(anchor, { className = "", role = "dialog", label = "", sheetTi
    * When only the page scrolls, the panel keeps its size and side and moves with its anchor; once the
    * anchor leaves the screen, the panel closes. (It used to re-fit on every scroll, so it shrank and grew
    * as the chart scrolled away.) */
-  let stop = () => {}, side = null;
+  let stop = () => {}, side = null, offset = 8;
   const place = (why = "layout") => {
     const vr = view === document.body ? { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight } : view.getBoundingClientRect();
     const boundary = { left: 0, top: 0, right: innerWidth, bottom: innerHeight, width: innerWidth, height: innerHeight };
@@ -131,14 +131,17 @@ function floating(anchor, { className = "", role = "dialog", label = "", sheetTi
     if (why === "scroll") {
       if (ar.bottom < 0 || ar.top > innerHeight || !anchor.isConnected) { layer.close(false); return; }
       const fr = { width: panel.offsetWidth, height: panel.offsetHeight };
-      const p = computePosition(ar, fr, { placement: side, boundary: { ...boundary, top: -1e5, bottom: 1e5, height: 2e5 }, padding: num("--layout-inset-regular", 16), flip: false });
+      const p = computePosition(ar, fr, { placement: side, boundary: { ...boundary, top: -1e5, bottom: 1e5, height: 2e5 }, padding: num("--layout-inset-regular", 16), flip: false, offset });
       panel.style.left = `${p.x - vr.left}px`; panel.style.top = `${p.y - vr.top}px`;
       g.update();
       return;
     }
     panel.style.maxHeight = "";
     const fr = { width: panel.offsetWidth, height: panel.offsetHeight };
-    const p = computePosition(ar, fr, { placement, boundary, padding: num("--layout-inset-regular", 16) });
+    // a panel that morphs out of its button takes the button's place (its corner where the button's was),
+    // rather than appearing below the button, which has faded out for the morph
+    offset = morph ? -ar.height : 8;
+    const p = computePosition(ar, fr, { placement, boundary, padding: num("--layout-inset-regular", 16), offset });
     side = `${p.side}-${placement.split("-")[1] || "center"}`;
     panel.style.maxHeight = `${Math.floor(p.maxHeight)}px`;
     panel.style.left = `${p.x - vr.left}px`; panel.style.top = `${p.y - vr.top}px`;

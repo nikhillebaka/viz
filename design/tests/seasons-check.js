@@ -101,6 +101,8 @@ export async function run() {
     const d0 = date(), topUS = top();
     document.getElementById("c-place").click(); await sleep(500);
     const input = document.querySelector('input[aria-label="Search locations"]');
+    { const pr = document.querySelector(".lp-panel").getBoundingClientRect(), br = document.getElementById("c-place").getBoundingClientRect();
+      check("the location menu opens where its button was (it morphs out of it), not below", Math.abs(pr.top - br.top) < 3 && Math.abs(pr.left - br.left) < 3, { panel: [Math.round(pr.left), Math.round(pr.top)], button: [Math.round(br.left), Math.round(br.top)] }); }
     check("the location picker has 52 tiles and a US button", document.querySelectorAll(".lp-tile").length === 52 && !!document.querySelector(".lp-us"));
     input.value = "mass"; input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); await settle();

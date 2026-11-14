@@ -65,7 +65,8 @@ jumps ("same week last season"), data-status tags, off-season weeks, typed dates
 
 A popover's size and side are settled when it opens (or its content changes), against the screen. When
 the page scrolls, it keeps its size and moves with its button; when its button leaves the screen, it
-closes. Clicking the button that opened it again closes it (it used to close and reopen, replaying the
+closes. A popover that morphs out of its button (Location, Models) opens in the button's place, its corner where
+the button's was, not below it (the button fades out for the morph). Clicking the button that opened it again closes it (it used to close and reopen, replaying the
 open animation). Before, every scroll re-fitted it to the room left inside the chart, so it shrank and grew, and
 the date picker's "scroll the current date into view" also scrolled the page. Lists now scroll only
 themselves (`revealInList` in `lib/controls.js`).
