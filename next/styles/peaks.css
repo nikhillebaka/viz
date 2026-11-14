@@ -1,10 +1,74 @@
-/* The peaks section: the outlook (one canvas), the table, then calls by round beside the peak map. */
-.pk-note { margin: 0 0 var(--space-16); }
+/* The peaks section: a headline, the season strip, one row per model (when · how high · how right),
+ * then season skill beside the peak map. Every row is the same grid (--pk-cols, set from the section's
+ * width), so the strip's week axis and every When column share their pixels. */
+.pk-head { margin: 0 0 var(--space-16); }
+.pk-consensus { color: var(--ink-primary); }
 .pk-fig { position: relative; }
-.pk-canvas, .pk-evo { display: block; }
-.pk-table { margin-top: var(--space-32); }
+
+.pk-grid { display: grid; grid-template-columns: var(--pk-cols); column-gap: var(--space-24); align-items: center; }
+.pk-strip-row > .pk-strip { grid-column: 1 / 3; display: block; }
+.pk-strip-row, .pk-cols { margin-bottom: var(--space-4); }
+
+/* column headers: sorts, then the axes (observed labels, size ticks) */
+.pk-cols { align-items: end; padding-bottom: var(--space-4); border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.pk-hcell { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-2); min-width: 0; }
+.pk-sort {
+  margin: 0 0 0 calc(-1 * var(--space-4)); padding: var(--space-2) var(--space-4); border: 0; border-radius: var(--radius-tag); background: none;
+  font: inherit; font-size: var(--text-micro); font-weight: var(--weight-medium); color: var(--ink-tertiary); cursor: pointer;
+}
+.pk-sort:hover { background-color: var(--fill-hover); color: var(--ink-primary); }
+.pk-sort.is-on { color: var(--ink-secondary); }
+.pk-arrow { font-family: var(--font-mono); }
+.pk-axis, .pk-when, .pk-high { display: block; }
+
+/* the rows */
+.pk-rows { padding-top: var(--space-4); }
+.pk-row { height: var(--space-24); transition: opacity var(--dur-fast) var(--ease-out); }
+.pk-rows.is-hovering .pk-row:not(.is-hover) { opacity: 0.55; }
+.pk-row.is-hover { background-color: var(--fill-hover); }
+.pk-row.is-pool { border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.pk-row.is-pool .pk-label { color: var(--ink-secondary); }
+
+.pk-name {
+  display: flex; align-items: center; gap: var(--space-6); min-width: 0; height: 100%;
+  margin: 0; padding: 0; border: 0; background: none; text-align: left;
+  font: inherit; font-size: var(--text-control); color: var(--ink-secondary);
+}
+button.pk-name { cursor: pointer; }
+button.pk-name:hover, .pk-row.is-focus .pk-name { color: var(--ink-primary); }
+.pk-row.is-focus .pk-label { font-weight: var(--weight-medium); }
+.pk-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk-chev {
+  flex: none; width: var(--space-8); color: var(--ink-tertiary); font-family: var(--font-mono);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.pk-name[aria-expanded="true"] .pk-chev { transform: rotate(90deg); }
+.pk-dot { flex: none; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; }
+
+/* a round under an expanded model */
+.pk-round { padding-left: var(--space-20); font-family: var(--font-mono); font-size: var(--text-small); color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+.pk-round.is-current { color: var(--ink-primary); }
+
+/* how right (final peaks only) */
+.pk-right {
+  display: grid; grid-template-columns: repeat(4, 1fr); column-gap: var(--space-8);
+  font-family: var(--font-mono); font-size: var(--text-small); font-variant-numeric: tabular-nums; color: var(--ink-secondary);
+}
+.pk-right > span { text-align: right; white-space: nowrap; }
+.pk-right .is-hit { color: var(--score-2); }
+.pk-right .is-miss, .pk-right .is-none { color: var(--ink-tertiary); }
+.pk-right-head { display: grid; align-items: end; padding-bottom: var(--space-2); font-family: inherit; font-size: var(--text-micro); font-weight: var(--weight-medium); color: var(--ink-tertiary); }
+
+.pk-none { margin: var(--space-12) 0 0; }
+
+/* below: season skill beside the peak map */
 .pk-lower { display: flex; gap: var(--space-56); align-items: flex-start; margin-top: var(--space-40); }
-.pk-evo-col { flex: 1 1 0; min-width: 0; overflow: hidden; }
+.pk-skill-col { flex: 1 1 0; min-width: 0; overflow-x: auto; }
 .pk-map-col { flex: none; }
+.pk-subhead { display: flex; align-items: baseline; gap: var(--space-8); margin: 0 0 var(--space-8); }
+.pk-subtitle { font-size: var(--text-micro); font-weight: var(--weight-medium); color: var(--ink-tertiary); }
+.pk-subline { flex: none; font-size: var(--text-micro); }
 .pk-map { --tile: 46px; }
 .pk-map .mp-tile { padding: var(--space-4); }
+/* "Model" has no axis under it: lift it to the other sorts' line */
+.pk-cols > .pk-hcell:first-child { padding-bottom: calc(var(--space-16) + var(--space-2)); }

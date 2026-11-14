@@ -240,7 +240,7 @@ export function readoutContent(head, rows, foot) {
     h("div", { class: "c-readout-head" }, h("span", null, head)),
     h("table", null, rows.filter(Boolean).map(([k, v, quiet]) => h("tr", { class: quiet ? "dim" : null }, h("td", { class: "c-readout-name" }, k), h("td", { class: "num" }, v)))),
     foot ? h("div", { class: "c-readout-foot" }, h("span", null, foot)) : null,
-  ];
+  ].filter(Boolean);
 }
 
 /* ---------------------------------------------------------------- when to work */
