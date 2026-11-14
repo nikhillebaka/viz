@@ -17,7 +17,7 @@ import { glass } from "./glass.js";
 // controls.js imports this module too; the cycle is safe because icons are only read when a layer opens
 import { icon } from "./controls.js";
 
-const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex='-1'])";
+const FOCUSABLE = ["button:not([disabled])", "[href]", "input:not([disabled])", "select", "textarea", "[tabindex]"].map((s) => `${s}:not([tabindex='-1'])`).join(", ");
 
 /* ---------- input modality ----------
  * Focus rings are for keyboard users. When we move focus ourselves (into a layer, back to its anchor),

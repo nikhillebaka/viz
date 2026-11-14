@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pickers · dev</title>
+<link rel="stylesheet" href="../styles/tokens.css">
+<link rel="stylesheet" href="../styles/base.css">
+<link rel="stylesheet" href="../styles/glass.css">
+<link rel="stylesheet" href="../styles/controls.css">
+<link rel="stylesheet" href="../styles/pickers.css">
+<style>
+  /* harness layout only */
+  html, body { height: 100%; overflow: hidden; }
+  #top { position: fixed; inset: 0 0 auto 0; z-index: var(--z-fixed); grid-template-rows: auto; grid-template-areas: "tl tc tr"; }
+  #state { position: fixed; right: var(--inset); bottom: var(--inset); max-width: 520px; white-space: normal; }
+  #state td:first-child { color: var(--ink-tertiary); padding-right: var(--space-12); vertical-align: top; }
+  #state td + td { text-align: left; white-space: normal; }
+  #guide { position: fixed; top: 0; bottom: 0; left: 0; width: 0; border-left: var(--stroke-hairline) dashed var(--accent); opacity: 0.6; pointer-events: none; transition: left var(--dur-move) var(--ease-spring); }
+  #hint { position: fixed; left: var(--inset); bottom: var(--inset); font-size: var(--text-small); color: var(--ink-tertiary); }
+</style>
+</head>
+<body>
+<!-- The two pickers on real data with chart: null (?chart=1: a stand-in chart that loads the real fan,
+     so "no forecast" notes, the inset and preview calls can be checked). t theme · ← → date · a Show all. -->
+<div class="c-chrome" id="top">
+  <div class="c-zone" data-zone="tl" id="tl"></div>
+  <div class="c-zone" data-zone="tr" id="tr"></div>
+</div>
+<div id="guide" hidden></div>
+<div id="hint">t theme · ← → round · a show all</div>
+<div class="c-readout" id="state"></div>
+<script type="module" src="pickers.js"></script>
+</body>
+</html>

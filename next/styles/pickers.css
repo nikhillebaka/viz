@@ -1,0 +1,81 @@
+/* The model and location pickers: only what the kit (controls.css) doesn't give. Load after it. */
+
+/* ================================================================ model picker
+ * Fixed to the left of the screen at full height; the width follows the list (one or two columns). */
+.pk-panel {
+  top: var(--inset) !important; left: var(--inset) !important;
+  height: calc(100vh - 2 * var(--inset)) !important; max-height: none !important;
+  transition: width var(--dur-move) var(--ease-spring);
+}
+.pk-panel .c-float-body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* header: the search and the Baseline switch share one hairline */
+.pk-head {
+  flex: none; display: flex; align-items: center; gap: var(--space-12);
+  margin-bottom: var(--space-6); padding-right: var(--space-8);
+  border-bottom: var(--stroke-hairline) solid var(--fill-selected);
+}
+.pk-head .c-search { flex: 1; margin-bottom: 0; border-bottom: 0; }
+.pk-base {
+  display: inline-flex; align-items: center; gap: var(--space-8); flex: none;
+  height: var(--size-chip); margin: 0; padding: 0; border: 0; background: none; border-radius: var(--radius-tag);
+  font: inherit; font-size: var(--text-control); font-weight: var(--weight-medium); line-height: 1;
+  color: var(--ink-secondary); cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.pk-base:hover, .pk-base[aria-checked="true"] { color: var(--ink-primary); }
+
+/* the list: the only part that scrolls. It reaches into the body's padding so focus rings aren't clipped
+ * and rows line up with the search */
+.pk-list {
+  flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain;
+  margin: 0 calc(-1 * var(--space-4)); padding: var(--space-4);
+  scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+}
+.pk-list.two .pk-cols { columns: 2; column-gap: var(--space-16); }
+.pk-cols > * { break-inside: avoid; }
+.pk-cols > .c-section { break-after: avoid; }
+
+/* a row: the kit's two-line row is the name target (role checkbox); the chart circle sits over its lead */
+.pk-row { position: relative; }
+.pk-row > .c-row { scroll-margin-block: var(--space-4); }
+.pk-row:has(> .pk-dot:hover) > .c-row { background-image: linear-gradient(var(--fill-hover), var(--fill-hover)); }
+.pk-dot {
+  position: absolute; z-index: 1; top: 50%;
+  left: calc(var(--space-8) + var(--size-icon) / 2 - var(--size-control-sm) / 2);
+  display: grid; place-items: center;
+  width: var(--size-control-sm); height: var(--size-control-sm); margin: 0; padding: 0;
+  border: 0; border-radius: 50%; background: none; cursor: pointer;
+  translate: 0 -50%;
+}
+.pk-dot > i {
+  display: grid; place-items: center;
+  width: var(--size-icon-sm); height: var(--size-icon-sm); border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--ink-faint);
+  transition: background-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
+}
+.pk-dot:hover > i { box-shadow: inset 0 0 0 1.5px var(--ink-secondary); }
+.pk-dot.on > i { background-color: var(--c); box-shadow: none; }
+/* drawn as grey context (Show all) */
+.pk-dot.grey > i::after { content: ""; width: var(--space-6); height: var(--space-6); border-radius: 50%; background: var(--ink-tertiary); }
+.pk-miss { color: var(--ink-secondary); }
+
+.pk-empty { padding: var(--space-8); font-size: var(--text-small); color: var(--ink-tertiary); }
+.pk-foot {
+  flex: none; display: flex; align-items: center;
+  height: var(--size-chip); margin-top: var(--space-6); padding: 0 var(--space-8);
+  border-top: var(--stroke-hairline) solid var(--fill-selected);
+  font-size: var(--text-small); font-variant-numeric: tabular-nums; color: var(--ink-tertiary);
+}
+
+/* ================================================================ location picker */
+.lp-chips { display: flex; flex-wrap: wrap; gap: var(--space-6); padding: 0 var(--space-8); }
+.lp-recent { padding-block: var(--space-6); }
+.lp-map { padding: var(--space-6) var(--space-8) var(--space-8); }
+.lp-map > .lp-chips { padding: var(--space-12) 0 0; }
+.lp-us { width: 100%; margin-bottom: var(--space-8); }
+.lp-tiles { grid-template-columns: repeat(11, 1fr); }
+/* searching: everything else dims, matches get a ring, the best (what Enter picks) a stronger one */
+.lp-panel.filtering .lp-map [data-loc]:not(.match) { opacity: var(--opacity-disabled); }
+.lp-panel.filtering .lp-map .match:not(.on) { color: var(--ink-primary); box-shadow: inset 0 0 0 var(--stroke-hairline) var(--accent); }
+.lp-panel.filtering .lp-map .match.best { box-shadow: inset 0 0 0 var(--stroke-focus) var(--accent); }
