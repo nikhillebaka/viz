@@ -5,7 +5,7 @@ No dependencies: Node (v22+, for global `WebSocket`) and a local Chrome. Run fro
 ## Unit
 
 ```bash
-node --test next/tests/unit/
+node --test "next/tests/unit/**/*.test.mjs"
 ```
 
 Pure modules only (scale, format, selection, fan decoding, layout rules).
