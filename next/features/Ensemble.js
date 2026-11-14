@@ -7,6 +7,7 @@ import { h } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { Segmented, icon, toast } from "../ui/controls.js";
 import { getJSON, postJSON, reloadSoon } from "./More.js";
+import { select, chartedBySlot } from "./selection.js";
 
 const ARM_MS = 3500;
 const METHODS = [{ value: "median", label: "Median" }, { value: "mean", label: "Mean" }];
@@ -32,6 +33,7 @@ export function openCombine(anchor, { manifest, store }) {
 
   const layer = openPopover(anchor, {
     title: "Combine", placement: "bottom-start", width: 420, className: "mo-panel",
+    onClose() { clearTimeout(timer); seq++; },
     content(body) {
       body.append(
         h("div", { class: "c-section" }, h("span", { class: "c-section-title" }, "Members")),
@@ -93,10 +95,12 @@ export function openCombine(anchor, { manifest, store }) {
     createBtn.disabled = true; createBtn.textContent = "Creating…";
     try {
       const r = await postJSON("/api/ensemble/create", { name, method, models: members, missing_policy: policy, spatial_split: false, save_to_disk: false });
-      // select it once the page has reloaded with the new manifest
+      // select it once the page has reloaded with the new manifest: the URL names the whole current
+      // selection plus the ensemble (it may have named none, the selection then coming from storage)
+      const next = select(store.get().sel, r.ensemble.id);
       const url = new URL(location.href);
-      const ids = (url.searchParams.get("models") || "").split(",").filter((x) => x && x !== "none");
-      url.searchParams.set("models", [...ids, r.ensemble.id].join(","));
+      url.searchParams.set("models", next.selected.join(","));
+      url.searchParams.set("chart", chartedBySlot(next).map((id) => id ?? "").join(","));
       history.replaceState(history.state, "", url);
       toast(`Created ${r.ensemble.name}`);
       layer.close(false);
@@ -123,13 +127,13 @@ export function openCombine(anchor, { manifest, store }) {
         clearTimeout(armed.get(e.id));
         del.disabled = true;
         try { await postJSON("/api/ensemble/delete", { ensemble_id: e.id }); toast(`Deleted ${e.name}`); reloadSoon(); }
-        catch (err) { del.disabled = false; del.textContent = "Delete"; toast(`Couldn't delete · ${err.message}`); }
+        catch (err) { del.disabled = false; del.textContent = "Delete"; toast(`Couldn't delete · ${err.message}`, { tone: "error" }); }
       });
       const keep = e.is_saved ? null : h("button", { type: "button", class: "c-btn filled sm" }, "Save");
       keep?.addEventListener("click", async () => {
         keep.disabled = true; keep.textContent = "Saving…";
         try { await postJSON("/api/ensemble/save", { ensemble_id: e.id }); toast(`Saved ${e.name}`); loadSaved(); }
-        catch (err) { keep.disabled = false; keep.textContent = "Save"; toast(`Couldn't save · ${err.message}`); }
+        catch (err) { keep.disabled = false; keep.textContent = "Save"; toast(`Couldn't save · ${err.message}`, { tone: "error" }); }
       });
       const n = new Set([...(e.models || []), ...(e.state_models || []), ...(e.national_models || [])]).size;
       return h("div", { class: "mo-ens" },

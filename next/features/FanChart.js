@@ -125,10 +125,13 @@ export class FanChart {
       // a layer opening or closing moves focus: hover hides or comes back on the next frame
       on(document, "focusin", () => this.request()),
       on(document, "focusout", () => this.request()),
-      on(window, "scroll", () => { this._rect = null; }, { passive: true, capture: true }),
+      // the canvas moved under a still pointer: forget its rect and re-check what is hovered
+      on(window, "scroll", () => { this._rect = null; if (this.interact.mouse) this.request(); }, { passive: true, capture: true }),
       on(document.fonts, "loadingdone", () => { this.#measure(); this.request(); }),
       () => ro.disconnect(),
+      () => this._dprOff?.(),
     ];
+    this.#watchDpr();
     document.fonts?.ready.then(() => { this.#measure(); this.request(); });
     this.#show(this.#want(s.date));
   }
@@ -183,6 +186,19 @@ export class FanChart {
   zoom(dir) {
     if (!this.nav) return;
     if (dir > 0) this.nav.zoomIn(); else if (dir < 0) this.nav.zoomOut(); else this.nav.reset();
+  }
+
+  /**
+   * Previews focus on a model from outside the chart (e.g. hovering its row in the scores), exactly as
+   * hovering its label does; null clears it. Only a model drawn in color (or the baseline) shows; a
+   * pointer over the chart or a keyboard-focused label takes precedence.
+   * @param {string | null} id
+   */
+  hoverModel(id) {
+    id = id ?? null;
+    if (id === this.interact.external) return;
+    this.interact.external = id;
+    this.request();
   }
 
   /** Clears the focus (Escape). */
@@ -269,6 +285,7 @@ export class FanChart {
     this.layers?.destroy();
     this.bubbles?.destroy();
     this.canvas.remove(); this.empty.remove(); this.readout.el.remove();
+    this.fan = this.nav = null; // late callbacks (fonts loading, the idle prefetch) find nothing to do
   }
 
   /* ================================================================ data */
@@ -333,13 +350,16 @@ export class FanChart {
       this.view.classList.add("is-ready");
       this.hooks.onReady?.();
     } else {
-      const crossed = fan.season !== this.fan.season;
+      const old = this.fan.dates;
+      const same = old.length === fan.dates.length && old[0] === fan.dates[0];
       this.#cut(() => {
         this.fan = fan;
         this.#prepare(true);
+        // another season, or a target or place whose rounds differ: the stepper takes the new weeks first,
+        // so the week setTimeline announces is read against them
+        if (!same) this.bubbles.setDates(fan.dates, index);
         this.nav.setTimeline({ dates: fan.dates, season: fan.window, index });
         this.nav.setHeight(1);
-        if (crossed) this.bubbles.setDates(fan.dates, index);
         this.layers.sync();
         this.draw(true);
       });
@@ -392,11 +412,22 @@ export class FanChart {
     o.context = ctxIds.filter((id) => fan.present.has(id)).map((id) => ({ id, label: M.label(id, among) }));
     o.absent = this.#absent(charted.filter((c) => !fan.present.has(c.id)).map((c) => c.id));
     o.format = valueFormat(M.targetById.get(fan.target));
-    const goal = niceMax(fan.yMax(models.map((m) => m.id)));
-    if (ease) this.y.set(goal, tokenNum("--dur-move", 300)); else this.y.jump(goal);
+    this.#axis(ease);
     // focus clears when the focused model leaves the chart (or isn't in this season, place or target)
     if (s.focus && !models.some((m) => m.id === s.focus)) store.set({ focus: null });
   }
+
+  /* The axis maximum: observed data and the charted medians (rounded up), and past seasons while that
+   * layer is on, so their lines never run off the top. Eases to a new goal; never per frame. */
+  #axis(ease) {
+    const fan = this.fan;
+    if (!fan) return;
+    const goal = niceMax(Math.max(fan.yMax(this.opts.models.map((m) => m.id)), this.layers?.yMax() ?? 0));
+    if (ease) this.y.set(goal, tokenNum("--dur-move", 300)); else this.y.jump(goal);
+  }
+
+  /** Something drawn on the chart changed what the axis must hold (a layer's data arrived). */
+  rescale() { this.#axis(true); this.request(); }
 
   // charted models with nothing here: one quiet line, "2 not in 2023–24 · 1 not in Wyoming"
   #absent(ids) {
@@ -437,6 +468,7 @@ export class FanChart {
     if (changed.has("rulers")) this.rk.set(s.rulers ? 1 : 0, RULER_MS);
     if (changed.has("sel") || changed.has("level")) this.bubbles?.sync(s);
     if (["layers", "date", "sel"].some((k) => changed.has(k))) this.layers?.sync();
+    if (changed.has("layers") && !changed.has("sel") && this.fan) this.#axis(true);
     this.request();
   }
 
@@ -448,6 +480,15 @@ export class FanChart {
     this._rect = null;
     this.#measure();
     if (this.nav) this.draw(true);
+  }
+
+  // a devicePixelRatio change (another display, browser zoom without a resize) redraws at the new density
+  #watchDpr() {
+    const mq = globalThis.matchMedia?.(`(resolution: ${globalThis.devicePixelRatio || 1}dppx)`);
+    if (!mq) return;
+    const fn = () => { this._dprOff?.(); this.#watchDpr(); if (this.nav) this.draw(true); };
+    mq.addEventListener("change", fn, { once: true });
+    this._dprOff = () => mq.removeEventListener("change", fn);
   }
 
   // the room the bottom bubbles take, from the view's bottom edge
@@ -476,6 +517,7 @@ export class FanChart {
     const s = this.ctx.store.get(), o = this.opts, ia = this.interact;
     const hoverT = ia.hoverT != null && !nav.moving && !activeLayer() ? ia.hoverT : null;
     o.t = nav.T;
+    o.settle = nav.week;
     o.domain = nav.domain();
     o.ymax = this.y.v / nav.heightZoom;
     o.pad.l = 64 + this.inset.v;
@@ -486,7 +528,7 @@ export class FanChart {
     o.level = s.level;
     o.outcome = s.outcome;
     o.rulers = this.rk.v;
-    o.focus = ia.preview ?? ia.keyed ?? s.focus;
+    o.focus = ia.preview ?? ia.keyed ?? ia.external ?? s.focus;
     o.hot = ia.hot;
     if (hoverT != null) { this.hoverAt.t = hoverT; o.hover = this.hoverAt; } else o.hover = null;
     o.fonts = chartFonts();
@@ -514,7 +556,7 @@ export class FanChart {
     const M = this.ctx.manifest, fan = this.fan;
     const place = M.locationById.get(fan.location)?.name ?? fan.location;
     const target = M.targetById.get(fan.target)?.label ?? fan.target;
-    const aria = `${target} · ${place} · forecast ${fmtLong(fan.dates[scene.di])}`;
+    const aria = `${target} · ${place} · forecast ${fmtLong(fan.dates[scene.settle])}`;
     if (aria !== this.ariaKey) { this.ariaKey = aria; this.canvas.setAttribute("aria-label", aria); }
     const none = !fan.observed.length && !fan.present.size;
     const key = none ? `${place}|${fan.season}|${Math.round((scene.pad.l + scene.w - scene.pad.r) / 2)}|${Math.round((scene.pad.t + scene.ay) / 2)}` : "";

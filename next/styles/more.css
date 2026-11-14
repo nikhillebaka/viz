@@ -14,6 +14,10 @@
 .mo-remove:hover, .mo-remove.armed { color: var(--status-error); }
 .mo-remove.armed { background-color: var(--fill-field); }
 
+/* the ⋯ bubble's dot: a hub sync running (accent) or failed */
+.mo-dot { position: absolute; top: var(--space-6); right: var(--space-6); width: 6px; height: 6px; border-radius: 50%; background: var(--accent); pointer-events: none; }
+.mo-dot.is-failed { background: var(--status-error); }
+
 /* ---------- data sources: one block per source, separated by hairlines ---------- */
 .mo-src { padding: var(--space-12) 0; border-bottom: var(--stroke-hairline) solid var(--fill-selected); }
 .mo-src:first-child { padding-top: var(--space-4); }

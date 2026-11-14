@@ -5,7 +5,7 @@ import { h } from "../../lib/dom.js";
 import { linear } from "../../lib/scale.js";
 import { tooltip } from "../../ui/floating.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
-import { LEVELS, fmtScore, fmtRel, relLevel } from "./model.js";
+import { LEVELS, fmtScore, fmtRel, relLevel, horizonsLabel } from "./model.js";
 import { loadDetails, loadPlaces } from "./data.js";
 import { s } from "./figures.js";
 
@@ -15,10 +15,11 @@ const fmtIso = (iso) => MON.format(Date.parse(`${iso}T00:00:00Z`));
 /**
  * @param {object} row the model's leaderboard row
  * @param {object | undefined} base the baseline's row
- * @param {{ ctx: object, scope: object, goTo(patch: { date?: string, location?: string }): void }} o
+ * @param {{ ctx: object, scope: object, baseline: string, goTo(patch: { date?: string, location?: string }): void }} o
+ *   baseline: the baseline the scores are relative to (the server's, when the scope's has no forecasts)
  * @returns {HTMLElement}
  */
-export function detail(row, base, { ctx, scope, goTo }) {
+export function detail(row, base, { ctx, scope, baseline, goTo }) {
   const { manifest, store } = ctx;
   const el = h("div", { class: "sc-detail", role: "region", "aria-label": `${row.label} detail` });
   const block = (title, ...kids) => h("div", { class: "sc-block" }, h("div", { class: "sc-block-title" }, title), ...kids);
@@ -48,17 +49,19 @@ export function detail(row, base, { ctx, scope, goTo }) {
   el.append(
     block("Anatomy", anatomy, key),
     block("Coverage", h("div", { class: "sc-cov-wrap" }, cov)),
-    block("Locations", tiles),
+    block(tilesTitle(scope, manifest), tiles),
     h("div", { class: "sc-block sc-wide" }, h("div", { class: "sc-block-title" }, "Submissions"), subs),
     h("div", { class: "sc-block sc-wide" }, facts),
   );
 
-  // per state: the model's mean WIS over the baseline's (the newest scoped season)
+  // per state: the model's mean WIS over the baseline's (a ratio of means, not the pairwise relative WIS),
+  // the newest scoped season, every week; one horizon when the scope has exactly one (tilesTitle says so)
   const season = scope.seasons[0];
   const byAbbr = new Map(manifest.locations.map((l) => [l.abbr, l]));
   if (season && !row.baseline) {
     tiles.append(h("span", { class: "sc-quiet" }, "Loading"));
-    loadPlaces(store.get().target, season, row.id, scope.baseline).then(({ model, base: b }) => {
+    const horizon = scope.horizons?.length === 1 ? scope.horizons[0] : "all";
+    loadPlaces(store.get().target, season, row.id, baseline || scope.baseline, horizon).then(({ model, base: b }) => {
       tiles.replaceChildren(...Object.entries(TILES).map(([abbr, [cx, cy]]) => {
         const loc = byAbbr.get(abbr), m = model.get(abbr), bv = b.get(abbr);
         const rel = m != null && bv > 0 ? m / bv : null, lvl = relLevel(rel);
@@ -67,7 +70,7 @@ export function detail(row, base, { ctx, scope, goTo }) {
           style: { gridColumn: String(cx + 1), gridRow: String(cy + 1), "--c": lvl ? `var(--score-${lvl})` : null },
           "aria-label": loc?.name || abbr, onclick: () => loc && goTo({ location: loc.id }),
         });
-        tooltip(t, `${loc?.name || abbr} · ${rel == null ? "–" : `${fmtRel(rel)} · WIS ${fmtScore(m)}`}`);
+        tooltip(t, `${loc?.name || abbr} · ${rel == null ? "–" : `${fmtRel(rel)}× baseline WIS · WIS ${fmtScore(m)}`}`);
         return t;
       }));
     }, () => tiles.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load locations")));
@@ -78,6 +81,18 @@ export function detail(row, base, { ctx, scope, goTo }) {
     renderFacts(facts, d, row, manifest);
   }, () => { subs.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load details")); });
   return el;
+}
+
+/* "Locations", plus where the tiles' scope is wider than the table's: they cover one season, every week
+ * and all horizons (or the one horizon in scope) */
+function tilesTitle(scope, manifest) {
+  const hs = scope.horizons;
+  return [
+    "Locations",
+    scope.seasons.length > 1 && (manifest.seasonById.get(scope.seasons[0])?.label || scope.seasons[0]),
+    (scope.weeks || scope.phase) && "whole season",
+    hs && hs.length > 1 && horizonsLabel(null),
+  ].filter(Boolean).join(" · ");
 }
 
 function drawCoverage(svg, row, base) {

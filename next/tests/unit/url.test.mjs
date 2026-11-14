@@ -126,3 +126,16 @@ test("unknown parameters are preserved, after this module's own", () => {
   assert.equal(q, "?loc=25&view=heatmap&hm_rows=model");
   assert.equal(writeUrl(base, manifest, "?view=peak"), "?view=peak");
 });
+
+test("the view sections' settings round-trip through hm, mp and pk", () => {
+  const views = {
+    heatmap: { rows: "model", cols: "date", metric: "wis", sort: "score", scale: "row", horizon: 2, model: "truth" },
+    map: { layer: "error", horizon: 3 },
+    peaks: { table: "skill", scope: "states", layer: "size" },
+  };
+  const d = defaults(manifest);
+  const qs = writeUrl({ ...d, views }, manifest);
+  assert.match(qs, /hm=model,date,wis,score,row,2,truth/);
+  assert.deepEqual(parseUrl(qs, manifest).views, views);
+  assert.equal(writeUrl({ ...d, views: { heatmap: null } }, manifest), "");
+});

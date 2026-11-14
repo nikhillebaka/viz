@@ -54,3 +54,22 @@ test("per-row scale spans each row's own range", () => {
   const g = buildGrid(r, { rows: "location", cols: "date", metric: "count", sort: "alpha", scale: "row" }, {});
   assert.deepEqual([g.tone(0, 0).t, g.tone(0, 1).t], [0, 1]);
 });
+
+test("request: place US asks for the US, all asks for the states", () => {
+  const v = normalizeView({ rows: "model", cols: "date" }, true);
+  assert.equal(requestFor(v, { target: "t", seasons: ["s"], place: "US", locationAbbr: "MA", models: ["a"] }).location, "US");
+  assert.equal(requestFor(v, { target: "t", seasons: ["s"], place: "all", locationAbbr: "MA", models: ["a"] }).location, "states");
+});
+
+test("a week window applies to each season, not only the newest", () => {
+  const r = { y_keys: ["m"], x_keys: ["2024-10-05", "2024-12-07", "2025-10-04", "2025-12-06"], raw_matrix: [[1, 2, 3, 4]] };
+  const weekOf = (iso) => ({ "2024-10-05": 10, "2024-12-07": 19, "2025-10-04": 10, "2025-12-06": 19 })[iso];
+  const g = buildGrid(r, { rows: "model", cols: "date", metric: "wis", sort: "alpha", scale: "none" }, { weeks: [8, 12], weekOf });
+  assert.deepEqual(g.cols.map((c) => c.key), ["2024-10-05", "2025-10-04"]);
+});
+
+test("coverage tones saturate 20 points off 95, as the scores' steps", () => {
+  const r = { y_keys: ["m"], x_keys: ["a", "b"], raw_matrix: [[75, 95]] };
+  const g = buildGrid(r, { rows: "model", cols: "location", metric: "cov95", sort: "alpha", scale: "none" }, {});
+  assert.equal(g.tone(0, 0).t, 1); assert.equal(g.tone(0, 1).t, 0);
+});

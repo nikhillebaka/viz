@@ -52,6 +52,29 @@ test("metricsRequest: every model unless shared-only or rank among selected", ()
   assert.equal(new URLSearchParams(d.query).get("horizons"), "0,1");
   assert.equal(new URLSearchParams(d.full).get("horizons"), null);
   assert.equal(d.key, d.query);
+  // the quick request: the full-pool scope on the selected models and the baseline
+  assert.equal(new URLSearchParams(a.quick).get("models"), "B,m1,m2");
+  assert.equal(new URLSearchParams(a.quick).get("season"), "2025-2026");
+  assert.equal(b.quick, null, "already selected-only");
+  assert.equal(new URLSearchParams(d.quick).get("horizons"), "0,1");
+});
+
+test("rowsFrom: the quick response stands in with relative WIS pending; Wins from the selected pool", () => {
+  const H = (wis, n) => ({ wis, count: n });
+  const pool = { baseline_model: "B", rankings: [
+    { model_id: "B", has_data_in_scope: true, count: 20, wis: 100, relative_wis: 1, weeks_won: 0, weeks_competed: 2, by_horizon: { 0: H(50, 10) } },
+    { model_id: "m1", has_data_in_scope: true, count: 20, wis: 80, relative_wis: 0.8, weeks_won: 0, weeks_competed: 2, by_horizon: { 0: H(25, 10) } },
+  ] };
+  const sel = { baseline_model: "B", rankings: pool.rankings.map((r) => ({ ...r, relative_wis: 0.7, weeks_won: r.model_id === "m1" ? 9 : 1, weeks_competed: 10 })) };
+  const o = { ids: ["m1"], baseline: "B", scale: "natural", label: (id) => id };
+  const wait = rowsFrom(sel, { ...o, wins: sel, pending: true });
+  assert.equal(wait[0].rel, null);
+  assert.equal(wait[1].rel, null, "the baseline is not ranked first while the others wait");
+  assert.equal(wait[0].wis, 80);
+  const done = rowsFrom(pool, { ...o, wins: sel });
+  assert.equal(done[0].rel, 0.8);
+  assert.deepEqual([done[0].wins, done[0].competed], [9, 10]);
+  assert.equal(rowsFrom(pool, { ...o, wins: null })[0].wins, null);
 });
 
 const H = (wis, count, comp = [1, 1, 1]) => ({ wis, wis_log: wis / 100, count, cov50: 50, cov95: 90, sharpness_component: comp[0], overprediction_penalty: comp[1], underprediction_penalty: comp[2], calibration: { "0.5": 50 } });
@@ -122,7 +145,9 @@ test("labels, CSV, command", () => {
   assert.equal(delimited([{ a: 'x"y', b: 1, c: null }]), '﻿"a","b","c"\r\n"x""y",1,');
   assert.equal(delimited([{ a: "x\ty" }], "tsv"), "﻿a\r\nx y");
   const cmd = cliCommand({ ids: ["m1", "hub:x"], scope: { ...sc, fair: true, weeks: [2, 5] }, target: "wk inc flu hosp", defaultTarget: "wk inc flu hosp", isHub: (id) => id.startsWith("hub:"), hubBaseline: "B", allSeasons: 2 });
-  assert.equal(cmd, "python3 viz/score_cli.py --models m1 --season 2025-2026 --weeks 2-5 --location states --fair");
+  assert.equal(cmd, "python3 viz/score_cli.py --models m1,B --season 2025-2026 --weeks 2-5 --location states --fair # hub models left out");
+  const ranked = cliCommand({ ids: ["m1"], scope: { ...sc, horizons: [0, 1] }, target: "t", defaultTarget: "t", isHub: () => false, hubBaseline: "B", allSeasons: 2 });
+  assert.match(ranked, /--models m1,B .* # Rel\. WIS among these only · 0–1 wk not in CLI$/);
 });
 
 test("URL: scope and leaderboard keys round-trip; defaults stay out", () => {

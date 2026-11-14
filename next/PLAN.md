@@ -24,7 +24,10 @@ fixed bubbles: Models · Location · Target                      theme · ⋯
 - **Scope** (what is being evaluated) lives in the store as `scope` and is read only through
   `sections/scope.js`: `scopeOf(state, manifest) → { seasons: [id], from, to, phase, horizons, place }`.
   By default it follows the chart's season. Scores owns the scope line UI; every other section reads it.
-- **Data** comes from the existing endpoints (`/api/metrics`, `/api/heatmap`, `/api/spatial`,
+- **Shared section parts** are in `sections/shared.js` (frame, fragment menus, loading, score ramps,
+  canvas, `onScreen`, `viewState`). A section's own settings live in `state.views.<name>` (URL keys
+  `hm`, `mp`, `pk`).
+- **Data** comes from `/api/next/*` (`manifest`, `fan`, `metrics`, `spatial`, `surveillance`) and the existing endpoints (`/api/metrics`, `/api/heatmap`, `/api/spatial`,
   `/api/peaks`, `/api/peak-map`, `/api/season-curves`, `/api/surveillance`, `/api/model-details`,
   `/api/ensemble/*`, `/api/remote/*`, `/api/status`). `server.py`/`core/` change only by adding
   `/api/next/*` routes, never by altering what old viz gets.

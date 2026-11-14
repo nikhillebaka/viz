@@ -1,9 +1,8 @@
 /* What the three view sections (heatmap, map, peaks) share: the section frame on the paper (a heading,
  * one quiet line of fragment controls, a loading hairline, one quiet empty line), JSON loading with
- * cancellation, the score color ramps, HHS regions, and canvas sizing. Lives under heatmap/ because a
- * lane owns only its sections' folders; map/ and peaks/ import it from here. */
-import { h, on, cssColor } from "../../lib/dom.js";
-import { openMenu } from "../../ui/floating.js";
+ * cancellation, the score color ramps, HHS regions, canvas sizing, and on-screen / DPR watching. */
+import { h, on, cssColor, storage } from "../lib/dom.js";
+import { openMenu } from "../ui/floating.js";
 
 /* ---------------------------------------------------------------- styles */
 const linked = new Set();
@@ -14,7 +13,7 @@ const linked = new Set();
 export function linkStyle(name) {
   if (linked.has(name)) return;
   linked.add(name);
-  document.head.append(h("link", { rel: "stylesheet", href: new URL(`../../styles/${name}.css`, import.meta.url).href }));
+  document.head.append(h("link", { rel: "stylesheet", href: new URL(`../styles/${name}.css`, import.meta.url).href }));
 }
 
 /* ---------------------------------------------------------------- frame */
@@ -242,6 +241,65 @@ export function readoutContent(head, rows, foot) {
     h("table", null, rows.filter(Boolean).map(([k, v, quiet]) => h("tr", { class: quiet ? "dim" : null }, h("td", { class: "c-readout-name" }, k), h("td", { class: "num" }, v)))),
     foot ? h("div", { class: "c-readout-foot" }, h("span", null, foot)) : null,
   ];
+}
+
+/* ---------------------------------------------------------------- when to work */
+/**
+ * Runs work only while the section is on (or near) the screen. Work asked for while it is off screen
+ * waits and runs once, when the section comes back; only the latest ask waits, so pass work that
+ * covers everything (a load that re-renders). `onChange(visible)` hears each change.
+ * @param {HTMLElement} el
+ * @param {(visible: boolean) => void} [onChange]
+ * @returns {{ visible(): boolean, run(fn: () => void): void, off(): void }}
+ */
+export function onScreen(el, onChange) {
+  let vis = true, pending = null;  // mounted because it neared the viewport: visible until told otherwise
+  const io = new IntersectionObserver((es) => {
+    const v = es[es.length - 1].isIntersecting;
+    if (v === vis) return;
+    vis = v;
+    onChange?.(v);
+    if (v && pending) { const fn = pending; pending = null; fn(); }
+  }, { rootMargin: "400px 0px" });
+  io.observe(el);
+  return {
+    visible: () => vis,
+    run(fn) { if (vis) { pending = null; fn(); } else pending = fn; },
+    off() { io.disconnect(); pending = null; },
+  };
+}
+
+/**
+ * Calls fn when the device pixel ratio changes (a window moved to another screen, browser zoom), which a
+ * ResizeObserver doesn't report.
+ * @param {() => void} fn @returns {() => void} stops
+ */
+export function onDprChange(fn) {
+  let mq = null;
+  const arm = () => {
+    mq = matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    mq.addEventListener("change", fire, { once: true });
+  };
+  const fire = () => { arm(); fn(); };
+  arm();
+  return () => mq?.removeEventListener("change", fire);
+}
+
+/**
+ * A section's settings in the store's `views` (the URL carries them) and in local storage: what the URL
+ * says, else what was stored. write(v, isDefault) keeps both; a default view leaves the URL clean.
+ * @param {{ get(): object, set(p: any): void }} store @param {string} name views key @param {string} key storage key
+ * @returns {{ initial: object, write(v: object, isDefault: boolean): void }}
+ */
+export function viewState(store, name, key) {
+  const fromUrl = store.get().views?.[name];
+  return {
+    initial: fromUrl || storage.get(key, {}) || {},
+    write(v, isDefault) {
+      storage.set(key, v);
+      store.set((s) => ({ views: { ...(s.views || {}), [name]: isDefault ? null : v } }));
+    },
+  };
 }
 
 export { h, on };

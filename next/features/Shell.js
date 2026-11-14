@@ -116,7 +116,8 @@ export function mountShell(root, ctx) {
   ctx.chart = chart;
   const sections = mountSections(root, ctx);
   // ⋯ bubble (hubs, warnings, shortcuts, methods): loaded when idle; the page works without it
-  import("./More.js").then((m) => m.mountMore(tr, ctx)).catch(() => {});
+  let more = null, gone = false;
+  import("./More.js").then((m) => { if (!gone) more = m.mountMore(tr, ctx); }).catch(() => {});
 
   // the chart's plot starts under the fixed top bubbles
   const measureTop = () => chart.setTop(Math.max(tl.getBoundingClientRect().bottom, tr.getBoundingClientRect().bottom));
@@ -133,7 +134,12 @@ export function mountShell(root, ctx) {
   offs.push(stopTime, on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const layer = activeLayer();
-    if (e.key === "Escape") { if (!layer) chart.clearFocus(); return; } // an open layer closes itself first
+    // Escape: an open layer closes itself first (it stops the event), then the focus clears, then
+    // presentation mode ends (More.js; it skips an Escape that was used here). Text fields keep theirs.
+    if (e.key === "Escape") {
+      if (!layer && store.get().focus && !e.target.closest?.(TEXT_FIELD)) { e.preventDefault(); chart.clearFocus(); }
+      return;
+    }
     if (layer || e.target.closest?.(TEXT_FIELD)) return;
     switch (e.key) {
       case "=": case "+": chart.zoom(1); break;
@@ -147,7 +153,7 @@ export function mountShell(root, ctx) {
 
   return {
     view,
-    destroy() { offs.forEach((off) => off()); sections.destroy(); chart.destroy(); glasses.forEach((g) => g.destroy()); view.remove(); fixed.remove(); },
+    destroy() { gone = true; more?.destroy(); offs.forEach((off) => off()); sections.destroy(); chart.destroy(); glasses.forEach((g) => g.destroy()); view.remove(); fixed.remove(); },
   };
 }
 

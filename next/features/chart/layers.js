@@ -119,6 +119,14 @@ export class Layers {
     this.sync();
   }
 
+  /** @returns {number} the highest value a visible layer must keep on the axis (past seasons), else 0 */
+  yMax() {
+    if (!this.on.has("seasons") || !this.cur) return 0;
+    let m = 0;
+    for (const l of this.cur) for (let i = 0; i < l.n; i++) if (l.vs[i] > m) m = l.vs[i];
+    return m;
+  }
+
   /** @returns {boolean} a layer's data is loading (for tests) */
   get busy() { return this.pending > 0; }
 
@@ -185,6 +193,7 @@ export class Layers {
         .sort((a, b) => String(b.season).localeCompare(String(a.season))).slice(0, PAST);
       this.cur = curves.map((c, i) => makeLine((c.points || []).map((p) => ({ t: w1 + (p.week - 1) * WEEK, v: p.value })),
         { id: `season-${c.season}`, kind: "season", name: seasonLabel(c.season), end: seasonLabel(c.season), c: "var(--ink-tertiary)", alpha: SEASON_ALPHA[i] ?? 0.2 })).filter(Boolean);
+      if (this.on.has("seasons")) this.chart.rescale();
     });
     this._curP = { sk, p };
     return p;
@@ -298,10 +307,13 @@ export class Layers {
     if (this.sig) for (const L of SIGNALS) if (onL.has(L.id)) add(this.sig.lines.get(L.id), after, width);
     if (onL.has("asof") && this.sig?.asof && this.asof?.line) add(this.asof.line, xc, width);
 
-    // end labels: where the line leaves the plot (left of the model labels), kept apart
+    // end labels: where the line leaves the plot (left of the model labels), kept apart. With forecasts
+    // drawn, no further than the data cutoff: the labels are right-aligned, so past it they would sit on
+    // the bands and medians
     const fs = this.chart.opts.fonts;
     M.font = `500 ${fs?.micro ?? 11}px ${fs?.sans ?? "sans-serif"}`;
-    const limit = (scene.labels.length ? scene.labels[0].x - 14 : scene.w - 16);
+    let limit = scene.labels.length ? scene.labels[0].x - 14 : scene.w - 16;
+    if (scene.series.length) limit = Math.min(limit, xc - 6);
     for (const l of M.lines) {
       if (!l.lab) continue;
       const lim = Math.min(limit, l.clipX ?? Infinity), xy = l.xy;

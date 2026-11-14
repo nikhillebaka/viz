@@ -1,8 +1,8 @@
 /* The heatmap section: rows × columns × metric over the shared scope, drawn on one canvas in the score
  * colors. Hover a cell for its numbers; click it to show that forecast on the chart (location, date and
  * model), then the page scrolls up to the chart. Pure logic is in model.js. */
-import { scopeOf } from "../scope.js";
-import { storage, onThemeChange, cssColor, reducedMotion } from "../../lib/dom.js";
+import { scopeOf, seasonWeekOf, startYearOf } from "../scope.js";
+import { onThemeChange, cssColor, reducedMotion } from "../../lib/dom.js";
 import { valueFormat, fmtDay, fmtLong, fmtMonth } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
 import { chartFonts, canvasMeasure } from "../../chart/render.js";
@@ -10,8 +10,8 @@ import { chart as chartModel, setBaseline, slotOf, COLORS } from "../../features
 import { nearestRound } from "../../features/url.js";
 import {
   h, on, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
-  resetColors, HHS, places, fitCanvas, perFrame, pointerReadout, readoutContent,
-} from "./shared.js";
+  resetColors, HHS, places, fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
+} from "../shared.js";
 import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, normalizeView, swapView, requestFor, buildGrid } from "./model.js";
 
 const KEY = "viz.heatmap";
@@ -25,12 +25,13 @@ export function mount(el, ctx) {
   const P = places(manifest);
   const f = frame(el, "Heatmap");
   const counts = () => manifest.targetById.get(store.get().target)?.scale !== "proportion";
-  let view = normalizeView(storage.get(KEY, {}) || {}, counts());
+  const vs = viewState(store, "heatmap", KEY);
+  let view = normalizeView(vs.initial, counts());
   let resp = null, grid = null, lay = null, reqKey = "", hover = null;
   const slot = {};
 
   // ---------------------------------------------------------------- the control line
-  const save = () => storage.set(KEY, view);
+  const save = () => vs.write(view, JSON.stringify(view) === JSON.stringify(normalizeView({}, counts())));
   const setView = (patch) => { view = normalizeView({ ...view, ...patch }, counts()); save(); syncLine(); load(); };
   const modelChoices = () => {
     const s = store.get(), ids = [...s.sel.selected];
@@ -82,13 +83,17 @@ export function mount(el, ctx) {
   const readout = pointerReadout(fig);
 
   // ---------------------------------------------------------------- loading
-  function load(force = false) {
+  // soft: only the chart's date or place changed, so an unchanged request needs a redraw, not a rebuild
+  function load(force = false, soft = false) {
     const s = store.get(), sc = scopeOf(s, manifest);
-    if (!sc.seasons.length) { resp = grid = null; f.empty("No season in scope"); return; }
+    const none = (text) => { slot._ctl?.abort(); reqKey = ""; resp = grid = null; lay = null; f.loading(false); f.empty(text); };
+    if (!sc.seasons.length) { none("No season in scope"); return; }
     const models = modelAxis(view) ? withBaseline(s.sel.selected) : null;
+    // the server scores every model when given none: never ask for that
+    if (modelAxis(view) && !models) { none("No models selected"); return; }
     const p = requestFor(view, { target: s.target, seasons: sc.seasons, place: sc.place, locationAbbr: P.abbrOf(s.location), models });
     const key = query(p);
-    if (key === reqKey && resp && !force) { rebuild(); return; }
+    if (key === reqKey && resp && !force) { if (soft && grid) redraw(); else rebuild(); return; }
     reqKey = key;
     f.loading(true);
     getJson(`/api/heatmap?${key}`, { slot }).then((j) => {
@@ -100,14 +105,17 @@ export function mount(el, ctx) {
       f.empty("Can't load the heatmap", () => load(true));
     });
   }
+  // a date's week of its own season, so a week window applies to every scoped season
+  const weekOf = (iso) => { const id = manifest.seasonOf(iso); return id ? seasonWeekOf(startYearOf(id), parseIso(iso)) : NaN; };
   const withBaseline = (ids) => (ids.length ? [...new Set([...ids, manifest.baseline].filter(Boolean))] : null);
 
   function rebuild() {
     if (!resp) return;
     const s = store.get(), sc = scopeOf(s, manifest);
     const ids = [...(resp.y_keys || []), ...(resp.x_keys || [])];
+    hover = null; cursor.hidden = true; readout.hide();
     grid = buildGrid(resp, view, {
-      baseline: manifest.baseline, from: sc.from, to: sc.to, horizons: sc.horizons,
+      baseline: manifest.baseline, weeks: sc.weeks, weekOf, horizons: sc.horizons,
       region: (a) => HHS[a], population: (a) => P.byAbbr.get(a)?.population, season: (iso) => manifest.seasonOf(iso),
       label: (k) => labelOf(view.rows, k, ids),
     });
@@ -125,7 +133,7 @@ export function mount(el, ctx) {
 
   function footer() {
     const off = grid.inactive;
-    if (!off.length) { foot.replaceChildren(); return; }
+    if (!off.length) { foot.replaceChildren(); foot.title = ""; return; }
     const names = off.slice(0, 4).map((m) => manifest.label(m.id, off.map((x) => x.id)));
     foot.replaceChildren(`No forecasts in scope · ${names.join(", ")}${off.length > 4 ? ` +${off.length - 4}` : ""}`);
     foot.title = off.map((m) => `${manifest.label(m.id)}: ${m.reason}`).join("\n");
@@ -316,14 +324,19 @@ export function mount(el, ctx) {
   const redraw = perFrame(draw);
   const ro = new ResizeObserver(redraw);
   ro.observe(f.body);
+  const screen = onScreen(el);
+  // off screen, the latest ask waits as a full load (a soft one could hide a rebuild)
+  const later = (soft = false) => (screen.visible() ? load(false, soft) : screen.run(() => load()));
   offs.push(
     () => ro.disconnect(),
+    () => screen.off(),
+    onDprChange(redraw),
     onThemeChange(() => { resetColors(); redraw(); }),
     store.on((s, prev, changed) => {
       if (changed.has("target")) { view = normalizeView(view, counts()); syncLine(); }
       if (changed.has("sel")) syncLine();
-      if (["target", "scope", "sel", "location", "date"].some((k) => changed.has(k))) load();
-      else if (changed.has("focus")) redraw();
+      if (["target", "scope", "sel"].some((k) => changed.has(k))) later();
+      else if (changed.has("location") || changed.has("date")) later(true);
     }),
   );
   syncLine();

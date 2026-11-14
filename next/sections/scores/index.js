@@ -2,8 +2,10 @@
  * fan chart (design/studies/evaluation-goals.md; next/PLAN.md, "Contracts").
  *
  * Reads the store (scope, sel, date, location, target, focus) and owns `scores` ({ sort, rev, cols, open }).
- * Scores come from /api/metrics; by default relative WIS is ranked among every model in scope and the
- * rows shown are the selected models plus the baseline. */
+ * Scores come from /api/next/metrics; by default relative WIS is ranked among every model in scope and the
+ * rows shown are the selected models plus the baseline. That full-pool request is slow the first time, so
+ * a quick selected-only one fills the table first (relative WIS waits for the pool) and is also the pool
+ * "Wins" counts in. */
 import { h } from "../../lib/dom.js";
 import { openMenu, openPopover, tooltip } from "../../ui/floating.js";
 import { icon, toast } from "../../ui/controls.js";
@@ -14,10 +16,10 @@ import {
   metricsRequest, rowsFrom, sortRows, SORTS, DEFAULT_SORT, relLevel, coverageLevel, SMALL, DASH,
   fmtScore, fmtRel, fmtPct, fmtCount, fmtDelta, datesLabel, horizonsLabel, exportRows, delimited, exportName, cliCommand,
 } from "./model.js";
-import { loadMetrics, hasMetrics } from "./data.js";
+import { loadMetrics, loadQuick, hasMetrics } from "./data.js";
 import { openDates } from "./dates.js";
 import { detail } from "./detail.js";
-import { calibrationFigure, horizonFigure, anatomyFigure, s } from "./figures.js";
+import { calibrationFigure, horizonFigure, anatomyFigure, emphasize, s } from "./figures.js";
 
 let cssLinked = false;
 function linkCss() {
@@ -35,7 +37,7 @@ const COLUMNS = {
   cov95: { label: "95%", tip: "95% interval coverage · target 95" },
   n: { label: "N", tip: "Forecasts scored" },
   delta: { label: "vs base", tip: "WIS change vs the baseline, on shared forecasts" },
-  wins: { label: "Wins", tip: "Rounds with the lowest WIS among the selected models" },
+  wins: { label: "Wins", tip: "Rounds with the lowest WIS · among the selected models and baseline" },
   per100k: { label: "/100k", tip: "WIS per 100k population" },
   sharp: { label: "Width", tip: "Mean 95% interval width" },
   cov80: { label: "80%", tip: "80% interval coverage · target 80" },
@@ -89,28 +91,42 @@ export function mount(el, ctx) {
   el.append(root);
 
   /* ---------------- state ---------------- */
+  // resp: the newest full response (may be for an older scope while the current one loads); quick: the
+  // selected-only response for `quickQ`; cur: the request the store asks for now
   let resp = null, respFull = null, respKey = null, wantKey = null, failed = false;
+  let quick = null, quickQ = null, quickWant = null, cur = null, shown = null;
   let rows = [], order = { ranked: [], unranked: [], ranks: new Map() };
-  let hover = null, share = false, previewed = null;
+  let hover = null, share = false, previewed = null, dead = false;
 
   const scope = () => scopeOf(store.get(), manifest);
   const setUi = (patch) => store.set((st) => ({ scores: { ...uiOf(st), ...patch } }));
 
   function request() {
     const st = store.get(), sc = scope();
-    if (!sc.seasons.length) { resp = null; respFull = null; respKey = null; render(); return; }
-    const req = metricsRequest(sc, { target: st.target, selected: st.sel.selected, allSeasons });
+    if (!sc.seasons.length) { cur = null; resp = null; respFull = null; respKey = null; render(); return; }
+    const req = (cur = metricsRequest(sc, { target: st.target, selected: st.sel.selected, allSeasons }));
+    // the quick request follows the selection even when the full-pool query (models=all) does not change
+    if (req.quick && req.quick !== quickQ && req.quick !== quickWant) {
+      quickWant = req.quick;
+      loadQuick(req.quick).then((j) => {
+        if (dead || quickWant !== req.quick) return;
+        quick = j; quickQ = req.quick; quickWant = null;
+        render();
+      }, (err) => {
+        if (err?.name !== "AbortError" && quickWant === req.quick) quickWant = null;
+      });
+    }
     if (req.key === respKey || req.key === wantKey) { render(); return; }
     wantKey = req.key;
     failed = false;
     root.classList.toggle("is-loading", !hasMetrics(req.query, req.full));
     loadMetrics(req.query, req.full).then((j) => {
-      if (wantKey !== req.key) return;
+      if (dead || wantKey !== req.key) return;
       resp = j.resp; respFull = j.full; respKey = req.key; wantKey = null;
       root.classList.remove("is-loading");
       render();
     }, (err) => {
-      if (err?.name === "AbortError" || wantKey !== req.key) return;
+      if (dead || err?.name === "AbortError" || wantKey !== req.key) return;
       wantKey = null; failed = true;
       root.classList.remove("is-loading");
       console.warn("viz: scores could not load", err);
@@ -124,11 +140,14 @@ export function mount(el, ctx) {
   const dotOf = (st, id) => (!isDrawn(st, id) ? null : id === manifest.baseline ? seriesColor("baseline") : seriesColor(slotOf(st.sel, id)));
   const sourceOf = (id) => { const m = manifest.modelById.get(id); return !m ? "repo" : m.source === "hub" ? `hub:${m.hub}` : m.source; };
 
+  /* light a hovered row's model on the chart: FanChart's hoverModel when it has one, else its keyed label */
   function previewChart(id) {
-    const c = ctx.chart, ia = c?.interact;
-    if (!ia || !("keyed" in ia)) return;
+    const c = ctx.chart;
     const st = store.get(), v = id && isDrawn(st, id) ? id : null;
     if (v === previewed) return;
+    if (typeof c?.hoverModel === "function") { previewed = v; c.hoverModel(v); return; }
+    const ia = c?.interact;
+    if (!ia || !("keyed" in ia)) return;
     if (ia.keyed === previewed) ia.keyed = v; // never undo a label the keyboard focused
     previewed = v;
     c.request();
@@ -139,7 +158,7 @@ export function mount(el, ctx) {
     board.querySelectorAll(".sc-row.is-hover").forEach((r) => r.classList.remove("is-hover"));
     if (id) board.querySelector(`.sc-row[data-id="${CSS.escape(id)}"]`)?.classList.add("is-hover");
     previewChart(id);
-    drawFigures();
+    drawFigures(true);
   }
   function focusModel(id) {
     const st = store.get();
@@ -165,14 +184,20 @@ export function mount(el, ctx) {
 
   /* ---------------- render ---------------- */
   function render() {
+    if (dead) return;
     const st = store.get(), sc = scope(), ui = uiOf(st);
-    renderScope(st, sc);
     const ids = st.sel.selected;
     const label = (id) => manifest.label(id, [...ids, sc.baseline]);
     const team = (id) => { const m = manifest.modelById.get(id); return m ? (m.team && m.team !== label(id) ? m.team : "") : ""; };
-    rows = resp ? rowsFrom(resp, { ids, baseline: sc.baseline, full: respFull, scale: sc.scale, label, team }) : [];
+    // while the full pool loads, the quick response for this scope stands in (relative WIS pending)
+    const fresh = !!cur && respKey === cur.key;
+    const stand = !fresh && !!cur?.quick && quickQ === cur.quick;
+    shown = !cur ? null : stand ? quick : resp;
+    const wins = !cur?.quick ? shown : quickQ === cur.quick ? quick : null;
+    rows = shown ? rowsFrom(shown, { ids, baseline: sc.baseline, full: stand ? null : respFull, wins, pending: stand, scale: sc.scale, label, team }) : [];
     for (const r of rows) r.dot = dotOf(st, r.id);
     order = sortRows(rows, ui.sort, ui.rev);
+    renderScope(st, sc);
     renderNotice(sc);
     renderBoard(st, sc, ui);
     drawFigures();
@@ -182,16 +207,16 @@ export function mount(el, ctx) {
     const def = (on) => (on ? "is-set" : "");
     const metric = ["Relative WIS", sc.scale === "log" && "log", sc.fair && "shared only", sc.rank === "selected" && "among selected"].filter(Boolean).join(" · ");
     fMetric.textContent = metric;
-    fMetric.className = ["sc-frag", def(sc.scale === "log" || sc.fair || sc.rank === "selected"), resp?.common_task_status === "empty_disjoint" && "is-warn"].filter(Boolean).join(" ");
+    fMetric.className = ["sc-frag", def(sc.scale === "log" || sc.fair || sc.rank === "selected"), shown?.common_task_status === "empty_disjoint" && "is-warn"].filter(Boolean).join(" ");
     const loc = manifest.locationById.get(st.location);
     fPlace.textContent = sc.place === "US" ? "US" : sc.place === "current" ? (loc?.name || st.location) : "All states";
     fPlace.className = ["sc-frag", def(sc.place !== "all")].filter(Boolean).join(" ");
     fDates.textContent = datesLabel(sc, seasonLabel, allSeasons.length);
-    const noneScored = resp && rows.length && rows.every((r) => !r.active);
+    const noneScored = shown && rows.length && rows.every((r) => !r.active);
     fDates.className = ["sc-frag", def(!sc.following || sc.weeks || sc.phase), noneScored && "is-warn"].filter(Boolean).join(" ");
     fHz.textContent = horizonsLabel(sc.horizons);
     fHz.className = ["sc-frag", def(!!sc.horizons)].filter(Boolean).join(" ");
-    const eff = resp?.baseline_model;
+    const eff = shown?.baseline_model;
     const fellBack = eff && eff !== sc.baseline;
     fBase.textContent = `vs ${manifest.label(fellBack ? eff : sc.baseline) || "baseline"}`;
     fBase.className = ["sc-frag", def(sc.baseline !== manifest.baseline || fellBack), fellBack && "is-warn"].filter(Boolean).join(" ");
@@ -203,7 +228,7 @@ export function mount(el, ctx) {
     if (failed) {
       notice.hidden = false;
       notice.append(h("span", null, "Can't score this scope · "), h("button", { type: "button", class: "c-link", onclick: () => { respKey = null; request(); } }, "Retry"));
-    } else if (resp?.common_task_status === "empty_disjoint" && sc.fair) {
+    } else if (shown?.common_task_status === "empty_disjoint" && sc.fair) {
       notice.hidden = false;
       notice.append(h("span", null, "No shared forecasts · "), h("button", { type: "button", class: "c-link", onclick: () => setScope(store, { fair: false }) }, "Score each on its own"));
     }
@@ -219,7 +244,7 @@ export function mount(el, ctx) {
     board.style.setProperty("--sc-grid", gridTemplate(cols));
     const keepFocus = document.activeElement?.closest?.(".sc-row")?.dataset.id;
     const kids = [];
-    if (!resp && !failed) {
+    if (!shown && !failed) {
       for (let i = 0; i < Math.max(2, st.sel.selected.length + 1); i++) kids.push(h("div", { class: "sc-row is-ghost", "aria-hidden": "true" }));
     } else {
       for (const r of order.ranked) kids.push(...rowEls(r, cols, st, sc, ui));
@@ -281,7 +306,7 @@ export function mount(el, ctx) {
     const out = [row];
     if (open) {
       const base = rows.find((x) => x.baseline);
-      out.push(detail(r, base, { ctx, scope: sc, goTo }));
+      out.push(detail(r, base, { ctx, scope: sc, baseline: shown?.baseline_model || sc.baseline, goTo }));
     }
     return out;
   }
@@ -296,11 +321,11 @@ export function mount(el, ctx) {
     const sc = scope();
     const inScope = r.seasons.filter((x) => sc.seasons.includes(x));
     if (r.seasons.length && !inScope.length) return `${r.seasons.map(seasonLabel).sort().join(", ")} only`;
-    if (/locations|location/.test(r.note)) return "No forecasts here";
+    if (/location/.test(r.note)) return "No forecasts here";
     return r.note || "No forecasts in scope";
   }
   function warnsFor(id) {
-    return (resp?.validation_warnings || []).filter((w) => w.includes(`'${id}'`) || w.includes(id));
+    return (shown?.validation_warnings || []).filter((w) => w.includes(`'${id}'`));
   }
 
   function cell(c, r, sc) {
@@ -372,17 +397,19 @@ export function mount(el, ctx) {
   }
 
   /* ---------------- figures ---------------- */
-  function drawFigures() {
+  /* emphasisOnly (a hover): restyle the drawn figures in place, redrawing only one that must name a line */
+  function drawFigures(emphasisOnly = false) {
     const st = store.get(), ui = uiOf(st);
     const list = [...order.ranked];
     const emph = new Set([...ui.open, st.focus].filter(Boolean));
-    const o = { emph, hover, onHover: (id) => setHover(id), onPick: (id) => { if (!ui.open.includes(id)) toggleOpen(id); } };
+    const o = { emph, hover, onHover: (id) => setHover(id), onPick: (id) => { if (!uiOf(store.get()).open.includes(id)) toggleOpen(id); } };
     figs.hidden = !list.length;
     if (!list.length) return;
-    calibrationFigure(figSvgs.cal, list, o);
-    horizonFigure(figSvgs.hz, list, o);
+    const one = (svg, draw) => { if (!emphasisOnly || !emphasize(svg, emph, hover)) draw(); };
+    one(figSvgs.cal, () => calibrationFigure(figSvgs.cal, list, o));
+    one(figSvgs.hz, () => horizonFigure(figSvgs.hz, list, o));
     shareBtn.textContent = share ? "Share" : "WIS";
-    anatomyFigure(figSvgs.anat, list, { ...o, share });
+    one(figSvgs.anat, () => anatomyFigure(figSvgs.anat, list, { ...o, share }));
   }
 
   /* ---------------- scope popovers and menus ---------------- */
@@ -475,11 +502,12 @@ export function mount(el, ctx) {
     });
   }
   function download(kind) {
-    if (!resp) { toast("Nothing scored yet"); return; }
+    if (!cur || respKey !== cur.key) { toast(cur && !failed ? "Still scoring" : "Nothing scored"); return; }
     const st = store.get(), sc = scope();
     const ids = [...order.ranked, ...order.unranked].map((r) => r.id);
     const data = exportRows(resp, {
       order: ids, ranks: order.ranks, scope: sc, target: st.target, sourceOf, full: respFull,
+      wins: !cur.quick ? resp : quickQ === cur.quick ? quick : null,
       scopeLabel: [fPlace.textContent, fDates.textContent, fHz.textContent].join(" · "),
     });
     const text = kind === "json" ? JSON.stringify({ scope: sc, target: st.target, baseline_model: resp.baseline_model, rows: data }, null, 2) : delimited(data, kind);
@@ -490,7 +518,7 @@ export function mount(el, ctx) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   async function copy(text, done) {
-    try { await navigator.clipboard.writeText(text); toast(done); } catch { toast("Can't copy"); }
+    try { await navigator.clipboard.writeText(text); toast(done); } catch { toast("Can't copy", { tone: "error" }); }
   }
 
   /* ---------------- wiring ---------------- */
@@ -503,6 +531,7 @@ export function mount(el, ctx) {
 
   return {
     destroy() {
+      dead = true;
       offs.forEach((f) => f());
       previewChart(null);
       root.remove();

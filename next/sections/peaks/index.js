@@ -2,7 +2,8 @@
  * chart's location, against what was observed and against past seasons. Below the outlook: a table
  * (this round's calls, or season skill), one model's calls round by round, and its peak map.
  * Only for targets with peak forecasts; otherwise one quiet line. */
-import { storage, onThemeChange, cssColor, token } from "../../lib/dom.js";
+import { onThemeChange, cssColor, token } from "../../lib/dom.js";
+import { scopeOf, setScope } from "../scope.js";
 import { valueFormat, fmtDay, fmtLong, fmtMonth } from "../../lib/format.js";
 import { parseIso, linear, niceStep, ticks, monthStarts, DAY, WEEK } from "../../lib/scale.js";
 import { chartFonts } from "../../chart/render.js";
@@ -10,8 +11,8 @@ import { slotOf, COLORS } from "../../features/selection.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import {
   h, on, linkStyle, frame, fragment, setLine, getJson, query, isAbort, sequential, inkOn, resetColors, places,
-  fitCanvas, perFrame, pointerReadout, readoutContent,
-} from "../heatmap/shared.js";
+  fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
+} from "../shared.js";
 
 const KEY = "viz.peaks";
 const PAD = { l: 148, r: 24, t: 16 };
@@ -25,11 +26,14 @@ export function mount(el, ctx) {
   const { manifest, store } = ctx;
   const P = places(manifest);
   const f = frame(el, "Peaks");
-  const saved = storage.get(KEY, {}) || {};
+  const vs = viewState(store, "peaks", KEY);
+  const saved = vs.initial;
   const opt = { table: saved.table === "skill" ? "skill" : "round", scope: saved.scope === "states" ? "states" : "location", layer: saved.layer === "size" ? "size" : "week", model: null };
-  let resp = null, curves = null, pmap = null, reqKey = "", shown = [];
+  let resp = null, curves = null, curvesKey = "", pmap = null, reqKey = "", shown = [], legacy = false;
   const slots = { peaks: {}, curves: {}, map: {} };
-  const save = () => storage.set(KEY, { table: opt.table, scope: opt.scope, layer: opt.layer });
+  const save = () => vs.write({ table: opt.table, scope: opt.scope, layer: opt.layer }, opt.table === "round" && opt.scope === "location" && opt.layer === "week");
+  // skill on shared rounds only: the scope's fair setting, as the scores (and old viz) use it
+  const fair = () => scopeOf(store.get(), manifest).fair;
   const target = () => manifest.targetById.get(store.get().target);
   const vf = () => valueFormat(target());
 
@@ -37,17 +41,19 @@ export function mount(el, ctx) {
   const withRounds = () => shown.filter((id) => resp?.rounds?.[id]?.length);
   const F = {
     model: fragment({ label: "Model", title: "Model for calls by round and the map", items: () => withRounds().map((id) => ({ value: id, label: manifest.label(id, shown) })),
-      value: () => opt.model, onSelect: (v) => { opt.model = v; loadMap(); renderEvo(); } }),
+      value: () => opt.model, onSelect: (v) => { opt.model = v; syncLine(); loadMap(); renderEvo(); } }),
     table: fragment({ label: "Table", title: "Table", items: () => [{ value: "round", label: "This round" }, { value: "skill", label: "Season skill" }],
       value: () => opt.table, isDefault: () => opt.table === "round", onSelect: (v) => { opt.table = v; save(); syncLine(); renderTable(); } }),
     scope: fragment({ label: "Scope", title: "Skill over", items: () => [{ value: "location", label: "This place" }, { value: "states", label: "All states" }],
       value: () => opt.scope, isDefault: () => opt.scope === "location", onSelect: (v) => { opt.scope = v; save(); load(); } }),
+    common: fragment({ label: "Rounds", title: "Skill on", items: () => [{ value: false, label: "Each model's rounds" }, { value: true, label: "Shared rounds only" }],
+      value: fair, isDefault: () => !fair(), onSelect: (v) => setScope(store, { fair: v }) }),
     layer: fragment({ label: "Map", title: "Peak map", items: () => [{ value: "week", label: "Peak week" }, { value: "size", label: "Peak size / 100k" }],
       value: () => opt.layer, isDefault: () => opt.layer === "week", onSelect: (v) => { opt.layer = v; save(); renderMap(); } }),
   };
   function syncLine() {
     Object.values(F).forEach((b) => b.sync());
-    setLine(f.line, [withRounds().length && F.model, F.table, opt.table === "skill" && F.scope, F.layer]);
+    setLine(f.line, [withRounds().length && F.model, F.table, opt.table === "skill" && F.scope, opt.table === "skill" && F.common, F.layer]);
   }
 
   // ---------------------------------------------------------------- the page
@@ -78,24 +84,46 @@ export function mount(el, ctx) {
   }
 
   // ---------------------------------------------------------------- loading
-  function load(force = false) {
+  /* The selected models (and the baseline) first; when none of them forecast peaks this round, every
+   * model (models=all). The second ask only happens on such rounds, and never sends 200 ids. */
+  const mine = () => [...new Set([...store.get().sel.selected, manifest.baseline].filter(Boolean))];
+  const forecasts = (j) => (j?.models || []).some((m) => m.has_round && (m.timing || m.size));
+  function load(force) {
+    force = force === true;
     const s = store.get();
-    const p = { target: s.target, location: s.location, date: s.date, models: manifest.models.map((m) => m.id).join(","), skill_scope: opt.scope };
-    const key = query(p);
+    const base = { target: s.target, location: s.location, date: s.date, skill_scope: opt.scope, common: fair() ? "1" : null };
+    const ids = mine();
+    const urlFor = (models) => `/api/peaks?${query({ ...base, models })}`;
+    const allIds = () => manifest.models.map((m) => m.id).join(",");
+    const key = query({ ...base, models: ids.join(",") });
+    const ck = query({ target: s.target, location: s.location });
+    if (ck !== curvesKey) {
+      curvesKey = ck; curves = null;
+      getJson(`/api/season-curves?${ck}`, { slot: slots.curves })
+        .then((j) => { if (ck === curvesKey) { curves = j; draw(); } }, (e) => { if (!isAbort(e) && ck === curvesKey) curves = null; });
+    }
     if (key === reqKey && resp && !force) { render(); return; }
     reqKey = key;
     f.loading(true);
-    getJson(`/api/peaks?${key}`, { slot: slots.peaks }).then((j) => {
+    const fail = (e) => {
+      if (isAbort(e) || key !== reqKey) return;
+      f.loading(false); resp = null;
+      f.empty("Can't load peak forecasts", () => load(true));
+    };
+    const done = (j) => {
       if (key !== reqKey) return;
       resp = j; f.loading(false);
       choose(); render(); loadMap();
-    }, (e) => {
-      if (isAbort(e)) return;
-      f.loading(false); resp = null;
-      f.empty("Can't load peak forecasts", () => load(true));
-    });
-    getJson(`/api/season-curves?${query({ target: s.target, location: s.location })}`, { slot: slots.curves })
-      .then((j) => { curves = j; draw(); }, (e) => { if (!isAbort(e)) curves = null; });
+    };
+    getJson(urlFor(ids.join(",")), { slot: slots.peaks }).then((j) => {
+      if (key !== reqKey) return;
+      if (!ids.length || forecasts(j) || !j.available) { done(j); return; }
+      getJson(urlFor(legacy ? allIds() : "all"), { slot: slots.peaks }).then((k) => {
+        // a server from before models=all reads "all" as an unknown model
+        if (!legacy && (k.missing || []).includes("all")) { legacy = true; return getJson(urlFor(allIds()), { slot: slots.peaks }).then(done); }
+        done(k);
+      }).catch(fail);
+    }, fail);
   }
   function loadMap() {
     const s = store.get();
@@ -155,7 +183,7 @@ export function mount(el, ctx) {
     let obs = "No observations yet";
     if (o?.value != null) obs = o.final ? ["Observed peak ", h("b", null, V.value(o.value)), ` · ${fmtLong(T(o.date))}`]
       : ["Peak so far ", h("b", null, V.value(o.value)), ` · ${fmtDay(T(o.date))} · provisional until ${fmtDay(T(o.window[1]))}`];
-    note.replaceChildren(parts.join(" · "), " · ", ...[obs].flat(), shown.fallback ? " · none selected forecast peaks, showing all" : "");
+    note.replaceChildren(parts.join(" · "), " · ", ...[obs].flat(), shown.fallback ? " · none selected · all models" : "");
   }
 
   // ---------------------------------------------------------------- the outlook
@@ -355,7 +383,7 @@ export function mount(el, ctx) {
     }
     const ids = new Set(shown);
     const rows = (sk.models || []).filter((m) => ids.has(m.model_id));
-    if (!rows.length) { tableWrap.replaceChildren(h("p", { class: "v-note" }, "No season skill for these models")); return; }
+    if (!rows.length) { tableWrap.replaceChildren(h("p", { class: "v-note" }, sk.common ? "No rounds shared by these models" : "No season skill for these models")); return; }
     const best = (k) => Math.min(...rows.map((m) => m[k]).filter(fin));
     const B = { rps: best("rps"), log_score: best("log_score"), abs_week_error: best("abs_week_error"), size_wis_pct: best("size_wis_pct") };
     const pct = (v) => (fin(v) ? `${Math.round(v * 100)}%` : "–");
@@ -369,7 +397,6 @@ export function mount(el, ctx) {
         num(`${pct(m.size_in50)} / ${pct(m.size_in90)}`, "quiet"))))),
     h("p", { class: "v-note" }, [
       sk.scope === "states" ? `${sk.locations} states with a final peak` : "Every round",
-      sk.common ? "shared rounds only" : "each model on its own rounds",
       sk.pending_locations ? `${sk.pending_locations} still provisional` : null,
     ].filter(Boolean).join(" · ")));
   }
@@ -402,7 +429,7 @@ export function mount(el, ctx) {
       g.fillText(fmtDay(T(r.reference_date)), 0, yy);
       const tm = r.timing, sz = r.size;
       g.strokeStyle = hair; g.lineWidth = 1; g.beginPath(); g.moveTo(64, yy + EVO_ROW / 2 - 0.5); g.lineTo(width, yy + EVO_ROW / 2 - 0.5); g.stroke();
-      if (tm) bar(g, x, T(tm.i90[0]), T(tm.i90[1]), T(tm.i50[0]), T(tm.i50[1]), T(tm.median), yy, c);
+      if (tm?.i90) bar(g, x, T(tm.i90[0]), T(tm.i90[1]), tm.i50 ? T(tm.i50[0]) : NaN, tm.i50 ? T(tm.i50[1]) : NaN, T(tm.median), yy, c);
       if (sz?.i90) bar(g, xs, sz.i90[0], sz.i90[1], sz.i50?.[0], sz.i50?.[1], sz.median, yy, c);
     });
     const o = resp.observed;
@@ -455,8 +482,11 @@ export function mount(el, ctx) {
   const redraw = perFrame(() => { draw(); renderEvo(); });
   const ro = new ResizeObserver(redraw);
   ro.observe(f.body);
+  const screen = onScreen(el);
   const offs = [
     () => ro.disconnect(),
+    () => screen.off(),
+    onDprChange(redraw),
     on(canvas, "pointermove", outlookHover),
     on(canvas, "pointerleave", () => readout.hide()),
     on(evo, "pointermove", (e) => {
@@ -473,10 +503,11 @@ export function mount(el, ctx) {
     }),
     on(evo, "pointerleave", () => evoReadout.hide()),
     on(evo, "click", (e) => { const hit = evoRow(e); if (hit) store.set({ date: hit.round.reference_date }); }),
-    onThemeChange(() => { resetColors(); render(); }),
+    onThemeChange(() => { resetColors(); screen.run(load); }),
+    // load() re-renders when its request is unchanged (a new selection's colors, say)
     store.on((s, prev, changed) => {
-      if (["target", "location", "date"].some((k) => changed.has(k))) load();
-      else if (changed.has("sel")) { choose(); render(); loadMap(); }
+      const fairChanged = changed.has("scope") && !!prev.scope?.fair !== !!s.scope?.fair;
+      if (["target", "location", "date", "sel"].some((k) => changed.has(k)) || fairChanged) screen.run(load);
     }),
   ];
   syncLine();

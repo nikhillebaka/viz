@@ -234,6 +234,7 @@
 .sc-hit { stroke: transparent; stroke-width: var(--space-12); pointer-events: stroke; cursor: pointer; }
 .sc-pt, .sc-pt-solid { fill: var(--ink-primary); }
 .sc-series:not(.is-emph) .sc-pt { fill: var(--ink-faint); }
+.sc-series:not(.is-emph, .is-single) .sc-pt { display: none; }
 .sc-end-label { fill: var(--ink-tertiary); font-size: var(--text-chart); font-family: var(--font-sans); }
 .sc-end { cursor: pointer; }
 .sc-end.is-emph .sc-end-label { fill: var(--ink-primary); font-weight: var(--weight-medium); }

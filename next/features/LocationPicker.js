@@ -82,7 +82,7 @@ export function nextRecent(recent, id, from) {
 
 /**
  * Open the location picker from the Location bubble (or close it, if it is open from there).
- * Writes only store.set({ location }) and storage "viz.places".
+ * Writes only store.set({ location }); app.js keeps storage "viz.places" (with nextRecent's rule).
  * @param {HTMLElement} anchor
  * @param {{ manifest: object, store: object, chart?: object | null }} ctx chart is not used
  * @returns {object | null} the layer, or null when this call closed it
@@ -134,7 +134,6 @@ export function openLocationPicker(anchor, { manifest, store }) {
 
       const pick = (id) => {
         if (!manifest.locationById.has(id)) return;
-        storage.set(PLACES_KEY, nextRecent(storage.get(PLACES_KEY, []) || [], id, current));
         store.set({ location: id });
         layer.close(true);
       };

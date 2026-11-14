@@ -45,6 +45,7 @@ function spread(items, lo, hi) {
 export function lineFigure(svg, o) {
   const w = svg.clientWidth || svg.parentElement.clientWidth, h = svg.clientHeight;
   svg.replaceChildren();
+  svg.dataset.named = "";
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   if (!w || !h) return;
   const pad = { l: 36, r: 112, t: 8, b: 22 };
@@ -67,9 +68,9 @@ export function lineFigure(svg, o) {
     const pts = se.pts.filter(([, v]) => v != null && Number.isFinite(v)).map(([xv, yv]) => [X(xv), y(yv)]);
     if (!pts.length) continue;
     const em = se.id === o.hover || (!hovering && o.emph.has(se.id));
-    const g = s("g", { class: ["sc-series", em && "is-emph", se.base && "is-base"], "data-id": se.id });
+    const g = s("g", { class: ["sc-series", em && "is-emph", se.base && "is-base", pts.length === 1 && "is-single"], "data-id": se.id });
     g.append(s("path", { d: path(pts), class: "sc-line" }));
-    if (pts.length === 1 || em) for (const [px, py] of pts) g.append(s("circle", { cx: px, cy: py, r: 2, class: "sc-pt" }));
+    for (const [px, py] of pts) g.append(s("circle", { cx: px, cy: py, r: 2, class: "sc-pt" })); // shown when emphasized (CSS)
     g.append(s("path", { d: path(pts), class: "sc-hit" }));
     lines.append(g);
     ends.push({ se, em, x: pts.at(-1)[0], y: pts.at(-1)[1] });
@@ -86,8 +87,25 @@ export function lineFigure(svg, o) {
     labels.append(g);
   }
   svg.append(labels);
+  svg.dataset.named = named.length === ends.length ? "all" : "";
   svg.classList.toggle("has-hover", hovering);
   wire(svg, o);
+}
+
+/**
+ * Restyle a drawn figure for new emphasis without rebuilding it.
+ * @returns {boolean} false when it can't (a line figure that names only emphasized lines): redraw it
+ */
+export function emphasize(svg, emph, hover) {
+  if (svg.dataset.named !== "all") return false;
+  const hovering = hover != null;
+  for (const g of svg.querySelectorAll(".sc-series[data-id], .sc-end[data-id]")) {
+    const id = g.dataset.id, em = id === hover || (!hovering && emph.has(id));
+    g.classList.toggle("is-emph", em);
+    if (em && !g.classList.contains("sc-bar")) g.parentNode.append(g); // emphasized lines on top
+  }
+  svg.classList.toggle("has-hover", hovering);
+  return true;
 }
 
 /* hovering a line (or its label) names it and tells the table; clicking picks it */
@@ -155,6 +173,7 @@ export function anatomyFigure(svg, rows, o) {
   const bar = 6, gap = 8, pad = { l: 120, r: 48, t: 4, b: 22 };
   const h = Math.max(svg.clientHeight, pad.t + pad.b + list.length * (bar + gap));
   svg.replaceChildren();
+  svg.dataset.named = "";
   svg.style.height = `${h}px`;
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   if (!w) return;
@@ -184,6 +203,7 @@ export function anatomyFigure(svg, rows, o) {
     if (!o.share) g.append(s("text", { x: X(x) + 6, y: y0 + bar / 2, "dominant-baseline": "middle", class: "sc-tick", text: fmtScore(T) }));
     svg.append(g);
   });
+  svg.dataset.named = "all";
   svg.classList.toggle("has-hover", hovering);
   wire(svg, o);
 }

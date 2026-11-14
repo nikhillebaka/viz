@@ -5,15 +5,15 @@
  *
  * Data: /api/next/spatial (/api/spatial unrounded, so proportion targets keep their values). Per-100k
  * layers are offered for count targets only. */
-import { storage, onThemeChange } from "../../lib/dom.js";
+import { onThemeChange } from "../../lib/dom.js";
 import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
-import { slotOf } from "../../features/selection.js";
+import { slotOf, COLORS } from "../../features/selection.js";
 import {
   h, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
-  resetColors, places,
-} from "../heatmap/shared.js";
+  resetColors, places, onScreen, viewState,
+} from "../shared.js";
 
 const KEY = "viz.map";
 const PLAY_MS = 1200;
@@ -27,7 +27,7 @@ const LAYERS = [
   { id: "o_rate", label: "Observed / 100k", counts: true, kind: "seq" },
   { id: "observed", label: "Observed", kind: "seq" },
   { id: "error", label: "Error", kind: "div" },
-  { id: "trend", label: "Change vs. nowcast", kind: "div" },
+  { id: "trend", label: "Change vs. nowcast", kind: "div", minHorizon: 1 },
   { id: "wis", label: "WIS", kind: "seq" },
 ];
 
@@ -37,7 +37,8 @@ export function mount(el, ctx) {
   const { manifest, store } = ctx;
   const P = places(manifest);
   const f = frame(el, "Map");
-  const saved = storage.get(KEY, {}) || {};
+  const vs = viewState(store, "map", KEY);
+  const saved = vs.initial;
   let layer = saved.layer || "f_rate", horizon = [0, 1, 2, 3].includes(saved.horizon) ? saved.horizon : 1, model = null;
   let data = null, reqKey = "", hoverAbbr = null, timer = 0;
   const slot = {};
@@ -47,7 +48,8 @@ export function mount(el, ctx) {
   const vf = () => valueFormat(target());
   const layers = () => LAYERS.filter((l) => counts() || !l.counts);
   const layerOf = () => layers().find((l) => l.id === layer) || layers()[0];
-  const save = () => storage.set(KEY, { layer, horizon });
+  const minH = () => layerOf().minHorizon || 0;  // change vs. nowcast has no 0 wk
+  const save = () => vs.write({ layer, horizon }, layer === LAYERS[0].id && horizon === 1);
 
   // ---------------------------------------------------------------- the control line
   const candidates = () => {
@@ -59,15 +61,15 @@ export function mount(el, ctx) {
   const F = {
     model: fragment({ label: "Model", title: "Model", items: () => withData().map((id) => ({ value: id, label: manifest.label(id, candidates()) })),
       value: () => model, onSelect: (v) => { model = v; render(); } }),
-    layer: fragment({ label: "Layer", title: "Layer", items: () => layers().map((l) => ({ value: l.id, label: l.label })),
+    layer: fragment({ label: "Layer", title: "Layer", items: () => layers().map((l) => ({ value: l.id, label: l.label, disabled: horizon < (l.minHorizon || 0) })),
       value: () => layerOf().id, isDefault: () => layerOf().id === layers()[0].id, onSelect: (v) => { layer = v; save(); render(); } }),
-    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => [0, 1, 2, 3].map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk ahead` })),
+    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => [0, 1, 2, 3].map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk ahead`, disabled: x < minH() })),
       value: () => horizon, isDefault: () => horizon === 1, onSelect: (v) => { stop(); horizon = v; save(); render(); } }),
   };
   const play = action("▶", "Play horizons", () => (timer ? stop() : start()));
   function start() {
     play.textContent = "❚❚"; play.classList.add("is-on"); play.setAttribute("aria-label", "Pause");
-    timer = setInterval(() => { horizon = (horizon + 1) % 4; render(); }, PLAY_MS);
+    timer = setInterval(() => { const lo = minH(); horizon = horizon >= 3 ? lo : Math.max(lo, horizon + 1); render(); }, PLAY_MS);
   }
   function stop() {
     if (!timer) return;
@@ -136,7 +138,8 @@ export function mount(el, ctx) {
   const colorFor = (L, v, max) => (L.kind === "div" ? diverging(max ? v / max : 0) : sequential(max ? Math.sqrt(Math.max(0, v) / max) : 0));
 
   // ---------------------------------------------------------------- loading
-  function load(force = false) {
+  function load(force) {
+    force = force === true;
     const s = store.get();
     const p = { target: s.target, date: s.date, models: candidates().join(",") };
     const key = query(p);
@@ -164,6 +167,7 @@ export function mount(el, ctx) {
 
   // ---------------------------------------------------------------- drawing
   function render() {
+    if (horizon < minH()) horizon = minH();  // a stored 0 wk with change vs. nowcast
     syncLine();
     const s = store.get();
     if (!data) return;
@@ -195,7 +199,7 @@ export function mount(el, ctx) {
       h("span", { class: "mp-legend-num" }, lo),
       h("span", { class: "mp-ramp", style: { background: `linear-gradient(90deg, ${stops.join(", ")})` } }),
       h("span", { class: "mp-legend-num" }, hi),
-      h("span", { class: "mp-legend-label" }, `${fmtDay(parseIso(tedOf()))} · ${horizon} wk ahead`),
+      h("span", { class: "mp-legend-label" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, `${horizon} wk ahead`].filter(Boolean).join(" · ")),
     );
   }
 
@@ -242,12 +246,13 @@ export function mount(el, ctx) {
       if (fin(e.wis)) row("WIS", V.value(e.wis));
     }
     const sl = slotOf(s.sel, model);
-    const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % 8) + 1})`;
+    const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
     aside.replaceChildren(
       h("p", { class: "mp-place" }, loc?.name ?? abbr),
       h("p", { class: "mp-meta" }, [
         loc?.population ? `${valueFormat(null).value(loc.population)} residents` : null,
-        `${fmtDay(parseIso(tedOf()))} · ${horizon} wk ahead`,
+        tedOf() ? fmtDay(parseIso(tedOf())) : null,
+        `${horizon} wk ahead`,
       ].filter(Boolean).join(" · ")),
       h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null }, h("i"), manifest.label(model, candidates()))),
       h("dl", { class: "mp-rows" }, rows),
@@ -255,11 +260,14 @@ export function mount(el, ctx) {
   }
 
   // ---------------------------------------------------------------- reacting
+  // off screen: nothing loads, and playing stops
+  const screen = onScreen(el, (visible) => { if (!visible) stop(); });
   const offs = [
-    onThemeChange(() => { resetColors(); render(); }),
+    () => screen.off(),
+    onThemeChange(() => { resetColors(); screen.run(load); }),
+    // load() re-renders when the request is unchanged, so it covers a new place too
     store.on((s, prev, changed) => {
-      if (["target", "date", "sel"].some((k) => changed.has(k))) load();
-      else if (changed.has("location")) render();
+      if (["target", "date", "sel", "location"].some((k) => changed.has(k))) screen.run(load);
     }),
   ];
   syncLine();

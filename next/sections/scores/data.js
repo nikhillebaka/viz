@@ -47,6 +47,23 @@ export function loadMetrics(query, full = null) {
   });
 }
 
+let quickInflight = null;
+/**
+ * One metrics query on its own (the quick, selected-only request): cached, and a newer call aborts the
+ * older one, but it never aborts loadMetrics' request or is aborted by it.
+ * @param {string} query
+ * @returns {Promise<object>}
+ */
+export function loadQuick(query) {
+  if (caches.metrics.has(query)) return Promise.resolve(caches.metrics.get(query));
+  quickInflight?.abort();
+  const ctl = (quickInflight = new AbortController());
+  return getJson(`/api/next/metrics?${query}`, ctl.signal).then((j) => {
+    if (quickInflight === ctl) quickInflight = null;
+    return remember(caches.metrics, query, j);
+  });
+}
+
 /** True when the metrics for this request are already here (no loading state needed). */
 export const hasMetrics = (query, full = null) => [query, full].filter(Boolean).every((q) => caches.metrics.has(q));
 
@@ -64,11 +81,12 @@ export function loadCurves(target, location, seasons) {
 
 /**
  * Mean WIS per state for a model and the baseline in one season (heatmap models × locations).
+ * @param {number | "all"} [horizon="all"]
  * @returns {Promise<{ model: Map<abbr, number>, base: Map<abbr, number> }>}
  */
-export function loadPlaces(target, season, id, baseline) {
+export function loadPlaces(target, season, id, baseline, horizon = "all") {
   const models = [...new Set([id, baseline].filter(Boolean))];
-  const q = new URLSearchParams({ rows: "model", cols: "location", target, metric: "wis", location: "states", season, horizon: "all", models: models.join(",") }).toString();
+  const q = new URLSearchParams({ rows: "model", cols: "location", target, metric: "wis", location: "states", season, horizon: String(horizon), models: models.join(",") }).toString();
   if (caches.places.has(q)) return caches.places.get(q);
   const p = getJson(`/api/heatmap?${q}`).then((d) => {
     const row = (mid) => {

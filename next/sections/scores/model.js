@@ -11,10 +11,14 @@ export const DASH = "–";
 
 /**
  * The /api/next/metrics query for a scope. With a horizon subset the server scores only those horizons
- * (`query`); `full` is the same scope on every horizon, for the by-horizon columns (null without a subset).
+ * (`query`); `full` is the same scope on every horizon, for the by-horizon columns (null without a subset). When `query` scores every model,
+ * `quick` is the same scope on just the selected models and the baseline: a fraction of the cost, so the
+ * table can show them while the full pool loads, and the pool "Wins" is counted in (null otherwise:
+ * `query` already is that).
  * @param {ReturnType<import("../scope.js").scopeOf>} scope
  * @param {{ target: string, selected: string[], allSeasons: string[] }} o
- * @returns {{ query: string, full: string | null, key: string, models: "all" | string[] }} key identifies the response
+ * @returns {{ query: string, full: string | null, quick: string | null, key: string, models: "all" | string[] }}
+ *   key identifies the response
  */
 export function metricsRequest(scope, { target, selected, allSeasons }) {
   const p = new URLSearchParams();
@@ -25,7 +29,8 @@ export function metricsRequest(scope, { target, selected, allSeasons }) {
   p.set("season", all ? "all" : scope.seasons.join(","));
   // relative WIS among every model in scope, so adding a model never moves anyone else's number;
   // shared-only (common tasks) is defined among the selected models, so it scores just those
-  const models = scope.rank === "all" && !scope.fair ? "all" : [...new Set([...selected, scope.baseline].filter(Boolean))].sort();
+  const picked = [...new Set([...selected, scope.baseline].filter(Boolean))].sort();
+  const models = scope.rank === "all" && !scope.fair ? "all" : picked;
   p.set("models", models === "all" ? "all" : models.join(","));
   p.set("fair", scope.fair ? "1" : "0");
   if (scope.baseline) p.set("baseline", scope.baseline);
@@ -35,7 +40,9 @@ export function metricsRequest(scope, { target, selected, allSeasons }) {
   const full = hs ? p.toString() : null;
   if (hs) p.set("horizons", hs.join(","));
   const query = p.toString();
-  return { query, full, key: query, models };
+  let quick = null;
+  if (models === "all" && picked.length) { p.set("models", picked.join(",")); quick = p.toString(); }
+  return { query, full, quick, key: query, models };
 }
 
 /* ------------------------------------------------------------------ rows */
@@ -51,17 +58,20 @@ const calOf = (cal) => LEVELS.map((l) => {
  * Leaderboard rows from a /api/next/metrics response.
  * @param {object} resp the response (scored on the scope's horizons)
  * @param {{ ids: string[], baseline: string, scale: "natural" | "log", full?: object | null,
- *           label(id: string): string, team?(id: string): string }} o
+ *           wins?: object | null, pending?: boolean, label(id: string): string, team?(id: string): string }} o
  *   ids: the models to show (the baseline is added); full: the response on every horizon, read for
- *   `byH` when `resp` covers a horizon subset (default `resp`)
+ *   `byH` when `resp` covers a horizon subset (default `resp`); wins: the response "Wins" is read from
+ *   (the selected models' own; default `resp`, null: not here yet); pending: `resp` is the quick
+ *   (selected-only) response standing in for the full pool, so relative WIS is not shown yet
  * @returns {object[]} one row per id (and the baseline), in `ids` order, baseline last. A row: { id,
  *   label, team, baseline, active, pending, note, seasons, n, rounds: [available, total], q, rel, wis,
  *   mae, cov50, cov80, cov95, sharp, per100k, delta, wins, competed, comp: { spread, over, under },
  *   cal: (number|null)[] by LEVELS, byH: { [h]: { wis, rel, comp, cal, n } } }.
  *   byH's rel is the ratio of mean WIS to the baseline's at that horizon.
  */
-export function rowsFrom(resp, { ids, baseline, scale, full = null, label, team = () => "" }) {
+export function rowsFrom(resp, { ids, baseline, scale, full = null, wins = resp, pending = false, label, team = () => "" }) {
   const byId = new Map((resp?.rankings || []).map((r) => [r.model_id, r]));
+  const winsById = new Map((wins?.rankings || []).map((r) => [r.model_id, r]));
   const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
   const log = scale === "log";
   const eff = resp?.baseline_model || baseline;
@@ -105,11 +115,12 @@ export function rowsFrom(resp, { ids, baseline, scale, full = null, label, team 
     row.sharp = num(r.sharpness); row.per100k = num(r.wis_per_100k);
     row.comp = { spread: num(r.decomp_sharpness), over: num(r.decomp_overpred), under: num(r.decomp_underpred) };
     row.cal = calOf(r.calibration);
-    row.rel = num(r[log ? "relative_wis_log" : "relative_wis"]);
-    if (isBase && id === eff) row.rel = 1;
+    row.rel = pending ? null : num(r[log ? "relative_wis_log" : "relative_wis"]);
+    if (isBase && id === eff && !pending) row.rel = 1;
     row.delta = num(r[log ? "pct_diff_vs_baseline_log" : "pct_diff_vs_baseline"]);
-    row.wins = num(r[log ? "weeks_won_log" : "weeks_won"]);
-    row.competed = num(r.weeks_competed) || null;
+    const w = winsById.get(id);
+    row.wins = w ? num(w[log ? "weeks_won_log" : "weeks_won"]) : null;
+    row.competed = w ? num(w.weeks_competed) || null : null;
     row.cov80 = row.cal[LEVELS.indexOf(0.8)];
     if (row.n === 0) row.active = false;
     return row;
@@ -255,29 +266,36 @@ export function horizonsLabel(horizons) {
 /* ------------------------------------------------------------------ exports */
 
 /**
- * The export's rows, in table order with the table's ranks (old viz's columns, natural scale).
+ * The export's rows, in table order with the table's ranks (old viz's columns, natural scale; on the log
+ * scale the log columns the ranks follow are added).
  * @param {object} resp the /api/next/metrics response
  * @param {{ order: string[], ranks: Map<string, number>, scope: object, target: string, scopeLabel: string,
- *           sourceOf(id: string): string, full?: object | null }} o  full: as in rowsFrom, for the h columns
+ *           sourceOf(id: string): string, full?: object | null, wins?: object | null }} o
+ *   full, wins: as in rowsFrom (the h columns; weeks won among the selected models, as the table)
  * @returns {object[]}
  */
-export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sourceOf, full = null }) {
+export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sourceOf, full = null, wins = resp }) {
   const byId = new Map((resp?.rankings || []).map((r) => [r.model_id, r]));
+  const winsById = new Map((wins?.rankings || []).map((r) => [r.model_id, r]));
+  const log = scope.scale === "log";
   const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
   const r2 = (v, d) => (typeof v === "number" && Number.isFinite(v) ? +v.toFixed(d) : null);
   return order.map((id) => {
     const r = byId.get(id) || {};
     const bh = (h) => r2(allH.get(id)?.by_horizon?.[h]?.wis, 2);
+    const w = winsById.get(id) || {};
     return {
       rank: ranks.get(id) ?? null, model_id: id, model_type: sourceOf(id), quantiles: r.quantile_count ?? null,
       tasks_evaluated: r.count ?? 0, overall_wis: r2(r.wis, 2), relative_wis: r2(r.relative_wis, 3),
-      weeks_won: r.weeks_won ?? null, weeks_competed: r.weeks_competed ?? null,
+      ...(log ? { overall_wis_log: r2(r.wis_log, 4), relative_wis_log: r2(r.relative_wis_log, 3) } : {}),
+      weeks_won: (log ? w.weeks_won_log : w.weeks_won) ?? null, weeks_competed: w.weeks_competed ?? null,
       pct_diff_vs_baseline: r2(r.pct_diff_vs_baseline, 1), wis_per_100k: r2(r.wis_per_100k, 2),
       baseline_model: resp?.baseline_model ?? scope.baseline, mae: r2(r.mae, 2),
       coverage_95_pct: r2(r.cov95, 1), coverage_50_pct: r2(r.cov50, 1), sharpness: r2(r.sharpness, 1),
       h0_wis_nowcast: bh(0), h1_wis_1wk: bh(1), h2_wis_2wk: bh(2), h3_wis_3wk: bh(3),
       target, evaluation_location: scope.location, evaluation_scope: scopeLabel,
       seasons: scope.seasons.join(","), weeks: scope.weeks ? scope.weeks.join("-") : "", phase: scope.phase || "",
+      horizons: scope.horizons ? scope.horizons.join(",") : "", rank_among: scope.rank, scale: scope.scale,
       common_tasks_fair: scope.fair ? "true" : "false", has_data_in_scope: !!r.has_data_in_scope, status_note: r.status_note || "",
     };
   });
@@ -312,14 +330,17 @@ export function exportName(ids, scope, target, ext) {
 }
 
 /**
- * The command that reproduces these scores with viz/score_cli.py. Hub models are left out (the CLI
- * scores repository and local models only); with none left it scores `all`.
+ * The command that reproduces these scores with viz/score_cli.py: the selected models and the baseline,
+ * as the table's own selected-only request. Hub models are left out (the CLI scores repository and local
+ * models only); with none left it scores `all`. What the CLI can't match (relative WIS ranked among
+ * every model, a horizon subset, the log scale, hub models) is named in a trailing shell comment.
  * @param {{ ids: string[], scope: object, target: string, defaultTarget: string, isHub(id: string): boolean,
  *           hubBaseline: string, allSeasons: number }} o
  * @returns {string}
  */
 export function cliCommand({ ids, scope, target, defaultTarget, isHub, hubBaseline, allSeasons }) {
-  const models = ids.filter((id) => !isHub(id));
+  const wanted = [...new Set([...ids, scope.baseline].filter(Boolean))];
+  const models = wanted.filter((id) => !isHub(id));
   const q = (s) => (/^[\w.,:+-]+$/.test(s) ? s : `"${s.replace(/(["\\$`])/g, "\\$1")}"`);
   const season = allSeasons > 1 && scope.seasons.length === allSeasons ? "all" : scope.seasons.join(",");
   const parts = ["python3 viz/score_cli.py", `--models ${models.length ? models.join(",") : "all"}`];
@@ -330,5 +351,12 @@ export function cliCommand({ ids, scope, target, defaultTarget, isHub, hubBaseli
   if (target && target !== defaultTarget) parts.push(`--target ${q(target)}`);
   if (scope.baseline && scope.baseline !== hubBaseline) parts.push(`--baseline ${q(scope.baseline)}`);
   if (scope.fair) parts.push("--fair");
+  const differs = [
+    scope.rank === "all" && !scope.fair && "Rel. WIS among these only",
+    scope.horizons && `${horizonsLabel(scope.horizons)} not in CLI`,
+    scope.scale === "log" && "log scale not in CLI",
+    models.length < wanted.length && "hub models left out",
+  ].filter(Boolean);
+  if (differs.length) parts.push(`# ${differs.join(" · ")}`);
   return parts.join(" ");
 }

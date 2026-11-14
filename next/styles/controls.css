@@ -295,4 +295,6 @@ button.c-section-title:hover { color: var(--ink-secondary); }
 }
 .c-toast:has(.c-toast-action) { padding-right: var(--pad-control); }
 .c-toast-icon { display: grid; color: var(--status-good); }
+.c-toast.is-error .c-toast-icon { color: var(--status-error); }
+.c-toast:not(:has(.c-toast-icon)) { padding-left: var(--space-16); }
 .c-toast-action { color: var(--accent); font-weight: var(--weight-strong); }

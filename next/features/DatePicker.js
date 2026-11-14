@@ -19,9 +19,11 @@ const WIDTH = 340;
  */
 export function openDatePicker(anchor, { manifest, store, chart }) {
   const seasons = manifest.seasons.filter((s) => s.rounds?.length);
+  // the store's date is the round itself (the chart's timeline snaps off-grid rounds to its weeks), and
+  // it is already the destination while another season loads
   const current = () => {
-    const iso = toIso(chart?.week() ?? parseIso(store.get().date));
-    return { iso, season: chart?.fan?.season ?? manifest.seasonOf(iso) };
+    const iso = store.get().date || (chart?.fan ? toIso(chart.week()) : "");
+    return { iso, season: manifest.seasonOf(iso) ?? chart?.fan?.season };
   };
   return openPopover(anchor, {
     width: WIDTH, placement: "top", className: "dp", title: "",

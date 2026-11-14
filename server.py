@@ -486,7 +486,12 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             location = "US"
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
-        model_ids = [m.strip() for m in models_param.split(",") if m.strip()]
+        if models_param.strip().lower() == "all":
+            # every known model (what /next/ asks for when no selected model forecasts peaks); added for
+            # /next/, so a model list behaves as before
+            model_ids = list(DATA_LOADER.scan_models().keys())
+        else:
+            model_ids = [m.strip() for m in models_param.split(",") if m.strip()]
         scope = query.get("skill_scope", ["location"])[0]
         common = query.get("common", ["0"])[0].lower() in ("1", "true", "yes")
         if not ref_date:

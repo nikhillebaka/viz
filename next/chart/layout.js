@@ -21,6 +21,8 @@
  * opts:
  *   models   [{ id, slot: 0–7 | "baseline", label }]  charted, in drawing order; labels are display names
  *   t        fractional timeline index (default: the last week); between weeks everything interpolates
+ *   settle   the timeline index t is heading to (default: the nearest week): the date ticks and ghost
+ *            labels name it, so they agree with the stepper while the chart glides
  *   domain   [ms, ms] the x view (default: 14 weeks before the reference date to the last horizon)
  *   ymax     the continuous y-axis maximum (already divided by the height zoom)
  *   pad      { l, r, t, b } plot insets; topClear: y above which y tick labels hide (default pad.t − 32)
@@ -34,7 +36,7 @@
  *
  * The scene (plain numbers, strings and arrays, plus the two scales):
  *   w, h, pad, ay (axis y), topClear, x, y (lib/scale.js linear scales: ms → px, value → px)
- *   t, di (the timeline index labels name), whole (t is on a week), ref (ms), cutoff (ms), level, lastH,
+ *   t, di (the nearest timeline index), settle (the index the labels name), whole (t is on a week), ref (ms), cutoff (ms), level, lastH,
  *   ymax, outcome, focus (the focused id when it is charted, else null), fonts { label, axis }
  *   ticks    [{ v, y, text | null }]  gridlines from the round step, up to the top edge; tickX
  *   months   [{ x, text }]            shade: x where the forecast shade starts
@@ -163,6 +165,7 @@ export function layoutFan(fan, opts, w, h) {
   // t: fractional timeline index. Integer t is an ordinary week; in between, everything interpolates.
   const t = opts.t ?? n - 1, di = clamp(Math.round(t), 0, Math.max(0, n - 1)), whole = Math.abs(t - di) < 1e-4;
   const ref = whole ? D[di] : D[0] + t * WEEK;
+  const si = Number.isInteger(opts.settle) ? clamp(opts.settle, 0, Math.max(0, n - 1)) : di;
   const models = opts.models || [];
   const rulerStep = w < 600 ? 11 : 14;
   // rulers sit in the margin beside the fan and push the labels aside; they never narrow the plot
@@ -207,8 +210,8 @@ export function layoutFan(fan, opts, w, h) {
     const px = x(m);
     if (px + 40 < w && (px + 44 < markL || px + 4 > markR)) months.push({ x: px + 4, text: month(m) });
   }
-  // while between weeks, the labels name the week the chart will settle on
-  const dates = { cut: { x: xc, date: day(whole ? cutoff : D[di] - WEEK) }, ref: { x: xr, date: day(D[di]) } };
+  // while between weeks, the labels name the week the chart will settle on (what the stepper shows)
+  const dates = { cut: { x: xc, date: day(whole && si === di ? cutoff : cutoffFor(fan, D[si])) }, ref: { x: xr, date: day(D[si]) } };
 
   // bands: unfocused first so the focused one sits on top
   const bands = order(B).map((b) => ({
@@ -293,7 +296,7 @@ export function layoutFan(fan, opts, w, h) {
   const topB = topClear + 12, botB = ay - 10;
   const labs = S.map((s) => ({ id: s.id, c: s.c, name: s.label, y: y(Math.min(s.pts[s.pts.length - 1].med, ymax)) })).sort((a, b) => a.y - b.y);
   // charted models with no forecast this week: dimmed, at the bottom of the stack
-  for (const o of missing) labs.push({ id: o.id, c: seriesColor(o.slot), name: o.label, y: NaN, ghost: `no forecast ${day(D[di])}` });
+  for (const o of missing) labs.push({ id: o.id, c: seriesColor(o.slot), name: o.label, y: NaN, ghost: `no forecast ${day(D[si])}` });
   // charted models with nothing at all this season or place: one quiet line, not a ghost each
   if (opts.absent) labs.push({ id: null, c: "transparent", name: "", y: NaN, ghost: opts.absent, summary: true });
   stack(labs, topB, botB, LABEL_GAP);
@@ -332,7 +335,7 @@ export function layoutFan(fan, opts, w, h) {
   }
 
   return {
-    w, h, pad, ay, topClear, x, y, t, di, whole, ref, cutoff, level, lastH, ymax, outcome,
+    w, h, pad, ay, topClear, x, y, t, di, settle: si, whole, ref, cutoff, level, lastH, ymax, outcome,
     focus: hasFocus ? f : null,
     fonts: { label: font(500, F.chart, F.sans), axis: font(400, F.axis, F.mono) },
     ticks, tickX: Math.min(20, pad.l), months, shade: xc, dates,

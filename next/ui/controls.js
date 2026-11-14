@@ -283,18 +283,23 @@ export class Segmented {
 
 /* ---------------------------------------------------------------- toast
  * A brief confirmation, bottom centre above the bottom controls. Pauses while hovered or focused; at most
- * three at once; announced politely. */
+ * three at once; announced politely. tone: "ok" (a check, the default), "error" (an alert sign), "info"
+ * (no sign, e.g. something under way). */
 let toastHost = null;
+const TOAST_ICON = { ok: () => icon.check, error: () => icon.alert, info: () => "" };
 /**
  * @param {string} message
- * @param {{ action?: { label: string, onClick?: () => void }, duration?: number }} [opts] duration defaults to --time-toast
+ * @param {{ action?: { label: string, onClick?: () => void }, duration?: number, tone?: "ok" | "error" | "info" }} [opts]
+ *   duration defaults to --time-toast
  * @returns {{ dismiss(): void }}
  */
-export function toast(message, { action = null, duration } = {}) {
+export function toast(message, { action = null, duration, tone = "ok" } = {}) {
   if (!toastHost?.isConnected) { toastHost = h("div", { class: "c-toasts", "aria-live": "polite" }); document.body.appendChild(toastHost); }
-  while (toastHost.children.length >= 3) toastHost.firstChild.remove();
-  const t = h("div", { class: "c-toast" },
-    h("span", { class: "c-toast-icon", html: icon.check }),
+  // the oldest goes at once (with its glass) to make room
+  while (toastHost.children.length >= 3) { const old = toastHost.firstChild; old._end ? old._end() : old.remove(); }
+  const ic = (TOAST_ICON[tone] ?? TOAST_ICON.ok)();
+  const t = h("div", { class: ["c-toast", tone !== "ok" && `is-${tone}`] },
+    ic ? h("span", { class: "c-toast-icon", html: ic }) : null,
     h("span", { class: "c-toast-label" }, message),
     action ? h("button", { type: "button", class: "c-btn filled c-toast-action", onclick: () => { action.onClick?.(); dismiss(); } }, action.label) : null);
   toastHost.appendChild(t);
@@ -306,6 +311,7 @@ export function toast(message, { action = null, duration } = {}) {
   t.addEventListener("pointerenter", pause); t.addEventListener("pointerleave", resume);
   t.addEventListener("focusin", pause); t.addEventListener("focusout", resume);
   let gone = false;
+  t._end = () => { gone = true; clearTimeout(timer); g.destroy(); t.remove(); };
   function dismiss() {
     if (gone) return;
     gone = true;

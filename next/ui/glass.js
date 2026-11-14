@@ -237,11 +237,16 @@ class Compositor {
     if (getComputedStyle(this.container).position === "static") this.container.style.position = "relative";
     source.after(cv);
     // controls move by CSS transitions and animations (fades, the press scale, a pill morphing away);
-    // while anything moves, follow it every frame, then stop
-    const watch = () => this.watch();
+    // while anything moves, follow it every frame, then stop. Only motion that can move a glass counts:
+    // on a glass, an ancestor of one (or of the canvas) or a sibling of those (it may push a glass along),
+    // and scrolling of the page or an ancestor; so hovers elsewhere and scrolling inside a list or a
+    // section don't re-render the chart's glass.
+    const holds = (n) => n.contains(this.container) || [...this.glass].some((g) => n.contains(g.el));
+    const moves = (t) => t === document || t === window || (t?.nodeType === 1 && (holds(t) || [...(t.parentElement?.children ?? [])].some((c) => c !== t && holds(c))));
+    const watch = (e) => { if (moves(e.target)) this.watch(); };
     this.offs = [
       ...["transitionrun", "transitionend", "animationstart", "animationend"].map((ev) => on(document, ev, watch, true)),
-      on(window, "resize", watch),
+      on(window, "resize", () => this.watch()),
       on(window, "scroll", watch, { passive: true, capture: true }),
     ];
     Compositor.all.add(this);
@@ -274,6 +279,8 @@ class Compositor {
     gl.viewport(0, 0, W, H);
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     if (!source.width || !source.height) return "";
+    // scrolled off screen: nothing to show, and no canvas upload
+    if (cr.bottom <= 0 || cr.top >= innerHeight) return "off";
     const sr = source.getBoundingClientRect();
     let key = "", uploaded = false;
     for (const g of this.glass) {

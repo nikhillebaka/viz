@@ -98,13 +98,14 @@ export function swapView(v, counts) {
  * The /api/heatmap parameters for a view in a scope.
  * @param {object} v a normalized view
  * @param {{ target: string, seasons: string[], place: string, locationAbbr: string, models: string[] }} o
- *   place "current" sends the chart's location; models: the candidates when models are an axis
+ *   place as scopeOf's ("all" every state · "US" · "current" the chart's location); models: the
+ *   candidates when models are an axis
  * @returns {Record<string, string>}
  */
 export function requestFor(v, { target, seasons, place, locationAbbr, models }) {
   const p = {
     rows: v.rows, cols: v.cols, target, metric: M[v.metric].api,
-    location: place === "current" ? locationAbbr || "US" : "states",
+    location: place === "current" ? locationAbbr || "US" : place === "US" ? "US" : "states",
     sort_by: "hhs_region", normalize: "none", horizon: String(v.horizon),
   };
   if (seasons?.length) p.season = seasons.join(",");
@@ -119,7 +120,8 @@ const fin = (x) => typeof x === "number" && Number.isFinite(x);
  * The grid to draw, from a response.
  * @param {object} resp /api/heatmap JSON (x_keys, y_keys, raw_matrix, cell_meta, inactive_models)
  * @param {object} v the view it was requested for
- * @param {{ baseline?: string, from?: string|null, to?: string|null, horizons?: number[]|null,
+ * @param {{ baseline?: string, from?: string|null, to?: string|null, weeks?: [number, number]|null,
+ *           weekOf?: (iso: string) => number, horizons?: number[]|null,
  *           region?: (abbr: string) => number, population?: (abbr: string) => number,
  *           season?: (iso: string) => string|null }} o
  * @returns {{ rows: object[], cols: object[], values: Float64Array, meta(r: number, c: number): object|null,
@@ -137,8 +139,10 @@ export function buildGrid(resp, v, o = {}) {
   const ri = new Map(rowKeys.map((k, i) => [k, i])), ci = new Map(colKeys.map((k, i) => [k, i]));
   const at = (rk, ck) => { const x = raw[ri.get(rk)]?.[ci.get(ck)]; return fin(x) ? x : NaN; };
 
-  // the scope's window and horizons, on whichever axis holds dates or horizons
+  // the scope's window and horizons, on whichever axis holds dates or horizons. A week window applies to
+  // each season (weekOf: a date's week of its own season); from / to bound one date range.
   const keep = (axis) => (k) => {
+    if (axis === "date" && o.weeks && o.weekOf) { const w = o.weekOf(k); return w >= o.weeks[0] && w <= o.weeks[1]; }
     if (axis === "date") return (!o.from || k >= o.from) && (!o.to || k <= o.to);
     if (axis === "horizon") return !o.horizons?.length || o.horizons.includes(Number(k));
     return true;
@@ -230,7 +234,7 @@ export function buildGrid(resp, v, o = {}) {
     }
     switch (metric.kind) {
       case "rel": return { kind: "div", t: Math.log2(x) };                // 0.5 → −1 (better) … 2 → +1
-      case "cov": return { kind: "div", t: (95 - x) / 45 };                // under-covering is warm
+      case "cov": return { kind: "div", t: (95 - x) / 20 };                // under-covering is warm; 20 points off saturates, as the scores' steps
       case "signed": return { kind: "div", t: v.metric === "trend" ? x / 50 : gMax ? x / gMax : 0 };
       default: return { kind: "seq", t: gMax ? Math.sqrt(Math.max(0, x) / gMax) : 0 };  // sqrt: long tails still show
     }

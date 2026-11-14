@@ -467,8 +467,9 @@ class EvaluationEngine:
             if m_df is not None and not m_df.is_empty():
                 model_dfs[mid] = m_df
 
-        # 5b. With a window, report the rounds that actually have forecast weeks inside it at these locations
-        if window_filter is not None:
+        # 5b. With a window or a horizon subset, report the rounds that actually have forecasts left in
+        # scope at these locations (horizon subsets come only from /api/next/metrics)
+        if window_filter is not None or horizon_set is not None:
             remaining: Set[str] = set()
             for mid, df in model_dfs.items():
                 scoped = df.filter(pl.col("location").cast(pl.String).is_in(locations_filter)) if locations_filter else df

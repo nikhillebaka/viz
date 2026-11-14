@@ -39,8 +39,10 @@ function persist(store) {
   return store.on((s, prev, changed) => {
     if (changed.has("location")) {
       storage.set("viz.location", s.location);
+      // recent places, however the place changed (picker, map, a row's link): it first, then the one
+      // left, then the rest; distinct; four (the same rule as LocationPicker's nextRecent)
       const places = storage.get("viz.places", []);
-      storage.set("viz.places", [s.location, ...(Array.isArray(places) ? places : []).filter((x) => x !== s.location)].slice(0, 4));
+      storage.set("viz.places", [...new Set([s.location, prev.location, ...(Array.isArray(places) ? places : [])].filter((x) => typeof x === "string" && x))].slice(0, 4));
     }
     if (changed.has("sel")) storage.set("viz.selection", { selected: s.sel.selected, charted: chartedBySlot(s.sel), showAll: s.sel.showAll, baseline: s.sel.baseline });
     if (changed.has("level")) storage.set("viz.level", s.level);

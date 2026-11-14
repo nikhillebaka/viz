@@ -24,6 +24,7 @@ export class Interaction {
     this.preview = null;   // a charted model previewed by hovering its label or line
     this.hot = null;       // a grey model lifted by hovering its line
     this.keyed = null;     // a charted model whose hidden label button has keyboard focus
+    this.external = null;  // a charted model previewed from outside the chart (FanChart.hoverModel)
     this.cursor = "";
     this.labelKey = "";
     this.list = h("div", { class: "sr-only", role: "group", "aria-label": "Models on the chart" });

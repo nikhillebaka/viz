@@ -1,5 +1,6 @@
 // The page loads cleanly, the manifest has data, and the runner's input path works.
-// Independent of app internals so it holds against a placeholder index page.
+// Independent of app internals so it holds against a placeholder index page; the input self-test runs
+// on about:blank.
 
 export default async function smoke(page, t) {
   await t.step("loads without console errors", async () => {
@@ -28,6 +29,8 @@ export default async function smoke(page, t) {
   });
 
   await t.step("input helpers reach the page", async () => {
+    // a blank page, so the app's own keys (← → step the date, = zooms) can't take the events
+    await page.goto("about:blank");
     await page.eval(() => {
       document.body.innerHTML = "";
       document.body.style.margin = "0";

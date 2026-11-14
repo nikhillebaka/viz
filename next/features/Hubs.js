@@ -22,17 +22,41 @@ const notes = new Map();       // hub id → a one-line outcome ("Up to date · 
 const armed = new Map();       // hub id → timer while Remove waits for its second click
 let pollTimer = 0;
 let render = null;             // the open panel's redraw, if any
+let failed = false;            // a sync failed since the panel was last opened
+const watchers = new Set();    // syncStatus listeners (the ⋯ bubble's dot)
 
 const running = (x) => x.job?.status === "running";
 const seasonLabel = (s) => { const [a, b] = s.split("-"); return `${a}–${b.slice(2)}`; };
 const day = (iso) => (iso ? fmtDay(parseIso(iso)) : "–");
 const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
 
+/** "running" while a sync runs, "failed" after one failed (until the panel is opened), else "". */
+export const syncStatus = () => (hubs.some(running) ? "running" : failed ? "failed" : "");
+
+/**
+ * Follow the sync status (called now, then on each change).
+ * @param {(status: "running" | "failed" | "") => void} fn
+ * @returns {() => void} stops
+ */
+export function watchSync(fn) {
+  watchers.add(fn);
+  fn(syncStatus());
+  return () => watchers.delete(fn);
+}
+let lastStatus = "";
+function emit() {
+  const s = syncStatus();
+  if (s === lastStatus) return;
+  lastStatus = s;
+  watchers.forEach((fn) => fn(s));
+}
+
 async function loadHubs() {
   const r = await getJSON("/api/remote/hubs");
   hubs = r.hubs || [];
   currentSeason = r.current_season || "";
   for (const x of hubs) if (!picked.has(x.id)) picked.set(x.id, defaultSeasons(x));
+  emit();
 }
 
 function defaultSeasons(x) {
@@ -54,7 +78,7 @@ function startPoll() {
   if (pollTimer) return;
   const tick = async () => {
     const live = hubs.filter(running);
-    if (!live.length) { pollTimer = 0; return; }
+    if (!live.length) { pollTimer = 0; emit(); return; }
     await Promise.all(live.map(async (x) => {
       try {
         const r = await getJSON(`/api/remote/job?hub=${encodeURIComponent(x.id)}`);
@@ -64,6 +88,7 @@ function startPoll() {
       } catch { /* a missed poll is retried on the next tick */ }
     }));
     render?.();
+    emit();
     pollTimer = setTimeout(tick, POLL_MS);
   };
   pollTimer = setTimeout(tick, POLL_MS);
@@ -81,7 +106,8 @@ function finished(x) {
     notes.set(x.id, "Sync cancelled · finished files kept");
   } else {
     notes.set(x.id, `Sync failed · ${j.error || "unknown error"}`);
-    toast(`${x.label} sync failed`);
+    failed = true;
+    toast(`${x.label} sync failed`, { tone: "error" });
   }
 }
 
@@ -94,7 +120,7 @@ function finished(x) {
 export async function openHubs(anchor, { manifest }) {
   const repoCount = manifest.models.filter((m) => m.source !== "hub").length;
   const list = h("div", { class: "mo-hubs" });
-  const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "S3 bucket", "aria-label": "Hub S3 bucket" });
+  const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "S3 bucket · S3 hubs only", "aria-label": "Hub S3 bucket" });
   const addBtn = h("button", { type: "button", class: "c-btn filled sm" }, "Add hub");
   const addNote = h("div", { class: "mo-note", "aria-live": "polite" });
   const add = async () => {
@@ -132,6 +158,8 @@ export async function openHubs(anchor, { manifest }) {
     },
   });
   if (!layer) return null;
+  failed = false; // seen
+  emit();
   render = () => { list.replaceChildren(...hubs.map(hubBlock)); layer.place(); };
   try { await loadHubs(); render?.(); if (hubs.some(running)) startPoll(); }
   catch (err) { list.replaceChildren(h("div", { class: "mo-note" }, `Couldn't load hubs · ${err.message}`)); }
@@ -226,6 +254,8 @@ async function sync(x) {
   try {
     const r = await postJSON("/api/remote/sync", { hub: x.id, seasons: [...(picked.get(x.id) || [])] });
     hubs = hubs.map((y) => (y.id === x.id ? { ...y, job: r.job } : y));
+    failed = false;
+    emit();
     startPoll();
   } catch (err) { notes.set(x.id, `Couldn't start · ${err.message}`); }
   render?.();
@@ -287,10 +317,8 @@ export async function openWarnings(anchor) {
     const w = await loadWarningSummary();
     groups = [];
     if (w.status.length) groups.push({ title: "Dataset", rows: w.status.map((t) => ({ model: "", text: t, n: 1 })) });
-    for (const x of w.hubs) {
-      const r = await getJSON(`/api/remote/warnings?hub=${encodeURIComponent(x.id)}`).catch(() => ({ warnings: [] }));
-      groups.push({ title: x.label, rows: groupNotes(r.warnings || []) });
-    }
+    const notesBy = await Promise.all(w.hubs.map((x) => getJSON(`/api/remote/warnings?hub=${encodeURIComponent(x.id)}`).catch(() => ({ warnings: [] }))));
+    w.hubs.forEach((x, i) => groups.push({ title: x.label, rows: groupNotes(notesBy[i].warnings || []) }));
     draw();
     layer.place();
   } catch (err) { list.replaceChildren(h("div", { class: "mo-note" }, `Couldn't load · ${err.message}`)); }
