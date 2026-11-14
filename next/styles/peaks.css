@@ -1,0 +1,10 @@
+/* The peaks section: the outlook (one canvas), the table, then calls by round beside the peak map. */
+.pk-note { margin: 0 0 var(--space-16); }
+.pk-fig { position: relative; }
+.pk-canvas, .pk-evo { display: block; }
+.pk-table { margin-top: var(--space-32); }
+.pk-lower { display: flex; gap: var(--space-56); align-items: flex-start; margin-top: var(--space-40); }
+.pk-evo-col { flex: 1 1 0; min-width: 0; overflow: hidden; }
+.pk-map-col { flex: none; }
+.pk-map { --tile: 46px; }
+.pk-map .mp-tile { padding: var(--space-4); }

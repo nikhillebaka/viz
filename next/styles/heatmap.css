@@ -1,0 +1,9 @@
+/* The heatmap section: one canvas on the paper, a hover outline, a quiet footnote. */
+.hm-fig { position: relative; }
+.hm-canvas { display: block; }
+.hm-cursor {
+  position: absolute; left: 0; top: 0; pointer-events: none;
+  box-shadow: 0 0 0 var(--stroke-hairline) var(--ink-primary);
+}
+.hm-foot { margin: var(--space-12) 0 0; font-size: var(--text-small); color: var(--ink-tertiary); }
+.hm-foot:empty { display: none; }
