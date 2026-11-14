@@ -1,0 +1,118 @@
+/* The Guide sheet (features/Guide.js) and the small ? links that open it beside section headings.
+ * The one place prose is set: a ~64ch measure, body size, generous leading. Every class starts with gd-
+ * (the ? link: v-help). Tokens only; dark and light come from tokens.css. */
+
+/* ---------- the sheet ---------- */
+.gd-sheet { height: min(880px, calc(100vh - 2 * var(--inset) - var(--size-control) - var(--gap))); }
+.gd-sheet .c-float-body { display: flex; flex-direction: column; overflow: hidden; padding: 0 var(--space-6) 0; }
+.gd-search { flex: none; margin: 0 var(--space-6); }
+.gd-cols { flex: 1; min-height: 0; display: grid; grid-template-columns: 188px minmax(0, 1fr); }
+
+/* parts and topics */
+.gd-nav {
+  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+  padding: var(--space-6) var(--space-4) var(--space-24);
+  border-right: var(--stroke-hairline) solid var(--fill-selected);
+}
+.gd-part + .gd-part { margin-top: var(--space-12); }
+.gd-part-title { padding: var(--space-4) var(--space-8); font-size: var(--text-small); font-weight: var(--weight-strong); color: var(--ink-tertiary); }
+.gd-item {
+  display: block; width: 100%; padding: var(--space-4) var(--space-8); border: 0; border-radius: var(--radius-item); background: none;
+  font: inherit; font-size: var(--text-control); line-height: 1.35; text-align: left; color: var(--ink-secondary); cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+.gd-item:hover { color: var(--ink-primary); background-color: var(--fill-hover); }
+.gd-item[aria-current] { color: var(--ink-primary); background-color: var(--fill-selected); font-weight: var(--weight-medium); }
+.gd-none { padding: var(--space-4) var(--space-8); font-size: var(--text-small); color: var(--ink-tertiary); }
+
+/* the reading column */
+.gd-read {
+  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+  padding: var(--space-12) var(--space-24) var(--space-32) var(--space-24);
+  font-size: var(--text-body); line-height: 1.62; color: var(--ink-secondary);
+}
+.gd-read:focus { outline: none; }
+.gd-read > *, .gd-plain > *, .gd-pro > div > * { max-width: 64ch; }
+.gd-crumb { font-size: var(--text-small); color: var(--ink-tertiary); }
+.gd-title { margin: var(--space-2) 0 var(--space-12); font-size: var(--text-title); font-weight: var(--weight-strong); letter-spacing: -0.01em; line-height: 1.3; color: var(--ink-primary); }
+.gd-read p, .gd-read ul, .gd-read ol { margin: 0 0 var(--space-12); }
+.gd-read ul, .gd-read ol { padding-left: 1.3em; }
+.gd-read li + li { margin-top: var(--space-4); }
+.gd-read b { font-weight: var(--weight-medium); color: var(--ink-primary); }
+.gd-read a { color: var(--accent); text-decoration: none; }
+.gd-read a:hover { text-decoration: underline; }
+.gd-read code, .gd-f, .gd-eq, .gd-read kbd { font-family: var(--font-mono); font-size: 0.86em; }
+.gd-read code { color: var(--ink-primary); }
+.gd-f { color: var(--ink-primary); white-space: nowrap; }
+.gd-read sub, .gd-read sup { font-size: 0.72em; line-height: 0; }
+.gd-read kbd, .gd-keys kbd {
+  display: inline-grid; place-items: center; min-width: var(--size-icon); height: calc(var(--size-icon) + var(--space-4)); padding: 0 var(--space-4);
+  border-radius: var(--radius-tag); background: var(--fill-field);
+  font-family: var(--font-mono); font-size: var(--text-micro); line-height: 1; color: var(--ink-primary); vertical-align: 0.1em;
+}
+.gd-eq {
+  margin: 0 0 var(--space-12); padding: var(--space-8) var(--space-12);
+  border-radius: var(--radius-tag); background: var(--fill-field);
+  line-height: 1.8; color: var(--ink-primary); overflow-x: auto;
+}
+.gd-eq > div { padding-left: 2ch; text-indent: -2ch; }
+.gd-sub { margin: 0 0 var(--space-8); font-size: var(--text-control); font-weight: var(--weight-strong); color: var(--ink-primary); }
+
+/* For modelers: set apart by a hairline, a step smaller */
+.gd-pro { margin-top: var(--space-20); padding-top: var(--space-16); border-top: var(--stroke-hairline) solid var(--fill-selected); font-size: var(--text-control); line-height: 1.6; }
+
+/* figures: inline SVG, colored from tokens */
+.gd-fig { margin: var(--space-4) 0 var(--space-16); }
+.gd-fig figcaption { margin-top: var(--space-4); font-size: var(--text-small); line-height: 1.5; color: var(--ink-tertiary); }
+.gd-svg { display: block; width: 100%; max-width: 520px; height: auto; overflow: visible; }
+.gd-svg-sm { max-width: 300px; }
+.gd-svg .f-lab { font-family: var(--font-sans); font-size: 11px; fill: var(--ink-tertiary); }
+.gd-svg .f-strong { fill: var(--ink-primary); }
+.gd-svg .f-warn { fill: var(--score-8); }
+.gd-svg .f-axis { stroke: var(--ink-faint); stroke-width: 1; }
+.gd-svg .f-area { fill: var(--fill-selected); stroke: var(--ink-tertiary); stroke-width: 1; }
+.gd-svg .f-med, .gd-svg .f-tick { stroke: var(--ink-secondary); stroke-width: 1.5; }
+.gd-svg .f-bars line { stroke: var(--series-2); stroke-linecap: round; }
+.gd-svg .f-bar95 { stroke-width: 3; opacity: 0.45; }
+.gd-svg .f-bar80 { stroke-width: 5; opacity: 0.65; }
+.gd-svg .f-bar50 { stroke-width: 7; }
+.gd-svg .f-bars .f-tick { stroke: var(--ink-primary); stroke-width: 1.5; stroke-linecap: butt; opacity: 1; }
+.gd-svg .f-miss { stroke: var(--score-8); stroke-width: 1.5; stroke-dasharray: 2 3; }
+.gd-svg .f-obs { fill: var(--ink-primary); }
+.gd-svg .f-obs-line { stroke: var(--ink-primary); stroke-width: 1; stroke-dasharray: 1 3; }
+.gd-svg .f-diag { stroke: var(--ink-tertiary); stroke-width: 1; stroke-dasharray: 4 4; }
+.gd-svg .f-curve { fill: none; stroke: var(--series-2); stroke-width: var(--stroke-series); }
+.gd-svg .f-dot { fill: var(--series-2); }
+
+/* glossary and shortcuts */
+.gd-gloss { display: grid; grid-template-columns: minmax(9em, auto) 1fr; gap: var(--space-6) var(--space-16); margin: 0; max-width: 64ch; font-size: var(--text-control); line-height: 1.5; }
+.gd-gloss dt { font-weight: var(--weight-medium); }
+.gd-gloss dd { margin: 0; }
+.gd-keys { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--space-6) var(--space-16); margin: 0 0 var(--space-20); font-size: var(--text-control); }
+.gd-keys dt { display: flex; align-items: center; gap: var(--space-4); white-space: nowrap; }
+.gd-keys dd { margin: 0; }
+.gd-gesture { font-size: var(--text-small); color: var(--ink-primary); }
+.gd-or { font-size: var(--text-small); color: var(--ink-faint); }
+
+/* search matches */
+.gd-mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 28%, transparent); color: var(--ink-primary); }
+
+/* previous / next */
+.gd-pager { display: flex; justify-content: space-between; gap: var(--space-16); margin-top: var(--space-24); padding-top: var(--space-12); border-top: var(--stroke-hairline) solid var(--fill-selected); font-size: var(--text-control); }
+.gd-pager .c-link { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; }
+
+/* ---------- the ? beside a section heading or the scope line's metric ---------- */
+.v-help {
+  display: inline-grid; place-items: center; width: 16px; height: 16px; margin: 0 0 0 var(--space-6); padding: 0;
+  border: 0; border-radius: 50%; background: none; vertical-align: 0.1em;
+  font: inherit; font-size: var(--text-micro); font-weight: var(--weight-medium); line-height: 1; letter-spacing: 0;
+  color: var(--ink-faint); cursor: pointer;
+  box-shadow: inset 0 0 0 var(--stroke-hairline) currentColor;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.v-help:hover, .v-help:focus-visible { color: var(--ink-secondary); }
+.sc-frags .v-help { margin-left: 0; align-self: center; }
+
+/* a reading surface: the frost alone lets chart lines show through long text, so the sheet is
+   (nearly) solid paper-raised; the rim and shadow still mark it as a floating layer */
+.gd-sheet { background-color: color-mix(in srgb, var(--surface-raised) 94%, transparent); }

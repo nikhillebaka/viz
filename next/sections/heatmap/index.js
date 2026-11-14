@@ -23,7 +23,7 @@ export function mount(el, ctx) {
   linkStyle("heatmap");
   const { manifest, store } = ctx;
   const P = places(manifest);
-  const f = frame(el, "Heatmap");
+  const f = frame(el, "Heatmap", "heatmap");
   const counts = () => manifest.targetById.get(store.get().target)?.scale !== "proportion";
   const vs = viewState(store, "heatmap", KEY);
   let view = normalizeView(vs.initial, counts());

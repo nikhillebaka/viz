@@ -42,7 +42,7 @@ fixed bubbles: Models · Location · Target                      theme · ⋯
 | Scores | `sections/scores/`, `sections/scope.js`, `styles/scores.css`: scope line, Dates popover, leaderboard, expanded row (model detail), figures (calibration, horizon, anatomy), ↓ menu (exports, Copy CLI, Copy link) | `leaderboard.js`, `diagnostics.js`, `eval_window.js`, `modals.js` |
 | Views | `sections/heatmap/`, `sections/map/`, `sections/peaks/` and their CSS | `heatmap_view.js`, `spatial_map.js`, `peak_view.js` |
 | Layers | `features/chart/layers.js` and the Layers pill on the fan chart (as-of, NSSP, ILINet, FluSurv-NET, past seasons, peaks) | `forecast_chart.js` (signals drawer) |
-| More | `features/More.js` (⋯ bubble: hubs, warnings, refresh, shortcuts, Methods), `features/Hubs.js`, `features/Ensemble.js`, `features/Methods.js` | `remote_hubs.js`, `ensemble_studio.js`, `modals.js` |
+| More | `features/More.js` (⋯ bubble: hubs, warnings, refresh, Guide), `features/Hubs.js`, `features/Ensemble.js`, `features/Guide.js` | `remote_hubs.js`, `ensemble_studio.js`, `modals.js` |
 
 ## Checking
 

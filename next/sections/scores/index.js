@@ -12,6 +12,7 @@ import { icon, toast } from "../../ui/controls.js";
 import { seriesColor } from "../../chart/layout.js";
 import { isCharted, slotOf, chart as chartModel, unchart, setBaseline } from "../../features/selection.js";
 import { scopeOf, setScope, HORIZONS } from "../scope.js";
+import { guideLink } from "../shared.js";
 import {
   metricsRequest, rowsFrom, sortRows, SORTS, DEFAULT_SORT, relLevel, coverageLevel, SMALL, DASH,
   fmtScore, fmtRel, fmtPct, fmtCount, fmtDelta, datesLabel, horizonsLabel, exportRows, delimited, exportName, cliCommand,
@@ -77,7 +78,7 @@ export function mount(el, ctx) {
   const sep = () => h("span", { class: "sc-sep", "aria-hidden": "true" }, "·");
   const scopeLine = h("div", { class: "sc-scope", role: "toolbar", "aria-label": "Evaluation scope" },
     h("h2", { class: "sc-title" }, "Scores"),
-    h("div", { class: "sc-frags" }, fMetric, sep(), fPlace, sep(), fDates, sep(), fHz, sep(), fBase), fExport);
+    h("div", { class: "sc-frags" }, fMetric, guideLink("relative-wis", "Relative WIS in the Guide"), sep(), fPlace, sep(), fDates, sep(), fHz, sep(), fBase), fExport);
   const progress = h("div", { class: "sc-progress", "aria-hidden": "true" });
   const notice = h("div", { class: "sc-notice", hidden: true });
   const board = h("div", { class: "sc-board", role: "table", "aria-label": "Leaderboard" });

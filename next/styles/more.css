@@ -1,4 +1,4 @@
-/* The ⋯ bubble's panels (data sources, warnings, Combine, Methods, shortcuts) and presentation mode.
+/* The ⋯ bubble's panels (data sources, warnings, Combine). The Guide has its own sheet (guide.css).
  * Only what the kit (controls.css) doesn't give. Load after it. Every class starts with mo-. */
 
 /* ---------- panels ---------- */
@@ -77,27 +77,3 @@
 .mo-ens-name { font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mo-ens .mo-remove { margin-left: 0; }
 .pk-combine { margin-left: auto; font-size: var(--text-small); }
-
-/* ---------- Methods and shortcuts ---------- */
-.mo-topic {
-  margin: var(--space-16) 0 var(--space-6);
-  font-size: var(--text-micro); font-weight: var(--weight-strong); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-tertiary);
-}
-.mo-topic:first-child { margin-top: var(--space-4); }
-.mo-dl { display: grid; grid-template-columns: 7.5em 1fr; gap: var(--space-8) var(--space-16); margin: 0; }
-.mo-dl dt { font-weight: var(--weight-medium); color: var(--ink-primary); }
-.mo-dl dd { margin: 0; color: var(--ink-secondary); line-height: 1.5; }
-.mo-keys { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: var(--space-6) var(--space-16); margin: 0; }
-.mo-keys dt { display: flex; align-items: center; gap: var(--space-4); white-space: nowrap; }
-.mo-keys dd { margin: 0; color: var(--ink-secondary); }
-.mo-keys kbd {
-  display: inline-grid; place-items: center; min-width: var(--size-icon); height: calc(var(--size-icon) + var(--space-4)); padding: 0 var(--space-4);
-  border-radius: var(--radius-tag); background: var(--fill-field);
-  font-family: var(--font-mono); font-size: var(--text-micro); color: var(--ink-primary);
-}
-.mo-gesture { font-size: var(--text-small); color: var(--ink-primary); }
-.mo-or { font-size: var(--text-small); color: var(--ink-faint); }
-
-/* ---------- presentation: only the date stepper stays ---------- */
-.is-present .app-fixed,
-.is-present .fc-chrome .c-zone > :not(.fc-stepper) { opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease-out); }

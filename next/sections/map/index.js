@@ -36,7 +36,7 @@ export function mount(el, ctx) {
   linkStyle("map");
   const { manifest, store } = ctx;
   const P = places(manifest);
-  const f = frame(el, "Map");
+  const f = frame(el, "Map", "map");
   const vs = viewState(store, "map", KEY);
   const saved = vs.initial;
   let layer = saved.layer || "f_rate", horizon = [0, 1, 2, 3].includes(saved.horizon) ? saved.horizon : 1, model = null;

@@ -38,8 +38,8 @@ intended behaviour is, and the row below says so.
 | Ensemble studio | "Combine" on a selection, from the picker | 4 | built, first pass |
 | Live hubs modal, brand menu | ⋯ bubble | 4 | built, first pass |
 | Validation warnings | ⋯ bubble count; a glyph on affected rows | 4 | built, first pass |
-| Guide / Methodology modal, glossary popovers | Definitions beside their settings; a Methods page | 4 | built, first pass |
-| Presentation mode | To decide: the new chart is already full-screen | 4 | built, first pass |
+| Guide / Methodology modal, glossary popovers | The Guide (⋯ → Guide, G, `#guide/<topic>`), ? links beside section headings | 4 | built, first pass |
+| Presentation mode | — | 4 | deferred: owner wants a real design, not hidden buttons |
 | Keyboard shortcuts | Kept where the action exists; modifier keys respected | 1–4 | built, first pass |
 
 ## Deliberate changes
@@ -48,7 +48,6 @@ From the brief (`design/HANDOFF.md` §5) plus what the inventory surfaced. **own
 
 | Old viz | Now | Why |
 |---|---|---|
-| PI levels: any combination of 95, 80, 50 at once | One level at a time | The interval study settled on one level; nested bands for five models are the clutter it removed. An old link's `pi=95,80` reads as 95. **owner** |
 | Shuffle colors (button, key C); 16-color palette for every model | Removed | Color means "on the chart": five stable slots, chosen to be distinct. Nothing to shuffle. |
 | Stepper and ← → walk every date, including surveillance-only and off-season weeks | They walk forecast rounds; the observed line shows every week | Tried and set aside with the owner (HANDOFF §5). |
 | Date popover: search grammar, model-count and Off-Season badges, Recent | Season chips and a calendar of rounds; "Latest" | Same. |
@@ -56,7 +55,7 @@ From the brief (`design/HANDOFF.md` §5) plus what the inventory surfaced. **own
 | Truth is today's revised data everywhere except the As-of line | Same for now; the as-of line returns as a layer (phase 2) | Parity first. Worth revisiting: a forecast is fairest read against what was known then. **owner** |
 | No hover values on the fan chart | Exact values for every week, model and interval | A gap in old viz. |
 | Chart heading and sub-heading text | None: the bubbles name the target, place and date | Controls are the labels of what they control. |
-| Telemetry strip, Guide buttons, generated advice, calibration status words | Dropped | HANDOFF §5. |
+| Telemetry strip, generated advice, calibration status words | Dropped | HANDOFF §5. |
 
 ## Old bugs not carried over
 

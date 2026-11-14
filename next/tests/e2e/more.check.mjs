@@ -1,4 +1,5 @@
-// The ⋯ bubble: its menu opens, each panel opens with real data, presentation mode toggles, Combine opens
+// The ⋯ bubble: its menu opens, each panel opens with real data, the Guide opens, searches and deep-links
+// (#guide/<topic>), there is no presentation mode, Combine opens
 // from the model picker with a preview. Read-only against the hub: nothing is synced, added, removed,
 // created or deleted (only GET endpoints and /api/ensemble/preview are called).
 // Screenshots go to $SHOTS when set.
@@ -33,7 +34,8 @@ export default async function more(page, t) {
 
   await t.step("menu lists its items", async () => {
     const labels = await menuItem(page);
-    for (const l of ["Data sources", "Refresh data", "Copy link", "Present", "Shortcuts", "Methods"]) t.ok(labels.includes(l), `menu has ${l}`);
+    for (const l of ["Data sources", "Refresh data", "Copy link", "Guide", "Shortcuts"]) t.ok(labels.includes(l), `menu has ${l}`);
+    t.ok(!labels.includes("Present") && !labels.includes("Methods"), "no Present or Methods");
     await shot(page, "menu");
     await closeLayer(page);
   });
@@ -60,27 +62,52 @@ export default async function more(page, t) {
     await closeLayer(page);
   });
 
-  await t.step("Methods and Shortcuts", async () => {
-    await menuItem(page, "Methods");
-    await page.waitFor(() => document.querySelectorAll(".mo-dl dt").length > 10, { message: "methods terms" });
-    await page.frames(10);
-    await shot(page, "methods");
+  await t.step("Guide opens, searches, and Shortcuts is its last part", async () => {
+    await menuItem(page, "Guide");
+    await page.waitFor(() => document.querySelectorAll(".gd-sheet .gd-item").length > 20 && !!document.querySelector(".gd-read .gd-title"), { message: "guide topics" });
+    t.ok(/^#guide\//.test(await page.eval(() => location.hash)), "hash follows the topic");
+    const n = await page.eval(() => document.querySelectorAll(".gd-item:not([hidden])").length);
+    await page.eval(() => { const i = document.querySelector(".gd-search input"); i.value = "calibration"; i.dispatchEvent(new Event("input")); });
+    await page.frames(2);
+    const m = await page.eval(() => document.querySelectorAll(".gd-item:not([hidden])").length);
+    t.ok(m > 0 && m < n, `search filters topics (${n} → ${m})`);
+    t.ok((await page.count(".gd-read mark.gd-mark")) > 0, "matches highlighted");
+    const last = await page.eval(() => [...document.querySelectorAll(".gd-item")].at(-1).dataset.topic);
+    t.eq(last, "shortcuts", "Shortcuts is the last topic");
+    await page.eval(() => document.querySelector(".gd-search input").focus());
+    await page.key.press("Escape");
+    t.eq(await page.eval(() => document.querySelector(".gd-search input")?.value), "", "Escape clears the search first");
     await closeLayer(page);
-    await menuItem(page, "Shortcuts");
-    await page.waitFor(() => document.querySelectorAll(".mo-keys kbd").length > 5, { message: "shortcut keys" });
+    t.ok(!(await page.eval(() => location.hash)), "closing clears the hash");
+    await page.eval(() => document.activeElement?.blur());
+    await page.key.press("?");
+    await page.waitFor(() => document.querySelector(".gd-item[aria-current]")?.dataset.topic === "shortcuts", { message: "? opens Shortcuts" });
+    t.ok((await page.count(".gd-keys kbd")) > 5, "shortcut keys");
+    t.ok(!(await page.eval(() => [...document.querySelectorAll(".gd-keys dd")].some((d) => /Present/.test(d.textContent)))), "no Present shortcut");
     await page.frames(10);
     await shot(page, "shortcuts");
     await closeLayer(page);
   });
 
-  await t.step("F presents, Escape leaves", async () => {
+  await t.step("no presentation mode: F does nothing", async () => {
     await page.eval(() => document.activeElement?.blur());
     await page.key.press("f");
-    t.ok(await page.eval(() => document.documentElement.classList.contains("is-present")), "present on");
+    t.ok(!(await page.eval(() => document.documentElement.classList.contains("is-present"))), "no is-present");
+  });
+
+  await t.step("#guide/wis deep link opens WIS", async () => {
+    // a fresh load with the hash (goto alone would be a same-document hash change)
+    await page.goto("/next/#guide/wis");
+    await page.waitFor(() => location.hash === "#guide/wis", { message: "hash set" });
+    await page.frames(10);
+    await page.reload();
+    await page.waitFor(() => document.querySelector(".gd-item[aria-current]")?.dataset.topic === "wis", { timeout: 15000, message: "guide at WIS" });
+    t.ok(/Weighted interval score/.test(await page.text(".gd-read .gd-title")), "WIS title");
+    t.ok((await page.count(".gd-read .gd-fig svg")) === 1, "WIS figure");
     await page.frames(20);
-    await shot(page, "present");
-    await page.key.press("Escape");
-    t.ok(!(await page.eval(() => document.documentElement.classList.contains("is-present"))), "present off");
+    await shot(page, "guide-wis");
+    await closeLayer(page);
+    await page.waitFor(() => document.querySelector(".app").classList.contains("is-ready"), { timeout: 15000, message: "chart ready" });
   });
 
   await t.step("Combine opens from the model picker with a preview", async () => {

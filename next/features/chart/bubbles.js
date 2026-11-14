@@ -123,9 +123,14 @@ export class ChartBubbles {
         "-",
         { label: "Width rulers", toggle: true, checked: s.rulers, onSelect: () => store.set({ rulers: !store.get().rulers }) },
         { label: "Outcome", toggle: true, checked: s.outcome, onSelect: () => store.set({ outcome: !store.get().outcome }) },
+        "-",
+        { label: "About intervals", onSelect: () => guide("intervals") },
       ],
     });
   }
 
   destroy() { this.glass.forEach((g) => g.destroy()); this.chrome.remove(); this.note.remove(); this.recenter.remove(); }
 }
+
+/* The Guide is loaded on first use, so the chart doesn't pay for it. */
+export const guide = (topic) => import("../Guide.js").then((m) => m.openGuide(topic)).catch((err) => console.error("viz: the guide could not open", err));

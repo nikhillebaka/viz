@@ -19,6 +19,7 @@ import { WEEK, DAY, parseIso, niceStep } from "../../lib/scale.js";
 import { glass } from "../../ui/glass.js";
 import { openMenu, activeLayer } from "../../ui/floating.js";
 import { pill } from "../../ui/controls.js";
+import { guide } from "./bubbles.js";
 
 /** Every layer, in menu (and canonical) order. Signals name their key in /api/surveillance. */
 export const LAYERS = Object.freeze([
@@ -314,6 +315,7 @@ export class Layers {
     const sig = SIGNALS.filter((l) => this.#has(l.id)).map(item);
     const items = [...base, ...(base.length && sig.length ? ["-"] : []), ...sig];
     if (!items.length) items.push({ label: "None here", disabled: true });
+    items.push("-", { label: "About layers", onSelect: () => guide(sig.length ? "surveillance" : "as-reported") });
     openMenu(this.pill, { placement: "top-start", label: "Layers", items });
   }
 

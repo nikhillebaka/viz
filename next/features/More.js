@@ -1,5 +1,5 @@
 /* The ⋯ bubble at the top right, beside the theme bubble: data sources (live hubs), warnings, refresh,
- * copy link, presentation mode, shortcuts and Methods. Each panel is its own module, loaded on first use.
+ * copy link and the Guide (which ends with the shortcuts). Each panel is its own module, loaded on first use.
  * Also the small helpers those panels share (JSON requests, sizes, relative times). */
 import { h, on } from "../lib/dom.js";
 import { glass } from "../ui/glass.js";
@@ -75,18 +75,20 @@ export async function loadWarningSummary() {
 const panels = {
   hubs: () => import("./Hubs.js").then((m) => m.openHubs),
   warnings: () => import("./Hubs.js").then((m) => m.openWarnings),
-  methods: () => import("./Methods.js").then((m) => m.openMethods),
-  shortcuts: () => import("./Methods.js").then((m) => m.openShortcuts),
 };
 
+/** Open the Guide (at a topic) from the ⋯ bubble. */
+const guide = (topic, anchor) => import("./Guide.js").then((m) => m.openGuide(topic, anchor)).catch((err) => console.error("viz: the Guide could not open", err));
+const guideHash = () => (/^#guide(\/|$)/.test(location.hash) ? decodeURIComponent(location.hash.slice(7)) || "start" : null);
+
 /**
- * Put the ⋯ bubble in a zone (after what is there) and wire its menu and keys (F presents, ? shortcuts).
+ * Put the ⋯ bubble in a zone (after what is there) and wire its menu and keys (G the Guide, ? its
+ * shortcuts). A `#guide/<topic>` hash opens the Guide there, on load and when the hash changes.
  * @param {HTMLElement} zone the fixed top-right zone
  * @param {{ manifest: object, store: object, chart: object | null }} ctx
  * @returns {{ destroy(): void }}
  */
 export function mountMore(zone, ctx) {
-  const doc = document.documentElement;
   const btn = pill({ icon: icon.more, ariaLabel: "More", className: "app-more" });
   btn.setAttribute("aria-haspopup", "menu");
   zone.append(btn);
@@ -111,10 +113,6 @@ export function mountMore(zone, ctx) {
   });
 
   const open = (name) => panels[name]().then((fn) => fn(btn, ctx)).catch((err) => console.error(`viz: ${name} could not open`, err));
-  const present = (onOff = !doc.classList.contains("is-present")) => {
-    if (onOff) activeLayer()?.close(false);
-    doc.classList.toggle("is-present", onOff);
-  };
 
   btn.addEventListener("click", () => {
     const items = [
@@ -123,10 +121,9 @@ export function mountMore(zone, ctx) {
       "-",
       { label: "Refresh data", onSelect: refresh },
       { label: "Copy link", onSelect: copyLink },
-      { label: "Present", shortcut: "F", onSelect: () => present(true) },
       "-",
-      { label: "Shortcuts", shortcut: "?", onSelect: () => open("shortcuts") },
-      { label: "Methods", onSelect: () => open("methods") },
+      { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
+      { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
     ].filter(Boolean);
     openMenu(btn, { items, placement: "bottom-end", label: "More" });
     refreshWarnings();
@@ -134,13 +131,15 @@ export function mountMore(zone, ctx) {
 
   const offKeys = on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
-    if (e.key === "Escape" && doc.classList.contains("is-present") && !activeLayer()) { present(false); return; }
     if (activeLayer() || e.target.closest?.(TEXT_FIELD)) return;
-    if (e.key === "f" || e.key === "F") { e.preventDefault(); present(); }
-    else if (e.key === "?") { e.preventDefault(); open("shortcuts"); }
+    if (e.key === "g" || e.key === "G") { e.preventDefault(); guide(null, btn); }
+    else if (e.key === "?") { e.preventDefault(); guide("shortcuts", btn); }
   });
+  const fromHash = () => { const t = guideHash(); if (t) guide(t, btn); };
+  const offHash = on(window, "hashchange", fromHash);
+  fromHash();
 
-  return { destroy() { gone = true; offSync(); offKeys(); tip.destroy(); g.destroy(); btn.remove(); present(false); } };
+  return { destroy() { gone = true; offSync(); offKeys(); offHash(); tip.destroy(); g.destroy(); btn.remove(); } };
 }
 
 async function refresh() {

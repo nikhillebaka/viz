@@ -29,7 +29,7 @@ export function mount(el, ctx) {
   linkStyle("peaks"); linkStyle("map");
   const { manifest, store } = ctx;
   const P = places(manifest);
-  const f = frame(el, "Peaks");
+  const f = frame(el, "Peaks", "peaks");
   const vs = viewState(store, "peaks", KEY);
   const saved = vs.initial;
   const opt = {

@@ -21,18 +21,19 @@ export function linkStyle(name) {
  * The section's skeleton on the paper.
  * @param {HTMLElement} el the section element
  * @param {string} title
+ * @param {string} [guide] a Guide topic: a small ? beside the title opens it
  * @returns {{ line: HTMLElement, body: HTMLElement, empty(text: string | null, retry?: () => void): void, loading(on: boolean): void }}
  *   line: where the fragment controls go. empty(text) shows one quiet line instead of the body (null hides
  *   it); with `retry`, the line ends in a Retry link.
  */
-export function frame(el, title) {
+export function frame(el, title, guide) {
   linkStyle("views");
   const line = h("div", { class: "v-line" });
   const bar = h("div", { class: "v-progress", "aria-hidden": "true" });
   const body = h("div", { class: "v-body" });
   const msg = h("p", { class: "v-empty", hidden: true });
   el.classList.add("v-section");
-  el.replaceChildren(h("header", { class: "v-head" }, h("h2", { class: "v-title" }, title), line), bar, msg, body);
+  el.replaceChildren(h("header", { class: "v-head" }, h("h2", { class: "v-title" }, title, guide ? guideLink(guide, `${title} in the Guide`) : null), line), bar, msg, body);
   return {
     line, body,
     empty(text, retry) {
@@ -41,6 +42,19 @@ export function frame(el, title) {
     },
     loading(on) { el.classList.toggle("is-loading", !!on); el.setAttribute("aria-busy", String(!!on)); },
   };
+}
+
+/**
+ * A quiet ? that opens the Guide at a topic (the Guide module loads on first use).
+ * @param {string} topic
+ * @param {string} label its accessible name
+ * @returns {HTMLButtonElement}
+ */
+export function guideLink(topic, label) {
+  return h("button", {
+    type: "button", class: "v-help", "aria-label": label,
+    onclick: () => import("../features/Guide.js").then((m) => m.openGuide(topic)).catch((err) => console.error("viz: the Guide could not open", err)),
+  }, "?");
 }
 
 /**
