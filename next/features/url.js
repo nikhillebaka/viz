@@ -43,19 +43,24 @@ export function defaults(manifest, sel) {
  * forecast (the newest `last` among them, snapped to a round at or before it); with nothing selected, or
  * nothing selected that ever forecast, the latest round any model forecast; else the latest round.
  * (The newest round of a hub often has only a few forecasts yet; opening there would show no models.)
+ * Of those rounds, the latest one in season (November to March) is preferred, so the page doesn't open
+ * on a flat off-season week; a hub with no such round opens on the latest.
  * @param {import("../lib/api.js").Manifest} manifest
  * @param {{ selected: string[] }} sel
  * @returns {string} a round's ISO date ("" when there are no rounds)
  */
+/* November to March: the weeks a flu season is doing something. */
+const IN_SEASON = (iso) => { const m = +iso.slice(5, 7); return m >= 11 || m <= 3; };
+
 export function defaultDate(manifest, sel) {
   const R = manifest.allRounds;
   if (!R.length) return "";
   const lastOf = (ids) => { let m = ""; for (const id of ids) { const l = manifest.modelById.get(id)?.last; if (typeof l === "string" && l > m) m = l; } return m; };
   const last = lastOf(sel?.selected ?? []) || lastOf(manifest.modelById.keys());
   if (!last) return R.at(-1).iso;
-  let best = null;
-  for (const r of R) if (r.iso <= last) best = r;
-  return (best ?? R[0]).iso;
+  let best = null, active = null;
+  for (const r of R) if (r.iso <= last) { best = r; if (IN_SEASON(r.iso)) active = r; }
+  return (active ?? best ?? R[0]).iso;
 }
 
 /**
