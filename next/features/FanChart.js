@@ -4,7 +4,7 @@
  * the optional context layers (and their pill) in chart/layers.js.
  *
  * It reads and writes the store: `date` (the round the chart is on), `focus`, `sel` (a grey line clicked
- * is charted); and reacts to target, location, date, sel, level, rulers, outcome, focus and layers. Zoom, pan and
+ * is charted); and reacts to target, location, date, sel, levels, rulers, outcome, focus and layers. Zoom, pan and
  * height are view state, kept here (TimeNav), not in the store.
  *
  * Frames: at most one draw per animation frame (TimeNav's loop and every request share it):
@@ -424,6 +424,7 @@ export class FanChart {
     if (!fan) return;
     const goal = niceMax(Math.max(fan.yMax(this.opts.models.map((m) => m.id)), this.layers?.yMax() ?? 0));
     if (ease) this.y.set(goal, tokenNum("--dur-move", 300)); else this.y.jump(goal);
+    this.layers?.axis(goal);
   }
 
   /** Something drawn on the chart changed what the axis must hold (a layer's data arrived). */
@@ -466,7 +467,7 @@ export class FanChart {
     else if (changed.has("date") && this.nav && s.date !== this.#isoAt(this.nav.week)) this.goTo(s.date);
     if (changed.has("sel") && this.fan) this.#prepare(true);
     if (changed.has("rulers")) this.rk.set(s.rulers ? 1 : 0, RULER_MS);
-    if (changed.has("sel") || changed.has("level")) this.bubbles?.sync(s);
+    if (changed.has("sel") || changed.has("levels")) this.bubbles?.sync(s);
     if (["layers", "date", "sel"].some((k) => changed.has(k))) this.layers?.sync();
     if (changed.has("layers") && !changed.has("sel") && this.fan) this.#axis(true);
     this.request();
@@ -525,7 +526,7 @@ export class FanChart {
     o.pad.t = this.top + 24;
     o.pad.b = this.bottom + 48;
     o.topClear = this.top;
-    o.level = s.level;
+    o.levels = s.levels;
     o.outcome = s.outcome;
     o.rulers = this.rk.v;
     o.focus = ia.preview ?? ia.keyed ?? ia.external ?? s.focus;
@@ -539,7 +540,7 @@ export class FanChart {
 
     if (hoverT != null) {
       this.readout.show(hoverInfo(fan, scene, hoverT), scene, {
-        value: o.format.value, level: s.level, rulers: s.rulers, showAll: s.sel.showAll, more: this.more,
+        value: o.format.value, levels: s.levels, rulers: s.rulers, showAll: s.sel.showAll, more: this.more,
         focus: scene.focus, minX: this.inset.v + tokenNum("--inset", 16),
         layers: this.layers?.rows(hoverT, scene, o.format.value),
       });
