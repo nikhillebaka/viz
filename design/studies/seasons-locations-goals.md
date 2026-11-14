@@ -56,10 +56,12 @@ compact month grid: old viz's picker told you more about each date, and that's w
 
 - **Search** at the top ("dec 27", "jan", "2024"); typing searches every season.
 - **All** or one season, as chips; the chart's season by default.
-- **One row per round**, newest first, grouped by season (a sticky header, with "Models" over the counts)
-  and month: the date; a dot per charted model, in its color when it forecast that round and hollow when
-  it didn't; and how many models forecast it at the chart's place. Rows where none of the charted models
-  forecast are faint. The chart's round is highlighted and centred when the picker opens.
+- **One row per round**, newest first, grouped by season and month (plain labels, no header bar): the
+  date; a thin bar for that week's observed admissions against the season's peak, so you can see where
+  in the season a date sits and find the peak; and "55 models", how many forecast it at the chart's
+  place (constant in this sandbox, varies in a real hub). The chart's round is highlighted and centred
+  when the picker opens. (A first version put a dot per charted model on each row: dropped, it repeated
+  the chart and was the same on nearly every row.)
 - Off-season and surveillance-only weeks (old viz listed them) aren't here: the chart steps through
   forecast rounds only.
 - Keys: ↑ ↓ move through rows, Enter goes (from the search field, the first match), Escape closes;

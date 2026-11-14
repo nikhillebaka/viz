@@ -114,7 +114,7 @@ function activate(m) {
 /* ---------------- readout ---------------- */
 function readout() {
   const el = $("readout");
-  if (S.hoverH == null || nav.moving) { el.hidden = true; return; }
+  if (S.hoverH == null || nav.moving || document.querySelector(".c-float")) { el.hidden = true; return; }
   const hp = { h: S.hoverH, date: new Date(+G.ref + S.hoverH * WEEK) }, f = G.focus, hasFocus = f != null;
   const rows = G.bands.map((b) => ({ b, p: b.pts.find((p) => p.h === hp.h) })).filter((d) => d.p);
   if (hasFocus) rows.sort((a, b) => (b.b.m === f) - (a.b.m === f));
@@ -501,8 +501,8 @@ async function setPlace(loc) {
 /* ---------------- the date picker ----------------
  * Old viz's picker told you more about each date: how many models forecast it, across every season, with
  * search. This keeps that, in this design: search; All or one season; one row per round, grouped by
- * season and month, with which charted models forecast it (their color dots, hollow when missing) and how
- * many models did in all, at the chart's place. Rows where none of the charted models forecast are faint.
+ * season and month: the date, a thin bar for that week's observed admissions against the season's peak
+ * (where in the season it is), and how many models forecast it at the chart's place.
  * ↑ ↓ move, Enter goes, typing searches ("dec 27", "2024", "jan"). */
 function openDatePicker(btn) {
   let tab = data.sid, q = "";
@@ -510,28 +510,27 @@ function openDatePicker(btn) {
     body.innerHTML = `<div class="lp-head"><label class="pop-search">${icon.search}<input type="search" placeholder="Search dates" aria-label="Search dates"></label></div>
       <div class="dp-seasons"></div><div class="dp-list" role="listbox" aria-label="Forecast dates"></div>`;
     const input = body.querySelector("input"), chipsEl = body.querySelector(".dp-seasons"), list = body.querySelector(".dp-list");
-    const charted = () => [...sel.charted].sort((a, b) => a.slot - b.slot);
     const fmtRow = d3.utcFormat("%b %-d"), fmtSearch = d3.utcFormat("%b %-d %Y %B %Y-%m-%d");
     const paint = async () => {
       chipsEl.innerHTML = [["all", "All"], ...[...SEASONS].reverse().map((sid) => [sid, seasonLabel(sid)])].map(([k, l]) => `<button type="button" class="dp-chip${k === tab ? " on" : ""}" data-tab="${k}">${l}</button>`).join("");
       const seasons = tab === "all" ? [...SEASONS].reverse() : [tab];
       const fans = await Promise.all(seasons.map((sid) => (sid === data.sid ? data : loadFan(man, sid, place))));
-      const terms = q.toLowerCase().split(/\s+/).filter(Boolean), cur = D.dates[nav.week], cs = charted();
+      const terms = q.toLowerCase().split(/\s+/).filter(Boolean), cur = D.dates[nav.week];
       let html = "";
       seasons.forEach((sid, k) => {
         const fd = fans[k], rounds = man.seasonById.get(sid).rounds.slice().reverse()
           .filter((r) => { const t = `${fmtSearch(new Date(r + "T00:00:00Z")).toLowerCase()} ${seasonLabel(sid)}`; return terms.every((w) => t.includes(w)); });
         if (!rounds.length) return;
-        html += `<div class="dp-sh"><span>${seasonLabel(sid)}</span><span class="n">Models</span></div>`;
+        const obs = new Map(fd.truth.map((t) => [isoDay(t.date), t.v])), peak = Math.max(1, ...fd.truth.map((t) => t.v));
+        html += `<div class="dp-sh">${seasonLabel(sid)}</div>`;
         let month = null;
         for (const r of rounds) {
           const d = new Date(r + "T00:00:00Z"), m = r.slice(0, 7);
           if (m !== month) { month = m; html += `<div class="dp-mh">${d3.utcFormat("%B")(d)}</div>`; }
-          const n = Object.values(fd.FC).filter((x) => x[r]).length;
-          const dots = cs.map((c) => `<i class="${fd.FC[c.m]?.[r] ? "on" : ""}" style="--c:${seriesVar(c.slot)}"></i>`).join("");
-          const some = cs.some((c) => fd.FC[c.m]?.[r]);
-          html += `<button type="button" class="dp-r${sid === data.sid && r === cur ? " cur" : ""}${some || !cs.length ? "" : " faint"}" role="option" data-sid="${sid}" data-r="${r}" aria-label="${fmtLong(d)}, ${n} models">
-            <span class="d">${fmtRow(d)}</span><span class="dots">${dots}</span><span class="n">${n}</span></button>`;
+          const n = Object.values(fd.FC).filter((x) => x[r]).length, v = obs.get(r);
+          const bar = v != null ? `<span class="bar" title="${fmtN(v)} admissions"><i style="width:${(100 * v) / peak}%"></i></span>` : `<span class="bar none"></span>`;
+          html += `<button type="button" class="dp-r${sid === data.sid && r === cur ? " cur" : ""}${n ? "" : " faint"}" role="option" data-sid="${sid}" data-r="${r}" aria-label="${fmtLong(d)}, ${n} models">
+            <span class="d">${fmtRow(d)}</span>${bar}<span class="n">${n ? `${n} models` : "no forecasts"}</span></button>`;
         }
       });
       list.innerHTML = html || `<div class="dp-empty">No dates match</div>`;
