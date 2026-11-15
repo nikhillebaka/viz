@@ -79,12 +79,13 @@
 .lp-panel.filtering .lp-map .match:not(.on) { color: var(--ink-primary); box-shadow: inset 0 0 0 var(--stroke-hairline) var(--accent); }
 .lp-panel.filtering .lp-map .match.best { box-shadow: inset 0 0 0 var(--stroke-focus) var(--accent); }
 
-/* a row's details (the model sheet): a small "i" at the end of the row, on hover */
+/* a row's details (the model sheet): a small open-page arrow at the end of the row, on hover */
 .pk-info {
   position: absolute; z-index: 1; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-8)); translate: 0 -50%;
-  width: var(--space-20); height: var(--space-20); padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
-  font: italic var(--weight-strong) var(--text-small) var(--font-sans); color: var(--ink-tertiary);
-  opacity: 0; transition: opacity var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+  display: grid; place-items: center; width: var(--space-24); height: var(--space-24); padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
+  color: var(--ink-tertiary);
+  opacity: 0; transition: opacity var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
+.pk-info .c-icon, .pk-info svg { display: block; width: var(--size-icon-sm); height: var(--size-icon-sm); }
 .pk-row:hover .pk-info, .pk-info:focus-visible { opacity: 1; }
 .pk-info:hover { color: var(--ink-primary); background: var(--fill-hover); }
