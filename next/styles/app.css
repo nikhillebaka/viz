@@ -118,3 +118,10 @@
 .fc-cross.right { right: var(--inset); }
 .fc-cross-arrow { display: inline-flex; width: var(--size-icon-sm); height: var(--size-icon-sm); }
 .fc-cross-arrow svg { width: 100%; height: 100%; }
+
+/* the forecast shade, continued above the chart for the page's overscroll bounce (FanChart draws the
+   rest on the canvas; same colour over the same paper, so the seam is invisible) */
+.fc-over {
+  position: absolute; top: -50vh; height: 50vh; right: 0; pointer-events: none;
+  background: var(--shade-forecast, var(--fill-hover));
+}
