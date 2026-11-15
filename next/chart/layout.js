@@ -29,6 +29,7 @@
  *   pad      { l, r, t, b } plot insets; topClear: y above which y tick labels hide (default pad.t − 32)
  *   levels   [0.95, 0.8, 0.5] any of them, widest first ([]: no bands; medians always)
  *            (or level: one of them, 0 for none)                     focus: a charted id, or null
+ *   anchorAt { t, v } | null: start every forecast at v instead of the observed value at t (As reported)
  *   hover    { t: ms week } | null: a hairline at that week          rulers: 0–1 (animates in and out)
  *   context  [{ id, label }] grey medians (Show all)                 hot: a context id lifted and named
  *   absent   one quiet line under the labels ("2 not in 2023–24"), or null
@@ -198,16 +199,21 @@ export function layoutFan(fan, opts, w, h) {
 
   // charted models: those with points here are the series; the rest keep their slot as a dimmed label
   const S = [], missing = [];
+  // As reported on: each forecast starts from the value as it was published at the cutoff (what the
+  // model saw), not today's revised value
+  const av = opts.anchorAt;
+  const reanchor = (pts) => (pts && av && pts[0]?.anchor && Math.abs(pts[0].t - av.t) < WEEK / 2
+    ? [{ ...pts[0], lo: av.v, hi: av.v, med: av.v }, ...pts.slice(1)] : pts);
   for (const m of models) {
-    const pts = pointsAt(fan, m.id, t, level);
+    const pts = reanchor(pointsAt(fan, m.id, t, level));
     if (!pts) { missing.push(m); continue; }
     const lv = [pts];
-    for (let k = 1; k < levels.length; k++) lv.push(pointsAt(fan, m.id, t, levels[k]));
+    for (let k = 1; k < levels.length; k++) lv.push(reanchor(pointsAt(fan, m.id, t, levels[k])));
     S.push({ id: m.id, slot: m.slot, label: m.label, c: seriesColor(m.slot), pts, lv });
   }
   const B = level ? S.filter((s) => bandable(s.pts)) : [];
   const C = [];
-  for (const c of opts.context || []) { const pts = pointsAt(fan, c.id, t, level); if (pts) C.push({ id: c.id, label: c.label, pts }); }
+  for (const c of opts.context || []) { const pts = reanchor(pointsAt(fan, c.id, t, level)); if (pts) C.push({ id: c.id, label: c.label, pts }); }
   const f = opts.focus, hasFocus = f != null && S.some((s) => s.id === f);
   const dim = (id) => hasFocus && id !== f;
   const order = (arr) => (hasFocus ? [...arr.filter((b) => b.id !== f), ...arr.filter((b) => b.id === f)] : arr);

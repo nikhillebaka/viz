@@ -123,8 +123,10 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
   const xc = S.x(S.cutoff);
   if (S.observed.all.length) {
     ctx.save(); ctx.beginPath(); ctx.rect(xc, 0, Math.max(0, w - xc), ay); ctx.clip();
-    ctx.setLineDash([0, 4.5]); ctx.lineCap = "round";
-    for (const p of S.observed.all) { path(p); stroke(ink1, 1.75); }
+    // round dots, not dashes (dashes are As reported): large and close enough to read as a line,
+    // still plainly not the solid line before the cutoff
+    ctx.setLineDash([0, 4.25]); ctx.lineCap = "round";
+    for (const p of S.observed.all) { path(p); stroke(ink1, 2.4); }
     ctx.setLineDash([]); ctx.lineCap = "butt"; ctx.restore();
   }
   for (const p of S.observed.known) { path(p); stroke(ink1, observedW); }

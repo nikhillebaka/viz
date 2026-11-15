@@ -543,6 +543,7 @@ export class FanChart {
     o.focus = ia.preview ?? ia.keyed ?? ia.external ?? s.focus;
     o.hot = ia.hot;
     if (hoverT != null) { this.hoverAt.t = hoverT; o.hover = this.hoverAt; } else o.hover = null;
+    o.anchorAt = this.layers?.anchorAt(nav.T) ?? null;
     o.fonts = chartFonts();
     const scene = (this.scene = layoutFan(fan, o, w, h));
     scene.layers = this.layers?.layout(scene) ?? null;

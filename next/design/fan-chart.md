@@ -129,6 +129,9 @@ the chart never draws one against the left axis as if it were:
   that keeps its season peak at or under the observed peak's height. A label hides where the top
   bubbles, the "Showing 5 of 9" note or a model label would cover it. The end label names the unit
   ("ILI+ %").
+- **As reported on:** every forecast (and grey line) starts from the as-published value at the data
+  cutoff, the number the models actually saw, instead of today's revised value; the gap between the solid
+  line's last point and the fan's origin is the revision.
 - **Names** of layer lines (past seasons, signals) are pinned to the plot's left edge beside their lines
   (or where a line starts, if later), so they stay put while time moves; stacked 13 px apart, and a name
   that can't fit is left out (the readout names it). Peaks are a triangle at the median week × size, no

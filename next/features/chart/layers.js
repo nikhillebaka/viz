@@ -118,6 +118,7 @@ export class Layers {
     this.peaks = null;      // { key, available, byModel: Map id → Map round → peak, observed } | null
     this.wanted = { peaks: "" };
     this.pending = 0;
+    this.anchor = { t: 0, v: 0 }; // reused by anchorAt()
     this.marks = { lines: [], marks: [], labels: [], font: "", axis: null };
     this.axisTicks = [];
     this.goal = 0;          // the chart's resting axis maximum (FanChart #axis)
@@ -261,6 +262,19 @@ export class Layers {
     });
     this._asofP = { sk, p };
     return p;
+  }
+
+  /**
+   * Where forecasts start while As reported is on: the as-published value at the line's last week (the
+   * data cutoff), at fractional week t; null when As reported is off or has nothing here.
+   * @param {number} t @returns {{ t: number, v: number } | null}
+   */
+  anchorAt(t) {
+    if (!this.on.has("asof")) return null;
+    const L = this.#asofAt(t);
+    if (!L) return null;
+    this.anchor.t = L.ts[L.n - 1]; this.anchor.v = L.vs[L.n - 1];
+    return this.anchor;
   }
 
   /* The as-reported line at fractional week t, written into the one reusable line (no allocation).
