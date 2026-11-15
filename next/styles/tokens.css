@@ -128,6 +128,8 @@
   --series-1: #83e5bc; --series-2: #71c9fa; --series-3: #ffb481; --series-4: #f1a1ce;
   --series-5: #f1d680; --series-6: #f599a5; --series-7: #c2a7f4; --series-8: #bcdf90;
   --series-baseline: #9a9a9a;
+  /* past seasons, tinted (Layers › Tint by season): quieter than the series, newest first */
+  --season-1: #d98a96; --season-2: #d1a560; --season-3: #a895d8; --season-4: #6db4a6;
   --band-whisper: 0.075;      /* interval fill, every charted model */
   --band-focus: 0.15;         /* interval fill, the focused model */
   --shade-forecast: rgba(255, 255, 255, 0.035); /* everything after the data cutoff */
@@ -173,6 +175,7 @@
   --series-1: #05ac7d; --series-2: #0891c9; --series-3: #ec6f00; --series-4: #de03a2;
   --series-5: #d6a20a; --series-6: #ec0050; --series-7: #8738f8; --series-8: #72ad04;
   --series-baseline: #8a8a8f;
+  --season-1: #c0596c; --season-2: #a8771f; --season-3: #7a62bd; --season-4: #2e8a79;
   --band-whisper: 0.06;
   --band-focus: 0.13;
   --shade-forecast: rgba(0, 0, 0, 0.045);

@@ -30,11 +30,15 @@ export const LAYERS = Object.freeze([
   { id: "ili", label: "ILINet", name: "ILINet", end: "ILI+ %", key: "ilinet", field: "pct", unit: "%" },
   { id: "flusurv", label: "FluSurv-NET", name: "FluSurv-NET", end: "FluSurv per 100k", key: "flusurvnet", field: "rate", unit: " per 100k" },
 ]);
-const IDS = LAYERS.map((l) => l.id);
+// options stored with the layers (URL `lay`, storage) but not layers themselves: "tints" colours the
+// past seasons, one quiet hue each, instead of grey ink fading with age
+const OPTIONS = ["tints"];
+const IDS = [...LAYERS.map((l) => l.id), ...OPTIONS];
 const SIGNALS = LAYERS.filter((l) => l.key);
 const GAP = 1.5 * WEEK;          // points further apart are not joined
 const PAST = 4;                  // past seasons drawn, newest first
 const SEASON_ALPHA = [0.6, 0.45, 0.34, 0.26];
+const TINT_ALPHA = [0.85, 0.75, 0.65, 0.55];
 const LABEL_GAP = 13;
 const ASOF_DASH = [4, 3];
 const AXIS_CHAR = 6.3;           // ≈ px per character of the mono axis font (the right ticks' room)
@@ -155,8 +159,20 @@ export class Layers {
     if (this.on.has("seasons")) this.#loadCurves();
     if (this.on.has("asof")) this.#loadAsof();
     if (this.on.has("peaks")) this.#loadPeaks();
+    this.#tint();
     this.#fit();
     this.#label();
+  }
+
+  /* Past seasons: grey ink fading with age, or (tints) one quiet hue each, newest strongest. */
+  #tint() {
+    if (!this.cur) return;
+    const on = this.on.has("tints");
+    this.cur.forEach((l, i) => {
+      l.c = on ? `var(--season-${(i % 4) + 1})` : "var(--ink-tertiary)";
+      l.alpha = (on ? TINT_ALPHA : SEASON_ALPHA)[i] ?? 0.2;
+      if (l.lab) l.lab.c = l.c;
+    });
   }
 
   /** The chart's axis maximum settled on a new goal: the right-hand axis follows (never per frame). */
@@ -229,6 +245,7 @@ export class Layers {
         .sort((a, b) => String(b.season).localeCompare(String(a.season))).slice(0, PAST);
       this.cur = curves.map((c, i) => makeLine((c.points || []).map((p) => ({ t: w1 + (p.week - 1) * WEEK, v: p.value })),
         { id: `season-${c.season}`, kind: "season", name: seasonLabel(c.season), end: seasonLabel(c.season), c: "var(--ink-tertiary)", alpha: SEASON_ALPHA[i] ?? 0.2 })).filter(Boolean);
+      this.#tint();
       if (this.on.has("seasons")) this.chart.rescale();
     });
     this._curP = { sk, p };
@@ -344,7 +361,7 @@ export class Layers {
 
   #label() {
     let n = 0;
-    for (const id of this.on) if (this.#has(id) !== false) n++;
+    for (const id of this.on) if (!OPTIONS.includes(id) && this.#has(id) !== false) n++;
     const text = n ? `${n} layer${n > 1 ? "s" : ""}` : "Layers";
     const lab = this.pill.querySelector(".c-pill-label");
     if (lab.textContent !== text) lab.textContent = text;
@@ -362,6 +379,11 @@ export class Layers {
     };
     const item = (l) => ({ label: l.label, toggle: true, checked: cur.has(l.id), onSelect: () => toggle(l.id) });
     const base = LAYERS.slice(0, 3).filter((l) => this.#has(l.id) !== false).map(item);
+    // with past seasons on: colour them by season (old viz's Tints)
+    if (cur.has("seasons") && this.#has("seasons") !== false) {
+      const at = base.findIndex((it) => it.label === "Past seasons");
+      base.splice(at + 1, 0, { label: "Tint by season", toggle: true, checked: cur.has("tints"), onSelect: () => toggle("tints") });
+    }
     const sig = SIGNALS.filter((l) => this.#has(l.id)).map(item);
     const items = [...base, ...(base.length && sig.length ? ["-"] : []), ...sig];
     if (!items.length) items.push({ label: "None here", disabled: true });
