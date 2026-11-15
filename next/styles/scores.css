@@ -268,3 +268,9 @@
 .sc-handle { fill: transparent; cursor: ew-resize; }
 .sc-handle:hover { fill: var(--ink-faint); }
 .sc-readout { padding: var(--space-6) var(--space-8) var(--space-8); font-size: var(--text-small); color: var(--ink-secondary); }
+
+/* Anatomy sits beside fixed-height figures: past their height it scrolls inside instead of growing the page */
+.sc-fig-scroll {
+  max-height: var(--sc-fig-h); overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+}

@@ -179,6 +179,8 @@ export function inkOn(rgb) {
 }
 
 /* ---------------------------------------------------------------- places */
+/** HHS regions' short names, for labels (1–10). */
+export const HHS_NAMES = Object.freeze({ 1: "New England", 2: "NY · NJ · PR", 3: "Mid-Atlantic", 4: "Southeast", 5: "Great Lakes", 6: "South Central", 7: "Plains", 8: "Mountain", 9: "Pacific SW", 10: "Northwest" });
 /** HHS region (1–10) by location abbreviation. */
 export const HHS = Object.freeze(Object.fromEntries([
   [1, "CT ME MA NH RI VT"], [2, "NJ NY PR VI"], [3, "DE DC MD PA VA WV"], [4, "AL FL GA KY MS NC SC TN"],

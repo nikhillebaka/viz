@@ -10,12 +10,12 @@ import { chart as chartModel, setBaseline, slotOf, COLORS } from "../../features
 import { nearestRound } from "../../features/url.js";
 import {
   h, on, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
-  resetColors, HHS, places, fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
+  resetColors, HHS, HHS_NAMES, places, fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
 } from "../shared.js";
 import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, normalizeView, swapView, requestFor, buildGrid, presets, presetOf, DEFAULT_VIEW } from "./model.js";
 
 const KEY = "viz.heatmap";
-const ROW_H = 20, GAP = 2, GROUP_GAP = 6, TOP = 22, LABEL_PAD = 16;
+const ROW_H = 20, GAP = 2, GROUP_GAP = 6, TOP = 22, LABEL_PAD = 16, REGION_W = 96;
 const fin = (x) => typeof x === "number" && Number.isFinite(x);
 
 /** @returns {{ destroy(): void }} */
@@ -28,6 +28,7 @@ export function mount(el, ctx) {
   const vs = viewState(store, "heatmap", KEY);
   let view = normalizeView(Object.keys(vs.initial).length ? vs.initial : DEFAULT_VIEW, counts());
   let resp = null, grid = null, lay = null, reqKey = "", hover = null;
+  let customOn = false; // Custom picked: the axes controls stay out
   const slot = {};
 
   // ---------------------------------------------------------------- the control line
@@ -43,9 +44,14 @@ export function mount(el, ctx) {
   const oneModel = () => { const s = store.get(); return (s.focus && s.sel.selected.includes(s.focus) ? s.focus : null) ?? s.sel.charted[0]?.id ?? s.sel.selected[0] ?? null; };
   const presetList = () => presets({ model: view.model !== "truth" && modelChoices().some((c) => c.value === view.model) ? view.model : oneModel(), counts: counts() });
   const F = {
-    view: fragment({ label: "View", title: "View", items: () => [...presetList().map((p) => ({ value: p.id, label: p.label })), { value: "custom", label: "Custom", disabled: presetOf(view) !== "custom" }],
-      value: () => presetOf(view), isDefault: () => presetOf(view) === "place",
-      onSelect: (id) => { const p = presetList().find((x) => x.id === id); if (p) setView({ ...p.v, sort: null }); } }),
+    // Custom: shows the rows and columns controls (and stays until a named view is picked again)
+    view: fragment({ label: "View", title: "View", items: () => [...presetList().map((p) => ({ value: p.id, label: p.label })), "-", { value: "custom", label: "Custom rows and columns", short: "Custom" }],
+      value: () => (customOn ? "custom" : presetOf(view)), isDefault: () => !customOn && presetOf(view) === "place",
+      onSelect: (id) => {
+        if (id === "custom") { customOn = true; syncLine(); return; }
+        customOn = false;
+        const p = presetList().find((x) => x.id === id); if (p) setView({ ...p.v, sort: null });
+      } }),
     rows: fragment({ label: "Rows", title: "Rows", items: () => axisItems(Object.keys(AXES)), value: () => view.rows,
       isDefault: () => view.rows === "location", onSelect: (rows) => setView({ rows, sort: null }) }),
     cols: fragment({ label: "Columns", title: "Columns", items: () => axisItems(AXES[view.rows]), value: () => view.cols,
@@ -68,7 +74,7 @@ export function mount(el, ctx) {
   function syncLine() {
     if (view.model !== "truth" && !modelChoices().some((c) => c.value === view.model)) view = normalizeView({ ...view, model: "truth" }, counts());
     Object.values(F).forEach((b) => b.sync());
-    const custom = presetOf(view) === "custom";
+    const custom = customOn || presetOf(view) === "custom";
     setLine(f.line, [
       F.view,
       custom && F.rows, custom && F.cols,
@@ -106,11 +112,20 @@ export function mount(el, ctx) {
       return;
     }
     const p = requestFor(view, { target: s.target, seasons: sc.seasons, place: sc.place, locationAbbr: P.abbrOf(s.location), models });
+    // the evaluation window, so every view (models × places too) scores what the scope line says
+    if (sc.horizons) p.horizons = sc.horizons.join(",");
+    if (sc.weeks) {
+      const rounds = sc.seasons.flatMap((id) => (manifest.seasonById.get(id)?.rounds || []).filter((iso) => {
+        const w = seasonWeekOf(startYearOf(id), parseIso(iso));
+        return w >= sc.weeks[0] && w <= sc.weeks[1];
+      }));
+      p.dates = rounds.join(",") || "none";
+    }
     const key = query(p);
     if (key === reqKey && resp && !force) { if (soft && grid) redraw(); else rebuild(); return; }
     reqKey = key;
     f.loading(true);
-    getJson(`/api/heatmap?${key}`, { slot }).then((j) => {
+    getJson(`/api/next/heatmap?${key}`, { slot }).then((j) => {
       if (key !== reqKey) return;
       resp = j; f.loading(false); rebuild();
     }, (e) => {
@@ -149,14 +164,14 @@ export function mount(el, ctx) {
   function legendLine() {
     const L = grid.legend, label = (x) => (typeof x === "number" ? fmtMetric(view.metric, x) : x);
     const stops = Array.from({ length: 9 }, (_, i) => (L.kind === "div" ? diverging(i / 4 - 1) : sequential(L.kind === "seq" && typeof L.hi === "number" ? Math.sqrt(i / 8) : i / 8)));
-    key.replaceChildren(
+    key.replaceChildren(...[
       h("span", { class: "hm-key-label" }, METRICS[view.metric].label),
       h("span", { class: "hm-key-num" }, label(L.lo)),
       h("span", { class: "hm-key-ramp", style: { background: `linear-gradient(90deg, ${stops.join(", ")})` } }, L.mid != null ? h("i", { "data-mid": label(L.mid) }) : null),
       h("span", { class: "hm-key-num" }, label(L.hi)),
       L.note ? h("span", { class: "hm-key-label" }, L.note) : null,
       h("span", { class: "hm-key-none" }, h("i"), "no value"),
-    );
+    ].filter(Boolean)); // replaceChildren would print a null as "null"
   }
 
   function footer() {
@@ -200,7 +215,9 @@ export function mount(el, ctx) {
     const nR = grid.rows.length, nC = grid.cols.length;
     const rowText = grid.rows.map((r) => labelOf(view.rows, r.key, grid.ids));
     const dots = view.rows === "model";
-    const labelW = Math.min(220, Math.max(40, ...rowText.map((t) => measure(t, rowFont)))) + (dots ? 14 : 0) + LABEL_PAD;
+    // states sorted by region: a gutter at the left for each region's bracket and name
+    const reg = view.rows === "location" && view.sort === "region" ? REGION_W : 0;
+    const labelW = reg + Math.min(220, Math.max(40, ...rowText.map((t) => measure(t, rowFont)))) + (dots ? 14 : 0) + LABEL_PAD;
     const breaks = (arr) => arr.reduce((n, x, i) => n + (i && x.group !== arr[i - 1].group ? 1 : 0), 0);
     // a few model columns: wide cells with their names set flat above them (easy to read); many: narrow
     // cells with the names turned on their side
@@ -213,7 +230,7 @@ export function mount(el, ctx) {
     grid.cols.forEach((c, i) => { if (i && c.group !== grid.cols[i - 1].group) x += GROUP_GAP; xs.push(x); x += cellW; });
     let y = top;
     grid.rows.forEach((r, i) => { if (i && r.group !== grid.rows[i - 1].group) y += GROUP_GAP; ys.push(y); y += ROW_H; });
-    return { width, height: y + GAP, labelW, cellW, top, xs, ys, rowText, colText, rowFont, colFont, nR, nC, right: x, flat };
+    return { width, height: y + GAP, labelW, cellW, top, xs, ys, rowText, colText, rowFont, colFont, nR, nC, right: x, flat, reg };
   }
 
   function draw() {
@@ -223,7 +240,10 @@ export function mount(el, ctx) {
     const s = store.get();
     const ink = cssColor("var(--ink-secondary)"), ink1 = cssColor("var(--ink-primary)"), ink3 = cssColor("var(--ink-tertiary)");
     const cw = L.cellW - GAP, ch = ROW_H - GAP;
-    const showNums = cw >= 40;
+    // Numbers only where the grid is a table: columns are a few categories (models, horizons), so each
+    // cell is read on its own. Over weeks or places the grid is a pattern (when, where) and stays colour
+    // only, whatever the cell width; the exact value is a hover away.
+    const showNums = (view.cols === "model" || view.cols === "horizon") && cw >= 40;
     g.textBaseline = "middle";
     for (let r = 0; r < L.nR; r++) for (let c = 0; c < L.nC; c++) {
       const t = grid.tone(r, c);
@@ -241,17 +261,34 @@ export function mount(el, ctx) {
     g.font = L.rowFont; g.textAlign = "left";
     grid.rows.forEach((row, r) => {
       const y = L.ys[r] + ch / 2 + 0.5;
-      let x = 0;
+      let x = L.reg;
       if (view.rows === "model") {
         const sl = slotOf(s.sel, row.key);
         const color = row.key === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
-        if (color) { g.fillStyle = cssColor(color); g.beginPath(); g.arc(4, y, 3.5, 0, Math.PI * 2); g.fill(); }
-        x = 14;
+        if (color) { g.fillStyle = cssColor(color); g.beginPath(); g.arc(x + 4, y, 3.5, 0, Math.PI * 2); g.fill(); }
+        x += 14;
       }
       const cur = (view.rows === "location" && row.key === here) || (view.rows === "date" && row.key === s.date);
       g.fillStyle = cur ? ink1 : ink;
       g.fillText(clip(L.rowText[r], L.labelW - x - LABEL_PAD, L.rowFont, measure), x, y);
     });
+    // region brackets: a hairline beside each region's states, its number and short name at the top
+    if (L.reg) {
+      const line = cssColor("var(--line-axis)");
+      let i0 = 0;
+      for (let r = 1; r <= L.nR; r++) {
+        if (r < L.nR && grid.rows[r].group === grid.rows[i0].group) continue;
+        const y0 = L.ys[i0] + 1, y1 = L.ys[r - 1] + ch - 1, bx = L.reg - 12, n = grid.rows[i0].group;
+        g.strokeStyle = line; g.lineWidth = 1; g.beginPath();
+        g.moveTo(bx + 4, y0 + 0.5); g.lineTo(bx + 0.5, y0 + 0.5); g.lineTo(bx + 0.5, y1 - 0.5); g.lineTo(bx + 4, y1 - 0.5); g.stroke();
+        g.textAlign = "right"; g.textBaseline = "middle";
+        g.font = `${Fo.axis}px ${Fo.mono}`; g.fillStyle = ink3;
+        g.fillText(`Region ${n}`, bx - 6, y0 + 7);
+        if (y1 - y0 > 26) { g.font = `${Fo.micro ?? 11}px ${Fo.sans}`; g.fillStyle = ink; g.fillText(clip(HHS_NAMES[n] ?? "", L.reg - 24, g.font, measure), bx - 6, y0 + 21); }
+        i0 = r;
+      }
+      g.textAlign = "left";
+    }
     // column labels
     g.font = L.colFont; g.fillStyle = ink3;
     if (view.cols === "date") {

@@ -87,7 +87,7 @@ export function mount(el, ctx) {
   const figs = h("div", { class: "sc-figs" },
     h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Calibration", h("span", { class: "sc-fig-sub" }, "coverage − nominal, pts")), figSvgs.cal),
     h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Horizon", h("span", { class: "sc-fig-sub" }, "Rel. WIS by weeks ahead")), figSvgs.hz),
-    h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Anatomy", h("span", { class: "sc-sep" }, "·"), shareBtn), figSvgs.anat));
+    h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Anatomy", h("span", { class: "sc-sep" }, "·"), shareBtn), h("div", { class: "sc-fig-scroll" }, figSvgs.anat)));
   const root = h("div", { class: "sc" }, scopeLine, progress, notice, board, figs);
   el.append(root);
 

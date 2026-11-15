@@ -93,7 +93,12 @@ export function mount(el, ctx) {
       h("span", { class: "mp-abbr" }, abbr), h("span", { class: "mp-val" }));
     b.addEventListener("pointerenter", () => { hoverAbbr = abbr; inspect(); });
     b.addEventListener("focus", () => { hoverAbbr = abbr; inspect(); });
-    b.addEventListener("click", () => store.set({ location: loc.id }));
+    // click a state to make it the chart's place; click it again to go back to the whole country
+    b.addEventListener("click", () => {
+      const back = store.get().location === loc.id && manifest.locationById.has("US");
+      store.set({ location: back ? "US" : loc.id });
+      if (back) { hoverAbbr = null; inspect(); }
+    });
     tiles.set(abbr, b);
     grid.append(b);
   }

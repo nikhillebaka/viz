@@ -77,7 +77,7 @@ export function mount(el, ctx) {
   const none = h("p", { class: "v-note pe-none", hidden: true });
   fig.append(stripRow, headRow, rowsEl, none);
   const readout = pointerReadout(fig);
-  const skillWrap = h("div", { class: "pe-skill" });
+  const skillWrap = h("div", { class: "pe-skill pe-skill-scroll" });
   const mapGrid = h("div", { class: "mp-grid pe-map", style: { "--cols": COLUMNS, "--rows": 8 } });
   const mapNote = h("p", { class: "v-note" });
   f.body.append(note, fig,
@@ -653,7 +653,17 @@ export function mount(el, ctx) {
       b.style.background = fill; b.style.color = has ? inkOn(fill) : "";
       b.lastChild.textContent = has ? (opt.layer === "week" ? fmtDay(v) : v.toFixed(1)) : "";
     }
-    mapNote.textContent = vals2.length ? (opt.layer === "week" ? `Median ${fmtDay(med)} · earlier blue, later orange · ${fmtDay(lo)} – ${fmtDay(hi)}` : `${lo.toFixed(1)}–${hi.toFixed(1)} per 100k`) : id ? "No peak map for this round" : "";
+    // the legend: a ramp with its ends named (earlier · median · later, or low · high)
+    if (!vals2.length) mapNote.replaceChildren(id ? "No peak map for this round" : "");
+    else {
+      const week = opt.layer === "week";
+      const stops = Array.from({ length: 9 }, (_, i) => (week ? diverging(i / 4 - 1) : sequential(i / 8)));
+      mapNote.replaceChildren(
+        h("span", { class: "pe-key-end" }, week ? `Earlier · ${fmtDay(lo)}` : `${lo.toFixed(1)}`),
+        h("span", { class: "pe-key-ramp", style: { background: `linear-gradient(90deg, ${stops.join(", ")})` } }, week ? h("i", { "data-mid": `median ${fmtDay(med)}` }) : null),
+        h("span", { class: "pe-key-end" }, week ? `${fmtDay(hi)} · later` : `${hi.toFixed(1)} per 100k`),
+      );
+    }
   }
 
   // ---------------------------------------------------------------- reacting

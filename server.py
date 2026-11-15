@@ -279,6 +279,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": "Missing 'season' parameter"}, status=400)
                 return
             self._send_json(NEXT_DATA.asof(query.get("target", [VIZ_CONFIG.get_default_target()])[0], season, query.get("location", ["US"])[0]))
+        elif name == "heatmap":
+            # /api/heatmap, plus the evaluation window: horizons=0,1 and dates=<rounds in scope>
+            self._handle_heatmap(query, next_api=True)
         elif name == "spatial":
             # /api/spatial with values unrounded (proportions would round to 0.0)
             self._handle_spatial(query, precise=True)
@@ -545,7 +548,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         spatial_data = DATA_LOADER.get_spatial_data(target, ref_date, model_ids, horizon=horizon_param, precise=precise)
         self._send_json(spatial_data)
 
-    def _handle_heatmap(self, query: dict):
+    def _handle_heatmap(self, query: dict, next_api: bool = False):
         mode = query.get("mode", [""])[0].strip() or None
         rows = query.get("rows", [""])[0].strip() or None
         cols = query.get("cols", [""])[0].strip() or None
@@ -580,11 +583,24 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 sort_by=sort_by,
                 normalize=normalize,
                 include_inactive=include_inactive,
+                **(self._heatmap_scope(query) if next_api else {}),
             )
             self._send_json(heatmap_data)
         except Exception as exc:
             logger.exception("Heatmap API generation error: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
+
+    @staticmethod
+    def _heatmap_scope(query: dict) -> dict:
+        """next/'s evaluation window for /api/next/heatmap: horizons=0,1 and dates=2025-11-01,… (rounds)."""
+        out = {}
+        raw_h = query.get("horizons", [""])[0].strip()
+        if raw_h and raw_h.lower() != "all":
+            out["horizons"] = sorted({int(h) for h in raw_h.split(",") if h.strip().lstrip("-").isdigit()}) or None
+        raw_d = query.get("dates", [""])[0].strip()
+        if raw_d:
+            out["dates"] = [d.strip() for d in raw_d.split(",") if d.strip()] or None
+        return out
 
     def _handle_season_curves(self, query: dict):
         """Truth curves per season for one location, aligned by season week, with peak/pre/post phases."""

@@ -1481,8 +1481,13 @@ class SandboxDataLoader:
         sort_by: str = "hhs_region",
         normalize: str = "none",
         include_inactive: Union[bool, str] = False,
+        horizons: Optional[List[int]] = None,
+        dates: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
+        horizons / dates (optional, default off so existing callers are unchanged): score only these
+        horizons, and only these reference dates within the season scope (the next/ evaluation window).
+
         Extract multi-dimensional matrix cross-sections for heatmap visualization:
         Directly driven by user-selected ROWS and COLS (Location, Model, Date, Horizon),
         with exact Leaderboard parity for TIME (Date, Season, Custom Seasons, All Time)
@@ -1628,6 +1633,9 @@ class SandboxDataLoader:
         scope_dates = sorted(list(set(scope_dates)))
         if not scope_dates and all_dates:
             scope_dates = all_dates
+        if dates:
+            keep = set(dates)
+            scope_dates = [d for d in scope_dates if d in keep]
 
         # -------------------------------------------------------------
         # Mode 1: Spatio-Temporal Wave Matrix (Location x Date)
@@ -2061,7 +2069,10 @@ class SandboxDataLoader:
                 )
                 if sc and "task_df" in sc and sc["task_df"] is not None:
                     # Restrict to the requested jurisdictions (all states excludes US national, as on the leaderboard)
-                    model_task_dfs[mid] = sc["task_df"].filter(pl.col("location").is_in(list(target_loc_fips)))
+                    tdf_m = sc["task_df"].filter(pl.col("location").is_in(list(target_loc_fips)))
+                    if horizons and "horizon" in tdf_m.columns:
+                        tdf_m = tdf_m.filter(pl.col("horizon").is_in(list(horizons)))
+                    model_task_dfs[mid] = tdf_m
 
             y_keys = cand_mids
             y_labels = [f"{mid} {'[LOCAL]' if all_models_meta.get(mid, {}).get('is_local') else ''}".strip() for mid in cand_mids]
