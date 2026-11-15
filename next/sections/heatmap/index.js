@@ -303,8 +303,9 @@ export function mount(el, ctx) {
       });
       g.textAlign = "left";
       // where cells are too narrow even for short names, a month is skipped rather than overprinted
-      for (const l of fitLabels(months, (s) => measure(s, L.colFont), 4)) g.fillText(l.text, l.x, L.top - 11);
-      for (const l of fitLabels(years, (s) => measure(s, L.colFont))) g.fillText(l.text, l.x, 9);
+      const edge = L.xs[L.nC - 1] + L.cellW;
+      for (const l of fitLabels(months, (s) => measure(s, L.colFont), 4, edge)) g.fillText(l.text, l.x, L.top - 11);
+      for (const l of fitLabels(years, (s) => measure(s, L.colFont), 6, edge)) g.fillText(l.text, l.x, 9);
     } else if (view.cols === "model" && L.flat) {
       g.textAlign = "center";
       grid.cols.forEach((c, i) => g.fillText(clip(L.colText[i], cw - 6, L.colFont, measure), L.xs[i] + cw / 2, L.top / 2));

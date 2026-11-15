@@ -5,11 +5,14 @@
  * @param {{ x: number, text: string, pri?: number, align?: "left" | "center" | "right" }[]} items
  * @param {(text: string) => number} measure width in px
  * @param {number} [gap=6]
- * @returns {object[]} the items to draw
+ * @param {number} [end] the right edge labels may not run past: one that would is pulled back to end there
+ * @returns {object[]} the items to draw (x adjusted where pulled back)
  */
-export function fitLabels(items, measure, gap = 6) {
+export function fitLabels(items, measure, gap = 6, end = Infinity) {
   const spans = items.map((it, i) => {
-    const w = measure(it.text), x0 = it.align === "center" ? it.x - w / 2 : it.align === "right" ? it.x - w : it.x;
+    const w = measure(it.text);
+    let x0 = it.align === "center" ? it.x - w / 2 : it.align === "right" ? it.x - w : it.x;
+    if (x0 + w > end) { const d = x0 + w - end; x0 -= d; it = { ...it, x: it.x - d }; }
     return { it, i, a: x0, b: x0 + w };
   });
   const kept = [];
