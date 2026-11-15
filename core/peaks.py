@@ -11,6 +11,7 @@ separate per-model "peak" table (canonical schema below) so the weekly code path
 """
 
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -228,8 +229,13 @@ def summarize_size(levels: Sequence[float], values: Sequence[float]) -> Optional
 # Scoring against an observed (final) peak
 # ---------------------------------------------------------------------------------------------------------
 
+@lru_cache(maxsize=4096)
+def _day(d: str) -> datetime:
+    return datetime.strptime(d, "%Y-%m-%d")
+
+
 def week_index(d: str, origin: str) -> int:
-    return round((datetime.strptime(d, "%Y-%m-%d") - datetime.strptime(origin, "%Y-%m-%d")).days / 7)
+    return round((_day(d) - _day(origin)).days / 7)
 
 
 def score_timing(timing: Dict[str, Any], peak_dates: Sequence[str]) -> Optional[Dict[str, Any]]:

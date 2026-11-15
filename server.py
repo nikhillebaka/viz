@@ -516,7 +516,14 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         if scope not in ("location", "states"):
             self._send_json({"error": "skill_scope must be 'location' or 'states'"}, status=400)
             return
-        self._send_json(DATA_LOADER.peaks.season_view(target, location, ref_date, model_ids, scope, common))
+        view = DATA_LOADER.peaks.season_view(target, location, ref_date, model_ids, scope, common)
+        # fallback=all (added for /next/): when none of the listed models forecast this round's peak, answer
+        # for every known model instead, in the same request; the response says so with "fallback": true
+        if (query.get("fallback", [""])[0] == "all" and model_ids and view.get("available")
+                and not any(m.get("has_round") and (m.get("timing") or m.get("size")) for m in view.get("models", []))):
+            view = DATA_LOADER.peaks.season_view(target, location, ref_date, list(DATA_LOADER.scan_models().keys()), scope, common)
+            view["fallback"] = True
+        self._send_json(view)
 
     def _handle_peak_map(self, query: dict):
         target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]

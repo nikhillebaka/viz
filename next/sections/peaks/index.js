@@ -94,8 +94,9 @@ export function mount(el, ctx) {
   }
 
   // ---------------------------------------------------------------- loading
-  /* The selected models (and the baseline) first; when none of them forecast peaks this round, every
-   * model (models=all). The second ask only happens on such rounds, and never sends 200 ids. */
+  /* The selected models (and the baseline); when none of them forecast peaks this round, the server
+   * answers for every model in the same request (fallback=all). A server from before that ignores it,
+   * so then a second ask follows (models=all, or the ids for one older still). */
   const mine = () => [...new Set([...store.get().sel.selected, manifest.baseline].filter(Boolean))];
   const forecasts = (j) => (j?.models || []).some((m) => m.has_round && (m.timing || m.size));
   function load(force) {
@@ -103,7 +104,7 @@ export function mount(el, ctx) {
     const s = store.get();
     const base = { target: s.target, location: s.location, date: s.date, skill_scope: opt.scope, common: fair() ? "1" : null };
     const ids = mine();
-    const urlFor = (models) => `/api/peaks?${query({ ...base, models })}`;
+    const urlFor = (models, fallback) => `/api/peaks?${query({ ...base, models, fallback })}`;
     const allIds = () => manifest.models.map((m) => m.id).join(",");
     const key = query({ ...base, models: ids.join(",") });
     const ck = query({ target: s.target, location: s.location });
@@ -125,9 +126,9 @@ export function mount(el, ctx) {
       resp = j; f.loading(false);
       choose(); render(); loadMap();
     };
-    getJson(urlFor(ids.join(",")), { slot: slots.peaks }).then((j) => {
+    getJson(urlFor(ids.join(","), "all"), { slot: slots.peaks }).then((j) => {
       if (key !== reqKey) return;
-      if (!ids.length || forecasts(j) || !j.available) { done(j); return; }
+      if (!ids.length || j.fallback || forecasts(j) || !j.available) { done(j); return; }
       getJson(urlFor(legacy ? allIds() : "all"), { slot: slots.peaks }).then((k) => {
         // a server from before models=all reads "all" as an unknown model
         if (!legacy && (k.missing || []).includes("all")) { legacy = true; return getJson(urlFor(allIds()), { slot: slots.peaks }).then(done); }

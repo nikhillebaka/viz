@@ -365,15 +365,18 @@ export function layoutFan(fan, opts, w, h) {
     if (lx >= w - 24) break; // pushed off-screen (panned into the past): skipped entirely
     const focused = hasFocus && d.id === f, weight = focused ? 600 : 500, size = d.ctx && !d.hot ? F.micro : F.chart;
     const fnt = font(weight, size, F.sans), full = d.summary ? d.ghost : d.name + (d.ghost ? ` · ${d.ghost}` : "");
-    const text = fitText(full, fnt, Math.round(w - lx - 10 - 8), measure); // never run off the chart; full name kept
+    // a ghost or summary line has no line of its own to sit beside: rather than cut it, it slides left
+    // into the empty room (never past the forecast shade); a series label stays in the column
+    const x = d.ghost || d.summary ? Math.max(Math.min(lx, w - 18 - 10 - measure(full, fnt)), Math.min(lx, xc + 12)) : lx;
+    const text = fitText(full, fnt, Math.round(w - x - 10 - 8), measure); // never run off the chart; full name kept
     const len = measure(text, fnt);
     labels.push({
-      id: d.id, x: lx, y: d.y, text, full, font: fnt, size, weight, len, alpha: d.alpha ?? 1,
+      id: d.id, x, y: d.y, text, full, font: fnt, size, weight, len, alpha: d.alpha ?? 1,
       ctx: !!d.ctx, hot: !!d.hot, ghost: !!d.ghost, summary: !!d.summary,
       dotR: d.summary ? 0 : d.ctx ? 2.5 : 3.5, dotC: d.c, dotAlpha: d.ghost ? 0.4 : dim(d.id) ? 0.55 : 1,
       fill: d.summary ? INK3 : d.hot ? INK1 : d.ctx || d.ghost ? INK3 : !hasFocus ? INK2 : focused ? INK1 : INK3,
       // the click / hover target is just a little larger than the dot and the name (5px around)
-      hit: d.summary || (d.alpha ?? 1) < 0.5 ? null : { x0: lx - 9, x1: lx + 10 + len + 5, y0: d.y - 11, y1: d.y + 11 },
+      hit: d.summary || (d.alpha ?? 1) < 0.5 ? null : { x0: x - 9, x1: x + 10 + len + 5, y0: d.y - 11, y1: d.y + 11 },
     });
   }
 

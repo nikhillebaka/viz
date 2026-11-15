@@ -7,6 +7,7 @@ same merged weekly truth the season-phase picker uses, so weekly forecasts and t
 
 from datetime import datetime, timedelta
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -30,6 +31,7 @@ def _mean(xs: Sequence[Optional[float]]) -> Optional[float]:
 
 class PeakService:
     def __init__(self, loader):
+        self._tls = threading.local()  # one model list per request (see _snapshot)
         self.loader = loader
         self._truth_cache: Optional[Tuple[Any, Dict[str, List[Tuple[str, float]]]]] = None
 
@@ -65,13 +67,16 @@ class PeakService:
         loader = self.loader
         if loader.ensemble_mgr.get_config(model_id):
             return None
-        models = loader.scan_models()
+        models = getattr(self._tls, "models", None) or loader.scan_models()
         info = models.get(model_id)
         if info is None and not model_id.startswith("local:"):
             return None
         if info and info.get("source") == "hub":
             return loader.cache_mgr.scan_model_peaks(model_id)
-        raw_id, is_local = loader._resolve_model_id_and_local(model_id)
+        if info:  # what loader._resolve_model_id_and_local does, from the list already in hand
+            raw_id, is_local = info.get("raw_name", model_id), info.get("is_local", False)
+        else:
+            raw_id, is_local = model_id[6:], True  # an unlisted "local:" id
         return loader.cache_mgr.scan_model_peaks(raw_id, is_local=is_local)
 
     def _rows(self, model_id: str, base_target: str, location: Optional[str] = None,
@@ -156,6 +161,20 @@ class PeakService:
 
     # ---- the Season Peak view ---------------------------------------------------------------------------
 
+    def _snapshot(fn):
+        """Scan the model list once for the whole request: scan_models() checks every model folder's
+        mtime, and a season view asks for it once per model and round (hundreds of times)."""
+        def wrapped(self, *args, **kwargs):
+            if getattr(self._tls, "models", None) is not None:
+                return fn(self, *args, **kwargs)
+            self._tls.models = self.loader.scan_models()
+            try:
+                return fn(self, *args, **kwargs)
+            finally:
+                self._tls.models = None
+        return wrapped
+
+    @_snapshot
     def season_view(self, base_target: str, location: str, reference_date: str, model_ids: List[str],
                     skill_scope: str = "location", common: bool = False) -> Dict[str, Any]:
         loader = self.loader
@@ -327,6 +346,7 @@ class PeakService:
 
     # ---- spatial map ------------------------------------------------------------------------------------
 
+    @_snapshot
     def map_layer(self, base_target: str, reference_date: str, model_id: str) -> Dict[str, Any]:
         """Per-location peak timing and size of one model and round, for the choropleth layers."""
         pt = peak_targets_for(base_target)
