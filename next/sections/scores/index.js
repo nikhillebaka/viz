@@ -85,8 +85,8 @@ export function mount(el, ctx) {
   const figSvgs = { cal: s("svg", { class: "sc-fig-svg" }), hz: s("svg", { class: "sc-fig-svg" }), anat: s("svg", { class: "sc-fig-svg sc-fig-anat" }) };
   const shareBtn = h("button", { type: "button", class: "sc-fig-toggle", onclick: () => { share = !share; drawFigures(); } });
   const figs = h("div", { class: "sc-figs" },
-    h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Calibration"), figSvgs.cal),
-    h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Horizon"), figSvgs.hz),
+    h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Calibration", h("span", { class: "sc-fig-sub" }, "coverage − nominal, pts")), figSvgs.cal),
+    h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Horizon", h("span", { class: "sc-fig-sub" }, "Rel. WIS by weeks ahead")), figSvgs.hz),
     h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Anatomy", h("span", { class: "sc-sep" }, "·"), shareBtn), figSvgs.anat));
   const root = h("div", { class: "sc" }, scopeLine, progress, notice, board, figs);
   el.append(root);
@@ -255,8 +255,7 @@ export function mount(el, ctx) {
         for (const r of order.unranked) kids.push(...rowEls(r, cols, st, sc, ui));
       }
     }
-    kids.push(headerRow(cols, ui, sc));
-    board.replaceChildren(...kids);
+    board.replaceChildren(headerRow(cols, ui, sc), ...kids);
     if (keepFocus) board.querySelector(`.sc-row[data-id="${CSS.escape(keepFocus)}"]`)?.focus({ preventScroll: true });
   }
 
@@ -361,7 +360,7 @@ export function mount(el, ctx) {
     }
   }
 
-  /* the column titles: a footer that rides the bottom of the screen and rests under the last row */
+  /* the column titles: above the rows, held under the top bubbles while a long table scrolls */
   function headerRow(cols, ui, sc) {
     const head = (key, text, cls = "") => {
       const active = ui.sort === key;

@@ -1,7 +1,7 @@
 /* The figures under the leaderboard (design/studies/evaluation-goals.md, "Figures"): Calibration,
  * Horizon and Anatomy, and the small per-model plots of the expanded row. SVG on the paper; every color
  * and size comes from classes in styles/scores.css (tokens), so a theme change needs no redraw.
- * Lines are ink. Emphasized models (hovered, focused, expanded) are full ink and named at the line end;
+ * Lines are ink; a model on the fan chart keeps its chart colour. Emphasized models (hovered, focused, expanded) are full ink and named at the line end;
  * the rest recede. */
 import { linear, niceStep, ticks } from "../../lib/scale.js";
 import { LEVELS, fmtScore } from "./model.js";
@@ -68,7 +68,7 @@ export function lineFigure(svg, o) {
     const pts = se.pts.filter(([, v]) => v != null && Number.isFinite(v)).map(([xv, yv]) => [X(xv), y(yv)]);
     if (!pts.length) continue;
     const em = se.id === o.hover || (!hovering && o.emph.has(se.id));
-    const g = s("g", { class: ["sc-series", em && "is-emph", se.base && "is-base", pts.length === 1 && "is-single"], "data-id": se.id });
+    const g = s("g", { class: ["sc-series", em && "is-emph", se.base && "is-base", se.dot && "is-charted", pts.length === 1 && "is-single"], "data-id": se.id, style: se.dot ? `--c:${se.dot}` : null });
     g.append(s("path", { d: path(pts), class: "sc-line" }));
     for (const [px, py] of pts) g.append(s("circle", { cx: px, cy: py, r: 2, class: "sc-pt" })); // shown when emphasized (CSS)
     g.append(s("path", { d: path(pts), class: "sc-hit" }));

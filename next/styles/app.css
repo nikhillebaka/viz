@@ -130,3 +130,6 @@
 .fc-tint.is-tints { background: conic-gradient(var(--season-1) 0 25%, var(--season-2) 0 50%, var(--season-3) 0 75%, var(--season-4) 0); }
 .fc-tint[aria-checked="true"] { box-shadow: 0 0 0 1.5px var(--surface-raised), 0 0 0 3px var(--accent); }
 .fc-tint:hover:not([aria-checked="true"]) { box-shadow: 0 0 0 1.5px var(--surface-raised), 0 0 0 3px var(--fill-selected); }
+
+/* scrolled down until the chart's bottom bubbles reach the top bubbles: they step out of the way */
+.app.is-tucked :is(.fc-chrome .c-zone > *, .fc-note, .fc-recenter, .fc-cross) { opacity: 0; pointer-events: none; }

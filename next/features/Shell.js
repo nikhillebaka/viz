@@ -119,6 +119,17 @@ export function mountShell(root, ctx) {
   let more = null, gone = false;
   import("./More.js").then((m) => { if (!gone) more = m.mountMore(tr, ctx); }).catch(() => {});
 
+  // The chart's own bubbles (bottom row, note, recenter) scroll with the chart; once that bottom row
+  // reaches the fixed top bubbles they fade out instead of piling onto them. An observer, not a scroll
+  // handler: nothing runs while scrolling.
+  const tuckAt = Math.round(tl.getBoundingClientRect().bottom + 8);
+  const tuck = new IntersectionObserver(([e]) => {
+    root.classList.toggle("is-tucked", !e.isIntersecting && e.boundingClientRect.top < tuckAt);
+  }, { rootMargin: `-${tuckAt}px 0px 0px 0px` });
+  if (chart.bubbles?.zones?.bc) tuck.observe(chart.bubbles.zones.bc);
+  else { const once = setInterval(() => { if (chart.bubbles?.zones?.bc) { tuck.observe(chart.bubbles.zones.bc); clearInterval(once); } }, 200); offs.push(() => clearInterval(once)); }
+  offs.push(() => tuck.disconnect());
+
   // the chart's plot starts under the fixed top bubbles
   const measureTop = () => chart.setTop(Math.max(tl.getBoundingClientRect().bottom, tr.getBoundingClientRect().bottom));
   const ro = new ResizeObserver(measureTop);

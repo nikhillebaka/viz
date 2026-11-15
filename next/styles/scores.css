@@ -126,11 +126,11 @@
 }
 .sc-row.is-add { height: var(--size-row); }
 
-/* the column titles: a footer that rides the bottom of the screen, then rests under the last row */
+/* the column titles: above the rows, held just under the top bubbles while a long table scrolls */
 .sc-headrow {
-  position: sticky; bottom: 0; z-index: var(--z-chrome);
-  height: var(--size-row); margin-top: var(--space-4);
-  border-top: var(--stroke-hairline) solid var(--line-hairline); border-radius: 0;
+  position: sticky; top: calc(var(--inset) + var(--size-control) + var(--space-8)); z-index: var(--z-chrome);
+  height: var(--size-row); margin-bottom: var(--space-4);
+  border-bottom: var(--stroke-hairline) solid var(--line-hairline); border-radius: 0;
   background: var(--surface-paper);
 }
 .sc-head {
@@ -218,6 +218,7 @@
 .sc-figs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-40); margin-top: var(--space-56); }
 .sc-fig { min-width: 0; }
 .sc-fig-title { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-12); font-size: var(--text-control); font-weight: var(--weight-medium); color: var(--ink-secondary); }
+.sc-fig-sub { margin-left: var(--space-6); font-weight: var(--weight-regular); color: var(--ink-tertiary); }
 .sc-fig-toggle { padding: 0 var(--space-2); border: 0; background: none; cursor: pointer; font: inherit; color: var(--ink-tertiary); }
 .sc-fig-toggle:hover { color: var(--ink-primary); }
 .sc-fig-svg { width: 100%; height: var(--sc-fig-h); overflow: visible; }
@@ -230,6 +231,10 @@
 .sc-line { stroke: var(--ink-faint); stroke-width: var(--stroke-observed); transition: stroke var(--dur-fast) var(--ease-out); }
 .sc-series.is-base .sc-line { stroke: var(--ink-tertiary); stroke-dasharray: 3 3; }
 .sc-series.is-emph .sc-line, .sc-line-solid { stroke: var(--ink-primary); stroke-width: var(--stroke-series); }
+/* a model on the fan chart keeps its chart colour here (colour means "on the chart", everywhere) */
+.sc-series.is-charted .sc-line { stroke: var(--c); }
+.sc-series.is-charted.is-emph .sc-line { stroke: var(--c); stroke-width: var(--stroke-series); }
+.sc-series.is-charted .sc-pt { fill: var(--c); }
 .sc-line-base { stroke: var(--series-baseline); stroke-width: var(--stroke-observed); stroke-dasharray: 3 3; }
 .sc-hit { stroke: transparent; stroke-width: var(--space-12); pointer-events: stroke; cursor: pointer; }
 .sc-pt, .sc-pt-solid { fill: var(--ink-primary); }

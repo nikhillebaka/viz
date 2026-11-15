@@ -8,6 +8,8 @@ import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { LEVELS, fmtScore, fmtRel, relLevel, horizonsLabel } from "./model.js";
 import { loadDetails, loadPlaces } from "./data.js";
 import { s } from "./figures.js";
+import { seriesColor } from "../../chart/layout.js";
+import { slotOf } from "../../features/selection.js";
 
 const MON = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 const fmtIso = (iso) => MON.format(Date.parse(`${iso}T00:00:00Z`));
@@ -40,7 +42,9 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
 
   // coverage: empirical vs nominal at every level, the baseline in grey
   const cov = s("svg", { class: "sc-cov", role: "img", "aria-label": "Coverage by interval level" });
-  requestAnimationFrame(() => drawCoverage(cov, row, base));
+  // a model on the fan chart draws in its chart colour here too
+  const slot = slotOf(ctx.store.get().sel, row.id);
+  requestAnimationFrame(() => drawCoverage(cov, row, base, slot == null ? null : seriesColor(slot)));
 
   const tiles = h("div", { class: "sc-tiles", style: { "--cols": String(COLUMNS) } });
   const subs = h("div", { class: "sc-subs" });
@@ -95,7 +99,7 @@ function tilesTitle(scope, manifest) {
   ].filter(Boolean).join(" · ");
 }
 
-function drawCoverage(svg, row, base) {
+function drawCoverage(svg, row, base, color) {
   const w = svg.clientWidth || 220, hh = svg.clientHeight || 150;
   svg.setAttribute("viewBox", `0 0 ${w} ${hh}`);
   const pad = { l: 28, r: 8, t: 6, b: 18 };
@@ -111,8 +115,9 @@ function drawCoverage(svg, row, base) {
   const line = (r, cls) => {
     const pts = LEVELS.map((l, i) => [l * 100, r?.cal[i]]).filter(([, v]) => v != null);
     if (!pts.length) return;
-    svg.append(s("path", { d: pts.map(([x, y], i) => `${i ? "L" : "M"}${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(""), class: cls }));
-    if (cls.includes("is-emph")) for (const [x, y] of pts) svg.append(s("circle", { cx: X(x), cy: Y(y), r: 2, class: "sc-pt-solid" }));
+    const style = cls.includes("is-emph") && color ? `stroke:${color}` : null;
+    svg.append(s("path", { d: pts.map(([x, y], i) => `${i ? "L" : "M"}${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(""), class: cls, style }));
+    if (cls.includes("is-emph")) for (const [x, y] of pts) svg.append(s("circle", { cx: X(x), cy: Y(y), r: 2, class: "sc-pt-solid", style: color ? `fill:${color}` : null }));
   };
   if (base && base.id !== row.id) line(base, "sc-line-base");
   line(row, "sc-line-solid is-emph");
