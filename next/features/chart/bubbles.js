@@ -101,9 +101,6 @@ export class ChartBubbles {
   /** After every frame: the recenter pill, when the forecast is panned off-screen; the crossing hint. */
   frame(scene) {
     this.#crossHint();
-    // the attic above the page continues the forecast shade from the same x (a transform: compositor only)
-    const ax = scene.shade == null ? scene.w : Math.round(scene.shade);
-    if (this.chart.attic && ax !== this.atticX) { this.atticX = ax; this.chart.attic.style.transform = `translateX(${ax}px)`; }
     const xr = scene.x(scene.ref);
     const side = xr < 0 ? "left" : xr > scene.w ? "right" : null;
     if (side) {
