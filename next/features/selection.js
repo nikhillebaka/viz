@@ -1,5 +1,4 @@
 /* Model selection: which models are selected (evaluated) and which five are charted in color.
- * Rules: design/studies/models-goals.md ("Which five are charted").
  *
  * A selection is a frozen plain value; every function returns a new one (or the same one when nothing
  * changes, so a store can skip a no-op):

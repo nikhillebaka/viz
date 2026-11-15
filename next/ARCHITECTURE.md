@@ -1,8 +1,7 @@
 # next/: architecture
 
-The new frontend of viz. Served by the same server at `/next/`, beside old viz (`/`), until parity
-(`PARITY.md`). The brief is `design/HANDOFF.md`; design decisions are in `next/design/` and
-`DECISIONS.md`. This file is the contract between modules: change it first, then the code.
+The new frontend of viz, served at `/next/` beside classic viz (`/`); each links to the other. Design
+decisions are in `DECISIONS.md`. This file is the contract between modules: change it first, then the code.
 
 ## Ground rules
 
@@ -51,10 +50,8 @@ next/
     Shell.js            fixed bubbles, zones, theme, loading and error states
     DatePicker.js  ModelPicker.js  LocationPicker.js  TargetMenu.js
     url.js              state ⇄ URL
-  dev/                  serve.py (run from a worktree) · kit.html (every control, every state)
+  dev/                  serve.py (run from a worktree)
   tests/                unit/*.test.mjs (node --test) · e2e (headless browser), see Tests
-  parity/               the old-viz inventory, by area
-  design/               goals and decisions per area
 ```
 
 ## Data (server: `core/next_api.py`, routes in `server.py`)
@@ -195,13 +192,12 @@ series, bands, context, rulers.
 ```
 
 ### chart/timenav.js
-`TimeNav` as in `design/lib/time.js` (every behaviour in `design/studies/time-navigation.md`), with a
-scale object from `lib/scale.js` instead of d3.
+`TimeNav`, with a scale object from `lib/scale.js` instead of d3.
 
 ### features/selection.js
 Pure functions over `{ selected: [id], charted: [{ id, slot, seq }], showAll, baseline, taken: [id] }`:
 `select, deselect, toggle, setMany, chart, unchart, toggleChart, setShowAll, setBaseline, context(sel)`,
-each returning a new value. Rules: `design/studies/models-goals.md` ("Which five are charted").
+each returning a new value.
 
 ### features/ (the app)
 

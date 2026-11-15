@@ -3,7 +3,7 @@
  *   seasons  Past seasons: earlier seasons' observed data, aligned by week of season, end-labelled
  *   peaks    each charted model's peak forecast for the round (▲ at median week × size, 50% whiskers) and
  *            the observed peak (◇)
- *   nssp · ili · flusurv  surveillance signals, in their own units (design/fan-chart.md, "Layers"): one on,
+ *   nssp · ili · flusurv  surveillance signals, in their own units: one on,
  *            it gets a right-hand axis whose round ticks sit on the left axis's gridlines, its end label
  *            naming the unit; two or more, each is scaled so its season peak meets the observed peak and
  *            labelled "· scaled". Raw values in the readout either way

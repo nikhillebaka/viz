@@ -1,4 +1,4 @@
-/* The Dates popover: the evaluation window (design/studies/evaluation-goals.md, "The Dates popover").
+/* The Dates popover: the evaluation window.
  * Seasons (multi, following the chart by default), phase, and a week range drawn on the seasons' observed
  * curves. Changes apply live; the range applies on release. Reset returns to following the chart. */
 import { h, on } from "../../lib/dom.js";

@@ -1,5 +1,4 @@
-/* An expanded leaderboard row: one model's detail (design/studies/evaluation-goals.md, "Expanding a
- * row"). Anatomy by horizon, coverage curve against the baseline's, a state tile grid in the score
+/* An expanded leaderboard row: one model's detail. Anatomy by horizon, coverage curve against the baseline's, a state tile grid in the score
  * colors, one tick per round, and facts from /api/model-details. Paper, not a panel. */
 import { h } from "../../lib/dom.js";
 import { linear } from "../../lib/scale.js";

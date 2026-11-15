@@ -1,6 +1,4 @@
 /* The model picker: which models are selected (evaluated) and which five are charted.
- * Decisions: design/studies/models-goals.md (two click targets per row, sections, search, bulk select,
- * keyboard, "The picker as a left-half panel"); seasons-locations-goals.md §4 (Not in <season>).
  *
  * A panel that morphs out of the Models bubble and takes the left of the screen at full height: two
  * columns and half the viewport when more than ONE_COLUMN_MAX rows show, else one column and a quarter.

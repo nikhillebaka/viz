@@ -1,5 +1,5 @@
 /* Paints a fan chart scene (chart/layout.js) on a canvas. Same marks, order, widths and alphas as the
- * prototype's fanCanvas (design/lib/chart.js). Colors and strokes are the design tokens, resolved
+ * original prototype. Colors and strokes are the design tokens, resolved
  * through lib/dom.js (cached per theme). One difference by nature from layered SVG: a dimmed median's
  * line and dots each get the alpha, rather than the group as one layer. */
 import { cssColor, token, tokenNum } from "../lib/dom.js";

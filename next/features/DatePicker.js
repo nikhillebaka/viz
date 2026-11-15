@@ -1,4 +1,4 @@
-/* The date picker (design/studies/seasons-locations-goals.md, "The date picker"): opened by the date
+/* The date picker: opened by the date
  * stepper's label. Season chips (newest first, the chart's season on), then that season's forecast rounds
  * as a calendar, one row per month; "Latest" goes to the newest round there is. Nothing else per date.
  * Keys: ← → ↑ ↓ move through the days (↑ ↓ by row, keeping the column where possible), a letter jumps to

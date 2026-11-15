@@ -1,6 +1,5 @@
 /* Regression check for the fan chart's time navigation in next/ (chart/timenav.js + features/FanChart.js).
- * Every behaviour agreed in design/studies/time-navigation.md has a case here (ported from
- * design/tests/time-nav-check.js), plus what next/ added: crossing seasons by a pull, folding models and
+ * Every agreed behaviour has a case here, plus crossing seasons by a pull, folding models and
  * proximity hover. Run it from the page's console on /next/ in a desktop-sized window:
  *     (await import("/next/tests/time-nav-check.js")).run()
  * or headless with `node next/tests/e2e/run.mjs --base http://127.0.0.1:8610 time`.

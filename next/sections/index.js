@@ -1,4 +1,4 @@
-/* The page below the chart: each section is mounted when it nears the viewport (PLAN.md, "Contracts"). */
+/* The page below the chart: each section is mounted when it nears the viewport. */
 import { h } from "../lib/dom.js";
 
 const SECTIONS = [

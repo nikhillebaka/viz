@@ -1,6 +1,5 @@
 /* The location picker: search, recent places, the United States, and a US tile map.
- * Decisions: design/studies/seasons-locations-goals.md §6. Any of 53 places is two keystrokes ("ma"
- * Enter) or one click away. Arrow keys move across the map by its geometry (this layer keeps its
+ * Any of 53 places is two keystrokes ("ma" Enter) or one click away. Arrow keys move across the map by its geometry (this layer keeps its
  * arrows: no time keys). Hovering or focusing a place prefetches its fan.
  *
  * TILES, matchLocations() and tileNeighbor() are pure, for node tests. */

@@ -2,7 +2,7 @@
  * and the grid drawn from a response (cells in display orientation, sorted, normalized, toned).
  * No DOM; node tests run it.
  *
- * Fixed from old viz (PARITY.md, "Old bugs not carried over"): cell details are found whichever way the
+ * Fixed from old viz: cell details are found whichever way the
  * axes are swapped; sorting, per-row scaling and region gaps act on the displayed rows and columns;
  * "score" sorts by how good the metric is (coverage: nearest 95%), not by its raw value. */
 

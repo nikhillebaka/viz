@@ -1,5 +1,4 @@
-/* Pointer and keyboard interaction with what is drawn on the chart (design/studies/models-goals.md, "One
- * interaction model for every line on the chart"):
+/* Pointer and keyboard interaction with what is drawn on the chart:
  *  - the hovered week: the timeline week nearest the pointer, but only while the pointer is near
  *    something drawn there (the observed line, a band, a median, a grey line, a layer line, a label):
  *    empty paper shows nothing;

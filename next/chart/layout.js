@@ -2,7 +2,7 @@
  * measured by the injected opts.measure. chart/render.js paints the scene; interaction (hover, clicks,
  * the readout) reads it through lineUnder(), labelAt() and hoverInfo().
  *
- * Chart rules (design/studies/intervals-goals.md, next/design/fan-chart.md):
+ * Chart rules:
  *  - straight segments between points, no smoothing; a fixed y-axis that never rescales to fit bands.
  *  - no ceiling or walls: grid, bands and observed data run under the chrome to the edges of the view.
  *    Only the x-axis clips.

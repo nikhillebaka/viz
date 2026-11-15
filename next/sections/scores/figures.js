@@ -1,4 +1,4 @@
-/* The figures under the leaderboard (design/studies/evaluation-goals.md, "Figures"): Calibration,
+/* The figures under the leaderboard: Calibration,
  * Horizon and Anatomy, and the small per-model plots of the expanded row. SVG on the paper; every color
  * and size comes from classes in styles/scores.css (tokens), so a theme change needs no redraw.
  * Lines are ink; a model on the fan chart keeps its chart colour. Emphasized models (hovered, focused, expanded) are full ink and named at the line end;

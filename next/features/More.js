@@ -126,6 +126,8 @@ export function mountMore(zone, ctx) {
       "-",
       { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
       { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
+      "-",
+      { label: "Classic viz", onSelect: () => location.assign("/") },
     ].filter(Boolean);
     openMenu(btn, { items, placement: "bottom-end", label: "More" });
     refreshWarnings();

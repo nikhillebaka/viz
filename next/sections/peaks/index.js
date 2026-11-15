@@ -1,7 +1,7 @@
 /* The peaks section: when the season peaks and how high, as forecast on the chart's round at the
  * chart's location. One row per model — the peak-week distribution and the peak-size interval side by
  * side, the observed peak a line through both — under a season strip that shares the week axis and
- * shows the hovered row's box. Below: season skill and the peak map. Design: design/peaks.md.
+ * shows the hovered row's box. Below: season skill and the peak map.
  * Only for targets with peak forecasts; otherwise one quiet line. */
 import { onThemeChange, cssColor, tokenNum } from "../../lib/dom.js";
 import { scopeOf, setScope } from "../scope.js";

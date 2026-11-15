@@ -1,6 +1,5 @@
 /* Time navigation for charts over weekly forecast dates: which date is shown, and how much time is on
- * screen. Every behaviour is agreed in design/studies/time-navigation.md; this is design/lib/time.js
- * with UTC ms instead of Dates, a lib/scale.js scale instead of d3, and no key handling of its own (the
+ * screen. UTC ms, a lib/scale.js scale, and no key handling of its own (the
  * app binds ← → = - 0 to step(), zoomIn(), zoomOut(), reset()).
  *
  * Two continuous quantities, both animated on critically damped springs:

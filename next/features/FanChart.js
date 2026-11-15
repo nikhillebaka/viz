@@ -1,4 +1,4 @@
-/* The fan chart view (design/fan-chart.md): the canvas, time navigation, the per-frame draw, data for one
+/* The fan chart view: the canvas, time navigation, the per-frame draw, data for one
  * (target, season, place) at a time and the transitions between them. Hover, focus and the hidden label
  * buttons are in chart/interact.js, the readout in chart/readout.js, the chart's bubbles in chart/bubbles.js,
  * the optional context layers (and their pill) in chart/layers.js.

@@ -1,4 +1,4 @@
-/* The chart's own bubbles (design/fan-chart.md): they belong to the chart view and scroll away with it,
+/* The chart's own bubbles: they belong to the chart view and scroll away with it,
  * so they are glass in canvas mode (the WebGL pass refracts the chart under them).
  *  - bottom left: the interval pill, "95% interval ▾" / "95 · 50% intervals" / "No interval", and its
  *    menu (any combination of levels);

@@ -1,5 +1,4 @@
-// The rules of design/studies/models-goals.md ("Which five are charted"); the first 14 cases are
-// design/tests/selection-check.mjs, ported.
+// The rules for which five selected models are charted.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as S from "../../features/selection.js";

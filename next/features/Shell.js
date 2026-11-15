@@ -1,4 +1,4 @@
-/* The page (design/fan-chart.md, "What is on screen"): the full-viewport chart view, the fixed bubbles
+/* The page: the full-viewport chart view, the fixed bubbles
  * over it (Models, Location, Target top left; theme top right), the global keys, the theme, and the
  * loading and error states.
  *

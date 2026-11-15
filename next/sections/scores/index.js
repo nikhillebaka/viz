@@ -1,5 +1,5 @@
 /* Scores: the scope line, the leaderboard (with expandable rows) and the figures, on the paper under the
- * fan chart (design/studies/evaluation-goals.md; next/PLAN.md, "Contracts").
+ * fan chart.
  *
  * Reads the store (scope, sel, date, location, target, focus) and owns `scores` ({ sort, rev, cols, open }).
  * Scores come from /api/next/metrics; by default relative WIS is ranked among every model in scope and the

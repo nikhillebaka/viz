@@ -1,4 +1,4 @@
-/* The hover readout: exact numbers for the hovered week (design/fan-chart.md, "Hover and the readout").
+/* The hover readout: exact numbers for the hovered week.
  * A solid kit panel (.c-readout), never glass. Built from hoverInfo() (chart/layout.js); its DOM is
  * rebuilt only when what it says changes, and moved only when its place changes. */
 import { h, tokenNum } from "../../lib/dom.js";
