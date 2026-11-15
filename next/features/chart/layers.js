@@ -390,12 +390,12 @@ export class Layers {
         mono.setAttribute("aria-checked", String(!on)); multi.setAttribute("aria-checked", String(on));
       };
       const sw = (cls, label, on) => {
-        const el = h("span", { class: `fc-swatch ${cls}`, role: "radio", "aria-label": label, "aria-checked": String(cur.has("tints") === on), title: label });
+        const el = h("span", { class: `fc-tint ${cls}`, role: "radio", "aria-label": label, "aria-checked": String(cur.has("tints") === on), title: label });
         el.addEventListener("click", (e) => { e.stopPropagation(); setTint(on); });
         return el;
       };
       const mono = sw("is-mono", "Grey", false), multi = sw("is-tints", "Tinted by season", true);
-      ps.trailing = h("span", { class: "fc-swatches", role: "radiogroup", "aria-label": "Past season colours" }, mono, multi);
+      ps.trailing = h("span", { class: "fc-tints", role: "radiogroup", "aria-label": "Past season colours" }, mono, multi);
       ps.onArrow = (d) => { if (store.get().layers?.includes("seasons")) setTint(d > 0); };
     }
     const sig = SIGNALS.filter((l) => this.#has(l.id)).map(item);

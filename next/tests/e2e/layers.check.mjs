@@ -49,11 +49,11 @@ export default async function layers(page, t) {
     const items = await page.eval(() => [...document.querySelectorAll(".c-menu [role=menuitemcheckbox]")].map((b) => [b.textContent.trim(), b.getAttribute("aria-checked")]));
     t.eq(items.length, 6, `items ${JSON.stringify(items)}`);
     t.ok(items.every(([, c]) => c === "true"), "all checked");
-    const sw = await page.eval(() => [...document.querySelectorAll(".c-menu .fc-swatch")].map((e) => e.getAttribute("aria-checked")));
+    const sw = await page.eval(() => [...document.querySelectorAll(".c-menu .fc-tint")].map((e) => e.getAttribute("aria-checked")));
     t.eq(sw, ["true", "false"], "past-season swatches: grey chosen");
-    await page.eval(() => document.querySelector(".c-menu .fc-swatch.is-tints").click());
+    await page.eval(() => document.querySelector(".c-menu .fc-tint.is-tints").click());
     t.ok(await page.eval(() => !!document.querySelector(".c-menu") && window.__viz.store.get().layers.includes("tints")), "tints on, menu still open");
-    await page.eval(() => document.querySelector(".c-menu .fc-swatch.is-mono").click());
+    await page.eval(() => document.querySelector(".c-menu .fc-tint.is-mono").click());
     await page.key.press("Escape");
   });
 

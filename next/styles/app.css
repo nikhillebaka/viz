@@ -120,13 +120,13 @@
 .fc-cross-arrow svg { width: 100%; height: 100%; }
 
 /* Layers › Past seasons: grey or tinted, two swatches at the end of the row while the layer is on */
-.fc-swatches { display: inline-flex; gap: var(--space-6); margin-left: auto; padding-left: var(--space-12); }
-.c-menu-item[aria-checked="false"] .fc-swatches { display: none; }
-.fc-swatch {
+.fc-tints { display: inline-flex; gap: var(--space-6); margin-left: auto; padding-left: var(--space-12); }
+.c-menu-item[aria-checked="false"] .fc-tints { display: none; }
+.fc-tint {
   width: 12px; height: 12px; border-radius: 50%; cursor: pointer; flex: none;
   transition: box-shadow var(--dur-fast) var(--ease-out);
 }
-.fc-swatch.is-mono { background: var(--ink-tertiary); }
-.fc-swatch.is-tints { background: conic-gradient(var(--season-1) 0 25%, var(--season-2) 0 50%, var(--season-3) 0 75%, var(--season-4) 0); }
-.fc-swatch[aria-checked="true"] { box-shadow: 0 0 0 1.5px var(--surface-raised), 0 0 0 3px var(--accent); }
-.fc-swatch:hover:not([aria-checked="true"]) { box-shadow: 0 0 0 1.5px var(--surface-raised), 0 0 0 3px var(--fill-selected); }
+.fc-tint.is-mono { background: var(--ink-tertiary); }
+.fc-tint.is-tints { background: conic-gradient(var(--season-1) 0 25%, var(--season-2) 0 50%, var(--season-3) 0 75%, var(--season-4) 0); }
+.fc-tint[aria-checked="true"] { box-shadow: 0 0 0 1.5px var(--surface-raised), 0 0 0 3px var(--accent); }
+.fc-tint:hover:not([aria-checked="true"]) { box-shadow: 0 0 0 1.5px var(--surface-raised), 0 0 0 3px var(--fill-selected); }
