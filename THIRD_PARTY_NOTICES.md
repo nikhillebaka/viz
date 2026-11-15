@@ -1,12 +1,14 @@
 # Third-party notices
 
-viz is MIT-licensed (see [LICENSE](LICENSE)). It bundles the following unmodified
-third-party files, which remain under their own licenses:
+viz is MIT-licensed (see [LICENSE](LICENSE)). It bundles the following third-party
+files, which remain under their own licenses:
 
 | File | Project | License | License text |
 | :--- | :--- | :--- | :--- |
 | `static/vendor/plotly-2.35.2.min.js` | [plotly.js](https://github.com/plotly/plotly.js) v2.35.2, © Plotly, Inc. | MIT | [licenses/plotly-MIT.txt](licenses/plotly-MIT.txt) |
 | `static/vendor/xlsx.full.min.js` | [SheetJS Community Edition](https://git.sheetjs.com/sheetjs/sheetjs) v0.18.5, © SheetJS LLC | Apache-2.0 | [licenses/sheetjs-Apache-2.0.txt](licenses/sheetjs-Apache-2.0.txt) |
+| `next/fonts/inter-latin.woff2` | [Inter](https://github.com/rsms/inter) (Latin subset, as served by Google Fonts), © The Inter Project Authors | SIL OFL 1.1 | [next/fonts/OFL-Inter.txt](next/fonts/OFL-Inter.txt) |
+| `next/fonts/geist-mono-latin.woff2` | [Geist Mono](https://github.com/vercel/geist-font) (Latin subset, as served by Google Fonts), © The Geist Project Authors | SIL OFL 1.1 | [next/fonts/OFL-GeistMono.txt](next/fonts/OFL-GeistMono.txt) |
 
 ## Data
 

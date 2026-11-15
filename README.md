@@ -138,4 +138,4 @@ The dashboard's **Guide & Methods** button has the full metric definitions too.
 
 ## License
 
-[MIT](LICENSE) © 2026 Nikhil Lebaka. Bundled Plotly (MIT) and SheetJS (Apache-2.0) keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[MIT](LICENSE) © 2026 Nikhil Lebaka. Bundled Plotly (MIT), SheetJS (Apache-2.0) and the Inter and Geist Mono fonts (SIL OFL 1.1) keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
