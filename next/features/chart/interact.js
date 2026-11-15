@@ -1,6 +1,8 @@
 /* Pointer and keyboard interaction with what is drawn on the chart (design/studies/models-goals.md, "One
  * interaction model for every line on the chart"):
- *  - the hovered week: the timeline week nearest the pointer, anywhere in the view;
+ *  - the hovered week: the timeline week nearest the pointer, but only while the pointer is near
+ *    something drawn there (the observed line, a band, a median, a grey line, a layer line, a label):
+ *    empty paper shows nothing;
  *  - hovering a charted model's label or median line previews focus; a grey (context) line is lifted and
  *    named; clicking focuses (a grey model is charted first); a press that moved more than 4 px is never a
  *    click; the cursor is a pointer only over a target;
@@ -13,6 +15,31 @@ import { labelAt, lineUnder } from "../../chart/layout.js";
 import { activeLayer } from "../../ui/floating.js";
 
 const CLICK_SLOP = 4;
+const NEAR = 22; // px: how close (vertically, at the pointer's x) the pointer must be to a mark to read it
+
+/* y of a flat [x0, y0, x1, y1, …] path (x ascending) at px, or NaN outside it; n = points (for buffers) */
+function yAt(p, px, n = p.length / 2) {
+  if (n < 2 || px < p[0] || px > p[2 * n - 2]) return NaN;
+  for (let i = 1; i < n; i++) {
+    const x1 = p[2 * i];
+    if (x1 >= px) { const x0 = p[2 * i - 2], u = x1 === x0 ? 0 : (px - x0) / (x1 - x0); return p[2 * i - 1] + (p[2 * i + 1] - p[2 * i - 1]) * u; }
+  }
+  return NaN;
+}
+const close = (y, py) => Math.abs(y - py) <= NEAR; // NaN is never close
+
+/* Is the pointer near anything drawn at its x? Bands count from edge to edge (plus the margin). */
+export function nearMark(s, px, py) {
+  for (const p of s.observed.all) if (close(yAt(p, px), py)) return true;
+  for (const b of s.bands) {
+    const hi = yAt(b.hi, px), lo = yAt(b.lo, px);
+    if (py >= hi - NEAR && py <= lo + NEAR) return true;
+  }
+  for (const m of s.medians) if (close(yAt(m.line, px), py)) return true;
+  for (const c of s.context) if (close(yAt(c.line, px), py)) return true;
+  if (s.layers) for (const l of s.layers.lines) if ((l.clipX == null || px <= l.clipX) && close(yAt(l.xy, px, l.n), py)) return true;
+  return false;
+}
 
 export class Interaction {
   /** @param {import("../FanChart.js").FanChart} chart */
@@ -78,9 +105,9 @@ export class Interaction {
     if (this.mouse && s && nav && !nav.moving && !activeLayer()) {
       const [px, py] = this.local(this.mouse.x, this.mouse.y);
       const t0 = chart.fan.dates[0], wk = t0 + Math.round((s.x.invert(px) - t0) / WEEK) * WEEK, xw = s.x(wk);
-      if (xw >= 0 && xw <= s.w) t = wk;
       const hit = this.#hit(px, py);
       if (hit) { cursor = "pointer"; if (hit.ctx) hot = hit.id; else preview = hit.id; }
+      if (xw >= 0 && xw <= s.w && py <= s.ay && (hit || nearMark(s, px, py))) t = wk;
     }
     if (cursor !== this.cursor) { this.cursor = cursor; chart.canvas.style.cursor = cursor; }
     if (t !== this.hoverT || preview !== this.preview || hot !== this.hot) {

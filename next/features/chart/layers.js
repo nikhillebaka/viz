@@ -35,7 +35,7 @@ const SIGNALS = LAYERS.filter((l) => l.key);
 const GAP = 1.5 * WEEK;          // points further apart are not joined
 const PAST = 4;                  // past seasons drawn, newest first
 const SEASON_ALPHA = [0.6, 0.45, 0.34, 0.26];
-const LABEL_GAP = 12;
+const LABEL_GAP = 13;
 const ASOF_DASH = [4, 3];
 const AXIS_CHAR = 6.3;           // ≈ px per character of the mono axis font (the right ticks' room)
 
@@ -380,33 +380,32 @@ export class Layers {
     if (this.sig) for (const L of SIGNALS) if (onL.has(L.id)) add(this.sig.lines.get(L.id), after, width);
     if (onL.has("asof")) add(this.#asofAt(this.chart.nav?.T ?? 0), xc, width);
 
-    // end labels: where the line leaves the plot (left of the model labels), kept apart. With forecasts
-    // drawn, no further than the data cutoff: the labels are right-aligned, so past it they would sit on
-    // the bands and medians
+    // Names, pinned to the left edge of the plot beside their lines (where the line crosses the edge,
+    // or where it starts if it starts later), so they stay put while time moves. Stacked apart; a name
+    // that can't sit beside its line inside the plot is left out (the readout still names it).
     const fs = this.chart.opts.fonts;
     M.font = `500 ${fs?.micro ?? 11}px ${fs?.sans ?? "sans-serif"}`;
-    let limit = scene.labels.length ? scene.labels[0].x - 14 : scene.w - 16;
-    if (scene.series.length) limit = Math.min(limit, xc - 6);
+    const edge = scene.pad.l + 6, right = scene.labels.length ? scene.labels[0].x - 120 : scene.w - 120;
+    const top = scene.topClear + 14, bottom = scene.ay - 6;
     for (const l of M.lines) {
-      if (!l.lab) continue;
-      const lim = Math.min(limit, l.clipX ?? Infinity), xy = l.xy;
-      let i = -1;
-      for (let j = 0; j < l.n; j++) if (xy[2 * j] <= lim) i = j;
-      if (i < 0) continue;
-      let lx = xy[2 * i], ly = xy[2 * i + 1];
-      if (i + 1 < l.n && !l.brk[i + 1]) {
-        const x1 = xy[2 * i + 2], u = (lim - lx) / (x1 - lx);
-        lx = lim; ly += (xy[2 * i + 3] - ly) * u;
-      }
-      if (lx < scene.pad.l + 48 || ly < scene.topClear + 12 || ly > scene.ay - 4) continue;
-      l.lab.x = lx; l.lab.y = ly - 5; l.lab.alpha = Math.min(1, l.alpha + 0.3);
+      if (!l.lab || l.n < 2) continue;
+      const xy = l.xy, n = l.n, lim = Math.min(right, l.clipX ?? Infinity);
+      let lx = NaN, ly = NaN;
+      if (xy[0] <= edge && xy[2 * n - 2] >= edge) {
+        for (let i = 1; i < n; i++) if (xy[2 * i] >= edge) { const x0 = xy[2 * i - 2], u = (edge - x0) / ((xy[2 * i] - x0) || 1); lx = edge; ly = xy[2 * i - 1] + (xy[2 * i + 1] - xy[2 * i - 1]) * u; break; }
+      } else if (xy[0] > edge && xy[0] < lim) { lx = xy[0] + 4; ly = xy[1]; }
+      if (!(lx <= lim) || !(ly >= top) || !(ly <= bottom + 6)) continue;
+      l.lab.x = lx; l.lab.y = Math.min(bottom, ly - 5); l.lab.alpha = Math.min(0.85, l.alpha + 0.2);
       M.labels.push(l.lab);
     }
+    // keep names apart: sorted by height, each at least LABEL_GAP below the one above it when they are
+    // side by side; any pushed past the bottom are dropped rather than overlapped
     M.labels.sort((a, b) => a.y - b.y);
     for (let i = 1; i < M.labels.length; i++) {
-      const a = M.labels[i - 1], b = M.labels[i];
-      if (b.y - a.y < LABEL_GAP && Math.abs(b.x - a.x) < 120) b.y = a.y + LABEL_GAP;
+      const b = M.labels[i];
+      for (let j = i - 1; j >= 0; j--) { const a = M.labels[j]; if (Math.abs(b.x - a.x) < 140 && b.y - a.y < LABEL_GAP) b.y = a.y + LABEL_GAP; }
     }
+    for (let i = M.labels.length - 1; i >= 0; i--) if (M.labels[i].y > bottom) M.labels.splice(i, 1);
 
     if (onL.has("peaks") && this.peaks) this.#peakMarks(scene, xc);
     if (this.right && M.lines.includes(this.right)) this.#rightAxis(scene);
@@ -442,10 +441,7 @@ export class Layers {
       for (const m of scene.medians) {
         const p = P.byModel.get(m.id)?.get(round);
         if (!p) continue;
-        M.marks.push({
-          kind: "peak", x: x(p.t), y: y(p.v), c: m.c, alpha: m.alpha,
-          x0: x(p.tl), x1: x(p.th), y0: Number.isFinite(p.vl) ? y(p.vl) : NaN, y1: Number.isFinite(p.vh) ? y(p.vh) : NaN,
-        });
+        M.marks.push({ kind: "peak", x: x(p.t), y: y(p.v), c: m.c, alpha: m.alpha });
       }
     }
     const o = P.observed;

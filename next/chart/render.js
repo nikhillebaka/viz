@@ -174,7 +174,7 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
 
 /* ---------------- context layers (features/chart/layers.js) ----------------
  * scene.layers = { lines: [{ n, xy, brk, c, w, alpha, dash?, clipX }], marks: [{ kind: "peak" | "observed",
- * x, y, c, alpha, x0?, x1?, y0?, y1? }], labels: [{ x, y, text, c, alpha }], font, axis: { x, ticks: [{ y,
+ * x, y, c, alpha }], labels: [{ x, y, text, c, alpha }], font, axis: { x, ticks: [{ y,
  * text }] } | null (one signal's right-hand axis, drawn with the left tick labels) }. Lines go under
  * everything else in the plot; marks and labels over the medians, under the model labels. */
 function layerLines(ctx, L) {
@@ -190,16 +190,11 @@ function layerLines(ctx, L) {
 }
 
 function layerMarks(ctx, L, surface) {
-  const edge = tokenNum("--stroke-edge", 0.75);
   for (const m of L.marks) {
     const c = cssColor(m.c);
     ctx.globalAlpha = m.alpha;
     if (m.kind === "peak") {
-      // 50% whiskers, then a small triangle with a paper halo
-      ctx.strokeStyle = c; ctx.lineWidth = edge; ctx.globalAlpha = m.alpha * 0.6; ctx.beginPath();
-      if (Number.isFinite(m.x0) && Number.isFinite(m.x1)) { ctx.moveTo(m.x0, m.y); ctx.lineTo(m.x1, m.y); }
-      if (Number.isFinite(m.y0) && Number.isFinite(m.y1)) { ctx.moveTo(m.x, m.y0); ctx.lineTo(m.x, m.y1); }
-      ctx.stroke(); ctx.globalAlpha = m.alpha;
+      // a small triangle with a paper halo (the median peak week × size; the ranges are in Peaks below)
       ctx.beginPath(); ctx.moveTo(m.x, m.y - 4.5); ctx.lineTo(m.x + 4, m.y + 2.5); ctx.lineTo(m.x - 4, m.y + 2.5); ctx.closePath();
       ctx.fillStyle = c; ctx.fill(); ctx.strokeStyle = surface; ctx.lineWidth = 1.25; ctx.stroke();
     } else {
@@ -209,11 +204,11 @@ function layerMarks(ctx, L, surface) {
   }
   ctx.globalAlpha = 1;
   if (!L.labels.length) return;
-  ctx.font = L.font; ctx.textAlign = "right"; ctx.textBaseline = "alphabetic"; ctx.lineJoin = "round";
+  ctx.font = L.font; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic"; ctx.lineJoin = "round";
   for (const d of L.labels) {
     ctx.globalAlpha = d.alpha;
     ctx.strokeStyle = surface; ctx.lineWidth = 4; ctx.strokeText(d.text, d.x, d.y);
     ctx.fillStyle = cssColor(d.c); ctx.fillText(d.text, d.x, d.y);
   }
-  ctx.globalAlpha = 1; ctx.textAlign = "left";
+  ctx.globalAlpha = 1;
 }

@@ -92,6 +92,10 @@ selection as grey medians. Hover a label or a line to preview focus, click to fo
 charted first), click again or Escape to clear.
 
 ### Hover and the readout
+- The readout and hairline show only while the pointer is near something drawn at its x (within 22 px of
+  the observed line, a median, a grey line or a layer line, or inside a band plus that margin, or on a
+  label). Empty paper shows nothing. Re-checked after every frame, so a still pointer picks it up once
+  the chart settles after a scroll.
 - The pointer's week gets a hairline. The readout is a solid panel (never glass) left of the reference
   date, under the top bubbles; if there is no room there, right of the hovered week.
 - In the forecast window: `Jan 3 · 1 wk ahead · 95 · 50%`, then a row per charted model (dot, name,
