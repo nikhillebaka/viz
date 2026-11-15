@@ -202,7 +202,10 @@ export function openPopover(anchor, { content, title = "", placement = "bottom-s
  * Open a menu (or close it, if it is already open from this anchor).
  * Items: { label, value?, checked?, toggle?, icon?, shortcut?, disabled?, danger?, onSelect(value) },
  * "-" for a separator, { header } for a group label. When any item has `checked`, items are
- * menuitemradio (a check marks the current one); `toggle: true` makes an item a menuitemcheckbox.
+ * menuitemradio (a check marks the current one); `toggle: true` makes an item a menuitemcheckbox, and a
+ * menu with more than one thing to pick stays open when one is toggled (it closes on a plain item, a
+ * radio, Escape, Tab or a click outside). `trailing`: a node at the end of the row (e.g. swatches; it
+ * handles its own clicks); `onArrow(d)`: ← → on that row (d = -1 / 1), for those trailing controls.
  * Keys: ↑ ↓ Home End, type-ahead, Enter / Space, Escape, Tab closes.
  * @param {HTMLElement} anchor
  * @param {{ items: Array, placement?: string, label?: string, onClose?: () => void }} opts
@@ -223,8 +226,17 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
     checks || it.toggle ? h("span", { class: "c-menu-check", html: it.checked ? icon.check : "" }) : null,
     it.icon ? h("span", { class: "c-menu-icon", html: it.icon }) : null,
     h("span", { class: "c-menu-label" }, it.label),
-    it.shortcut ? h("kbd", null, it.shortcut) : null);
-    b.addEventListener("click", () => { if (it.disabled) return; layer.close(true); it.onSelect?.(it.value ?? it.label); });
+    it.shortcut ? h("kbd", null, it.shortcut) : null,
+    it.trailing || null);
+    b.addEventListener("click", (e) => {
+      if (it.disabled || (it.trailing && it.trailing.contains(e.target))) return;
+      if (!it.toggle) { layer.close(true); it.onSelect?.(it.value ?? it.label); return; }
+      it.checked = !it.checked;
+      b.setAttribute("aria-checked", String(it.checked));
+      b.querySelector(".c-menu-check").innerHTML = it.checked ? icon.check : "";
+      it.onSelect?.(it.value ?? it.label);
+    });
+    if (it.onArrow) b.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); it.onArrow(e.key === "ArrowLeft" ? -1 : 1); } });
     // the pointer and the keyboard share one highlight: hovering an item focuses it
     b.addEventListener("pointermove", () => { if (document.activeElement !== b && !it.disabled) focusQuietly(b); });
     layer.body.appendChild(b);

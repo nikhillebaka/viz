@@ -379,10 +379,24 @@ export class Layers {
     };
     const item = (l) => ({ label: l.label, toggle: true, checked: cur.has(l.id), onSelect: () => toggle(l.id) });
     const base = LAYERS.slice(0, 3).filter((l) => this.#has(l.id) !== false).map(item);
-    // with past seasons on: colour them by season (old viz's Tints)
-    if (cur.has("seasons") && this.#has("seasons") !== false) {
-      const at = base.findIndex((it) => it.label === "Past seasons");
-      base.splice(at + 1, 0, { label: "Tint by season", toggle: true, checked: cur.has("tints"), onSelect: () => toggle("tints") });
+    // Past seasons carries its colouring in its own row: grey or one hue per season (old viz's Tints),
+    // two swatches shown while the layer is on, the chosen one ringed
+    const ps = base.find((it) => it.label === "Past seasons");
+    if (ps) {
+      const setTint = (on) => {
+        const next = new Set(store.get().layers || []);
+        if (on) next.add("tints"); else next.delete("tints");
+        store.set({ layers: parseLayers([...next]) });
+        mono.setAttribute("aria-checked", String(!on)); multi.setAttribute("aria-checked", String(on));
+      };
+      const sw = (cls, label, on) => {
+        const el = h("span", { class: `fc-swatch ${cls}`, role: "radio", "aria-label": label, "aria-checked": String(cur.has("tints") === on), title: label });
+        el.addEventListener("click", (e) => { e.stopPropagation(); setTint(on); });
+        return el;
+      };
+      const mono = sw("is-mono", "Grey", false), multi = sw("is-tints", "Tinted by season", true);
+      ps.trailing = h("span", { class: "fc-swatches", role: "radiogroup", "aria-label": "Past season colours" }, mono, multi);
+      ps.onArrow = (d) => { if (store.get().layers?.includes("seasons")) setTint(d > 0); };
     }
     const sig = SIGNALS.filter((l) => this.#has(l.id)).map(item);
     const items = [...base, ...(base.length && sig.length ? ["-"] : []), ...sig];

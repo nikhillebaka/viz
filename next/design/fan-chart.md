@@ -129,7 +129,7 @@ the chart never draws one against the left axis as if it were:
   that keeps its season peak at or under the observed peak's height. A label hides where the top
   bubbles, the "Showing 5 of 9" note or a model label would cover it. The end label names the unit
   ("ILI+ %").
-- **Past seasons** are grey ink fading with age; Layers › Tint by season (`lay=…,tints`, old viz's Tints)
+- **Past seasons** are grey ink fading with age; two swatches in the Past seasons row (grey · tinted, `lay=…,tints`, old viz's Tints)
   gives each its own quiet hue (`--season-1…4`, newest strongest), its name at the left edge in the same hue.
 - **As reported on:** every forecast (and grey line) starts from the as-published value at the data
   cutoff, the number the models actually saw, instead of today's revised value; the gap between the solid
