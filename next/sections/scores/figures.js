@@ -22,7 +22,7 @@ export function s(tag, attrs = {}, ...kids) {
 }
 
 /* A label in at most `max` px. One that fits is plain text. A longer one shows its start, fading at
- * the cut, inside a clipped box; hovering its row (or the row's line in the table) glides it to its end
+ * the cut, inside a clipped box; hovering that label (or its bar row) glides it to its end
  * (the same rule as slideText for HTML names). anchor "end": the box ends at x. */
 let slideN = 0;
 export function slideLabel(svg, parent, { x, y, text, max, anchor = "start", cls, style = null }) {

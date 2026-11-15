@@ -245,10 +245,10 @@
 .sc-series:not(.is-emph, .is-single) .sc-pt { display: none; }
 .sc-end-label { fill: var(--ink-tertiary); font-size: var(--text-chart); font-family: var(--font-sans); }
 .sc-end { cursor: pointer; }
-/* long labels (slideLabel): hovering the row, its line or its table row glides them to their end */
+/* long labels (slideLabel): only the label under the pointer glides to its end, nowhere else */
 .sc-slide text { transition: transform var(--dur-move) var(--ease-out); }
-:is(.sc-end, .sc-bar):hover .sc-slide text, .has-hover .is-emph .sc-slide text { transform: translateX(var(--slide)); }
-:is(.sc-end, .sc-bar):hover .sc-slide-mask, .has-hover .is-emph .sc-slide-mask { mask: var(--ml); }
+:is(.sc-end, .sc-bar):hover .sc-slide text { transform: translateX(var(--slide)); }
+:is(.sc-end, .sc-bar):hover .sc-slide-mask { mask: var(--ml); }
 .sc-end.is-emph .sc-end-label { fill: var(--ink-primary); font-weight: var(--weight-medium); }
 .sc-bar { cursor: pointer; }
 .sc-bar-label { fill: var(--ink-tertiary); font-size: var(--text-small); font-family: var(--font-sans); }
