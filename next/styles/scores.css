@@ -235,6 +235,9 @@
 .sc-series.is-charted .sc-line { stroke: var(--c); }
 .sc-series.is-charted.is-emph .sc-line { stroke: var(--c); stroke-width: var(--stroke-series); }
 .sc-series.is-charted .sc-pt { fill: var(--c); }
+/* one model hovered (or focused / expanded): everything else steps back, coloured lines included */
+.sc-fig-svg:has(.sc-series.is-emph:not(.sc-bar)) :is(.sc-series:not(.sc-bar), .sc-end):not(.is-emph) { opacity: 0.3; }
+.sc-fig-svg :is(.sc-series, .sc-end) { transition: opacity var(--dur-fast) var(--ease-out); }
 .sc-line-base { stroke: var(--series-baseline); stroke-width: var(--stroke-observed); stroke-dasharray: 3 3; }
 .sc-hit { stroke: transparent; stroke-width: var(--space-12); pointer-events: stroke; cursor: pointer; }
 .sc-pt, .sc-pt-solid { fill: var(--ink-primary); }

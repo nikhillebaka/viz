@@ -58,7 +58,7 @@ export function mount(el, ctx) {
     common: fragment({ label: "Rounds", title: "Skill on", items: () => [{ value: false, label: "Each model's rounds" }, { value: true, label: "Shared rounds only" }],
       value: fair, isDefault: () => !fair(), onSelect: (v) => setScope(store, { fair: v }) }),
   };
-  const subhead = (title) => { const line = h("span", { class: "v-line pk-subline" }); return { el: h("div", { class: "pk-subhead" }, h("span", { class: "pk-subtitle" }, title), line), line }; };
+  const subhead = (title) => { const line = h("span", { class: "v-line pe-subline" }); return { el: h("div", { class: "pe-subhead" }, h("span", { class: "pe-subtitle" }, title), line), line }; };
   const skillHead = subhead("Season skill"), mapHead = subhead("Peak map");
   function syncLines() {
     Object.values(F).forEach((b) => b.sync());
@@ -67,22 +67,22 @@ export function mount(el, ctx) {
   }
 
   // ---------------------------------------------------------------- the page
-  const note = h("p", { class: "v-note pk-head" });
-  const fig = h("div", { class: "pk-fig" });
-  const strip = h("canvas", { class: "pk-strip", role: "img" });
-  const stripRow = h("div", { class: "pk-grid pk-strip-row" }, strip);
-  const headRow = h("div", { class: "pk-grid pk-cols" });
-  const rowsEl = h("div", { class: "pk-rows", role: "list" });
-  const none = h("p", { class: "v-note pk-none", hidden: true });
+  const note = h("p", { class: "v-note pe-head" });
+  const fig = h("div", { class: "pe-fig" });
+  const strip = h("canvas", { class: "pe-strip", role: "img" });
+  const stripRow = h("div", { class: "pe-grid pe-strip-row" }, strip);
+  const headRow = h("div", { class: "pe-grid pe-cols" });
+  const rowsEl = h("div", { class: "pe-rows", role: "list" });
+  const none = h("p", { class: "v-note pe-none", hidden: true });
   fig.append(stripRow, headRow, rowsEl, none);
   const readout = pointerReadout(fig);
-  const skillWrap = h("div", { class: "pk-skill" });
-  const mapGrid = h("div", { class: "mp-grid pk-map", style: { "--cols": COLUMNS, "--rows": 8 } });
+  const skillWrap = h("div", { class: "pe-skill" });
+  const mapGrid = h("div", { class: "mp-grid pe-map", style: { "--cols": COLUMNS, "--rows": 8 } });
   const mapNote = h("p", { class: "v-note" });
   f.body.append(note, fig,
-    h("div", { class: "pk-lower" },
-      h("div", { class: "pk-skill-col" }, skillHead.el, skillWrap),
-      h("div", { class: "pk-map-col" }, mapHead.el, mapGrid, mapNote)));
+    h("div", { class: "pe-lower" },
+      h("div", { class: "pe-skill-col" }, skillHead.el, skillWrap),
+      h("div", { class: "pe-map-col" }, mapHead.el, mapGrid, mapNote)));
   const tiles = new Map();
   for (const [abbr, [c, r]] of Object.entries(TILES)) {
     const loc = P.byAbbr.get(abbr);
@@ -199,7 +199,7 @@ export function mount(el, ctx) {
     const tm = pool?.timing, sz = pool?.size;
     const when = tm?.i50?.[0] && tm.i50[1] ? (tm.i50[0] === tm.i50[1] ? fmtDay(T(tm.i50[0])) : `${fmtDay(T(tm.i50[0]))} – ${fmtDay(T(tm.i50[1]))}`) : null;
     const high = sz?.i50 ? `${V.value(sz.i50[0])}–${V.value(sz.i50[1])}` : null;
-    if (when || high) out.push(" · ", h("span", { class: "pk-consensus" }, `Most likely ${[when, high].filter(Boolean).join(" · ")}`));
+    if (when || high) out.push(" · ", h("span", { class: "pe-consensus" }, `Most likely ${[when, high].filter(Boolean).join(" · ")}`));
     note.replaceChildren(...out);
   }
 
@@ -219,7 +219,7 @@ export function mount(el, ctx) {
     const top = Math.max(1, resp.observed?.value || 0, ...sizes.map((s) => s.i50?.[1] ?? s.median).filter(fin), his.length ? his[Math.floor((his.length - 1) * 0.8)] : 0);
     const vmax = niceMax(top * 1.04, 4);
     const xh = linear([0, vmax], [PADH[0], HIGH - PADH[1]]);
-    fig.style.setProperty("--pk-cols", `${NAME}px ${when}px ${HIGH}px${final ? ` ${RIGHT}px` : ""}`);
+    fig.style.setProperty("--pe-cols", `${NAME}px ${when}px ${HIGH}px${final ? ` ${RIGHT}px` : ""}`);
     return (G = { width, gap, final, when, xw, xh, vmax, ox: NAME + gap });
   }
 
@@ -376,15 +376,15 @@ export function mount(el, ctx) {
     none.hidden = true;
     // header: sortable names, then the axes (observed labels, size ticks)
     const sortBtn = (key, text) => h("button", {
-      type: "button", class: ["pk-sort", opt.sort === key && "is-on"], "aria-sort": opt.sort === key ? (opt.rev ? "descending" : "ascending") : null,
+      type: "button", class: ["pe-sort", opt.sort === key && "is-on"], "aria-sort": opt.sort === key ? (opt.rev ? "descending" : "ascending") : null,
       onclick: () => { if (opt.sort === key) opt.rev = !opt.rev; else { opt.sort = key; opt.rev = false; } save(); buildRows(); },
-    }, text, opt.sort === key ? h("span", { class: "pk-arrow", "aria-hidden": "true" }, opt.rev ? " ↑" : " ↓") : "");
-    const whenAxis = h("canvas", { class: "pk-axis", "aria-hidden": "true" }), highAxis = h("canvas", { class: "pk-axis", "aria-hidden": "true" });
+    }, text, opt.sort === key ? h("span", { class: "pe-arrow", "aria-hidden": "true" }, opt.rev ? " ↑" : " ↓") : "");
+    const whenAxis = h("canvas", { class: "pe-axis", "aria-hidden": "true" }), highAxis = h("canvas", { class: "pe-axis", "aria-hidden": "true" });
     headRow.replaceChildren(
-      h("div", { class: "pk-hcell" }, sortBtn("name", "Model")),
-      h("div", { class: "pk-hcell" }, sortBtn("when", "When"), whenAxis),
-      h("div", { class: "pk-hcell" }, sortBtn("high", "How high"), highAxis),
-      G.final ? h("div", { class: "pk-hcell pk-right pk-right-head" }, ...["Δ week", "Δ size", "In 50%", "In 90%"].map((t) => h("span", null, t))) : "",
+      h("div", { class: "pe-hcell" }, sortBtn("name", "Model")),
+      h("div", { class: "pe-hcell" }, sortBtn("when", "When"), whenAxis),
+      h("div", { class: "pe-hcell" }, sortBtn("high", "How high"), highAxis),
+      G.final ? h("div", { class: "pe-hcell pe-right pe-right-head" }, ...["Δ week", "Δ size", "In 50%", "In 90%"].map((t) => h("span", null, t))) : "",
     );
     headRow._axes = { whenAxis, highAxis };
 
@@ -407,21 +407,21 @@ export function mount(el, ctx) {
   function row(rec) {
     const { kind, id } = rec;
     let name;
-    if (kind === "pool") name = h("span", { class: "pk-name" }, h("span", { class: "pk-chev" }), h("span", { class: "pk-label" }, "All models"));
+    if (kind === "pool") name = h("span", { class: "pe-name" }, h("span", { class: "pe-chev" }), h("span", { class: "pe-label" }, "All models"));
     else if (kind === "round") {
       const cur = rec.round === store.get().date;
-      name = h("button", { type: "button", class: ["pk-name pk-round", cur && "is-current"], title: `Chart round ${fmtLong(T(rec.round))}`, onclick: () => store.set({ date: rec.round }) },
-        h("span", { class: "pk-label" }, fmtDay(T(rec.round))));
+      name = h("button", { type: "button", class: ["pe-name pe-round", cur && "is-current"], title: `Chart round ${fmtLong(T(rec.round))}`, onclick: () => store.set({ date: rec.round }) },
+        h("span", { class: "pe-label" }, fmtDay(T(rec.round))));
     } else {
       const has = resp.rounds?.[id]?.length > 0, label = manifest.label(id, shown);
       name = h(has ? "button" : "span", {
-        type: has ? "button" : null, class: "pk-name", title: manifest.label(id), "aria-expanded": has ? String(open.has(id)) : null,
+        type: has ? "button" : null, class: "pe-name", title: manifest.label(id), "aria-expanded": has ? String(open.has(id)) : null,
         onclick: has ? () => { if (open.has(id)) open.delete(id); else open.add(id); buildRows(); } : null,
-      }, h("span", { class: "pk-chev", "aria-hidden": "true" }, has ? "›" : ""), h("i", { class: "pk-dot", style: rec.color ? { background: rec.color } : null, hidden: !rec.color }), h("span", { class: "pk-label" }, label));
+      }, h("span", { class: "pe-chev", "aria-hidden": "true" }, has ? "›" : ""), h("i", { class: "pe-dot", style: rec.color ? { background: rec.color } : null, hidden: !rec.color }), h("span", { class: "pe-label" }, label));
     }
-    rec.when = h("canvas", { class: "pk-when" });
-    rec.high = h("canvas", { class: "pk-high" });
-    const el2 = h("div", { class: ["pk-grid pk-row", `is-${kind}`], role: "listitem", "data-id": id || "" }, name, rec.when, rec.high, G.final ? rightCell(rec) : "");
+    rec.when = h("canvas", { class: "pe-when" });
+    rec.high = h("canvas", { class: "pe-high" });
+    const el2 = h("div", { class: ["pe-grid pe-row", `is-${kind}`], role: "listitem", "data-id": id || "" }, name, rec.when, rec.high, G.final ? rightCell(rec) : "");
     recs.set(el2, rec); rec.el = el2;
     return el2;
   }
@@ -436,7 +436,7 @@ export function mount(el, ctx) {
       return h("span", { class: a && b ? "is-hit" : !a && !b ? "is-miss" : null }, t);
     };
     const we = sc?.timing?.week_error, pe = sc?.size?.pct_error;
-    return h("div", { class: "pk-right" },
+    return h("div", { class: "pe-right" },
       h("span", { class: fin(we) && Math.abs(we) <= 1 ? "is-hit" : null }, fin(we) ? `${signed(we, 0)} wk` : "–"),
       h("span", null, fin(pe) ? `${signed(pe, 0)}%` : "–"),
       cov("in50"), cov("in90"));
@@ -566,7 +566,7 @@ export function mount(el, ctx) {
     const fid = store.get().focus;
     for (const r of rows) { const rec = recs.get(r); r.classList.toggle("is-focus", rec.kind === "model" && rec.id === fid); }
   }
-  const recOf = (t) => { const r = t?.closest?.(".pk-row"); return r ? recs.get(r) : null; };
+  const recOf = (t) => { const r = t?.closest?.(".pe-row"); return r ? recs.get(r) : null; };
   // readoutContent ends in null without a foot, which replaceChildren would print
   const show = (x, y, head, rowsList) => readout.show(x, y, readoutContent(head, rowsList).filter(Boolean));
   function readoutFor(e, rec) {
@@ -668,7 +668,7 @@ export function mount(el, ctx) {
     on(rowsEl, "focusout", (e) => { if (!rowsEl.contains(e.relatedTarget)) setHover(null); }),
     on(rowsEl, "click", (e) => {
       const rec = recOf(e.target);
-      if (!rec || rec.kind !== "model" || e.target.closest(".pk-name") || !isDrawn(rec.id)) return;
+      if (!rec || rec.kind !== "model" || e.target.closest(".pe-name") || !isDrawn(rec.id)) return;
       store.set({ focus: store.get().focus === rec.id ? null : rec.id });
     }),
     onThemeChange(() => { resetColors(); screen.run(load); }),
