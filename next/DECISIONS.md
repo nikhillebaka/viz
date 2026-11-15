@@ -6,7 +6,7 @@ last. Product-shaping ones are marked **owner** until the owner has seen them.
 | # | Decision | Alternatives | Why |
 |---|---|---|---|
 | 1 | No runtime dependencies: no d3. Scales, ticks and date helpers are ~150 lines in `lib/scale.js`. | Vendor d3 v7 (the prototype loaded it from a CDN). | The product promises "no build step" and works offline; the canvas chart used d3 only for scales and formatting. |
-| 2 | Fonts load from Google Fonts with system fallbacks, as old viz does. | Vendor Inter and Geist Mono into the repo. | Same policy as the product today. **owner**: vendoring would make the look identical offline. |
+| 2 | Fonts ship with viz: the latin subsets of Inter (400–700) and Geist Mono (400–500), ~70 KB, in `next/fonts` (SIL OFL). | Load them from Google Fonts, as old viz does. | Owner's call: the same look offline. Other characters fall back to system fonts. |
 | 3 | Fan data is one binary block per (target, season, location), every model included, cached on both sides. | Per-date requests like old viz; JSON. | Scrubbing, the picker's "no forecast" notes and Show all need every round and model at hand; ~1 MB, 0.1–0.5 s cold, instant after. |
 | 4 | `server.py` reads the hub from `VIZ_HUB_DIR` when set. | A shadow hub of symlinks. | Lets a worktree copy of viz run against the real hub; default behaviour is unchanged. |
 | 5 | Glass: fixed bubbles use the backdrop refraction, chart bubbles the WebGL pass, panels are frosted. No renderer switching on scroll. | The prototype's switch-on-scroll. | The trailing image came from mixing a fixed element with a pass that redraws a frame late. Choosing by where the element lives removes the case. |

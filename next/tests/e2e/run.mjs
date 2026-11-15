@@ -338,10 +338,12 @@ async function main() {
       const mod = await import(pathToFileURL(check.file).href);
       if (typeof mod.default !== "function") throw new Error(`${check.file} has no default-exported function`);
       let timer;
+      // a check may need longer than the default (export const timeout = ms); --timeout still caps the rest
+      const limit = Math.max(o.timeout, Number(mod.timeout) || 0);
       try {
         await Promise.race([
           mod.default(page, t),
-          new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`check timed out after ${o.timeout} ms${t._current() ? ` in step "${t._current()}"` : ""}`)), o.timeout); }),
+          new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`check timed out after ${limit} ms${t._current() ? ` in step "${t._current()}"` : ""}`)), limit); }),
         ]);
       } finally { clearTimeout(timer); }
       if (t._loose.used) await report(t._loose.name, t._loose.failures, Date.now() - t0);

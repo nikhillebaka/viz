@@ -52,7 +52,7 @@ From the brief (`design/HANDOFF.md` §5) plus what the inventory surfaced. **own
 | Stepper and ← → walk every date, including surveillance-only and off-season weeks | They walk forecast rounds; the observed line shows every week | Tried and set aside with the owner (HANDOFF §5). |
 | Date popover: search grammar, model-count and Off-Season badges, Recent | Season chips and a calendar of rounds; "Latest" | Same. |
 | Location quick picks (US, CA, NY, TX, FL, MA) | The last four places you used | The same shortcut, without a fixed list. |
-| Truth is today's revised data everywhere except the As-of line | Same for now; the as-of line returns as a layer (phase 2) | Parity first. Worth revisiting: a forecast is fairest read against what was known then. **owner** |
+| Truth is today's revised data everywhere except the As-of line | Same; As reported is a layer, and forecasts start from it while it is on | Scoring against the data as known at the time is not wanted (owner). |
 | No hover values on the fan chart | Exact values for every week, model and interval | A gap in old viz. |
 | Chart heading and sub-heading text | None: the bubbles name the target, place and date | Controls are the labels of what they control. |
 | Telemetry strip, generated advice, calibration status words | Dropped | HANDOFF §5. |
