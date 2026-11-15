@@ -167,10 +167,14 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
   // labels: dot, then the name with a surface-colored halo
   ctx.textBaseline = "alphabetic"; ctx.textAlign = "left"; ctx.lineJoin = "round";
   for (const d of S.labels) {
-    if (d.dotR > 0) { circle(d.x, d.y, d.dotR); ctx.fillStyle = cssColor(d.dotC); ctx.globalAlpha = d.dotAlpha; ctx.fill(); ctx.globalAlpha = 1; }
+    const a = d.alpha ?? 1;
+    if (a < 0.01) continue;
+    if (d.dotR > 0) { circle(d.x, d.y, d.dotR); ctx.fillStyle = cssColor(d.dotC); ctx.globalAlpha = d.dotAlpha * a; ctx.fill(); }
+    ctx.globalAlpha = a;
     ctx.font = d.font; const by = d.y + 0.34 * d.size;
     ctx.strokeStyle = surface; ctx.lineWidth = 4; ctx.strokeText(d.text, d.x + 10, by);
     ctx.fillStyle = cssColor(d.fill); ctx.fillText(d.text, d.x + 10, by);
+    ctx.globalAlpha = 1;
   }
 }
 

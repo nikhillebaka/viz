@@ -140,7 +140,7 @@ export class Interaction {
    */
   syncLabels(scene) {
     const focus = this.chart.ctx.store.get().focus;
-    const ls = scene.labels.filter((d) => d.id && !d.summary && !d.ctx);
+    const ls = scene.labels.filter((d) => d.id && !d.summary && !d.ctx && d.alpha >= 0.5);
     const key = ls.map((d) => `${d.id}|${d.full}|${d.id === focus}`).join("\n");
     if (key === this.labelKey) return;
     this.labelKey = key;

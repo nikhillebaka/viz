@@ -129,6 +129,7 @@ function folded(pts, k) {
     const p = pts[i];
     out[i] = { t: o.t + (p.t - o.t) * k, h: p.h, lo: o.med + (p.lo - o.med) * k, hi: o.med + (p.hi - o.med) * k, med: o.med + (p.med - o.med) * k, anchor: p.anchor };
   }
+  out.open = k; // how open it is (its label fades with it)
   return out;
 }
 
@@ -209,7 +210,7 @@ export function layoutFan(fan, opts, w, h) {
     if (!pts) { missing.push(m); continue; }
     const lv = [pts];
     for (let k = 1; k < levels.length; k++) lv.push(reanchor(pointsAt(fan, m.id, t, levels[k])));
-    S.push({ id: m.id, slot: m.slot, label: m.label, c: seriesColor(m.slot), pts, lv });
+    S.push({ id: m.id, slot: m.slot, label: m.label, c: seriesColor(m.slot), pts, lv, open: pts.open ?? 1 });
   }
   const B = level ? S.filter((s) => bandable(s.pts)) : [];
   const C = [];
@@ -327,8 +328,15 @@ export function layoutFan(fan, opts, w, h) {
   // observed line pass behind them
   const lx = fanEnd + 14 + rk * (rulerW - 6); // labels ride with the fan, and step aside for rulers
   const topB = topClear + 12, botB = ay - 10;
-  const labs = S.map((s) => ({ id: s.id, c: s.c, name: s.label, y: y(Math.min(s.pts[s.pts.length - 1].med, ymax)) })).sort((a, b) => a.y - b.y);
-  // charted models with no forecast this week: dimmed, at the bottom of the stack
+  const labs = S.map((s) => ({ id: s.id, c: s.c, name: s.label, y: y(Math.min(s.pts[s.pts.length - 1].med, ymax)), alpha: s.open })).sort((a, b) => a.y - b.y);
+  // charted models with no forecast this week: dimmed, at the bottom of the stack. A model folding into
+  // (or out of) a week without a forecast cross-fades: its label fades with the fan, the ghost fades in
+  const i0 = clamp(Math.floor(t), 0, Math.max(0, n - 1)), i1 = Math.min(n - 1, i0 + 1);
+  for (const s of S) {
+    if (s.open > 0.999) continue;
+    const gone = fan.points(s.id, i0, level) ? i1 : i0;
+    labs.push({ id: s.id, c: s.c, name: s.label, y: NaN, ghost: `no forecast ${day(D[gone])}`, alpha: 1 - s.open });
+  }
   for (const o of missing) labs.push({ id: o.id, c: seriesColor(o.slot), name: o.label, y: NaN, ghost: `no forecast ${day(D[si])}` });
   // charted models with nothing at all this season or place: one quiet line, not a ghost each
   if (opts.absent) labs.push({ id: null, c: "transparent", name: "", y: NaN, ghost: opts.absent, summary: true });
@@ -358,12 +366,12 @@ export function layoutFan(fan, opts, w, h) {
     const text = fitText(full, fnt, Math.round(w - lx - 10 - 8), measure); // never run off the chart; full name kept
     const len = measure(text, fnt);
     labels.push({
-      id: d.id, x: lx, y: d.y, text, full, font: fnt, size, weight, len,
+      id: d.id, x: lx, y: d.y, text, full, font: fnt, size, weight, len, alpha: d.alpha ?? 1,
       ctx: !!d.ctx, hot: !!d.hot, ghost: !!d.ghost, summary: !!d.summary,
       dotR: d.summary ? 0 : d.ctx ? 2.5 : 3.5, dotC: d.c, dotAlpha: d.ghost ? 0.4 : dim(d.id) ? 0.55 : 1,
       fill: d.summary ? INK3 : d.hot ? INK1 : d.ctx || d.ghost ? INK3 : !hasFocus ? INK2 : focused ? INK1 : INK3,
       // the click / hover target is just a little larger than the dot and the name (5px around)
-      hit: d.summary ? null : { x0: lx - 9, x1: lx + 10 + len + 5, y0: d.y - 11, y1: d.y + 11 },
+      hit: d.summary || (d.alpha ?? 1) < 0.5 ? null : { x0: lx - 9, x1: lx + 10 + len + 5, y0: d.y - 11, y1: d.y + 11 },
     });
   }
 
