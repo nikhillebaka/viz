@@ -3,7 +3,7 @@
  * model), then the page scrolls up to the chart. Pure logic is in model.js. */
 import { scopeOf, seasonWeekOf, startYearOf } from "../scope.js";
 import { onThemeChange, cssColor, reducedMotion } from "../../lib/dom.js";
-import { valueFormat, fmtDay, fmtLong, fmtMonth } from "../../lib/format.js";
+import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
 import { chartFonts, canvasMeasure } from "../../chart/render.js";
 import { chart as chartModel, setBaseline, slotOf, COLORS } from "../../features/selection.js";
@@ -15,6 +15,7 @@ import {
 import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, normalizeView, swapView, requestFor, buildGrid, presets, presetOf, DEFAULT_VIEW } from "./model.js";
 
 const KEY = "viz.heatmap";
+const MON = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" });
 const ROW_H = 20, GAP = 2, GROUP_GAP = 6, TOP = 22, LABEL_PAD = 16, REGION_W = 96;
 const fin = (x) => typeof x === "number" && Number.isFinite(x);
 
@@ -224,7 +225,7 @@ export function mount(el, ctx) {
     const flat = view.cols === "model" && nC <= 8;
     const cellW = Math.max(3, Math.min(flat ? 132 : nC <= 8 ? 88 : 44, Math.floor((width - labelW - breaks(grid.cols) * GROUP_GAP) / nC)));
     const colText = grid.cols.map((c) => shortCol(view.cols, c.key, grid.ids));
-    const top = view.cols === "model" && !flat ? Math.min(150, Math.max(...colText.map((t) => measure(t, colFont)))) + 12 : TOP;
+    const top = view.cols === "model" && !flat ? Math.min(150, Math.max(...colText.map((t) => measure(t, colFont)))) + 12 : view.cols === "date" ? TOP + 16 : TOP;
     const xs = [], ys = [];
     let x = labelW;
     grid.cols.forEach((c, i) => { if (i && c.group !== grid.cols[i - 1].group) x += GROUP_GAP; xs.push(x); x += cellW; });
@@ -292,16 +293,18 @@ export function mount(el, ctx) {
     // column labels
     g.font = L.colFont; g.fillStyle = ink3;
     if (view.cols === "date") {
-      // a label where each month starts; where they would touch (many seasons, narrow cells), the one that
-      // names its year wins, then the earlier
-      let lastMonth = -1;
-      const months = [];
+      // months on the lower line (short names, all the same size); the year above, where each one starts
+      let lastMonth = -1, lastYear = -1;
+      const months = [], years = [];
       grid.cols.forEach((c, i) => {
-        const t = parseIso(c.key), m = new Date(t).getUTCMonth();
-        if (m !== lastMonth) { const text = fmtMonth(t); months.push({ x: L.xs[i], text, pri: /\d/.test(text) ? 2 : i && c.group !== grid.cols[i - 1].group ? 1 : 0 }); lastMonth = m; }
+        const d = new Date(parseIso(c.key)), m = d.getUTCMonth(), y = d.getUTCFullYear();
+        if (m !== lastMonth) { months.push({ x: L.xs[i], text: MON.format(d) }); lastMonth = m; }
+        if (y !== lastYear) { years.push({ x: L.xs[i], text: String(y) }); lastYear = y; }
       });
       g.textAlign = "left";
-      for (const l of fitLabels(months, (s) => measure(s, L.colFont))) g.fillText(l.text, l.x, L.top / 2);
+      // where cells are too narrow even for short names, a month is skipped rather than overprinted
+      for (const l of fitLabels(months, (s) => measure(s, L.colFont), 4)) g.fillText(l.text, l.x, L.top - 11);
+      for (const l of fitLabels(years, (s) => measure(s, L.colFont))) g.fillText(l.text, l.x, 9);
     } else if (view.cols === "model" && L.flat) {
       g.textAlign = "center";
       grid.cols.forEach((c, i) => g.fillText(clip(L.colText[i], cw - 6, L.colFont, measure), L.xs[i] + cw / 2, L.top / 2));
