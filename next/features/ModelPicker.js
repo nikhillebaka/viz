@@ -266,8 +266,19 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
       shown += s.ids.length;
     }
     if (!g.sections.length) frag.append(h("div", { class: "pk-empty" }, query ? "No models match" : "No models"));
-    cols.replaceChildren(frag);
-    list.classList.toggle("two", shown > ONE_COLUMN_MAX);
+    const two = shown > ONE_COLUMN_MAX;
+    // Two columns are split here, not by CSS multi-column: the browser's column balancing could lay rows
+    // over each other while the panel was resizing. Halfway by row count; a section header never ends
+    // a column (it moves to the top of the next with its rows).
+    if (two) {
+      const items = [...frag.children], half = Math.ceil(items.length / 2);
+      let cut = half;
+      while (cut > 1 && items[cut - 1].classList.contains("c-section")) cut--;
+      const a = h("div", { class: "pk-col" }), b = h("div", { class: "pk-col" });
+      items.forEach((el, i) => (i < cut ? a : b).append(el));
+      cols.replaceChildren(a, b);
+    } else cols.replaceChildren(frag);
+    list.classList.toggle("two", two);
     resize();
     list.scrollTop = top;
     notesKey = null;

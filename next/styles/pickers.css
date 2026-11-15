@@ -32,9 +32,8 @@
   margin: 0 calc(-1 * var(--space-4)); padding: var(--space-4);
   scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
 }
-.pk-list.two .pk-cols { columns: 2; column-gap: var(--space-16); }
-.pk-cols > * { break-inside: avoid; }
-.pk-cols > .c-section { break-after: avoid; }
+/* two columns: ModelPicker splits the rows into two .pk-col itself (no CSS multi-column) */
+.pk-list.two .pk-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: var(--space-16); align-items: start; }
 
 /* a row: the kit's two-line row is the name target (role checkbox); the chart circle sits over its lead */
 .pk-row { position: relative; }
