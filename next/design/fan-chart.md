@@ -129,6 +129,10 @@ the chart never draws one against the left axis as if it were:
   that keeps its season peak at or under the observed peak's height. A label hides where the top
   bubbles, the "Showing 5 of 9" note or a model label would cover it. The end label names the unit
   ("ILI+ %").
+- **Names** of layer lines (past seasons, signals) are pinned to the plot's left edge beside their lines
+  (or where a line starts, if later), so they stay put while time moves; stacked 13 px apart, and a name
+  that can't fit is left out (the readout names it). Peaks are a triangle at the median week × size, no
+  ranges (those are in the Peaks section).
 - **Two or more:** each is scaled so its season peak meets the observed peak, and the end labels say so
   ("ILI+ % · scaled"). Several right axes on one chart are unreadable; this is old viz's normalized mode,
   anchored to the data instead of 0–100.
