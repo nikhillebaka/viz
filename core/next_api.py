@@ -55,18 +55,6 @@ def _truthy(v: Any) -> bool:
     return v is True or str(v).strip().lower() in ("true", "yes", "1")
 
 
-def _mask(dates, index: Dict[str, int]) -> str:
-    """The rounds a model submitted, as a hex bit string over every season's rounds in order (bit i of
-    the string is round i: 4 rounds per hex digit, lowest bit first), so the picker can draw coverage."""
-    bits = 0
-    for d in dates or ():
-        i = index.get(str(d)[:10])
-        if i is not None:
-            bits |= 1 << i
-    n = (len(index) + 3) // 4
-    return "".join("0123456789abcdef"[(bits >> (4 * k)) & 15] for k in range(n)).rstrip("0")
-
-
 def _season_label(season: str) -> str:
     return f"{season[:4]}–{season[7:9]}" if len(season) >= 9 else season
 
@@ -185,7 +173,6 @@ class NextData:
             for key, forms in spellings.items()
         }
 
-        round_index = {d: i for i, d in enumerate(r for s in seasons for r in s["rounds"])}
         model_list = []
         for mid, info in models.items():
             meta = self._model_meta(mid, info)
@@ -206,12 +193,11 @@ class NextData:
                 "first": info.get("min_date"),
                 "last": info.get("max_date"),
                 "rounds": len(info.get("dates") or []),
-                # the picker's filters: what kind of model, what data it is fitted to, which rounds it has
+                # the picker's filters: what kind of model and what data it is fitted to
                 "kind": "ensemble" if info.get("is_synthetic") or meta["ensemble"] or fam.lower() == "ensemble"
                         else "baseline" if meta["baseline"] or fam.lower() == "baseline" else "individual",
                 "inputs": meta["inputs"],
                 "name": meta["name"],
-                "cov": _mask(info.get("dates"), round_index),
             })
 
         locations = [

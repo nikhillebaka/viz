@@ -1,11 +1,10 @@
-// The model browser's pure logic: variant lines, name parts, rail filters, sets, and the bottom section.
+// The model picker's pure logic: typed search, filter values, variant lines, name parts, rail filters, sets, and the bottom section.
 // Uses a small manifest shaped like the real one (core/next_api.py).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { indexManifest } from "../../lib/api.js";
 import * as S from "../../features/selection.js";
-import { browse, nameParts, linesOf, rowLine, designatedMarks } from "../../features/ModelBrowser.js";
-import { catalog } from "../../features/ModelPicker.js";
+import { browse, nameParts, linesOf, rowLine, designatedMarks, catalog, parseQuery, facetsOf } from "../../features/ModelPicker.js";
 
 const H = "wk inc flu hosp";
 const model = (id, o = {}) => ({
@@ -78,4 +77,20 @@ test("rows: the readable name when there is one; designated marked only where it
   const d = designatedMarks(M);
   assert.ok(d.has("flusight:CU-ensemble"));
   assert.ok(!d.has("flusight:ZTeam-alpha"), "ZTeam's only model");
+});
+
+test("typed search: key:value; an unknown key is a word", () => {
+  assert.deepEqual(parseQuery("team:umass gbqr data:nssp"), { words: ["gbqr"], tokens: [{ key: "team", value: "umass" }, { key: "input", value: "nssp" }] });
+  assert.deepEqual(parseQuery("foo:bar").words, ["foo:bar"]);
+  const ids = (q) => browse(M, { target: H, season: "2025-2026", query: q }).ids;
+  assert.deepEqual(ids("team:cu").sort(), ["flusight:CU-base", "flusight:CU-ensemble"]);
+  assert.ok(ids("team:u").length && !ids("team:u").some((id) => id.includes("CU-")), "from the start of a word: team:u is UMass, not CU");
+});
+
+test("filter values: source, a family of one is Other, kind, data or Not stated", () => {
+  const f = facetsOf(M, M.modelById.get("flusight:CU-ensemble"));
+  assert.deepEqual(f.source, ["FluSight"]);
+  assert.deepEqual(f.kind, ["Ensemble"]);
+  assert.deepEqual(f.input, ["Not stated"]);
+  assert.deepEqual(catalog(M, H).facets.get("UMass-AR2").family, ["Other"], "AR has one model here");
 });
