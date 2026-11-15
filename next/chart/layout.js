@@ -59,6 +59,7 @@
  * Every path (line, lo, hi, dots, observed parts) is a flat array [x0, y0, x1, y1, …]. */
 import { WEEK, linear, niceStep, ticks as steps, monthStarts } from "../lib/scale.js";
 import { fmtDay, fmtMonth } from "../lib/format.js";
+import { fitLabels } from "../lib/labels.js";
 
 const GAP = 1.5 * WEEK;          // observed weeks further apart than this are not joined
 const LABEL_GAP = 18;            // label spacing
@@ -233,11 +234,12 @@ export function layoutFan(fan, opts, w, h) {
   // the cutoff shade, the two date ticks, and the month labels that don't crowd them
   const xc = x(cutoff), xr = x(ref);
   const markL = xc - 84, markR = xr + 104;
-  const months = [];
+  const monthFont = font(500, F.chart, F.sans), cand = [];
   for (const m of monthStarts(x.invert(0), x.invert(w))) {
     const px = x(m);
-    if (px + 40 < w && (px + 44 < markL || px + 4 > markR)) months.push({ x: px + 4, text: month(m) });
+    if (px + 40 < w && (px + 44 < markL || px + 4 > markR)) cand.push({ x: px + 4, text: month(m), pri: /\d/.test(month(m)) ? 1 : 0 });
   }
+  const months = fitLabels(cand, (t) => measure(t, monthFont), 10);
   // while between weeks, the labels name the week the chart will settle on (what the stepper shows)
   const dates = { cut: { x: xc, date: day(whole && si === di ? cutoff : cutoffFor(fan, D[si])) }, ref: { x: xr, date: day(D[si]) } };
 

@@ -1,6 +1,7 @@
 /* What the three view sections (heatmap, map, peaks) share: the section frame on the paper (a heading,
  * one quiet line of fragment controls, a loading hairline, one quiet empty line), JSON loading with
  * cancellation, the score color ramps, HHS regions, canvas sizing, and on-screen / DPR watching. */
+export { fitLabels } from "../lib/labels.js";
 import { h, on, cssColor, storage } from "../lib/dom.js";
 import { openMenu } from "../ui/floating.js";
 
@@ -205,6 +206,7 @@ export function places(manifest) {
  * @param {HTMLCanvasElement} c @param {number} w @param {number} hgt CSS px
  * @returns {CanvasRenderingContext2D}
  */
+
 export function fitCanvas(c, w, hgt) {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const W = Math.max(1, Math.round(w * dpr)), H = Math.max(1, Math.round(hgt * dpr));

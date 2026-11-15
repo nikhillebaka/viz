@@ -14,7 +14,7 @@ import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { poolWeeks, poolSize } from "./pool.js";
 import { slideText } from "../../ui/controls.js";
 import {
-  h, on, linkStyle, frame, fragment, setLine, getJson, query, isAbort, sequential, diverging, inkOn, resetColors, places,
+  h, on, linkStyle, frame, fragment, setLine, getJson, query, isAbort, sequential, diverging, inkOn, resetColors, places, fitLabels,
   fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
 } from "../shared.js";
 
@@ -274,11 +274,10 @@ export function mount(el, ctx) {
     }
     // months under the strip: the When column's axis
     g.textAlign = "left"; g.textBaseline = "alphabetic";
-    for (const m of monthStarts(d0, d1)) {
-      const xx = Math.round(X(m)) + 0.5;
-      g.strokeStyle = axis; g.beginPath(); g.moveTo(xx, STRIP); g.lineTo(xx, STRIP + 4); g.stroke();
-      g.fillStyle = ink("tertiary"); g.fillText(fmtMonth(m), xx + 3, STRIP + 14);
-    }
+    const ms = monthStarts(d0, d1).map((m) => ({ x: Math.round(X(m)) + 0.5, text: fmtMonth(m) }));
+    for (const l of ms) { g.strokeStyle = axis; g.beginPath(); g.moveTo(l.x, STRIP); g.lineTo(l.x, STRIP + 4); g.stroke(); }
+    g.fillStyle = ink("tertiary");
+    for (const l of fitLabels(ms.map((l) => ({ ...l, x: l.x + 3, pri: /\d/.test(l.text) ? 1 : 0 })), (s) => g.measureText(s).width)) g.fillText(l.text, l.x, STRIP + 14);
     // the round
     g.strokeStyle = ink("faint"); g.beginPath(); g.moveTo(Math.round(X(ref)) + 0.5, 4); g.lineTo(Math.round(X(ref)) + 0.5, STRIP); g.stroke();
     // past seasons: faint, labelled at their ends

@@ -4,6 +4,7 @@
 import { h, on } from "../../lib/dom.js";
 import { openPopover } from "../../ui/floating.js";
 import { linear } from "../../lib/scale.js";
+import { fitLabels } from "../../lib/labels.js";
 import { scopeOf, setScope, startYearOf } from "../scope.js";
 import { loadCurves } from "./data.js";
 import { PHASE_LABEL, weeksDates } from "./model.js";
@@ -101,11 +102,16 @@ function drawSeason(svg, { curves, sc, brush }) {
   const list = (curves?.curves || []).filter((c) => on.includes(c.season)).sort((a, b) => a.season.localeCompare(b.season));
   const max = Math.max(1e-9, ...list.flatMap((c) => c.points.map((p) => p.value ?? 0)));
   const Y = linear([0, max * 1.08], [hgt - PAD.b, PAD.t]);
+  const mticks = [];
   for (const m of curves?.month_ticks || []) {
     if (m.week < W1 || m.week > 52) continue;
     svg.append(s("line", { x1: X(m.week), x2: X(m.week), y1: PAD.t, y2: hgt - PAD.b, class: "sc-grid" }));
-    svg.append(s("text", { x: X(m.week) + 3, y: hgt - 6, class: "sc-tick", text: m.label }));
+    const el = s("text", { x: X(m.week) + 3, y: hgt - 6, class: "sc-tick", text: m.label });
+    svg.append(el);
+    mticks.push({ x: X(m.week) + 3, text: m.label, el });
   }
+  const shown = new Set(fitLabels(mticks, (t) => mticks.find((m) => m.text === t).el.getComputedTextLength?.() || t.length * 7));
+  for (const m of mticks) if (!shown.has(m)) m.el.remove();
   if (!curves) svg.append(s("text", { x: w / 2, y: hgt / 2, class: "sc-tick", "text-anchor": "middle", text: "Loading" }));
   else if (!list.length) svg.append(s("text", { x: w / 2, y: hgt / 2, class: "sc-tick", "text-anchor": "middle", text: curves.failed ? "Can't load curves" : "No observed data" }));
   const weeks = brush.weeks || sc.weeks;

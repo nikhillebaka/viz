@@ -10,7 +10,7 @@ import { chart as chartModel, setBaseline, slotOf, COLORS } from "../../features
 import { nearestRound } from "../../features/url.js";
 import {
   h, on, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
-  resetColors, HHS, HHS_NAMES, places, fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
+  resetColors, HHS, HHS_NAMES, places, fitLabels, fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
 } from "../shared.js";
 import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, normalizeView, swapView, requestFor, buildGrid, presets, presetOf, DEFAULT_VIEW } from "./model.js";
 
@@ -292,11 +292,16 @@ export function mount(el, ctx) {
     // column labels
     g.font = L.colFont; g.fillStyle = ink3;
     if (view.cols === "date") {
+      // a label where each month starts; where they would touch (many seasons, narrow cells), the one that
+      // names its year wins, then the earlier
       let lastMonth = -1;
+      const months = [];
       grid.cols.forEach((c, i) => {
         const t = parseIso(c.key), m = new Date(t).getUTCMonth();
-        if (m !== lastMonth) { g.textAlign = "left"; g.fillText(fmtMonth(t), L.xs[i], L.top / 2); lastMonth = m; }
+        if (m !== lastMonth) { const text = fmtMonth(t); months.push({ x: L.xs[i], text, pri: /\d/.test(text) ? 2 : i && c.group !== grid.cols[i - 1].group ? 1 : 0 }); lastMonth = m; }
       });
+      g.textAlign = "left";
+      for (const l of fitLabels(months, (s) => measure(s, L.colFont))) g.fillText(l.text, l.x, L.top / 2);
     } else if (view.cols === "model" && L.flat) {
       g.textAlign = "center";
       grid.cols.forEach((c, i) => g.fillText(clip(L.colText[i], cw - 6, L.colFont, measure), L.xs[i] + cw / 2, L.top / 2));
