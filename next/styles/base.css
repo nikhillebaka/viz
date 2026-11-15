@@ -5,9 +5,8 @@ html, body, h1, h2, h3, h4, p, figure, ul, ol, dl, dd, table { margin: 0; }
 ul, ol { padding: 0; list-style: none; }
 
 html, body { background: var(--surface-paper); color: var(--ink-primary); }
-/* the page scrolls down to the scores without a visible bar; no swipe-to-go-back, and no rubber-band
-   bounce at the page's ends (at the top it showed a hard edge above the chart) */
-html { overscroll-behavior: none; overflow-x: clip; scrollbar-width: none; }
+/* the page scrolls down to the scores without a visible bar; no swipe-to-go-back */
+html { overscroll-behavior-x: none; overflow-x: clip; scrollbar-width: none; }
 html::-webkit-scrollbar { display: none; }
 body {
   font-family: var(--font-sans); font-size: var(--text-body); line-height: 1.5;

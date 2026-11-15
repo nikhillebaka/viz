@@ -18,6 +18,20 @@ const pickers = {
   location: () => import("./LocationPicker.js").then((m) => m.openLocationPicker),
 };
 
+/* The attic: a strip of page above the chart, scrolled out of view, so scrolling up past the chart shows
+ * the chart's shade carrying on (and a line of nonsense) instead of a hard edge. Browsers draw nothing
+ * above the page itself during the overscroll bounce, so this is real page that springs back. */
+const ATTIC_LINES = [
+  "Nothing up here but last season's flu",
+  "Forecasts grow down, not up",
+  "You found the attic",
+  "The peak is below. Probably.",
+  "Week 54 is up here somewhere",
+  "Quantile 0.999 lives here",
+  "No horizons beyond this point",
+  "This space intentionally left uncertain",
+];
+
 const TEXT_FIELD = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
 
 /**
@@ -30,6 +44,11 @@ export function mountShell(root, ctx) {
   const { manifest, store } = ctx;
   const doc = document.documentElement;
   root.classList.add("app");
+  const atticShade = h("div", { class: "app-attic-shade" });
+  const attic = h("div", { class: "app-attic", "aria-hidden": "true" }, atticShade,
+    h("p", { class: "app-attic-line" }, ATTIC_LINES[Math.floor(Math.random() * ATTIC_LINES.length)]));
+  root.before(attic);
+  const atticH = () => attic.offsetHeight;
   const view = h("section", { id: "view", class: "app-view", "aria-label": "Forecast chart" });
   const zone = (z) => h("div", { class: "c-zone", "data-zone": z });
   const tl = zone("tl"), tr = zone("tr");
@@ -114,6 +133,7 @@ export function mountShell(root, ctx) {
     },
   });
   ctx.chart = chart;
+  chart.attic = atticShade; // the chart moves the attic's shade to its own shade edge (ChartBubbles.frame)
   const sections = mountSections(root, ctx);
   // ⋯ bubble (hubs, warnings, the Guide): loaded when idle; the page works without it
   let more = null, gone = false;
@@ -131,6 +151,18 @@ export function mountShell(root, ctx) {
   const stopTime = timeKeys((dir) => chart.step(dir), {
     active: () => { const l = activeLayer(); return !l || l.panel.hasAttribute("data-time-keys"); },
   });
+  // open on the chart, not the attic (unless the browser restored a scroll position further down)
+  if (scrollY < atticH()) scrollTo(0, atticH());
+
+  // let go in the attic: back down to the chart
+  let atticTimer = 0;
+  offs.push(on(window, "scroll", () => {
+    clearTimeout(atticTimer);
+    atticTimer = setTimeout(() => {
+      if (scrollY < atticH() - 1) scrollTo({ top: atticH(), behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    }, 140);
+  }, { passive: true }), () => { clearTimeout(atticTimer); attic.remove(); });
+
   offs.push(stopTime, on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const layer = activeLayer();

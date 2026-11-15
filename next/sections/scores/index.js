@@ -180,7 +180,7 @@ export function mount(el, ctx) {
   function goTo({ date, location }) {
     if (location) store.set({ location });
     if (date) { if (ctx.chart?.goTo) ctx.chart.goTo(date); else store.set({ date }); }
-    scrollTo({ top: 0, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    document.getElementById("view")?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }
 
   /* ---------------- render ---------------- */

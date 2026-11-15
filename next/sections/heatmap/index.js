@@ -317,7 +317,7 @@ export function mount(el, ctx) {
       patch.focus = model;
     }
     store.set(patch);
-    window.scrollTo({ top: 0, behavior: reducedMotion() ? "auto" : "smooth" });
+    document.getElementById("view")?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth" });
   }
 
   // ---------------------------------------------------------------- reacting
