@@ -28,8 +28,12 @@ let slideN = 0;
 export function slideLabel(svg, parent, { x, y, text, max, anchor = "start", cls, style = null }) {
   const t = s("text", { x, y, "text-anchor": anchor, "dominant-baseline": "middle", class: cls, text, style });
   parent.append(t);
-  const len = t.getComputedTextLength();
-  if (!(len > max) || max < 24) return t;
+  // measured at the emphasized weight too (a hovered label is set heavier, so wider): slide far enough
+  const plain = t.getComputedTextLength();
+  t.style.fontWeight = "var(--weight-strong)";
+  const len = Math.max(plain, t.getComputedTextLength());
+  t.style.fontWeight = "";
+  if (!(plain > max) || max < 24) return t;
   t.remove();
   const H = 16, x0 = anchor === "end" ? x - max : x, id = `scs${++slideN}`;
   const defs = svg.querySelector(":scope > defs") || svg.insertBefore(s("defs"), svg.firstChild);
