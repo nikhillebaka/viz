@@ -14,7 +14,10 @@ import { openTargetMenu } from "./TargetMenu.js";
 import { mountSections } from "../sections/index.js";
 
 const pickers = {
-  models: () => import("./ModelPicker.js").then((m) => m.openModelPicker),
+  // the model browser (a prototype) unless the ⋯ menu's "New model picker" is off
+  models: () => (storage.get("viz.next.browser", true) !== false
+    ? import("./ModelBrowser.js").then((m) => m.openModelBrowser)
+    : import("./ModelPicker.js").then((m) => m.openModelPicker)),
   location: () => import("./LocationPicker.js").then((m) => m.openLocationPicker),
 };
 

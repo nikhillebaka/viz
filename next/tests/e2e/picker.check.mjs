@@ -1,4 +1,4 @@
-// The model picker: filters narrow the list and count what each value would show, the view drawer
+// The old model picker (features/ModelPicker.js): filters narrow the list and count what each value would show, the view drawer
 // groups and sorts, typed search filters by key, the tray lists the selection, Escape closes a drawer
 // before the picker, and nothing logs an error.
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -6,7 +6,8 @@ export default async function picker(page, t) {
   await t.step("opens", async () => {
     await page.goto("/next/?models=UMass-flusion,UMass-gbqr_4src&date=2026-01-10");
     await page.waitFor(() => !!window.__viz?.chart?.fan, { timeout: 30000, message: "the chart never loaded" });
-    await page.eval(() => localStorage.removeItem("viz.next.picker"));
+    // the old picker (the ⋯ menu's "New model picker" off)
+    await page.eval(() => { localStorage.removeItem("viz.next.picker"); localStorage.setItem("viz.next.browser", "false"); });
     await page.eval(() => document.querySelector(".app-models").click());
     await page.waitFor(() => document.querySelectorAll(".pk-panel .pk-row").length > 10, { timeout: 10000, message: "no rows" });
     t.eq(await page.count(".pk-tray .pk-tchip"), 2, "the tray lists the two selected");
@@ -73,5 +74,5 @@ export default async function picker(page, t) {
   await t.step("no console errors", async () => { t.eq(page.errors, [], "uncaught exceptions and console errors"); });
 
   // the app remembers the selection in the browser: leave none behind for the checks after this one
-  await page.eval(() => { localStorage.removeItem("viz.selection"); localStorage.removeItem("viz.next.picker"); });
+  await page.eval(() => { localStorage.removeItem("viz.selection"); localStorage.removeItem("viz.next.picker"); localStorage.removeItem("viz.next.browser"); });
 }

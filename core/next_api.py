@@ -126,6 +126,8 @@ class NextData:
             "inputs": _inputs_of(meta.get("data_inputs")) if has_file else [],
             "ensemble": _truthy(meta.get("ensemble_of_models")) if has_file else False,
             "baseline": _truthy(meta.get("baseline_model")) if has_file else False,
+            # the metadata's readable name ("GBQR with NSSP, ILINet, FluSurv-NET"), when it says more than the abbreviation
+            "name": str(meta.get("model_name")).strip() if has_file and meta.get("model_name") and str(meta.get("model_name")).strip().lower() not in (str(meta.get("model_abbr") or abbr).lower(), "none", "null", "nan") else None,
         }
         if info.get("is_synthetic"):
             out["abbr"] = str(info.get("name") or model_id)
@@ -208,6 +210,7 @@ class NextData:
                 "kind": "ensemble" if info.get("is_synthetic") or meta["ensemble"] or fam.lower() == "ensemble"
                         else "baseline" if meta["baseline"] or fam.lower() == "baseline" else "individual",
                 "inputs": meta["inputs"],
+                "name": meta["name"],
                 "cov": _mask(info.get("dates"), round_index),
             })
 

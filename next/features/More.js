@@ -1,7 +1,7 @@
 /* The ⋯ bubble at the top right, beside the theme bubble: data sources (live hubs), warnings, refresh,
  * copy link and the Guide (which ends with the shortcuts). Each panel is its own module, loaded on first use.
  * Also the small helpers those panels share (JSON requests, sizes, relative times). */
-import { h, on } from "../lib/dom.js";
+import { h, on, storage } from "../lib/dom.js";
 import { glass } from "../ui/glass.js";
 import { activeLayer, openMenu, tooltip } from "../ui/floating.js";
 import { pill, icon, toast } from "../ui/controls.js";
@@ -127,6 +127,7 @@ export function mountMore(zone, ctx) {
       { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
       { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
       "-",
+      { label: "New model picker", toggle: true, checked: storage.get("viz.next.browser", true) !== false, onSelect: () => storage.set("viz.next.browser", storage.get("viz.next.browser", true) === false) },
       { label: "Classic viz", onSelect: () => location.assign("/classic/") },
     ].filter(Boolean);
     openMenu(btn, { items, placement: "bottom-end", label: "More" });
