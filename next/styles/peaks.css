@@ -74,11 +74,11 @@ button.pe-name:hover, .pe-row.is-focus .pe-name { color: var(--ink-primary); }
 .pe-cols > .pe-hcell:first-child { padding-bottom: calc(var(--space-16) + var(--space-2)); }
 
 /* the peak map's legend: a ramp, its ends named, the median marked */
-.pe-map .v-note:has(.pe-key-ramp) { display: flex; align-items: center; gap: var(--space-8); padding-bottom: var(--space-16); }
+.pe-key:has(.pe-key-ramp) { display: flex; align-items: center; gap: var(--space-8); padding-bottom: var(--space-20); }
 .pe-key-end { font-size: var(--text-small); color: var(--ink-tertiary); white-space: nowrap; }
-.pe-key-ramp { position: relative; flex: 0 1 calc(var(--space-56) * 3); height: var(--space-8); border-radius: var(--radius-check); }
+.pe-key-ramp { position: relative; flex: 0 0 calc(var(--space-56) * 3); height: var(--space-8); border-radius: var(--radius-check); }
 .pe-key-ramp > i { position: absolute; left: 50%; top: calc(-1 * var(--space-2)); bottom: calc(-1 * var(--space-2)); width: var(--stroke-hairline); background: var(--ink-secondary); }
-.pe-key-ramp > i::after { content: attr(data-mid); position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: var(--space-2); font-size: var(--text-axis); color: var(--ink-tertiary); white-space: nowrap; }
+.pe-key-ramp > i::after { font-style: normal; content: attr(data-mid); position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: var(--space-2); font-size: var(--text-axis); color: var(--ink-tertiary); white-space: nowrap; }
 
 /* Season skill sits beside the peak map: past the map's height it scrolls inside, its header held */
 .pe-skill-scroll {

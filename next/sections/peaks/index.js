@@ -79,7 +79,7 @@ export function mount(el, ctx) {
   const readout = pointerReadout(fig);
   const skillWrap = h("div", { class: "pe-skill pe-skill-scroll" });
   const mapGrid = h("div", { class: "mp-grid pe-map", style: { "--cols": COLUMNS, "--rows": 8 } });
-  const mapNote = h("p", { class: "v-note" });
+  const mapNote = h("p", { class: "v-note pe-key" });
   f.body.append(note, fig,
     h("div", { class: "pe-lower" },
       h("div", { class: "pe-skill-col" }, skillHead.el, skillWrap),
@@ -659,9 +659,9 @@ export function mount(el, ctx) {
       const week = opt.layer === "week";
       const stops = Array.from({ length: 9 }, (_, i) => (week ? diverging(i / 4 - 1) : sequential(i / 8)));
       mapNote.replaceChildren(
-        h("span", { class: "pe-key-end" }, week ? `Earlier · ${fmtDay(lo)}` : `${lo.toFixed(1)}`),
+        h("span", { class: "pe-key-end" }, week ? "Earlier" : `${lo.toFixed(1)}`),
         h("span", { class: "pe-key-ramp", style: { background: `linear-gradient(90deg, ${stops.join(", ")})` } }, week ? h("i", { "data-mid": `median ${fmtDay(med)}` }) : null),
-        h("span", { class: "pe-key-end" }, week ? `${fmtDay(hi)} · later` : `${hi.toFixed(1)} per 100k`),
+        h("span", { class: "pe-key-end" }, week ? "Later" : `${hi.toFixed(1)} per 100k`),
       );
     }
   }
