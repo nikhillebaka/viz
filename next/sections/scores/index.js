@@ -19,7 +19,6 @@ import {
 } from "./model.js";
 import { loadMetrics, loadQuick, hasMetrics } from "./data.js";
 import { openDates } from "./dates.js";
-import { detail } from "./detail.js";
 import { calibrationFigure, horizonFigure, anatomyFigure, emphasize, s } from "./figures.js";
 
 let cssLinked = false;
@@ -173,10 +172,8 @@ export function mount(el, ctx) {
     if (id === manifest.baseline) store.set({ sel: setBaseline(st.sel, !st.sel.baseline) });
     else store.set({ sel: isCharted(st.sel, id) ? unchart(st.sel, id) : chartModel(st.sel, id) });
   }
-  function toggleOpen(id) {
-    const open = uiOf(store.get()).open;
-    setUi({ open: open.includes(id) ? open.filter((x) => x !== id) : [...open, id] });
-  }
+  /* a model's page: the model sheet (features/ModelSheet.js, loaded on first use) */
+  function openSheet(id) { import("../../features/ModelSheet.js").then((m) => m.openModel(id, ctx)); }
   function goTo({ date, location }) {
     if (location) store.set({ location });
     if (date) { if (ctx.chart?.goTo) ctx.chart.goTo(date); else store.set({ date }); }
@@ -269,12 +266,11 @@ export function mount(el, ctx) {
   }
 
   function rowEls(r, cols, st, sc, ui) {
-    const open = ui.open.includes(r.id);
     const rank = order.ranks.get(r.id);
     const small = r.active && r.n < SMALL;
     const row = h("div", {
-      class: ["sc-row c-slide-host", r.baseline && "is-base", !r.active && "is-off", small && "is-small", open && "is-open", st.focus === r.id && "is-focus", hover === r.id && "is-hover"],
-      role: "row", tabindex: "0", "data-id": r.id, "aria-expanded": String(open),
+      class: ["sc-row c-slide-host", r.baseline && "is-base", !r.active && "is-off", small && "is-small", st.focus === r.id && "is-focus", hover === r.id && "is-hover"],
+      role: "row", tabindex: "0", "data-id": r.id,
     });
     row.append(h("span", { class: "sc-rank mono", role: "cell" }, rank != null ? String(rank) : ""));
     // the name: the chart's color dot (charted only; a faint ring on hover charts it), name, team
@@ -284,10 +280,10 @@ export function mount(el, ctx) {
       onclick: (e) => { e.stopPropagation(); toggleDot(r.id); },
     });
     const name = h("button", {
-      type: "button", class: "sc-label", tabindex: "-1", "aria-label": `${open ? "Collapse" : "Expand"} ${r.label}`,
-      onclick: (e) => { e.stopPropagation(); toggleOpen(r.id); },
+      type: "button", class: "sc-label", tabindex: "-1", "aria-label": `${r.label} · open its page`,
+      onclick: (e) => { e.stopPropagation(); openSheet(r.id); },
     }, slideText(r.label, "sc-label-text"), r.team ? h("span", { class: "sc-team" }, r.team) : null,
-    h("span", { class: "sc-chev", html: icon.chevronDown }));
+    h("span", { class: "sc-chev", html: icon.right }));
     const glyphs = h("span", { class: "sc-glyphs" });
     if (!r.active) glyphs.append(glyph("sc-g-off", offReason(r)));
     else {
@@ -304,12 +300,7 @@ export function mount(el, ctx) {
     row.addEventListener("pointerleave", () => setHover(null));
     row.addEventListener("click", () => focusModel(r.id));
     row.addEventListener("keydown", (e) => rowKey(e, r));
-    const out = [row];
-    if (open) {
-      const base = rows.find((x) => x.baseline);
-      out.push(detail(r, base, { ctx, scope: sc, baseline: shown?.baseline_model || sc.baseline, goTo }));
-    }
-    return out;
+    return [row];
   }
 
   function glyph(cls, tip, style, text = "") {
@@ -388,13 +379,8 @@ export function mount(el, ctx) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       rowsEls[Math.max(0, Math.min(rowsEls.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))]?.focus();
-    } else if (e.key === "Enter") { e.preventDefault(); toggleOpen(r.id); }
+    } else if (e.key === "Enter") { e.preventDefault(); openSheet(r.id); }
     else if (e.key === " ") { e.preventDefault(); toggleDot(r.id); }
-    else if (e.key === "Escape" && uiOf(store.get()).open.length) {
-      e.stopPropagation();
-      const open = uiOf(store.get()).open;
-      setUi({ open: open.slice(0, -1) });
-    }
   }
 
   /* ---------------- figures ---------------- */
@@ -402,8 +388,8 @@ export function mount(el, ctx) {
   function drawFigures(emphasisOnly = false) {
     const st = store.get(), ui = uiOf(st);
     const list = [...order.ranked];
-    const emph = new Set([...ui.open, st.focus].filter(Boolean));
-    const o = { emph, hover, onHover: (id) => setHover(id), onPick: (id) => { if (!uiOf(store.get()).open.includes(id)) toggleOpen(id); } };
+    const emph = new Set([st.focus].filter(Boolean));
+    const o = { emph, hover, onHover: (id) => setHover(id), onPick: (id) => openSheet(id) };
     figs.hidden = !list.length;
     if (!list.length) return;
     const one = (svg, draw) => { if (!emphasisOnly || !emphasize(svg, emph, hover)) draw(); };
@@ -530,8 +516,36 @@ export function mount(el, ctx) {
   offs.push(() => ro.disconnect());
   request();
 
+  /* What the model sheet reads: the leaderboard's order, a model's row in this scope (from the response
+   * shown when it has the model, else one request of the sheet's own), and the scope line's words. */
+  const sheetCache = new Map();
+  const getJ = (q) => { if (!sheetCache.has(q)) sheetCache.set(q, fetch(`/api/next/metrics?${q}`).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })); return sheetCache.get(q); };
+  ctx.scores = {
+    order: () => [...order.ranked, ...order.unranked].map((r) => r.id),
+    async rowFor(id) {
+      const st = store.get(), sc = scope();
+      const label = (x) => manifest.label(x, [...st.sel.selected, sc.baseline, id]);
+      const team = (x) => { const m = manifest.modelById.get(x); return m && m.team && m.team !== label(x) ? m.team : ""; };
+      const scopeText = [...root.querySelectorAll(".sc-frags .sc-frag")].map((b) => b.textContent.trim()).filter((t) => t && t !== "↓").join(" · ");
+      const ranked = order.ranked.map((r) => r.id);
+      const make = (resp, full) => {
+        const rs = rowsFrom(resp, { ids: [id], baseline: sc.baseline, full, wins: null, pending: false, scale: sc.scale, label, team });
+        const rank = order.ranks.get(id) ?? null;
+        return { row: rs.find((r) => r.id === id), base: rs.find((r) => r.baseline), scope: sc, baseline: resp?.baseline_model || sc.baseline, scopeText, rank, of: rank != null ? ranked.length : null };
+      };
+      const fresh = cur && respKey === cur.key && resp;
+      if (fresh && resp.rankings?.some((r) => r.model_id === id)) return make(resp, respFull);
+      const req = metricsRequest(sc, { target: st.target, selected: [...new Set([...st.sel.selected, id])], allSeasons });
+      const [j, f] = await Promise.all([getJ(req.query), req.full ? getJ(req.full) : null]);
+      return make(j, f);
+    },
+  };
+  // an old link's open=<ids> (expanded rows): the first opens as the model sheet
+  { const was = uiOf(store.get()).open; if (was?.length) { setUi({ open: [] }); openSheet(was[0]); } }
+
   return {
     destroy() {
+      if (ctx.scores?.rowFor) ctx.scores = null;
       dead = true;
       offs.forEach((f) => f());
       previewChart(null);

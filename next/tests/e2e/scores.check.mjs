@@ -1,5 +1,5 @@
 // Scores: the section mounts when scrolled to, ranks real models from /api/next/metrics with the baseline at
-// 1.00, sorts, expands a row into its detail, opens the Dates popover, and logs no errors.
+// 1.00, sorts, opens a model's sheet, opens the Dates popover, and logs no errors.
 // SCORES_SHOTS=<dir> saves screenshots for a visual pass.
 import { join } from "node:path";
 
@@ -39,13 +39,14 @@ export default async function scores(page, t) {
     await page.waitFor(() => /sort=wis/.test(location.search), { timeout: 2000, message: "sort not in the URL" });
   });
 
-  await t.step("expands a row", async () => {
+  await t.step("a name opens the model sheet with its detail", async () => {
     await page.eval(() => document.querySelector("#scores .sc-row[data-id]:not(.is-base):not(.is-off) .sc-label").click());
-    await page.waitFor(() => document.querySelectorAll("#scores .sc-detail .sc-tile").length > 40, { timeout: 20000, message: "no location tiles" });
-    await page.waitFor(() => document.querySelectorAll("#scores .sc-detail .sc-tick-mark").length > 5, { timeout: 20000, message: "no submission ticks" });
-    await page.eval(() => document.querySelector("#scores .sc-detail").scrollIntoView({ block: "center" }));
+    await page.waitFor(() => document.querySelectorAll(".ms-sheet .sc-detail .sc-tile").length > 40, { timeout: 20000, message: "no location tiles" });
+    await page.waitFor(() => document.querySelectorAll(".ms-sheet .sc-detail .sc-tick-mark").length > 5, { timeout: 20000, message: "no submission ticks" });
     await page.frames(3);
     await shot(page, "detail");
+    await page.eval(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    await page.waitFor(() => !document.querySelector(".ms-sheet"), { timeout: 5000, message: "sheet closed" });
   });
 
   await t.step("Dates popover", async () => {

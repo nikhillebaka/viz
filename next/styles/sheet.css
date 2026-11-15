@@ -1,0 +1,41 @@
+/* The model sheet (features/ModelSheet.js): one model's page in a large frosted sheet, like the Guide's.
+ * The detail blocks inside reuse the Scores styles (styles/scores.css). Tokens only. */
+.ms-sheet { height: min(880px, calc(100vh - 2 * var(--inset) - var(--size-control) - var(--gap))); background-color: color-mix(in srgb, var(--surface-raised) 94%, transparent); }
+.ms-sheet .c-float-body { display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.ms-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 var(--space-24) var(--space-32); scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent; }
+
+.ms-head { padding: var(--space-8) 0 var(--space-16); border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.ms-title-row { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.ms-dot { flex: none; width: var(--size-dot); height: var(--size-dot); border-radius: 50%; }
+.ms-title { flex: 1; min-width: 0; margin: 0; font-size: calc(var(--text-title) + 4px); font-weight: var(--weight-strong); letter-spacing: -0.01em; color: var(--ink-primary); }
+.ms-nav { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; }
+.ms-nav-n { font-size: var(--text-axis); color: var(--ink-tertiary); min-width: calc(var(--space-40) + var(--space-4)); text-align: center; }
+.ms-line { margin: var(--space-4) 0 0; font-size: var(--text-small); color: var(--ink-secondary); display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-6); }
+.ms-badge { padding: 0 var(--space-6); border-radius: var(--radius-tag); background: var(--fill-field); font-size: var(--text-micro); color: var(--ink-secondary); }
+.ms-actions { display: flex; gap: var(--space-6); margin-top: var(--space-12); }
+
+.ms-nums { padding: var(--space-16) 0; border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.ms-scope { margin: 0 0 var(--space-12); font-size: var(--text-small); color: var(--ink-tertiary); }
+.ms-num-row { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-32); }
+.ms-num { display: grid; align-content: start; gap: var(--space-2); min-width: calc(var(--space-56) + var(--space-8)); }
+.ms-num-k { font-size: var(--text-micro); font-weight: var(--weight-medium); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-tertiary); }
+.ms-num-v { font-size: var(--text-title); color: var(--ink-primary); }
+.ms-num-s { font-size: var(--text-axis); color: var(--ink-tertiary); }
+.ms-quiet { margin: 0; font-size: var(--text-small); color: var(--ink-tertiary); }
+
+/* the Scores detail blocks, given the sheet's width */
+.ms-blocks .sc-detail { padding: var(--space-16) 0; border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.ms-blocks:empty { display: none; }
+
+.ms-about { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-24) var(--space-40); padding-top: var(--space-16); }
+.ms-block { min-width: 0; }
+.ms-block:first-child:has(.ms-prose) { grid-column: 1 / -1; }
+.ms-prose { margin: 0; max-width: 72ch; font-size: var(--text-body); line-height: 1.6; color: var(--ink-secondary); }
+.ms-dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-6) var(--space-16); margin: 0; font-size: var(--text-small); }
+.ms-dl dt { color: var(--ink-tertiary); }
+.ms-dl dd { margin: 0; color: var(--ink-primary); overflow-wrap: anywhere; }
+.ms-links { margin: var(--space-8) 0 0; display: flex; flex-wrap: wrap; gap: var(--space-12); font-size: var(--text-small); }
+.ms-people { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--space-4); font-size: var(--text-small); color: var(--ink-secondary); }
+.ms-members { margin: var(--space-6) 0 0; display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-12); font-size: var(--text-small); }
+/* the old row's facts line repeats About: not shown here */
+.ms-blocks .sc-block:has(> .sc-facts) { display: none; }

@@ -155,6 +155,9 @@ export function mount(el, ctx) {
     return hubsInfo;
   };
 
+  // a model's name that opens its page (the shared data-model-sheet handler)
+  const modelLink = (el, mid) => { el.dataset.modelSheet = mid; el.title = `${manifest.label(mid)} · details`; return el; };
+
   /* Which models: the selected ones that forecast peaks this round; when none do, every model that does. */
   function choose() {
     const s = store.get();
@@ -437,7 +440,7 @@ export function mount(el, ctx) {
       name = h(has ? "button" : "span", {
         type: has ? "button" : null, class: "pe-name", title: manifest.label(id), "aria-expanded": has ? String(open.has(id)) : null,
         onclick: has ? () => { if (open.has(id)) open.delete(id); else open.add(id); buildRows(); } : null,
-      }, h("span", { class: "pe-chev", "aria-hidden": "true" }, has ? "›" : ""), h("i", { class: "pe-dot", style: rec.color ? { background: rec.color } : null, hidden: !rec.color }), slideText(label, "pe-label"));
+      }, h("span", { class: "pe-chev", "aria-hidden": "true" }, has ? "›" : ""), h("i", { class: "pe-dot", style: rec.color ? { background: rec.color } : null, hidden: !rec.color }), modelLink(slideText(label, "pe-label"), id));
     }
     rec.when = h("canvas", { class: "pe-when" });
     rec.high = h("canvas", { class: "pe-high" });

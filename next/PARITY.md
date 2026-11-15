@@ -36,7 +36,7 @@ intended behaviour is, and the row below says so.
 | Evaluation window popover | Dates popover in the scope line | 3 | at parity |
 | Heatmap view | Heatmap section, sharing the scope | 3 | at parity |
 | Exports, Copy CLI | ↓ menu in the scope line | 3 | at parity |
-| Model detail modal | Expanded leaderboard row; details in the picker | 3 | at parity |
+| Model detail modal | The model sheet: from names everywhere, ↑ ↓ between models, #model/<id> links | 3 | at parity |
 | Spatial map view | Map section | 4 | at parity |
 | Season peak view | Peaks section | 4 | at parity |
 | Ensemble studio | "Combine" on a selection, from the picker | 4 | at parity |

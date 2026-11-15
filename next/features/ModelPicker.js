@@ -306,7 +306,9 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
         h("span", { class: "c-row-sub" }, subLine(manifest, m, label, s.title), miss)),
       h("span", { class: "c-row-check", html: icon.check }));
     const dot = h("button", { type: "button", class: "pk-dot", tabindex: "-1" }, h("i"));
-    const el = h("div", { class: "pk-row c-slide-host", "data-id": id }, dot, name);
+    // its page (the model sheet); opened by the shared data-model-sheet handler
+    const info = h("button", { type: "button", class: "pk-info", tabindex: "-1", "data-model-sheet": id, "aria-label": `${label} · details`, title: "Details" }, "i");
+    const el = h("div", { class: "pk-row c-slide-host", "data-id": id }, dot, name, info);
     rows.set(id, { el, name, dot, miss, label, away: s.kind === "away", k: "", note: "" });
     return el;
   }

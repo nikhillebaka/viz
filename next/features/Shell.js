@@ -114,6 +114,9 @@ export function mountShell(root, ctx) {
     },
   });
   ctx.chart = chart;
+  // model pages: data-model-sheet="<id>" anywhere opens the sheet; #model/<id> opens it on load and on change
+  const sheet = () => import("./ModelSheet.js");
+  sheet().then((m) => { m.installModelLinks(ctx); const id = m.modelHash(); if (id) m.openModel(id, ctx); }).catch(() => {});
   const sections = mountSections(root, ctx);
   // ⋯ bubble (hubs, warnings, the Guide): loaded when idle; the page works without it
   let more = null, gone = false;
@@ -142,6 +145,7 @@ export function mountShell(root, ctx) {
   const stopTime = timeKeys((dir) => chart.step(dir), {
     active: () => { const l = activeLayer(); return !l || l.panel.hasAttribute("data-time-keys"); },
   });
+  offs.push(on(window, "hashchange", () => sheet().then((m) => { const id = m.modelHash(); if (id) m.openModel(id, ctx); })));
   offs.push(stopTime, on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const layer = activeLayer();

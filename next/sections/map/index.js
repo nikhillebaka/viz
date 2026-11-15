@@ -216,7 +216,7 @@ export function mount(el, ctx) {
     aside.replaceChildren(
       h("p", { class: "mp-place" }, "All states"),
       h("p", { class: "mp-meta" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, `${horizon} wk ahead`].filter(Boolean).join(" · ")),
-      h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null }, h("i"), manifest.label(model, candidates()))),
+      h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null, "data-model-sheet": model, title: "Details" }, h("i"), manifest.label(model, candidates()))),
       h("dl", { class: "mp-rows" }, glance.map(([k, v, sub]) => h("div", { class: "mp-row" }, h("dt", null, k), h("dd", null, v, sub ? h("small", null, sub) : null)))),
     );
   }
@@ -271,7 +271,7 @@ export function mount(el, ctx) {
         tedOf() ? fmtDay(parseIso(tedOf())) : null,
         `${horizon} wk ahead`,
       ].filter(Boolean).join(" · ")),
-      h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null }, h("i"), manifest.label(model, candidates()))),
+      h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null, "data-model-sheet": model, title: "Details" }, h("i"), manifest.label(model, candidates()))),
       h("dl", { class: "mp-rows" }, rows),
     );
   }

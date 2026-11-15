@@ -372,7 +372,15 @@ export function mount(el, ctx) {
       readout.show(lay.xs[hit.c] + lay.cellW / 2, lay.ys[hit.r], readoutFor(hit.r, hit.c));
     }),
     on(canvas, "pointerleave", () => { hover = null; cursor.hidden = true; readout.hide(); }),
-    on(canvas, "click", (e) => { const hit = cellAt(e); if (hit) showOnChart(hit.r, hit.c); }),
+    on(canvas, "click", (e) => {
+      const hit = cellAt(e);
+      if (hit) { showOnChart(hit.r, hit.c); return; }
+      // a model row's name: its page
+      if (!lay || view.rows !== "model") return;
+      const rect = canvas.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
+      const r = lay.ys.findIndex((y0) => y >= y0 && y < y0 + ROW_H);
+      if (x < lay.labelW && r >= 0) import("../../features/ModelSheet.js").then((m) => m.openModel(grid.rows[r].key, ctx));
+    }),
   ];
 
   /* A cell's forecast on the chart: its place, its week (snapped to a round) and its model, charted and
