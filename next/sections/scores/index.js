@@ -8,7 +8,7 @@
  * "Wins" counts in. */
 import { h } from "../../lib/dom.js";
 import { openMenu, openPopover, tooltip } from "../../ui/floating.js";
-import { icon, toast } from "../../ui/controls.js";
+import { icon, toast, slideText } from "../../ui/controls.js";
 import { seriesColor } from "../../chart/layout.js";
 import { isCharted, slotOf, chart as chartModel, unchart, setBaseline } from "../../features/selection.js";
 import { scopeOf, setScope, HORIZONS } from "../scope.js";
@@ -273,7 +273,7 @@ export function mount(el, ctx) {
     const rank = order.ranks.get(r.id);
     const small = r.active && r.n < SMALL;
     const row = h("div", {
-      class: ["sc-row", r.baseline && "is-base", !r.active && "is-off", small && "is-small", open && "is-open", st.focus === r.id && "is-focus", hover === r.id && "is-hover"],
+      class: ["sc-row c-slide-host", r.baseline && "is-base", !r.active && "is-off", small && "is-small", open && "is-open", st.focus === r.id && "is-focus", hover === r.id && "is-hover"],
       role: "row", tabindex: "0", "data-id": r.id, "aria-expanded": String(open),
     });
     row.append(h("span", { class: "sc-rank mono", role: "cell" }, rank != null ? String(rank) : ""));
@@ -286,7 +286,7 @@ export function mount(el, ctx) {
     const name = h("button", {
       type: "button", class: "sc-label", tabindex: "-1", "aria-label": `${open ? "Collapse" : "Expand"} ${r.label}`,
       onclick: (e) => { e.stopPropagation(); toggleOpen(r.id); },
-    }, h("span", { class: "sc-label-text" }, r.label), r.team ? h("span", { class: "sc-team" }, r.team) : null,
+    }, slideText(r.label, "sc-label-text"), r.team ? h("span", { class: "sc-team" }, r.team) : null,
     h("span", { class: "sc-chev", html: icon.chevronDown }));
     const glyphs = h("span", { class: "sc-glyphs" });
     if (!r.active) glyphs.append(glyph("sc-g-off", offReason(r)));

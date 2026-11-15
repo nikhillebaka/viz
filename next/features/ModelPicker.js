@@ -11,7 +11,7 @@
  * groupModels(), subLine(), matcher() and panelWidth() are pure, for node tests. */
 import { h, on, tokenNum } from "../lib/dom.js";
 import { openPopover, revealInList } from "../ui/floating.js";
-import { icon } from "../ui/controls.js";
+import { icon, slideText } from "../ui/controls.js";
 import { toIso } from "../lib/scale.js";
 import { fmtDay } from "../lib/format.js";
 import * as S from "./selection.js";
@@ -302,11 +302,11 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     const name = h("button", { type: "button", class: "c-row two pk-name", role: "checkbox", tabindex: "-1" },
       h("span", { class: "c-row-lead" }),
       h("span", { class: "c-row-text" },
-        h("span", { class: "c-row-label" }, label),
+        slideText(label, "c-row-name"),
         h("span", { class: "c-row-sub" }, subLine(manifest, m, label, s.title), miss)),
       h("span", { class: "c-row-check", html: icon.check }));
     const dot = h("button", { type: "button", class: "pk-dot", tabindex: "-1" }, h("i"));
-    const el = h("div", { class: "pk-row", "data-id": id }, dot, name);
+    const el = h("div", { class: "pk-row c-slide-host", "data-id": id }, dot, name);
     rows.set(id, { el, name, dot, miss, label, away: s.kind === "away", k: "", note: "" });
     return el;
   }

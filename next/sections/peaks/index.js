@@ -12,6 +12,7 @@ import { seriesColor } from "../../chart/layout.js";
 import { slotOf, isCharted } from "../../features/selection.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { poolWeeks, poolSize } from "./pool.js";
+import { slideText } from "../../ui/controls.js";
 import {
   h, on, linkStyle, frame, fragment, setLine, getJson, query, isAbort, sequential, inkOn, resetColors, places,
   fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
@@ -417,11 +418,11 @@ export function mount(el, ctx) {
       name = h(has ? "button" : "span", {
         type: has ? "button" : null, class: "pe-name", title: manifest.label(id), "aria-expanded": has ? String(open.has(id)) : null,
         onclick: has ? () => { if (open.has(id)) open.delete(id); else open.add(id); buildRows(); } : null,
-      }, h("span", { class: "pe-chev", "aria-hidden": "true" }, has ? "›" : ""), h("i", { class: "pe-dot", style: rec.color ? { background: rec.color } : null, hidden: !rec.color }), h("span", { class: "pe-label" }, label));
+      }, h("span", { class: "pe-chev", "aria-hidden": "true" }, has ? "›" : ""), h("i", { class: "pe-dot", style: rec.color ? { background: rec.color } : null, hidden: !rec.color }), slideText(label, "pe-label"));
     }
     rec.when = h("canvas", { class: "pe-when" });
     rec.high = h("canvas", { class: "pe-high" });
-    const el2 = h("div", { class: ["pe-grid pe-row", `is-${kind}`], role: "listitem", "data-id": id || "" }, name, rec.when, rec.high, G.final ? rightCell(rec) : "");
+    const el2 = h("div", { class: ["pe-grid pe-row c-slide-host", `is-${kind}`], role: "listitem", "data-id": id || "" }, name, rec.when, rec.high, G.final ? rightCell(rec) : "");
     recs.set(el2, rec); rec.el = el2;
     return el2;
   }

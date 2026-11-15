@@ -298,3 +298,12 @@ button.c-section-title:hover { color: var(--ink-secondary); }
 .c-toast.is-error .c-toast-icon { color: var(--status-error); }
 .c-toast:not(:has(.c-toast-icon)) { padding-left: var(--space-16); }
 .c-toast-action { color: var(--accent); font-weight: var(--weight-strong); }
+
+/* ---------- long names (slideText): the start shows, fading at the cut; hover glides to the end ---------- */
+.c-slide { display: block; min-width: 0; overflow: hidden; white-space: nowrap; }
+.c-slide-in { display: inline-block; transition: transform var(--dur-move) var(--ease-out); }
+.c-slide { --fade: var(--space-12); }
+.c-slide.is-over { mask-image: linear-gradient(to right, #000 calc(100% - var(--fade)), transparent); }
+.c-slide.is-sliding { mask-image: linear-gradient(to right, transparent, #000 var(--fade)); }
+.c-slide.is-sliding > .c-slide-in { transform: translateX(var(--slide)); }
+@media (prefers-reduced-motion: reduce) { .c-slide-in { transition: none; } }

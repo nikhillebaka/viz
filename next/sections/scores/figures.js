@@ -21,6 +21,33 @@ export function s(tag, attrs = {}, ...kids) {
   return el;
 }
 
+/* A label in at most `max` px. One that fits is plain text. A longer one shows its start, fading at
+ * the cut, inside a clipped box; hovering its row (or the row's line in the table) glides it to its end
+ * (the same rule as slideText for HTML names). anchor "end": the box ends at x. */
+let slideN = 0;
+export function slideLabel(svg, parent, { x, y, text, max, anchor = "start", cls, style = null }) {
+  const t = s("text", { x, y, "text-anchor": anchor, "dominant-baseline": "middle", class: cls, text, style });
+  parent.append(t);
+  const len = t.getComputedTextLength();
+  if (!(len > max) || max < 24) return t;
+  t.remove();
+  const H = 16, x0 = anchor === "end" ? x - max : x, id = `scs${++slideN}`;
+  const defs = svg.querySelector(":scope > defs") || svg.insertBefore(s("defs"), svg.firstChild);
+  for (const [k, a, b] of [["r", max - 12, max], ["l", 12, 0]]) {
+    const g = s("linearGradient", { id: `${id}${k}g`, gradientUnits: "userSpaceOnUse", x1: a, x2: b, y1: 0, y2: 0 });
+    g.append(s("stop", { offset: 0, "stop-color": "#fff" }), s("stop", { offset: 1, "stop-color": "#fff", "stop-opacity": 0 }));
+    const m = s("mask", { id: `${id}${k}`, maskUnits: "userSpaceOnUse", x: 0, y: 0, width: max, height: H });
+    m.append(s("rect", { x: 0, y: 0, width: max, height: H, fill: `url(#${id}${k}g)` }));
+    defs.append(g, m);
+  }
+  const box = s("svg", { x: x0, y: y - H / 2, width: max, height: H, overflow: "hidden", class: "sc-slide", style: `--slide:${(max - len).toFixed(1)}px;--ml:url(#${id}l)` });
+  const inner = s("g", { mask: `url(#${id}r)`, class: "sc-slide-mask" });
+  inner.append(s("text", { x: 0, y: H / 2, "dominant-baseline": "middle", class: cls, text, style }));
+  box.append(inner);
+  parent.append(box);
+  return box;
+}
+
 const LABEL_GAP = 13;      // px between stacked line-end labels (one --text-chart line)
 const path = (pts) => pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
 
@@ -48,7 +75,7 @@ export function lineFigure(svg, o) {
   svg.dataset.named = "";
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   if (!w || !h) return;
-  const pad = { l: 36, r: 112, t: 8, b: 22 };
+  const pad = { l: 36, r: 150, t: 8, b: 22 }; // the right margin holds the end labels, never past the figure
   const tf = o.y.log ? Math.log : (v) => v;
   const X = linear(o.x.domain, [pad.l, w - pad.r]);
   const Y = linear(o.y.domain.map(tf), [h - pad.b, pad.t]);
@@ -78,15 +105,14 @@ export function lineFigure(svg, o) {
   svg.append(lines);
   const room = Math.floor((h - pad.t - pad.b) / LABEL_GAP) + 1;
   const named = ends.filter((e) => e.em || (o.labels !== "emph" && ends.length <= room));
+  svg.append(labels); // in the document first: slideLabel measures text
   for (const e of spread(named.map((e) => ({ ...e })), pad.t, h - pad.b)) {
     const g = s("g", { class: ["sc-end", e.em && "is-emph", e.se.base && "is-base"], "data-id": e.se.id });
     let tx = e.x + 8;
     if (e.se.dot) { g.append(s("circle", { cx: tx + 3, cy: e.y, r: 3, style: `fill:${e.se.dot}` })); tx += 10; }
-    const t = s("text", { x: tx, y: e.y, "dominant-baseline": "middle", class: "sc-end-label", text: e.se.label });
-    g.append(t);
     labels.append(g);
+    slideLabel(svg, g, { x: tx, y: e.y, text: e.se.label, max: w - tx - 2, cls: "sc-end-label" });
   }
-  svg.append(labels);
   svg.dataset.named = named.length === ends.length ? "all" : "";
   svg.classList.toggle("has-hover", hovering);
   wire(svg, o);
@@ -170,7 +196,7 @@ export function horizonFigure(svg, rows, o) {
 export function anatomyFigure(svg, rows, o) {
   const w = svg.clientWidth || svg.parentElement.clientWidth;
   const list = rows.filter((r) => r.active && r.comp.spread != null);
-  const bar = 6, gap = 8, pad = { l: 120, r: 48, t: 4, b: 22 };
+  const bar = 6, gap = 8, pad = { l: 150, r: 48, t: 4, b: 22 };
   const h = Math.max(svg.clientHeight, pad.t + pad.b + list.length * (bar + gap));
   svg.replaceChildren();
   svg.dataset.named = "";
@@ -193,7 +219,8 @@ export function anatomyFigure(svg, rows, o) {
     const em = r.id === o.hover || (!hovering && o.emph.has(r.id));
     const g = s("g", { class: ["sc-series", "sc-bar", em && "is-emph", r.baseline && "is-base"], "data-id": r.id });
     g.append(s("rect", { x: 0, y: y0 - gap / 2, width: w, height: bar + gap, class: "sc-hit-rect" }));
-    g.append(s("text", { x: pad.l - 8, y: y0 + bar / 2, "text-anchor": "end", "dominant-baseline": "middle", class: "sc-bar-label", text: r.label }));
+    svg.append(g);
+    slideLabel(svg, g, { x: pad.l - 8, y: y0 + bar / 2, text: r.label, max: pad.l - 12, anchor: "end", cls: "sc-bar-label" });
     let x = 0;
     for (const [k, cls] of [["spread", "sc-c1"], ["over", "sc-c2"], ["under", "sc-c3"]]) {
       const v = (r.comp[k] || 0) / (o.share ? T : 1);
@@ -201,7 +228,6 @@ export function anatomyFigure(svg, rows, o) {
       x += v;
     }
     if (!o.share) g.append(s("text", { x: X(x) + 6, y: y0 + bar / 2, "dominant-baseline": "middle", class: "sc-tick", text: fmtScore(T) }));
-    svg.append(g);
   });
   svg.dataset.named = "all";
   svg.classList.toggle("has-hover", hovering);

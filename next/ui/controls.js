@@ -322,3 +322,44 @@ export function toast(message, { action = null, duration, tone = "ok" } = {}) {
   }
   return { dismiss };
 }
+
+/* ---------------------------------------------------------------- long names
+ * A name too long for its room shows its start, fading out at the cut. Hovering anything that holds it
+ * (the row, by default the nearest .c-slide-host) glides the whole name left until its end is in view,
+ * quickly, so the part that differs between similar names (often the end: "…_otid10" vs "…_otid50")
+ * is one hover away. Leaving glides it back. Names that fit do nothing. One delegated listener; the
+ * width is measured only on hover. Not used on the fan chart (canvas labels have their own rules). */
+let slideOn = false;
+/**
+ * @param {string} text
+ * @param {string} [className] extra classes for the outer span
+ * @returns {HTMLSpanElement} <span class="c-slide"><span class="c-slide-in">text</span></span>
+ */
+export function slideText(text, className = "") {
+  if (!slideOn) { slideOn = true; installSlide(); }
+  const el = h("span", { class: ["c-slide", className], title: text }, h("span", { class: "c-slide-in" }, text));
+  // marks names that overflow (the fade at the cut); runs only when sizes change
+  (overRO ||= new ResizeObserver((entries) => {
+    for (const { target: t } of entries) t.classList.toggle("is-over", t.firstChild.scrollWidth - t.clientWidth > 1);
+  })).observe(el);
+  return el;
+}
+let overRO = null;
+function installSlide() {
+  const hostOf = (t) => t?.closest?.(".c-slide-host, .c-slide");
+  let cur = null;
+  const set = (host) => {
+    if (host === cur) return;
+    if (cur) for (const el of cur.matches(".c-slide") ? [cur] : cur.querySelectorAll(".c-slide")) el.classList.remove("is-sliding");
+    cur = host;
+    if (!host) return;
+    for (const el of host.matches(".c-slide") ? [host] : host.querySelectorAll(".c-slide")) {
+      const d = el.firstChild.scrollWidth - el.clientWidth;
+      if (d > 1) { el.style.setProperty("--slide", `${-Math.ceil(d)}px`); el.classList.add("is-sliding"); }
+    }
+  };
+  document.addEventListener("pointerover", (e) => set(hostOf(e.target) || null), { passive: true });
+  document.addEventListener("pointerleave", () => set(null), { passive: true });
+  // keyboard: a focused row slides too
+  document.addEventListener("focusin", (e) => { const h0 = hostOf(e.target); if (h0) set(h0); });
+}
