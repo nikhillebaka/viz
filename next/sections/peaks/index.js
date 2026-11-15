@@ -14,7 +14,7 @@ import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { poolWeeks, poolSize } from "./pool.js";
 import { slideText } from "../../ui/controls.js";
 import {
-  h, on, linkStyle, frame, fragment, setLine, getJson, query, isAbort, sequential, inkOn, resetColors, places,
+  h, on, linkStyle, frame, fragment, setLine, getJson, query, isAbort, sequential, diverging, inkOn, resetColors, places,
   fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
 } from "../shared.js";
 
@@ -196,10 +196,11 @@ export function mount(el, ctx) {
     if (o?.value != null) obs = o.final ? ["Observed peak ", h("b", null, V.value(o.value)), ` · ${fmtDay(T(o.date))}`]
       : ["Peak so far ", h("b", null, V.value(o.value)), ` · ${fmtDay(T(o.date))} · provisional`];
     const pool = pooled(), out = [parts.join(" · "), " · ", ...obs];
-    if (shown.fallback) out.push(" · none selected · all models");
+    // when the selection forecasts no peaks here, say so plainly: these are other models
+    if (shown.fallback) out.push(store.get().sel.selected.length ? ` · yours don't forecast peaks · the ${shown.length} that do` : ` · the ${shown.length} that forecast peaks`);
     const tm = pool?.timing, sz = pool?.size;
     const when = tm?.i50?.[0] && tm.i50[1] ? (tm.i50[0] === tm.i50[1] ? fmtDay(T(tm.i50[0])) : `${fmtDay(T(tm.i50[0]))} – ${fmtDay(T(tm.i50[1]))}`) : null;
-    const high = sz?.i50 ? `${V.value(sz.i50[0])}–${V.value(sz.i50[1])}` : null;
+    const high = sz?.i50 ? (V.value(sz.i50[0]) === V.value(sz.i50[1]) ? V.value(sz.i50[0]) : `${V.value(sz.i50[0])}–${V.value(sz.i50[1])}`) : null;
     if (when || high) out.push(" · ", h("span", { class: "pe-consensus" }, `Most likely ${[when, high].filter(Boolean).join(" · ")}`));
     note.replaceChildren(...out);
   }
@@ -335,7 +336,8 @@ export function mount(el, ctx) {
     const cur = curves.curves.find((c) => c.season === resp.season);
     const start = cur?.points?.[0] ? T(cur.points[0].date) - (cur.points[0].week - 1) * WEEK : null;
     if (start == null) return [];
-    return curves.curves.filter((c) => c.season !== resp.season && c.points?.length).slice(0, 3).map((c) => ({
+    return curves.curves.filter((c) => String(c.season) < String(resp.season) && c.points?.length)
+      .sort((a, b) => String(b.season).localeCompare(String(a.season))).slice(0, 3).map((c) => ({
       label: manifest.seasonById.get(c.season)?.label ?? c.season,
       pts: c.points.map((p) => ({ t: start + (p.week - 1) * WEEK, v: p.value })).filter((p) => fin(p.v) && p.t >= d0 && p.t <= d1),
     })).filter((c) => c.pts.length > 1);
@@ -429,11 +431,13 @@ export function mount(el, ctx) {
 
   function rightCell(rec) {
     const sc = rec.kind === "pool" ? null : rec.data.scores;
-    const signed = (v, d) => `${v > 0 ? "+" : v < 0 ? "−" : "±"}${Math.abs(v).toFixed(d)}`;
+    // the sign of what is shown: −0.3% reads "0%", not "−0%"
+    const signed = (v, d) => { const r = Math.abs(v).toFixed(d); return `${+r === 0 ? "±" : v > 0 ? "+" : "−"}${r}`; };
     const cov = (k) => {
       const a = sc?.timing?.[k], b = sc?.size?.[k];
       if (a == null && b == null) return h("span", { class: "is-none" }, "–");
-      const t = a && b ? "both" : a ? "when" : b ? "high" : "neither";
+      // which parts of the observed peak the interval caught: its week, its size, both, or neither
+      const t = a && b ? "both" : a ? "week" : b ? "size" : "neither";
       return h("span", { class: a && b ? "is-hit" : !a && !b ? "is-miss" : null }, t);
     };
     const we = sc?.timing?.week_error, pe = sc?.size?.pct_error;
@@ -638,15 +642,18 @@ export function mount(el, ctx) {
     const vals2 = [...vals.values()];
     mapGrid.hidden = !vals2.length;
     const lo = Math.min(...vals2), hi = Math.max(...vals2);
+    // peak week: earlier or later than the typical (median) state, blue to orange; size: low to high
+    const sorted = [...vals2].sort((a, b) => a - b), med = sorted[Math.floor(sorted.length / 2)];
+    const span = Math.max(med - lo, hi - med) || 1;
     for (const [abbr, b] of tiles) {
       const v = vals.get(abbr), has = fin(v);
-      const fill = has ? sequential(hi > lo ? (v - lo) / (hi - lo) : 0.5) : "";
+      const fill = !has ? "" : opt.layer === "week" ? diverging((v - med) / span) : sequential(hi > lo ? (v - lo) / (hi - lo) : 0.5);
       b.classList.toggle("has-value", has);
       b.classList.toggle("is-here", abbr === here);
       b.style.background = fill; b.style.color = has ? inkOn(fill) : "";
       b.lastChild.textContent = has ? (opt.layer === "week" ? fmtDay(v) : v.toFixed(1)) : "";
     }
-    mapNote.textContent = vals2.length ? (opt.layer === "week" ? `Earliest ${fmtDay(lo)} · latest ${fmtDay(hi)}` : `${lo.toFixed(1)}–${hi.toFixed(1)} per 100k`) : id ? "No peak map for this round" : "";
+    mapNote.textContent = vals2.length ? (opt.layer === "week" ? `Median ${fmtDay(med)} · earlier blue, later orange · ${fmtDay(lo)} – ${fmtDay(hi)}` : `${lo.toFixed(1)}–${hi.toFixed(1)} per 100k`) : id ? "No peak map for this round" : "";
   }
 
   // ---------------------------------------------------------------- reacting

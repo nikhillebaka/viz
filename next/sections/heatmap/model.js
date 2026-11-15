@@ -37,6 +37,32 @@ const M = {
 };
 export const METRICS = Object.freeze(M);
 
+/**
+ * Named views: the questions people bring, each a ready combination of axes and metric (old viz had
+ * presets too). Scores come first: this is an evaluation tool. Anything else is "Custom" (the axes and
+ * the swap stay available).
+ * @param {{ model?: string, counts: boolean }} o model: the model "One model" shows
+ */
+export function presets({ model = null, counts = true } = {}) {
+  return [
+    { id: "place", label: "Scores by place", v: { rows: "location", cols: "model", metric: "relwis" } },
+    { id: "week", label: "Scores by week", v: { rows: "model", cols: "date", metric: "relwis" } },
+    { id: "horizon", label: "Scores by horizon", v: { rows: "model", cols: "horizon", metric: "relwis" } },
+    { id: "observed", label: "Observed by place", v: { rows: "location", cols: "date", model: "truth", metric: counts ? "rate" : "count" } },
+    model ? { id: "model", label: "One model by place", v: { rows: "location", cols: "date", model, metric: "error" } } : null,
+  ].filter(Boolean);
+}
+/** The named view a view is (rows, columns, metric family and model), else "custom". */
+export function presetOf(v) {
+  if (v.rows === "location" && v.cols === "model") return "place";
+  if (v.rows === "model" && v.cols === "date") return "week";
+  if (v.rows === "model" && v.cols === "horizon") return "horizon";
+  if (v.rows === "location" && v.cols === "date") return v.model === "truth" ? "observed" : "model";
+  return "custom";
+}
+/** The view a fresh page opens on. */
+export const DEFAULT_VIEW = Object.freeze({ rows: "location", cols: "model", metric: "relwis" });
+
 /** @returns {boolean} models are one of the axes */
 export const modelAxis = (v) => v.rows === "model" || v.cols === "model";
 /** @returns {boolean} location × weeks (either way), where one model or the observed data is shown */
@@ -62,8 +88,8 @@ export function metricsFor(v, counts) {
  */
 export function sortsFor(rows) {
   if (rows === "location") return [
-    { value: "region", label: "Region" }, { value: "peak", label: "Peak week" }, { value: "magnitude", label: "Highest first" },
-    { value: "population", label: "Population" }, { value: "alpha", label: "A–Z" },
+    { value: "region", label: "By region" }, { value: "peak", label: "By peak week" }, { value: "magnitude", label: "Highest first" },
+    { value: "population", label: "By population" }, { value: "alpha", label: "A–Z" },
   ];
   if (rows === "model") return [{ value: "score", label: "Best first" }, { value: "alpha", label: "A–Z" }];
   return [];
@@ -248,5 +274,11 @@ export function buildGrid(resp, v, o = {}) {
 
   let count = 0;
   for (const x of values) if (fin(x)) count++;
-  return { rows, cols, values, meta, base, inactive: resp.inactive_models || [], tone, count };
+  // what the colours mean, for the legend: the ramp's kind and the values at its ends (and middle)
+  const legend = v.scale === "row" ? { kind: "seq", lo: "Low", hi: "High", note: "each row its own scale" }
+    : metric.kind === "rel" ? { kind: "div", lo: "½× · better", mid: "1.00", hi: "2× · worse", note: "vs baseline" }
+    : metric.kind === "cov" ? { kind: "div", lo: "over 95%", mid: "95%", hi: "75% or less" }
+    : metric.kind === "signed" ? { kind: "div", lo: v.metric === "trend" ? -50 : -gMax, mid: 0, hi: v.metric === "trend" ? 50 : gMax }
+    : { kind: "seq", lo: 0, hi: gMax };
+  return { rows, cols, values, meta, base, inactive: resp.inactive_models || [], tone, count, legend };
 }

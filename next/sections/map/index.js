@@ -203,6 +203,19 @@ export function mount(el, ctx) {
     );
   }
 
+  // the map at a glance, beside it while no state is hovered (and the chart is on the whole country)
+  let glance = [];
+  function overview() {
+    const s = store.get(), sl = slotOf(s.sel, model);
+    const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
+    aside.replaceChildren(
+      h("p", { class: "mp-place" }, "All states"),
+      h("p", { class: "mp-meta" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, `${horizon} wk ahead`].filter(Boolean).join(" · ")),
+      h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null }, h("i"), manifest.label(model, candidates()))),
+      h("dl", { class: "mp-rows" }, glance.map(([k, v, sub]) => h("div", { class: "mp-row" }, h("dt", null, k), h("dd", null, v, sub ? h("small", null, sub) : null)))),
+    );
+  }
+
   function drawSummary() {
     let top = null, rising = 0, falling = 0, steady = 0, total = 0, n = 0;
     const rateId = counts() ? "f_rate" : "f_count";
@@ -213,22 +226,21 @@ export function mount(el, ctx) {
       if (horizon > 0 && fin(e.trend_pct)) { if (e.trend_pct > 5) rising++; else if (e.trend_pct < -5) falling++; else steady++; }
       if (counts() && fin(e.median)) { total += e.median; n++; }
     }
-    const parts = [];
-    if (top) parts.push(["Highest", `${top.abbr} ${fmt(rateId, top.v)}${counts() ? " / 100k" : ""}`]);
-    if (horizon > 0 && rising + falling + steady) parts.push(["Rising", rising], ["Falling", falling], ["Steady", steady]);
-    if (n) parts.push([`Sum of ${n}`, vf().value(total)]);
-    summary.replaceChildren(...parts.flatMap(([k, v], i) => [i ? " · " : "", `${k} `, h("b", null, String(v))]));
+    glance = [];
+    if (n) glance.push(["Total forecast", vf().value(total), `sum of ${n} states`]);
+    if (top) glance.push(["Highest", `${P.byAbbr.get(top.abbr)?.name ?? top.abbr}`, `${fmt(rateId, top.v)}${counts() ? " per 100k" : ""}`]);
+    if (horizon > 0 && rising + falling + steady) {
+      glance.push(["Rising", String(rising), "more than 5% above now"], ["Falling", String(falling), "more than 5% below now"], ["Steady", String(steady)]);
+    }
+    summary.replaceChildren();
   }
 
   /* The readout beside the map: the hovered state, else the chart's location, else the highest. */
   function inspect() {
     if (!data || !model) { aside.replaceChildren(); return; }
     const s = store.get(), here = P.abbrOf(s.location);
-    let abbr = hoverAbbr || (tiles.has(here) ? here : null);
-    if (!abbr) {
-      const id = layerOf().id;
-      abbr = [...tiles.keys()].reduce((a, b) => ((valueAt(b, id) || -Infinity) > (valueAt(a, id) || -Infinity) ? b : a), [...tiles.keys()][0]);
-    }
+    const abbr = hoverAbbr || (tiles.has(here) ? here : null);
+    if (!abbr) { overview(); return; }
     const st = stateOf(abbr), loc = P.byAbbr.get(abbr), e = entry(abbr), V = vf();
     const truth = st?.truth?.[tedOf()];
     const rows = [];

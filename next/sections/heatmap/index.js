@@ -12,7 +12,7 @@ import {
   h, on, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
   resetColors, HHS, places, fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange, viewState,
 } from "../shared.js";
-import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, normalizeView, swapView, requestFor, buildGrid } from "./model.js";
+import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, normalizeView, swapView, requestFor, buildGrid, presets, presetOf, DEFAULT_VIEW } from "./model.js";
 
 const KEY = "viz.heatmap";
 const ROW_H = 20, GAP = 2, GROUP_GAP = 6, TOP = 22, LABEL_PAD = 16;
@@ -26,12 +26,12 @@ export function mount(el, ctx) {
   const f = frame(el, "Heatmap", "heatmap");
   const counts = () => manifest.targetById.get(store.get().target)?.scale !== "proportion";
   const vs = viewState(store, "heatmap", KEY);
-  let view = normalizeView(vs.initial, counts());
+  let view = normalizeView(Object.keys(vs.initial).length ? vs.initial : DEFAULT_VIEW, counts());
   let resp = null, grid = null, lay = null, reqKey = "", hover = null;
   const slot = {};
 
   // ---------------------------------------------------------------- the control line
-  const save = () => vs.write(view, JSON.stringify(view) === JSON.stringify(normalizeView({}, counts())));
+  const save = () => vs.write(view, JSON.stringify(view) === JSON.stringify(normalizeView(DEFAULT_VIEW, counts())));
   const setView = (patch) => { view = normalizeView({ ...view, ...patch }, counts()); save(); syncLine(); load(); };
   const modelChoices = () => {
     const s = store.get(), ids = [...s.sel.selected];
@@ -39,7 +39,13 @@ export function mount(el, ctx) {
     return [{ value: "truth", label: "Observed" }, ...ids.map((id) => ({ value: id, label: manifest.label(id, ids) }))];
   };
   const axisItems = (axes) => axes.map((a) => ({ value: a, label: AXIS_LABEL[a] }));
+  // the model "One model by place" shows: the focused one, else the first on the chart, else the first selected
+  const oneModel = () => { const s = store.get(); return (s.focus && s.sel.selected.includes(s.focus) ? s.focus : null) ?? s.sel.charted[0]?.id ?? s.sel.selected[0] ?? null; };
+  const presetList = () => presets({ model: view.model !== "truth" && modelChoices().some((c) => c.value === view.model) ? view.model : oneModel(), counts: counts() });
   const F = {
+    view: fragment({ label: "View", title: "View", items: () => [...presetList().map((p) => ({ value: p.id, label: p.label })), { value: "custom", label: "Custom", disabled: presetOf(view) !== "custom" }],
+      value: () => presetOf(view), isDefault: () => presetOf(view) === "place",
+      onSelect: (id) => { const p = presetList().find((x) => x.id === id); if (p) setView({ ...p.v, sort: null }); } }),
     rows: fragment({ label: "Rows", title: "Rows", items: () => axisItems(Object.keys(AXES)), value: () => view.rows,
       isDefault: () => view.rows === "location", onSelect: (rows) => setView({ rows, sort: null }) }),
     cols: fragment({ label: "Columns", title: "Columns", items: () => axisItems(AXES[view.rows]), value: () => view.cols,
@@ -52,7 +58,7 @@ export function mount(el, ctx) {
       value: () => view.metric, isDefault: () => view.metric === metricsFor(view, counts())[0], onSelect: (metric) => setView({ metric }) }),
     sort: fragment({ label: "Sort", title: "Sort rows", items: () => sortsFor(view.rows), value: () => view.sort,
       isDefault: () => view.sort === sortsFor(view.rows)[0]?.value, onSelect: (sort) => setView({ sort }) }),
-    scale: fragment({ label: "Scale", title: "Scale", items: () => [{ value: "none", label: "One scale" }, { value: "row", label: "Per row" }],
+    scale: fragment({ label: "Scale", title: "Colour scale", items: () => [{ value: "none", label: "One colour scale" }, { value: "row", label: "Each row its own scale", short: "Each row scaled" }],
       value: () => view.scale, isDefault: () => view.scale === "none", onSelect: (scale) => setView({ scale }) }),
   };
   F.cols.dataset.sep = "×";
@@ -62,8 +68,10 @@ export function mount(el, ctx) {
   function syncLine() {
     if (view.model !== "truth" && !modelChoices().some((c) => c.value === view.model)) view = normalizeView({ ...view, model: "truth" }, counts());
     Object.values(F).forEach((b) => b.sync());
+    const custom = presetOf(view) === "custom";
     setLine(f.line, [
-      F.rows, F.cols,
+      F.view,
+      custom && F.rows, custom && F.cols,
       !modelAxis(view) && F.model,
       waveView(view) && view.model !== "truth" && F.horizon,
       F.metric,
@@ -78,8 +86,9 @@ export function mount(el, ctx) {
   const canvas = h("canvas", { class: "hm-canvas", role: "img" });
   const cursor = h("div", { class: "hm-cursor", hidden: true });
   const foot = h("p", { class: "hm-foot" });
+  const key = h("div", { class: "hm-key" });
   fig.append(canvas, cursor);
-  f.body.append(fig, foot);
+  f.body.append(key, fig, foot);
   const readout = pointerReadout(fig);
 
   // ---------------------------------------------------------------- loading
@@ -90,7 +99,12 @@ export function mount(el, ctx) {
     if (!sc.seasons.length) { none("No season in scope"); return; }
     const models = modelAxis(view) ? withBaseline(s.sel.selected) : null;
     // the server scores every model when given none: never ask for that
-    if (modelAxis(view) && !models) { none("No models selected"); return; }
+    if (modelAxis(view) && !models) {
+      none("No models selected");
+      const obs = presetList().find((p) => p.id === "observed");
+      f.empty("No models selected", () => setView({ ...obs.v, sort: null }), "Observed by place");
+      return;
+    }
     const p = requestFor(view, { target: s.target, seasons: sc.seasons, place: sc.place, locationAbbr: P.abbrOf(s.location), models });
     const key = query(p);
     if (key === reqKey && resp && !force) { if (soft && grid) redraw(); else rebuild(); return; }
@@ -131,7 +145,22 @@ export function mount(el, ctx) {
     draw();
   }
 
+  // the legend: what the colours mean in this view, one quiet line above the grid
+  function legendLine() {
+    const L = grid.legend, label = (x) => (typeof x === "number" ? fmtMetric(view.metric, x) : x);
+    const stops = Array.from({ length: 9 }, (_, i) => (L.kind === "div" ? diverging(i / 4 - 1) : sequential(L.kind === "seq" && typeof L.hi === "number" ? Math.sqrt(i / 8) : i / 8)));
+    key.replaceChildren(
+      h("span", { class: "hm-key-label" }, METRICS[view.metric].label),
+      h("span", { class: "hm-key-num" }, label(L.lo)),
+      h("span", { class: "hm-key-ramp", style: { background: `linear-gradient(90deg, ${stops.join(", ")})` } }, L.mid != null ? h("i", { "data-mid": label(L.mid) }) : null),
+      h("span", { class: "hm-key-num" }, label(L.hi)),
+      L.note ? h("span", { class: "hm-key-label" }, L.note) : null,
+      h("span", { class: "hm-key-none" }, h("i"), "no value"),
+    );
+  }
+
   function footer() {
+    legendLine();
     const off = grid.inactive;
     if (!off.length) { foot.replaceChildren(); foot.title = ""; return; }
     const names = off.slice(0, 4).map((m) => manifest.label(m.id, off.map((x) => x.id)));
@@ -173,15 +202,18 @@ export function mount(el, ctx) {
     const dots = view.rows === "model";
     const labelW = Math.min(220, Math.max(40, ...rowText.map((t) => measure(t, rowFont)))) + (dots ? 14 : 0) + LABEL_PAD;
     const breaks = (arr) => arr.reduce((n, x, i) => n + (i && x.group !== arr[i - 1].group ? 1 : 0), 0);
-    const cellW = Math.max(3, Math.min(nC <= 8 ? 88 : 44, Math.floor((width - labelW - breaks(grid.cols) * GROUP_GAP) / nC)));
+    // a few model columns: wide cells with their names set flat above them (easy to read); many: narrow
+    // cells with the names turned on their side
+    const flat = view.cols === "model" && nC <= 8;
+    const cellW = Math.max(3, Math.min(flat ? 132 : nC <= 8 ? 88 : 44, Math.floor((width - labelW - breaks(grid.cols) * GROUP_GAP) / nC)));
     const colText = grid.cols.map((c) => shortCol(view.cols, c.key, grid.ids));
-    const top = view.cols === "model" ? Math.min(150, Math.max(...colText.map((t) => measure(t, colFont)))) + 12 : TOP;
+    const top = view.cols === "model" && !flat ? Math.min(150, Math.max(...colText.map((t) => measure(t, colFont)))) + 12 : TOP;
     const xs = [], ys = [];
     let x = labelW;
     grid.cols.forEach((c, i) => { if (i && c.group !== grid.cols[i - 1].group) x += GROUP_GAP; xs.push(x); x += cellW; });
     let y = top;
     grid.rows.forEach((r, i) => { if (i && r.group !== grid.rows[i - 1].group) y += GROUP_GAP; ys.push(y); y += ROW_H; });
-    return { width, height: y + GAP, labelW, cellW, top, xs, ys, rowText, colText, rowFont, colFont, nR, nC, right: x };
+    return { width, height: y + GAP, labelW, cellW, top, xs, ys, rowText, colText, rowFont, colFont, nR, nC, right: x, flat };
   }
 
   function draw() {
@@ -228,6 +260,9 @@ export function mount(el, ctx) {
         const t = parseIso(c.key), m = new Date(t).getUTCMonth();
         if (m !== lastMonth) { g.textAlign = "left"; g.fillText(fmtMonth(t), L.xs[i], L.top / 2); lastMonth = m; }
       });
+    } else if (view.cols === "model" && L.flat) {
+      g.textAlign = "center";
+      grid.cols.forEach((c, i) => g.fillText(clip(L.colText[i], cw - 6, L.colFont, measure), L.xs[i] + cw / 2, L.top / 2));
     } else if (view.cols === "model") {
       g.save(); g.textAlign = "left";
       grid.cols.forEach((c, i) => {

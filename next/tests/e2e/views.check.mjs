@@ -42,7 +42,7 @@ export default async function views(page, t) {
     await page.frames(2);
     const pt = await page.eval(() => {
       const c = document.querySelector("#heatmap .hm-canvas"), r = c.getBoundingClientRect();
-      return { x: r.left + r.width * 0.6, y: r.top + 51 };
+      return { x: r.left + 270, y: r.top + 32 }; // a cell in the first column, first row (any view)
     });
     await page.mouse.move(pt.x, pt.y);
     await page.frames(2);

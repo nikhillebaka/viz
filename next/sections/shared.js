@@ -24,7 +24,7 @@ export function linkStyle(name) {
  * @param {string} [guide] a Guide topic: a small ? beside the title opens it
  * @returns {{ line: HTMLElement, body: HTMLElement, empty(text: string | null, retry?: () => void): void, loading(on: boolean): void }}
  *   line: where the fragment controls go. empty(text) shows one quiet line instead of the body (null hides
- *   it); with `retry`, the line ends in a Retry link.
+ *   it); with `retry`, the line ends in a link (Retry, or linkText) that calls it.
  */
 export function frame(el, title, guide) {
   linkStyle("views");
@@ -36,9 +36,9 @@ export function frame(el, title, guide) {
   el.replaceChildren(h("header", { class: "v-head" }, h("h2", { class: "v-title" }, title, guide ? guideLink(guide, `${title} in the Guide`) : null), line), bar, msg, body);
   return {
     line, body,
-    empty(text, retry) {
+    empty(text, retry, linkText = "Retry") {
       msg.hidden = !text; body.hidden = !!text;
-      msg.replaceChildren(text || "", retry ? h("span", null, " · ", h("button", { type: "button", class: "c-link", onclick: retry }, "Retry")) : "");
+      msg.replaceChildren(text || "", retry ? h("span", null, " · ", h("button", { type: "button", class: "c-link", onclick: retry }, linkText)) : "");
     },
     loading(on) { el.classList.toggle("is-loading", !!on); el.setAttribute("aria-busy", String(!!on)); },
   };

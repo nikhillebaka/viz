@@ -7,3 +7,12 @@
 }
 .hm-foot { margin: var(--space-12) 0 0; font-size: var(--text-small); color: var(--ink-tertiary); }
 .hm-foot:empty { display: none; }
+
+/* the legend: what the colours mean in this view */
+.hm-key { display: flex; align-items: center; gap: var(--space-8); margin: var(--space-4) 0 var(--space-12); font-size: var(--text-small); color: var(--ink-tertiary); }
+.hm-key-num { font-family: var(--font-mono); font-size: var(--text-axis); color: var(--ink-secondary); }
+.hm-key-ramp { position: relative; width: calc(var(--space-56) * 3); height: var(--space-8); border-radius: var(--radius-check); }
+.hm-key-ramp > i { position: absolute; left: 50%; top: calc(-1 * var(--space-2)); bottom: calc(-1 * var(--space-2)); width: var(--stroke-hairline); background: var(--ink-secondary); }
+.hm-key-ramp > i::after { content: attr(data-mid); position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: var(--space-2); font-family: var(--font-mono); font-size: var(--text-axis); color: var(--ink-tertiary); white-space: nowrap; }
+.hm-key-none { display: inline-flex; align-items: center; gap: var(--space-4); margin-left: var(--space-12); }
+.hm-key-none > i { width: var(--space-8); height: var(--space-8); border-radius: var(--radius-check); box-shadow: inset 0 0 0 var(--stroke-hairline) var(--line-axis); }
