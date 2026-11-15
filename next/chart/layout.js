@@ -415,6 +415,8 @@ export function hoverInfo(fan, scene, t) {
   return { t, h, observed, rows, hot, context: { n, min: n ? min : null, max: n ? max : null } };
 }
 
+const LINE_HIT = 4; // px either side of a line that still counts as on it
+
 /**
  * The median line under a point (within 6 px), by priority: the focused model, other charted models,
  * then grey context lines; nearest first within a priority. Medians are interpolated at the point's x;
@@ -439,7 +441,7 @@ export function lineUnder(scene, px, py, focusId = scene.focus) {
   const consider = (id, ctx, pri, v) => {
     if (v == null) return;
     const d = Math.abs(scene.y(v) - py);
-    if (d <= 6 && (!best || pri < best.pri || (pri === best.pri && d < best.d))) best = { id, ctx, pri, d };
+    if (d <= LINE_HIT && (!best || pri < best.pri || (pri === best.pri && d < best.d))) best = { id, ctx, pri, d };
   };
   for (const s of scene.series) consider(s.id, false, s.id === focusId ? 0 : 1, at(s.pts));
   for (const c of scene.context) consider(c.id, true, 2, at(c.pts));
