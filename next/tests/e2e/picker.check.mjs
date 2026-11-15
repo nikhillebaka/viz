@@ -52,5 +52,23 @@ export default async function picker(page, t) {
     await page.key.press("Escape");
   });
 
+  await t.step("Select all takes what the list shows; Clear all, everything", async () => {
+    await page.eval(() => document.querySelector(".app-models").click());
+    await page.waitFor(() => !!document.querySelector(".pk-panel .pk-row"), { timeout: 10000, message: "picker did not reopen" });
+    await page.eval(() => { const i = document.querySelector(".pk-panel input"); i.value = "family:gbqr"; i.dispatchEvent(new Event("input")); });
+    await wait(200);
+    const shown = await page.eval(() => Number(document.querySelector(".pk-shown").textContent.split(" ")[0]));
+    const before = await page.eval(() => window.__viz.store.get().sel.selected.length);
+    await page.eval(() => document.querySelector(".pk-bulk [data-all]").click());
+    await wait(150);
+    const sel = await page.eval(() => window.__viz.store.get().sel.selected);
+    t.ok(sel.length >= shown && sel.length <= shown + before && sel.filter((id) => /gbqr/i.test(id)).length >= shown, `the ${shown} shown GBQR models selected (${sel.length})`);
+    await page.eval(() => document.querySelector(".pk-bulk [data-none]").click());
+    await wait(150);
+    await page.key.press("Escape");
+    t.eq(await page.eval(() => window.__viz.store.get().sel.selected.length), 0, "none left");
+    t.ok(await page.eval(() => document.querySelector(".pk-bulk [data-none]").disabled), "Clear all is off with nothing selected");
+  });
+
   await t.step("no console errors", async () => { t.eq(page.errors, [], "uncaught exceptions and console errors"); });
 }

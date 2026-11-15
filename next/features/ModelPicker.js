@@ -315,7 +315,6 @@ export function panelWidth(vw, rows, inset = 16, min = 360) {
 /* ================================================================ the panel */
 
 const ITEMS = ".c-section-title, .c-section-action, .pk-name";
-const NS = "http://www.w3.org/2000/svg";
 const PREFS = "viz.next.picker";
 
 /* The filters (for the session, like the collapsed sections) and the view (kept in the browser). */
@@ -325,29 +324,6 @@ const prefs = (() => {
   const p = storage.get(PREFS, {}) || {};
   return { group: GROUPS[p.group] ? p.group : "source", sort: SORTS[p.sort] ? p.sort : "name", when: WHEN[p.when] ? p.when : "season" };
 })();
-
-/* A season's coverage as a strip: one cell per round, the forecast ones filled. */
-function covStrip(c, title) {
-  const W = 40, H = 6, svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("class", "pk-cov"); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("aria-hidden", "true");
-  const t = document.createElementNS(NS, "title"); t.textContent = title; svg.append(t);
-  const bg = document.createElementNS(NS, "rect");
-  bg.setAttribute("class", "pk-cov-bg"); bg.setAttribute("y", String(H / 2 - 0.5)); bg.setAttribute("width", String(W)); bg.setAttribute("height", "1");
-  svg.append(bg);
-  if (c.total) {
-    const w = W / c.total;
-    let d = "";
-    for (let i = 0; i < c.total; i++) {
-      if (!c.on[i]) continue;
-      let j = i;
-      while (j + 1 < c.total && c.on[j + 1]) j++;
-      d += `M${(i * w).toFixed(2)} 0h${((j - i + 1) * w).toFixed(2)}v${H}h-${((j - i + 1) * w).toFixed(2)}z`;
-      i = j;
-    }
-    if (d) { const p = document.createElementNS(NS, "path"); p.setAttribute("class", "pk-cov-on"); p.setAttribute("d", d); svg.append(p); }
-  }
-  return svg;
-}
 
 /**
  * Open the model picker from the Models bubble (or close it, if it is open from there).
@@ -366,7 +342,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   const offs = [];
   let raf = 0, width = 0, shown = 0, lastClicked = null, notesKey = null;
   let rows = new Map(), sections = new Map(), order = [];
-  let els = null, drawer = null, roundKey = "";
+  let els = null, drawer = null, roundKey = "", shownIds = [];
   const seen = { fan: undefined, week: undefined, target: undefined };
 
   // the chart's round, for "This round": which models have a forecast on it (null until the fan is this
@@ -493,9 +469,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     const dot = h("button", { type: "button", class: "pk-dot", tabindex: "-1" }, h("i"));
     // its page (the model sheet); opened by the shared data-model-sheet handler
     const info = h("button", { type: "button", class: "pk-info", tabindex: "-1", "data-model-sheet": id, "aria-label": `${label} · details`, title: "Details", html: icon.open });
-    const c = coverageOf(manifest, m, season), sl = manifest.seasonById?.get(season)?.label || season || "";
-    const cov = c.total ? covStrip(c, `${c.n} of ${c.total} rounds in ${sl}`) : null;
-    const el = h("div", { class: "pk-row c-slide-host", "data-id": id }, dot, name, cov, info);
+    const el = h("div", { class: "pk-row c-slide-host", "data-id": id }, dot, name, info);
     rows.set(id, { el, name, dot, miss, label, away: s.kind === "away", k: "", note: "" });
     return el;
   }
@@ -511,7 +485,13 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     out.push(chip("when", WHEN[prefs.when], prefs.when !== "season"));
     out.push(chip("view", `${prefs.group === "none" ? "No groups" : `By ${GROUPS[prefs.group].toLowerCase()}`} · ${SORTS[prefs.sort]}`, prefs.group !== "source" || prefs.sort !== "name"));
     if (filtering()) out.push(h("button", { type: "button", class: "c-link pk-fclear", "data-clear": "" }, "Clear filters"));
-    out.push(h("span", { class: "pk-shown" }, g.shown === g.total ? "" : `${g.shown} of ${g.total}`));
+    // everything the list shows (above its bottom section), and none
+    const n = store.get().sel.selected.length;
+    out.push(h("span", { class: "pk-bulk" },
+      h("span", { class: "pk-shown" }, g.shown === g.total ? `${g.total}` : `${g.shown} of ${g.total}`),
+      h("button", { type: "button", class: "c-link", "data-all": "", disabled: !g.shown || null }, g.shown === g.total ? "Select all" : `Select ${g.shown}`),
+      h("button", { type: "button", class: "c-link", "data-none": "", disabled: !n || null }, "Clear all")));
+    shownIds = g.sections.filter((s) => s.kind !== "away").flatMap((s) => s.ids);
     els.fil.replaceChildren(...out);
   }
 
@@ -573,6 +553,8 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   function onFilters(e) {
     const t = e.target.closest("button");
     if (!t) return;
+    if (t.dataset.all != null) { setSel(S.setMany(store.get().sel, shownIds, true)); return; }
+    if (t.dataset.none != null) { const sel = store.get().sel; setSel(S.setMany(sel, sel.selected, false)); return; }
     if (t.dataset.clear != null) { for (const f of FACETS) filters[f.key].clear(); searchClosed.clear(); rebuild(undefined, { resetScroll: true }); els.input.focus(); return; }
     const key = t.dataset.drawer;
     if (!key) return;
@@ -609,6 +591,8 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     const n = sel.selected.length, c = sel.charted.length, grey = S.context(sel).length;
     els.combine.hidden = n < 2;
     els.clear.hidden = !n;
+    const none = els.fil.querySelector("[data-none]");
+    if (none) none.disabled = !n;
     renderTray(sel);
     els.footText.textContent = [`${n} selected`, `${c} charted`, grey ? `${grey} grey` : null].filter(Boolean).join(" · ");
   }

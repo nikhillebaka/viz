@@ -72,7 +72,9 @@
 .pk-fchip[aria-expanded="true"] > svg { rotate: 180deg; }
 .pk-fchip[aria-pressed="true"] { color: var(--ink-primary); background-color: var(--fill-selected); }
 .pk-fclear { font-size: var(--text-small); }
-.pk-shown { margin-left: auto; font-size: var(--text-small); font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
+.pk-bulk { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-12); font-size: var(--text-small); }
+.pk-bulk .c-link:disabled { opacity: var(--opacity-disabled); cursor: default; }
+.pk-shown { font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
 .pk-drawer {
   flex: none; max-height: 28vh; overflow: auto; overscroll-behavior: contain;
   margin: 0 var(--space-4) var(--space-6); padding: var(--space-8);
@@ -86,17 +88,6 @@
 .pk-opt[aria-pressed="true"] { box-shadow: none; }
 .pk-opt .pk-n { font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
 .pk-opt.is-zero { opacity: var(--opacity-disabled); }
-
-/* coverage: the chart season's rounds as a strip at the row's end; the details arrow takes its place on hover */
-.pk-name .c-row-text { padding-right: calc(40px + var(--space-12)); }
-.pk-cov {
-  position: absolute; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-12)); translate: 0 -50%;
-  width: 40px; height: 6px; pointer-events: auto;
-  transition: opacity var(--dur-fast) var(--ease-out);
-}
-.pk-cov-bg { fill: var(--fill-selected); }
-.pk-cov-on { fill: var(--ink-tertiary); opacity: 0.7; }
-.pk-row:hover .pk-cov, .pk-row:has(.pk-info:focus-visible) .pk-cov { opacity: 0; }
 
 /* the foot: what is selected, as chips (charted first, in their colours), then counts and actions */
 .pk-foot {
@@ -139,7 +130,7 @@
 
 /* a row's details (the model sheet): a small open-page arrow at the end of the row, on hover */
 .pk-info {
-  position: absolute; z-index: 1; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-12) + 8px); translate: 0 -50%;
+  position: absolute; z-index: 1; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-8)); translate: 0 -50%;
   display: grid; place-items: center; width: var(--space-24); height: var(--space-24); padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
   color: var(--ink-tertiary);
   opacity: 0; transition: opacity var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
