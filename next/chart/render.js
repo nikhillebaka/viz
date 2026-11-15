@@ -20,22 +20,6 @@ globalThis.document?.fonts?.ready.then(() => { widths.clear(); fonts = null; });
  * @returns {(text: string, font: string) => number} width in CSS px
  */
 export function canvasMeasure() { return measure; }
-const FADE = 28; // px at the top of the canvas over which bands fade out
-
-/* "#rrggbb" / "rgb(r, g, b)" → [r, g, b] (anything else: mid grey) */
-function rgbOf(c) {
-  if (c[0] === "#") { const n = c.length === 4 ? c.slice(1).replace(/./g, "$&$&") : c.slice(1, 7); const v = parseInt(n, 16); return [v >> 16, (v >> 8) & 255, v & 255]; }
-  const m = /rgba?\(([^)]+)\)/.exec(c);
-  return m ? m[1].split(/[ ,/]+/).slice(0, 3).map(Number) : [128, 128, 128];
-}
-/* a vertical gradient of colour c: transparent at the canvas top, opaque from FADE down (same rgb at
-   both ends, so no dark fringe from interpolating through transparent black) */
-function fadeTop(ctx, c) {
-  const [r, g, b] = rgbOf(c), grad = ctx.createLinearGradient(0, 0, 0, FADE);
-  grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0)`); grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 1)`);
-  return grad;
-}
-
 function measure(text, font) {
   let byFont = widths.get(font);
   if (!byFont) widths.set(font, (byFont = new Map()));
@@ -117,11 +101,7 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
   if (S.layers) layerLines(ctx, S.layers);
   const whisper = tokenNum("--band-whisper", 0.075), focusA = tokenNum("--band-focus", 0.15);
   for (const b of S.bands) {
-    // a band that runs off the top fades out over its last FADE px instead of ending in a flat edge
-    // (seen when the page's overscroll bounce shows what is above the chart)
-    let top = Infinity;
-    for (let i = 1; i < b.hi.length; i += 2) if (b.hi[i] < top) top = b.hi[i];
-    const c = top < FADE ? fadeTop(ctx, cssColor(b.c)) : cssColor(b.c);
+    const c = cssColor(b.c);
     if (b.fill) {
       path(b.lo);
       for (let i = b.hi.length - 2; i >= 0; i -= 2) ctx.lineTo(b.hi[i], b.hi[i + 1]);

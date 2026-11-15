@@ -61,11 +61,11 @@ export class ChartBubbles {
     this.cross = h("div", { class: "fc-cross", "aria-hidden": "true" }, h("span", { class: "fc-cross-arrow" }), h("span", { class: "fc-cross-label" }));
     this.crossKey = "";
     view.append(this.chrome, this.note, this.recenter, this.cross);
-    // the forecast shade continued above the view, so the page's overscroll bounce at the top shows more
-    // of the chart instead of a hard edge between the shade and the page
-    this.over = h("div", { class: "fc-over", "aria-hidden": "true" });
-    this.overX = NaN;
-    view.prepend(this.over);
+    // The forecast shade continued above the page, for the overscroll bounce at the top. Browsers paint
+    // only the page's own background in the bounce area (nothing positioned above the page), so the shade
+    // goes into the root background, under the opaque canvas. It is a style change on <html>, so it is
+    // written only when the chart is at rest and the shade has moved: never during a gesture.
+    this.overKey = "";
     this.stepper = new RoundStepper(this.stepEl, {
       values: chart.fan.dates, index, label: "Forecast date",
       format: { long: fmtLong, short: fmtDay },
@@ -106,8 +106,7 @@ export class ChartBubbles {
   /** After every frame: the recenter pill, when the forecast is panned off-screen; the crossing hint. */
   frame(scene) {
     this.#crossHint();
-    const ox = scene.shade == null ? -1 : Math.round(scene.shade);
-    if (ox !== this.overX) { this.overX = ox; this.over.hidden = ox < 0 || ox >= scene.w; if (ox >= 0) this.over.style.left = `${ox}px`; }
+    if (!this.chart.nav?.moving) this.#overscroll(scene);
     const xr = scene.x(scene.ref);
     const side = xr < 0 ? "left" : xr > scene.w ? "right" : null;
     if (side) {
@@ -148,6 +147,20 @@ export class ChartBubbles {
     });
   }
 
+  #overscroll(scene) {
+    const ox = scene.shade == null || scene.shade >= scene.w ? -1 : Math.round(Math.max(0, scene.shade));
+    const h = Math.round(this.chart.view.offsetTop + scene.h), key = `${ox}|${h}`;
+    if (key === this.overKey) return;
+    this.overKey = key;
+    const st = document.documentElement.style;
+    if (ox < 0) { st.backgroundImage = ""; return; }
+    // the image runs from 50vh above the page to the chart's bottom; nothing below the chart
+    st.backgroundImage = `linear-gradient(to right, transparent ${ox}px, var(--shade-forecast) ${ox}px)`;
+    st.backgroundRepeat = "no-repeat";
+    st.backgroundPosition = "0 -50vh";
+    st.backgroundSize = `100% calc(50vh + ${h}px)`;
+  }
+
   // the hint during a pull past the season's end: the next season's name, fading in with the pull
   #crossHint() {
     const p = this.chart.nav?.pull ?? 0, d = Math.sign(p), k = Math.min(1, Math.abs(p));
@@ -165,7 +178,7 @@ export class ChartBubbles {
     if (d > 0) this.cross.append(this.cross.querySelector(".fc-cross-arrow")); else this.cross.prepend(this.cross.querySelector(".fc-cross-arrow"));
   }
 
-  destroy() { this.glass.forEach((g) => g.destroy()); this.chrome.remove(); this.note.remove(); this.recenter.remove(); this.cross.remove(); this.over.remove(); }
+  destroy() { this.glass.forEach((g) => g.destroy()); this.chrome.remove(); this.note.remove(); this.recenter.remove(); this.cross.remove(); const st = document.documentElement.style; st.backgroundImage = st.backgroundRepeat = st.backgroundPosition = st.backgroundSize = ""; }
 }
 
 /* The Guide is loaded on first use, so the chart doesn't pay for it. */
