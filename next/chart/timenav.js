@@ -32,7 +32,14 @@
  *    resets it.
  *  - double-click: zoom fully out to the season; when fully out, zoom back in on the date you clicked.
  *    Either way, height returns to normal.
- * Past the first and last date, and below minSpan, the gesture rubber-bands and springs back. */
+ * Past the first and last date, and below minSpan, the gesture rubber-bands and springs back.
+ *  - Crossing seasons by scroll or drag: a pull, not a flick. A gesture that reaches the season's end
+ *    stops there (rubber band). A new gesture that starts at the end and stretches the rubber band past
+ *    CROSS weeks of pull crosses into the neighbouring season when it is released (onCross); `pull`
+ *    (−1…1+, signed) is how far along that pull is, for the page's hint. Pans, zooms, height zooms and
+ *    double-click never cross; nor does a gesture that started away from the edge, so a flick to the
+ *    latest week can't overshoot into the next season. */
+export const CROSS = 1.6;
 import { WEEK } from "../lib/scale.js";
 
 /**
@@ -119,6 +126,8 @@ export class TimeNav {
    * @param {(i: number) => void} [o.onWeek] the week T is heading to changed
    * @param {(mode: "close" | "season") => void} [o.onZoom]
    * @param {(d: number) => boolean} [o.onEdge] step() past either end: return true if it took over (crossed seasons)
+   * @param {(d: -1 | 1) => boolean} [o.canCross] there is a season to cross into that way
+   * @param {(d: -1 | 1) => void} [o.onCross] a pull past either end was released past CROSS
    */
   constructor(o) {
     Object.assign(this, {
@@ -133,6 +142,7 @@ export class TimeNav {
     this.P = this.tP = 0; this.vP = 0; this.wP = 30;          // camera offset from the forecast, in weeks
     this.H = this.tH = 0; this.vH = 0; this.wH = 30;          // height zoom, log scale (0 = normal)
     this.busy = false; this.raf = 0; this.queued = 0; this.mode = "close";
+    this.pull = 0; this.edgeStart = 0;                          // a pull across the season's end (see CROSS)
     this.#abort = new AbortController();
     this.#bind();
   }
@@ -176,7 +186,7 @@ export class TimeNav {
   /** Swap the whole timeline (another season): new dates and season window, the date set to index at once
    * (a cut, not a glide). Zoom carries over (clamped to the new season); pan carries over if it fits. */
   setTimeline({ dates, season, index }) {
-    this.dates = dates; this.N = dates.length; this.season = season;
+    this.dates = dates; this.N = dates.length; this.season = season; this.pull = 0; this.edgeStart = 0;
     this.seasonSpan = (season[1] - season[0]) / WEEK;
     this.T = this.tT = Math.max(0, Math.min(this.N - 1, index)); this.vT = 0;
     const zmax = Math.log(this.seasonSpan);
@@ -299,8 +309,27 @@ export class TimeNav {
     const x = this.scale(), px = clientX - this.surface.getBoundingClientRect().left;
     return Math.max(0, Math.min(this.N - 1, (x.invert(px) - this.dates[0]) / WEEK));
   }
-  #setT(T) { this.T = T; const i = Math.max(0, Math.min(this.N - 1, Math.round(T))); if (i !== this.tT) { this.tT = i; this.onWeek(i); } this.request(); }
-  #settleT(v = 0, w = 26) { this.busy = false; this.goTo(Math.round(this.T + v * 0.12), { w, v, recenter: false }); }
+  #setT(T) {
+    this.T = T; const i = Math.max(0, Math.min(this.N - 1, Math.round(T))); if (i !== this.tT) { this.tT = i; this.onWeek(i); }
+    // how far a pull that began at the season's end has stretched past it (signed, 1 = enough to cross)
+    const r = this.#rawT(T), over = r < 0 ? r : r > this.N - 1 ? r - (this.N - 1) : 0;
+    this.pull = this.edgeStart && Math.sign(over) === this.edgeStart && this.canCross?.(this.edgeStart) ? over / CROSS : 0;
+    this.request();
+  }
+  /* -1 / 1 when the chart rests at (or is springing back to) the first / last week, else 0: where a
+   * gesture must start to be able to cross. */
+  #edgeAt() {
+    if (this.tT === this.N - 1 && this.T >= this.N - 1.05) return 1;
+    if (this.tT === 0 && this.T <= 0.05) return -1;
+    return 0;
+  }
+  #settleT(v = 0, w = 26) {
+    this.busy = false;
+    const d = Math.abs(this.pull) >= 1 ? Math.sign(this.pull) : 0;
+    this.pull = 0; this.edgeStart = 0;
+    this.goTo(Math.round(this.T + v * 0.12), { w, v, recenter: false });
+    if (d) this.onCross?.(d);
+  }
   #settleZ() {
     this.pinching = false;
     const z = this.Z, b = Math.log(this.seasonSpan), lo = Math.log(this.minSpan);
@@ -354,6 +383,7 @@ export class TimeNav {
       // shift + drag zooms height (up to stretch), independent of the date and the time view
       drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, lastX: e.clientX, lastY: e.clientY, fan, pan: e.metaKey, height: e.shiftKey && !e.metaKey, moved: false, scrubbed: false, hist: [{ t: e.timeStamp, T: this.T }] };
       if (drag.pan) this.returning = false;
+      this.edgeStart = drag.pan || drag.height ? 0 : this.#edgeAt();
     }, opt);
     el.addEventListener("pointermove", (e) => {
       if (!drag || e.pointerId !== drag.id) return;
@@ -430,6 +460,7 @@ export class TimeNav {
         W.tail = null; W.hist = [];
       }
       if (W.hist.length && (now - W.hist.at(-1).t > 120 || sign !== W.hist.at(-1).sign)) W.hist = [];
+      if (!W.hist.length) this.edgeStart = this.#edgeAt();     // a new gesture: may it cross?
       W.hist.push({ t: now, mag, sign, T: this.T }); if (W.hist.length > 8) W.hist.shift();
       const did = this.#advance((dx * unit) / this.#pxPerWeek());
       if (did !== "scrub") return;

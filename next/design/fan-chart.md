@@ -64,8 +64,16 @@ shift scroll / shift drag zoom height; double-click toggles the whole season. Ve
 page's.
 
 ### Seasons and places (unchanged; `design/studies/seasons-locations-goals.md`)
-One season on the chart. Keys and the stepper cross seasons as a 150 ms cut; drag and scroll never
-cross. The y-axis is fixed per season and place (observed data and the charted medians, rounded up)
+One season on the chart. Keys and the stepper cross seasons; so does a **pull** with drag or side
+scroll: a gesture that reaches the season's end stops there, and a new one that starts at the end and
+stretches the rubber band past 1.6 weeks crosses when released, with the next season's name fading in
+at that edge (primary ink once letting go will cross). A flick can never carry into the next season.
+Pans, zooms, height zooms and double-click never cross. The crossing is a cut: the old frame slides out
+the way time went and fades (240 ms) while the new one fades in.
+
+Between rounds everything moves: a model with a forecast on only one side folds into (or unfolds from)
+its first point instead of popping on or off, and the As reported line moves with the date (weeks both
+rounds report ease from one value to the other; a newly reported week grows out of the one before). The y-axis is fixed per season and place (observed data and the charted medians, rounded up)
 and eases to the new maximum when either changes; height zoom resets. Changing place keeps the date,
 zoom, pan and focus. Models absent from the season or place collapse into one quiet line
 ("2 not in 2023–24 · 1 not in Wyoming").

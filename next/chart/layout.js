@@ -108,13 +108,27 @@ export function pointsAt(fan, id, t, level) {
   const a = fan.points(id, i0, level), z = fan.points(id, i1, level);
   const one = a || z;
   if (!one) return null;
-  if (!a || !z || a.length !== z.length) return one;
+  // only one side has a forecast: it folds into (or unfolds from) its first point, so a model never
+  // pops on or off between weeks. k is how open it is: 1 on its own week, 0 on the week without it.
+  if (!a || !z) return folded(one, a ? 1 - u : u);
+  if (a.length !== z.length) return one;
   const pts = new Array(a.length);
   for (let k = 0; k < a.length; k++) {
     const p = a[k], q = z[k];
     pts[k] = { t: p.t + (q.t - p.t) * u, h: p.h, lo: p.lo + (q.lo - p.lo) * u, hi: p.hi + (q.hi - p.hi) * u, med: p.med + (q.med - p.med) * u, anchor: p.anchor };
   }
   return pts;
+}
+
+/* A forecast folded toward its first point (the anchor at the data cutoff) by k (1 open, 0 closed). */
+function folded(pts, k) {
+  if (k > 1 - 1e-4) return pts;
+  const o = pts[0], out = new Array(pts.length);
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    out[i] = { t: o.t + (p.t - o.t) * k, h: p.h, lo: o.med + (p.lo - o.med) * k, hi: o.med + (p.hi - o.med) * k, med: o.med + (p.med - o.med) * k, anchor: p.anchor };
+  }
+  return out;
 }
 
 // the data cutoff for a reference date: the last observed week before it (else the week before)

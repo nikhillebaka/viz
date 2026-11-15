@@ -99,3 +99,22 @@
 .app-section { min-height: var(--peek); padding: 0 var(--space-24) var(--space-56); }
 .app-section.is-pending { min-height: 40svh; }
 .app-section-error { color: var(--ink-tertiary); font-size: var(--text-small); padding: var(--space-24) 0; }
+.fc-recenter { gap: var(--space-4); }
+.fc-recenter-arrow { display: inline-flex; width: var(--size-icon-sm); height: var(--size-icon-sm); }
+.fc-recenter-arrow[hidden] { display: none; }
+.fc-recenter-arrow svg { width: 100%; height: 100%; }
+
+/* crossing seasons by a pull past the end: the next season's name at that edge, fading in with the pull,
+   primary ink once letting go will cross */
+.fc-cross {
+  position: absolute; z-index: var(--z-chrome); top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: var(--space-4); pointer-events: none;
+  font-size: var(--text-control); font-weight: var(--weight-medium); color: var(--ink-tertiary);
+  opacity: 0; transition: color var(--dur-fast) var(--ease-out);
+}
+.fc-cross.is-shown { opacity: var(--pull, 0); }
+.fc-cross.is-ready { color: var(--ink-primary); }
+.fc-cross.left { left: calc(var(--inset) + var(--inset-goal)); }
+.fc-cross.right { right: var(--inset); }
+.fc-cross-arrow { display: inline-flex; width: var(--size-icon-sm); height: var(--size-icon-sm); }
+.fc-cross-arrow svg { width: 100%; height: 100%; }

@@ -209,12 +209,16 @@ test("outcome off: nothing observed after the cutoff", () => {
   assert.ok(Math.abs(f.observed.known.at(-1).at(-2) - fc) < 1e-9);
 });
 
-test("between weeks, medians interpolate; a week without a forecast shows its neighbour's", () => {
+test("between weeks, medians interpolate; a model with one side only folds into its first point", () => {
   const a = pointsAt(fan, "m0", di, 0.95), z = pointsAt(fan, "m0", di + 1, 0.95), m = pointsAt(fan, "m0", di + 0.25, 0.95);
   assert.ok(Math.abs(m[2].t - (a[2].t + 0.25 * (z[2].t - a[2].t))) < 1e-6);
   assert.equal(pointsAt(fan, "m0", di + 0.00001, 0.95), a, "on a week: the cached array");
-  const g = pointsAt(fan, "ghost1", 2.5, 0.95);
-  assert.equal(g, fan.points("ghost1", 2, 0.95));
+  const one = fan.points("ghost1", 2, 0.95), g = pointsAt(fan, "ghost1", 2.5, 0.95), o = one[0], q = one.at(-1);
+  assert.ok(Math.abs(g.at(-1).t - (o.t + 0.5 * (q.t - o.t))) < 1e-6, "halfway: half as long");
+  assert.ok(Math.abs(g.at(-1).med - (o.med + 0.5 * (q.med - o.med))) < 1e-6, "halfway: half as far from its first point");
+  assert.equal(g[0].t, o.t, "the first point stays put");
+  const near = pointsAt(fan, "ghost1", 2.9999, 0.95);
+  assert.ok(Math.abs(near.at(-1).t - o.t) < 0.01 * (q.t - o.t), "nearly closed just before the week without it");
 });
 
 test("lineUnder and labelAt", () => {

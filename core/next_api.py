@@ -202,6 +202,53 @@ class NextData:
         return out
 
     # ------------------------------------------------------------------ fan
+    def asof(self, target: str, season: str, location: str) -> Dict[str, Any]:
+        """The target as it was published at every round of a season, for one place: per round, the
+        latest snapshot on or before it, the weeks of this season before the round. One scan of the
+        as-of archive, so the chart can move between rounds without a request each."""
+        loader = self.loader
+        rounds = sorted(loader.get_dates_for_season(season))
+        out: Dict[str, Any] = {"target": target, "season": season, "location": location, "rounds": {}, "snapshots": {}}
+        lf = loader.cache_mgr.scan_as_of_admissions()
+        if lf is None or not rounds:
+            return out
+        start, end = loader.get_season_calendar_bounds(int(season[:4]))
+        try:
+            df = (
+                lf.filter(
+                    (pl.col("target") == target)
+                    & (pl.col("location") == str(location))
+                    & (pl.col("as_of").cast(pl.Utf8) <= rounds[-1])
+                    & (pl.col("target_end_date").cast(pl.Utf8) >= str(start))
+                    & (pl.col("target_end_date").cast(pl.Utf8) <= str(end))
+                )
+                .select([pl.col("as_of").cast(pl.Utf8), pl.col("target_end_date").cast(pl.Utf8), pl.col("oracle_value")])
+                .drop_nulls()
+                .sort(["as_of", "target_end_date"])
+                .collect()
+            )
+        except Exception as exc:  # an archive without these columns: no as-of line
+            logger.warning("next asof: %s", exc)
+            return out
+        if df.is_empty():
+            return out
+        snaps: Dict[str, List[Tuple[str, float]]] = {}
+        for a, d, v in df.iter_rows():
+            snaps.setdefault(a[:10], []).append((d[:10], float(v)))
+        keys = sorted(snaps)
+        k = -1
+        for r in rounds:
+            while k + 1 < len(keys) and keys[k + 1] <= r:
+                k += 1
+            if k < 0:
+                continue
+            snap = keys[k]
+            pts = [[d, v] for d, v in snaps[snap] if d < r]
+            if pts:
+                out["rounds"][r] = pts
+                out["snapshots"][r] = snap
+        return out
+
     def fan(self, target: str, season: str, location: str) -> Optional[bytes]:
         """
         Everything the fan chart draws for one (target, season, location):

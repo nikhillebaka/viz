@@ -342,6 +342,9 @@ export class FanChart {
         tapTarget: (e) => this.interact.onLine(e),
         onFrame: () => this.draw(),
         onWeek: (i) => this.#onWeek(i),
+        // a pull past the season's end crosses into the next one, as ← → do at the last round
+        canCross: (d) => !this._crossing && !!this.neighbour(d),
+        onCross: (d) => { const nb = !this._crossing && this.neighbour(d); if (nb) this.goTo(d > 0 ? nb.rounds[0] : nb.rounds.at(-1)); },
       });
       this.bubbles = new ChartBubbles(this, index);
       this.layers = new Layers(this);
@@ -352,7 +355,9 @@ export class FanChart {
     } else {
       const old = this.fan.dates;
       const same = old.length === fan.dates.length && old[0] === fan.dates[0];
-      this.#cut(() => {
+      // another season: the old one slides out the way time went; anything else is a plain cut
+      const dir = fan.season === this.fan.season ? 0 : fan.season > this.fan.season ? 1 : -1;
+      this.#cut(dir, () => {
         this.fan = fan;
         this.#prepare(true);
         // another season, or a target or place whose rounds differ: the stepper takes the new weeks first,
@@ -377,8 +382,10 @@ export class FanChart {
     }, { timeout: 2000 });
   }
 
-  /* The old frame fades out over the new one (a cut, not a glide), --dur-fast × 1.25 ≈ 150 ms. */
-  #cut(apply) {
+  /* The old frame fades out over the new one (a cut, not a glide), --dur-fast × 1.25 ≈ 150 ms. Crossing
+   * seasons (dir ±1) the old frame also slides out the way time went, and the new one fades in, so the
+   * cut reads as moving on rather than flashing. Both are compositor-only (opacity and transform). */
+  #cut(dir, apply) {
     let ghost = null;
     if (!reducedMotion() && this.canvas.width && this.scene) {
       ghost = document.createElement("canvas");
@@ -392,7 +399,11 @@ export class FanChart {
     if (!ghost) return;
     this._cutting++;
     const done = () => { if (ghost.isConnected) { ghost.remove(); this._cutting--; } };
-    const a = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: tokenNum("--dur-fast", 120) * 1.25, easing: "ease-out", fill: "forwards" });
+    const ms = tokenNum("--dur-fast", 120) * (dir ? 2 : 1.25);
+    const a = ghost.animate(dir
+      ? [{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * 48}px)` }]
+      : [{ opacity: 1 }, { opacity: 0 }], { duration: ms, easing: "cubic-bezier(0.2, 0, 0, 1)", fill: "forwards" });
+    if (dir) this.canvas.animate([{ opacity: 0 }, { opacity: 1 }], { duration: ms, easing: "cubic-bezier(0.2, 0, 0, 1)" });
     a.onfinish = done;
     setTimeout(done, 400); // a hidden tab may pause animations; never leave a copy behind
   }

@@ -10,7 +10,7 @@ import { h } from "../../lib/dom.js";
 import { fmtDay, fmtLong } from "../../lib/format.js";
 import { glass } from "../../ui/glass.js";
 import { openMenu } from "../../ui/floating.js";
-import { pill, Stepper } from "../../ui/controls.js";
+import { pill, icon, Stepper } from "../../ui/controls.js";
 import { setShowAll } from "../selection.js";
 import { openDatePicker } from "../DatePicker.js";
 import { LEVELS, parseLevels } from "../url.js";
@@ -48,12 +48,19 @@ export class ChartBubbles {
     this.noteLink = h("button", { type: "button", class: "c-link", onclick: () => this.#toggleAll() });
     this.note = h("div", { class: "c-note fc-note", inert: true }, this.noteText, this.noteLink);
 
-    this.recenter = pill({ label: "", size: "sm", className: "fc-recenter", onClick: () => chart.nav?.recenter() });
+    // ← Dec 27 forecast  /  Dec 27 forecast →: the arrow points at where the forecast is
+    this.recenter = pill({ label: " ", size: "sm", className: "fc-recenter", onClick: () => chart.nav?.recenter() });
+    this.recenterIcons = [h("span", { class: "fc-recenter-arrow", html: icon.left, hidden: true }), h("span", { class: "fc-recenter-arrow", html: icon.right, hidden: true })];
+    this.recenter.prepend(this.recenterIcons[0]);
+    this.recenter.append(this.recenterIcons[1]);
     this.recenter.inert = true;
     this.recenterSide = null;
     this.recenterText = "";
 
-    view.append(this.chrome, this.note, this.recenter);
+    // the season a pull past the end will cross into (TimeNav `pull`); quiet ink until the pull is enough
+    this.cross = h("div", { class: "fc-cross", "aria-hidden": "true" }, h("span", { class: "fc-cross-arrow" }), h("span", { class: "fc-cross-label" }));
+    this.crossKey = "";
+    view.append(this.chrome, this.note, this.recenter, this.cross);
     this.stepper = new RoundStepper(this.stepEl, {
       values: chart.fan.dates, index, label: "Forecast date",
       format: { long: fmtLong, short: fmtDay },
@@ -91,15 +98,20 @@ export class ChartBubbles {
     }
   }
 
-  /** After every frame: the recenter pill, when the forecast is panned off-screen. */
+  /** After every frame: the recenter pill, when the forecast is panned off-screen; the crossing hint. */
   frame(scene) {
+    this.#crossHint();
     const xr = scene.x(scene.ref);
     const side = xr < 0 ? "left" : xr > scene.w ? "right" : null;
     if (side) {
       const day = fmtDay(this.chart.week());
-      const text = side === "left" ? `← ${day} forecast` : `${day} forecast →`;
+      const text = `${day} forecast`;
       if (text !== this.recenterText) { this.recenterText = text; this.recenter.querySelector(".c-pill-label").textContent = text; }
-      if (side !== this.recenterSide) { this.recenter.classList.toggle("left", side === "left"); this.recenter.classList.toggle("right", side === "right"); }
+      if (side !== this.recenterSide) {
+        this.recenter.classList.toggle("left", side === "left"); this.recenter.classList.toggle("right", side === "right");
+        this.recenterIcons[0].hidden = side !== "left"; this.recenterIcons[1].hidden = side !== "right";
+        this.recenter.setAttribute("aria-label", `Back to the ${day} forecast`);
+      }
     }
     const shown = !!side;
     if (shown !== !!this.recenterSide) { this.recenter.classList.toggle("is-shown", shown); this.recenter.inert = !shown; }
@@ -129,7 +141,24 @@ export class ChartBubbles {
     });
   }
 
-  destroy() { this.glass.forEach((g) => g.destroy()); this.chrome.remove(); this.note.remove(); this.recenter.remove(); }
+  // the hint during a pull past the season's end: the next season's name, fading in with the pull
+  #crossHint() {
+    const p = this.chart.nav?.pull ?? 0, d = Math.sign(p), k = Math.min(1, Math.abs(p));
+    const nb = d ? this.chart.neighbour(d) : null;
+    const key = nb ? `${d}|${nb.id}|${Math.round(k * 20)}` : "";
+    if (key === this.crossKey) return;
+    this.crossKey = key;
+    this.cross.classList.toggle("is-shown", !!nb && k > 0.05);
+    if (!nb) return;
+    this.cross.classList.toggle("left", d < 0); this.cross.classList.toggle("right", d > 0);
+    this.cross.classList.toggle("is-ready", k >= 1);
+    this.cross.style.setProperty("--pull", k.toFixed(2));
+    this.cross.querySelector(".fc-cross-arrow").innerHTML = d < 0 ? icon.left : icon.right;
+    this.cross.querySelector(".fc-cross-label").textContent = nb.label;
+    if (d > 0) this.cross.append(this.cross.querySelector(".fc-cross-arrow")); else this.cross.prepend(this.cross.querySelector(".fc-cross-arrow"));
+  }
+
+  destroy() { this.glass.forEach((g) => g.destroy()); this.chrome.remove(); this.note.remove(); this.recenter.remove(); this.cross.remove(); }
 }
 
 /* The Guide is loaded on first use, so the chart doesn't pay for it. */

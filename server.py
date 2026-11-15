@@ -272,6 +272,13 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+        elif name == "asof":
+            # the target as published at every round of a season (one request for the whole season)
+            season = query.get("season", [""])[0]
+            if not season:
+                self._send_json({"error": "Missing 'season' parameter"}, status=400)
+                return
+            self._send_json(NEXT_DATA.asof(query.get("target", [VIZ_CONFIG.get_default_target()])[0], season, query.get("location", ["US"])[0]))
         elif name == "spatial":
             # /api/spatial with values unrounded (proportions would round to 0.0)
             self._handle_spatial(query, precise=True)

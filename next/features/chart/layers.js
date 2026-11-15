@@ -100,9 +100,9 @@ function makeLine(pts, o) {
 /** The raw value of a line on week t (within half a week), or undefined. */
 function valueAt(line, t) {
   const ts = line.ts;
-  let lo = 0, hi = ts.length - 1;
+  let lo = 0, hi = line.n - 1;
   while (lo < hi) { const m = (lo + hi) >> 1; if (ts[m] < t) lo = m + 1; else hi = m; }
-  for (const i of [lo - 1, lo]) if (i >= 0 && Math.abs(ts[i] - t) < WEEK / 2) return line.raw[i];
+  for (const i of [lo - 1, lo]) if (i >= 0 && i < line.n && Math.abs(ts[i] - t) < WEEK / 2) return line.raw[i];
   return undefined;
 }
 
@@ -112,13 +112,12 @@ export class Layers {
     this.chart = chart;
     this.on = new Set();
     this.sk = "";           // target|location|season the season data belongs to
-    this.sig = null;        // { lines: Map id → line, asof: boolean } | null
+    this.sig = null;        // { lines: Map id → line } | null
     this.cur = null;        // past-season lines | null
-    this.asof = null;       // { round, line } | null (kept while the next round's loads)
+    this.asof = null;       // { any, rounds: per timeline week { ts, vs } | null, line } | null (the season)
     this.peaks = null;      // { key, available, byModel: Map id → Map round → peak, observed } | null
-    this.wanted = { asof: "", peaks: "" };
+    this.wanted = { peaks: "" };
     this.pending = 0;
-    this._asofTimer = 0;
     this.marks = { lines: [], marks: [], labels: [], font: "", axis: null };
     this.axisTicks = [];
     this.goal = 0;          // the chart's resting axis maximum (FanChart #axis)
@@ -150,10 +149,10 @@ export class Layers {
     this.on = new Set(s.layers || []);
     if (!fan) return;
     const sk = `${fan.target}|${fan.location}|${fan.season}`;
-    if (sk !== this.sk) { this.sk = sk; this.sig = this.cur = this.asof = this.peaks = null; this.wanted = { asof: "", peaks: "" }; }
-    if (SIGNALS.some((l) => this.on.has(l.id)) || this.on.has("asof")) this.#loadSignals();
+    if (sk !== this.sk) { this.sk = sk; this.sig = this.cur = this.asof = this.peaks = null; this.wanted = { peaks: "" }; }
+    if (SIGNALS.some((l) => this.on.has(l.id))) this.#loadSignals();
     if (this.on.has("seasons")) this.#loadCurves();
-    if (this.on.has("asof")) this.#loadAsof(s.date);
+    if (this.on.has("asof")) this.#loadAsof();
     if (this.on.has("peaks")) this.#loadPeaks();
     this.#fit();
     this.#label();
@@ -211,7 +210,7 @@ export class Layers {
         const line = makeLine([...by].map(([t, v]) => ({ t, v })), { id: L.id, kind: "signal", name: L.name, end: L.end, unit: L.unit, k: ref / max, k0: ref / max, ref, c: "var(--ink-tertiary)", alpha: 0.9 });
         if (line) lines.set(L.id, line);
       }
-      this.sig = { lines, asof: !!rs.at(-1)?.as_of?.available };
+      this.sig = { lines };
       this.#fit();
     });
     this._sigP = { sk, p };
@@ -235,23 +234,59 @@ export class Layers {
     return p;
   }
 
-  // the as-published series for the round the chart is on (debounced while scrubbing through rounds)
-  #loadAsof(iso) {
-    const fan = this.chart.fan;
-    if (!iso || fan.indexOf(iso) < 0 || this.wanted.asof === iso) return;
-    this.wanted.asof = iso;
-    clearTimeout(this._asofTimer);
-    const sk = this.sk;
-    this._asofTimer = setTimeout(() => {
-      if (sk !== this.sk || this.wanted.asof !== iso) return;
-      const ref = parseIso(iso);
-      this.#track(getJson("/api/next/surveillance", { target: fan.target, location: fan.location, date: iso }), sk, (r) => {
-        if (this.wanted.asof !== iso) return;
-        const a = r?.as_of;
-        const pts = a?.available ? (a.data || []).map((d) => ({ t: parseIso(d.date), v: d.value })).filter((p) => p.t < ref) : [];
-        this.asof = { round: iso, line: makeLine(pts, { id: "asof", kind: "asof", name: "As reported", c: "var(--ink-tertiary)", alpha: 1, dash: ASOF_DASH }) };
+  /* As reported: the target as published at every round of the season, in one request. Each timeline
+   * week takes the latest round at or before it; between weeks the line moves like the forecasts do
+   * (see #asofAt), so it never jumps into place. */
+  #loadAsof() {
+    if (this.asof || this._asofP?.sk === this.sk) return this._asofP?.p;
+    const fan = this.chart.fan, sk = this.sk;
+    const p = this.#track(getJson("/api/next/asof", { target: fan.target, location: fan.location, season: fan.season }), sk, (r) => {
+      const keys = Object.keys(r?.rounds || {}).sort();
+      const prepared = new Map(keys.map((k) => {
+        const pts = r.rounds[k].map(([d, v]) => [parseIso(d), +v]).filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
+        return [k, { ts: Float64Array.from(pts, (q) => q[0]), vs: Float64Array.from(pts, (q) => q[1]) }];
+      }));
+      let cap = 2, j = -1;
+      const rounds = fan.dates.map((t) => {
+        const iso = new Date(t).toISOString().slice(0, 10);
+        while (j + 1 < keys.length && keys[j + 1] <= iso) j++;
+        const a = j >= 0 ? prepared.get(keys[j]) : null;
+        if (a && a.ts.length + 1 > cap) cap = a.ts.length + 1;
+        return a && a.ts.length > 1 ? a : null;
       });
-    }, this.asof ? 120 : 0);
+      const vs = new Float64Array(cap);
+      const line = { id: "asof", kind: "asof", name: "As reported", c: "var(--ink-tertiary)", alpha: 1, dash: ASOF_DASH, n: 0,
+        ts: new Float64Array(cap), vs, raw: vs, brk: new Uint8Array(cap), xy: new Float32Array(2 * cap), clipX: null, lab: null };
+      this.asof = { any: rounds.some(Boolean), rounds, line };
+    });
+    this._asofP = { sk, p };
+    return p;
+  }
+
+  /* The as-reported line at fractional week t, written into the one reusable line (no allocation).
+   * Weeks both rounds report move from one value to the other (revisions settle in); a week only the
+   * later round has grows out of the point before it, as the observed line fills in. */
+  #asofAt(t) {
+    const A = this.asof;
+    if (!A?.any) return null;
+    const R = A.rounds, L = A.line, last = R.length - 1;
+    const i0 = Math.max(0, Math.min(last, Math.floor(t))), i1 = Math.min(last, i0 + 1), u = Math.max(0, Math.min(1, t - i0));
+    let a = R[i0], z = R[i1];
+    if (!a && !z) return null;
+    if (!a || !z || a === z || u < 1e-4 || u > 1 - 1e-4) { a = z = (u > 0.5 ? z || a : a || z); }
+    const ts = L.ts, vs = L.vs, brk = L.brk;
+    let n = 0, ia = 0;
+    for (let k = 0; k < z.ts.length; k++) {
+      const tk = z.ts[k];
+      while (ia < a.ts.length && a.ts[ia] < tk) ia++;
+      if (ia < a.ts.length && a.ts[ia] === tk) { ts[n] = tk; vs[n] = a.vs[ia] + (z.vs[k] - a.vs[ia]) * u; }
+      else if (n) { ts[n] = ts[n - 1] + (tk - ts[n - 1]) * u; vs[n] = vs[n - 1] + (z.vs[k] - vs[n - 1]) * u; }
+      else continue;
+      brk[n] = n === 0 || ts[n] - ts[n - 1] > GAP ? 1 : 0;
+      n++;
+    }
+    L.n = n;
+    return n > 1 ? L : null;
   }
 
   // every round's peak forecasts this season for the models on the chart, in one request
@@ -280,14 +315,15 @@ export class Layers {
   }
 
   // what exists here, for the menu: loads everything once (cached)
-  #meta() { return Promise.allSettled([this.#loadSignals(), this.#loadCurves(), this.#loadPeaks()]); }
+  #meta() { return Promise.allSettled([this.#loadSignals(), this.#loadCurves(), this.#loadPeaks(), this.#loadAsof()]); }
 
   /** true / false once known, undefined while not loaded */
   #has(id) {
     if (id === "seasons") return this.cur ? this.cur.length > 0 : undefined;
     if (id === "peaks") return this.peaks ? this.peaks.available : undefined;
+    if (id === "asof") return this.asof ? this.asof.any : undefined;
     if (!this.sig) return undefined;
-    return id === "asof" ? this.sig.asof : this.sig.lines.has(id);
+    return this.sig.lines.has(id);
   }
 
   /* ---------------- the pill and its menu ---------------- */
@@ -342,7 +378,7 @@ export class Layers {
     };
     if (onL.has("seasons") && this.cur) for (const l of this.cur) add(l, null, tokenNum("--stroke-hairline", 1));
     if (this.sig) for (const L of SIGNALS) if (onL.has(L.id)) add(this.sig.lines.get(L.id), after, width);
-    if (onL.has("asof") && this.sig?.asof && this.asof?.line) add(this.asof.line, xc, width);
+    if (onL.has("asof")) add(this.#asofAt(this.chart.nav?.T ?? 0), xc, width);
 
     // end labels: where the line leaves the plot (left of the model labels), kept apart. With forecasts
     // drawn, no further than the data cutoff: the labels are right-aligned, so past it they would sit on
@@ -428,7 +464,7 @@ export class Layers {
     if (!onL.size || !this.chart.fan) return out;
     const seen = scene.outcome || t <= scene.cutoff;
     const line = (l, v, text) => { if (v !== undefined) out.push({ name: l.name, value: text(v), mark: l.dash ? "dash" : "line", c: l.c }); };
-    if (onL.has("asof") && this.sig?.asof && this.asof?.line && t <= scene.cutoff) line(this.asof.line, valueAt(this.asof.line, t), value);
+    if (onL.has("asof") && this.asof?.line?.n > 1 && t <= scene.cutoff) line(this.asof.line, valueAt(this.asof.line, t), value);
     if (this.sig) for (const L of SIGNALS) {
       const l = onL.has(L.id) && seen && this.sig.lines.get(L.id);
       if (l) line(l, valueAt(l, t), (v) => `${+v.toFixed(2)}${l.unit}`);
@@ -447,7 +483,6 @@ export class Layers {
   }
 
   destroy() {
-    clearTimeout(this._asofTimer);
     this.offs.forEach((off) => off());
     this.glass.destroy();
     this.pill.remove();
