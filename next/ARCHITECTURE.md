@@ -1,6 +1,6 @@
 # next/: architecture
 
-The new frontend of viz, served at `/next/` beside classic viz (`/`); each links to the other. Design
+The frontend of viz, served at `/next/` (`/` redirects there); classic viz is at `/classic/`, and each links to the other. Design
 decisions are in `DECISIONS.md`. This file is the contract between modules: change it first, then the code.
 
 ## Ground rules
@@ -269,5 +269,5 @@ follows from the date. Zoom, pan and height are view state inside the chart, not
 
 ```bash
 python next/dev/serve.py --port 8610        # from a worktree; finds the hub upward, or pass --hub
-./run.sh                                    # in a normal install: old viz at /, new at /next/
+./run.sh                                    # in a normal install: / opens viz next; classic at /classic/
 ```

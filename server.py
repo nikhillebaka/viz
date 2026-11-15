@@ -184,7 +184,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         # API Routes
         if path == "/next" or path.startswith("/next/"):
-            self._serve_next(path)
+            self._serve_dir(path, "/next", NEXT_DIR)
+        elif path == "/classic" or path.startswith("/classic/"):
+            self._serve_dir(path, "/classic", STATIC_DIR)
         elif path.startswith("/api/next/"):
             self._handle_next_api(path, query)
         elif path == "/api/metadata":
@@ -228,21 +230,25 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 status=405,
             )
         elif path == "/" or not path or path == "/index.html":
-            self._serve_file(STATIC_DIR / "index.html", "text/html")
+            # viz next is the default page; classic is at /classic/. A temporary redirect, so browsers
+            # don't remember it; the query comes along (next reads classic's link parameters).
+            self.send_response(302)
+            self.send_header("Location", "/next/" + (f"?{parsed.query}" if parsed.query else ""))
+            self.end_headers()
         else:
             # Fall back to static files in STATIC_DIR
             super().do_GET()
 
-    # ---- the new frontend (/next/) and its data (/api/next/); nothing old viz uses changes here ----
-    def _serve_next(self, path: str):
-        if path == "/next":
+    # ---- the two frontends: viz next at /next/ (the default; / redirects there) and classic at /classic/ ----
+    def _serve_dir(self, path: str, prefix: str, root: Path):
+        if path == prefix:
             self.send_response(301)
-            self.send_header("Location", "/next/")
+            self.send_header("Location", prefix + "/")
             self.end_headers()
             return
-        rel = urllib.parse.unquote(path[len("/next/"):]) or "index.html"
-        target = (NEXT_DIR / rel).resolve()
-        if NEXT_DIR.resolve() not in target.parents or not target.is_file():
+        rel = urllib.parse.unquote(path[len(prefix) + 1:]) or "index.html"
+        target = (root / rel).resolve()
+        if root.resolve() not in target.parents or not target.is_file():
             self.send_error(404, "File not found")
             return
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
