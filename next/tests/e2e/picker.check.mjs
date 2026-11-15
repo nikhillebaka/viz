@@ -71,4 +71,7 @@ export default async function picker(page, t) {
   });
 
   await t.step("no console errors", async () => { t.eq(page.errors, [], "uncaught exceptions and console errors"); });
+
+  // the app remembers the selection in the browser: leave none behind for the checks after this one
+  await page.eval(() => { localStorage.removeItem("viz.selection"); localStorage.removeItem("viz.next.picker"); });
 }
