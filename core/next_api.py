@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import struct
 import threading
 from collections import OrderedDict
@@ -26,6 +27,44 @@ import polars as pl
 logger = logging.getLogger("viz.next")
 
 FAN_MAGIC = b"VZF1"
+
+
+# what a model's metadata says it is fitted to, as the picker's "Data" filter: (label, pattern) over the
+# data_inputs text, lower-cased; a model can match several
+INPUT_KINDS = (
+    ("NHSN admissions", r"nhsn|\bhhs\b|healthdata"),
+    ("NSSP ED visits", r"nssp|emergency|\bed visit"),
+    ("ILINet", r"ilinet|\bili\b"),
+    ("FluSurv-NET", r"flusurv"),
+    ("Lab tests", r"nrevss|clinical lab|positivity|test positiv"),
+    ("COVID / RSV", r"covid|\brsv\b"),
+    ("Vaccination", r"vaccin"),
+    ("Weather", r"humidity|temperature|weather|climate"),
+    ("Search trends", r"google|search trend"),
+    ("Wastewater", r"wastewater"),
+    ("Hub forecasts", r"flusight|other models|hub models|ensemble"),
+)
+
+
+def _inputs_of(text: str) -> List[str]:
+    t = str(text or "").lower()
+    return [label for label, pat in INPUT_KINDS if re.search(pat, t)]
+
+
+def _truthy(v: Any) -> bool:
+    return v is True or str(v).strip().lower() in ("true", "yes", "1")
+
+
+def _mask(dates, index: Dict[str, int]) -> str:
+    """The rounds a model submitted, as a hex bit string over every season's rounds in order (bit i of
+    the string is round i: 4 rounds per hex digit, lowest bit first), so the picker can draw coverage."""
+    bits = 0
+    for d in dates or ():
+        i = index.get(str(d)[:10])
+        if i is not None:
+            bits |= 1 << i
+    n = (len(index) + 3) // 4
+    return "".join("0123456789abcdef"[(bits >> (4 * k)) & 15] for k in range(n)).rstrip("0")
 
 
 def _season_label(season: str) -> str:
@@ -84,6 +123,9 @@ class NextData:
             "team_name": str(meta.get("team_name")) if has_file and meta.get("team_name") else None,
             "designated": bool(meta.get("designated_model")) if has_file else False,
             "has_metadata": has_file,
+            "inputs": _inputs_of(meta.get("data_inputs")) if has_file else [],
+            "ensemble": _truthy(meta.get("ensemble_of_models")) if has_file else False,
+            "baseline": _truthy(meta.get("baseline_model")) if has_file else False,
         }
         if info.get("is_synthetic"):
             out["abbr"] = str(info.get("name") or model_id)
@@ -141,9 +183,11 @@ class NextData:
             for key, forms in spellings.items()
         }
 
+        round_index = {d: i for i, d in enumerate(r for s in seasons for r in s["rounds"])}
         model_list = []
         for mid, info in models.items():
             meta = self._model_meta(mid, info)
+            fam = family_name.get((info.get("family") or "").lower(), "")
             hub_key = loader.cache_mgr.hub_key(info.get("raw_name", mid)) if info.get("source") == "hub" else None
             model_list.append({
                 "id": mid,
@@ -160,6 +204,11 @@ class NextData:
                 "first": info.get("min_date"),
                 "last": info.get("max_date"),
                 "rounds": len(info.get("dates") or []),
+                # the picker's filters: what kind of model, what data it is fitted to, which rounds it has
+                "kind": "ensemble" if info.get("is_synthetic") or meta["ensemble"] or fam.lower() == "ensemble"
+                        else "baseline" if meta["baseline"] or fam.lower() == "baseline" else "individual",
+                "inputs": meta["inputs"],
+                "cov": _mask(info.get("dates"), round_index),
             })
 
         locations = [

@@ -60,12 +60,70 @@
 .pk-miss { color: var(--ink-secondary); }
 
 .pk-empty { padding: var(--space-8); font-size: var(--text-small); color: var(--ink-tertiary); }
+
+/* filters: one wrapping row of quiet chips; the open one's options in a drawer under it */
+.pk-filters {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-6);
+  padding: var(--space-2) var(--space-8) var(--space-6);
+}
+.pk-fchip { height: var(--size-control-sm); padding: 0 var(--space-8) 0 var(--space-12); gap: var(--space-4); font-size: var(--text-small); }
+.pk-fchip > span { order: -1; white-space: nowrap; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+.pk-fchip > svg { width: var(--size-icon-sm); height: var(--size-icon-sm); opacity: 0.6; transition: rotate var(--dur-fast) var(--ease-out); }
+.pk-fchip[aria-expanded="true"] > svg { rotate: 180deg; }
+.pk-fchip[aria-pressed="true"] { color: var(--ink-primary); background-color: var(--fill-selected); }
+.pk-fclear { font-size: var(--text-small); }
+.pk-shown { margin-left: auto; font-size: var(--text-small); font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
+.pk-drawer {
+  flex: none; max-height: 28vh; overflow: auto; overscroll-behavior: contain;
+  margin: 0 var(--space-4) var(--space-6); padding: var(--space-8);
+  border-radius: var(--radius-tag); background: var(--fill-field);
+  scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+}
+.pk-opts { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-6); }
+.pk-opts + .pk-opts { margin-top: var(--space-8); }
+.pk-dlabel { min-width: 3.5em; font-size: var(--text-small); color: var(--ink-tertiary); }
+.pk-opt { height: var(--size-control-sm); padding: 0 var(--space-12); gap: var(--space-6); font-size: var(--text-small); background-color: transparent; box-shadow: inset 0 0 0 var(--stroke-hairline) var(--fill-selected); }
+.pk-opt[aria-pressed="true"] { box-shadow: none; }
+.pk-opt .pk-n { font-variant-numeric: tabular-nums; color: var(--ink-tertiary); }
+.pk-opt.is-zero { opacity: var(--opacity-disabled); }
+
+/* coverage: the chart season's rounds as a strip at the row's end; the details arrow takes its place on hover */
+.pk-name .c-row-text { padding-right: calc(40px + var(--space-12)); }
+.pk-cov {
+  position: absolute; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-12)); translate: 0 -50%;
+  width: 40px; height: 6px; pointer-events: auto;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.pk-cov-bg { fill: var(--fill-selected); }
+.pk-cov-on { fill: var(--ink-tertiary); opacity: 0.7; }
+.pk-row:hover .pk-cov, .pk-row:has(.pk-info:focus-visible) .pk-cov { opacity: 0; }
+
+/* the foot: what is selected, as chips (charted first, in their colours), then counts and actions */
 .pk-foot {
-  flex: none; display: flex; align-items: center;
-  height: var(--size-chip); margin-top: var(--space-6); padding: 0 var(--space-8);
+  flex: none; margin-top: var(--space-6); padding: var(--space-6) var(--space-8) 0;
   border-top: var(--stroke-hairline) solid var(--fill-selected);
   font-size: var(--text-small); font-variant-numeric: tabular-nums; color: var(--ink-tertiary);
 }
+.pk-tray {
+  display: flex; flex-wrap: wrap; gap: var(--space-4);
+  max-height: calc(3 * var(--size-control-sm) + 2 * var(--space-4)); overflow: auto; overscroll-behavior: contain;
+  margin-bottom: var(--space-6); scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+}
+.pk-tchip {
+  display: inline-flex; align-items: center; height: var(--size-control-sm); max-width: 100%;
+  border-radius: var(--radius-pill); background: var(--fill-field); color: var(--ink-secondary);
+}
+.pk-tname, .pk-tx { display: inline-flex; align-items: center; height: 100%; margin: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
+.pk-tname { gap: var(--space-6); min-width: 0; padding-left: var(--space-8); }
+.pk-tname > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pk-tname > i { flex: none; width: var(--space-8); height: var(--space-8); border-radius: 50%; box-shadow: inset 0 0 0 1.25px var(--ink-faint); }
+.pk-tname > i.on { background: var(--c); box-shadow: none; }
+.pk-tname:hover { color: var(--ink-primary); }
+.pk-tx { padding: 0 var(--space-6) 0 var(--space-4); color: var(--ink-tertiary); border-radius: 0 var(--radius-pill) var(--radius-pill) 0; }
+.pk-tx:hover { color: var(--ink-primary); }
+.pk-tx svg { width: 12px; height: 12px; }
+.pk-foot-line { display: flex; align-items: center; gap: var(--space-12); height: var(--size-chip); }
+.pk-acts { margin-left: auto; display: inline-flex; gap: var(--space-12); }
 
 /* ================================================================ location picker */
 .lp-chips { display: flex; flex-wrap: wrap; gap: var(--space-6); padding: 0 var(--space-8); }
@@ -81,7 +139,7 @@
 
 /* a row's details (the model sheet): a small open-page arrow at the end of the row, on hover */
 .pk-info {
-  position: absolute; z-index: 1; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-8)); translate: 0 -50%;
+  position: absolute; z-index: 1; top: 50%; right: calc(var(--space-8) + var(--size-icon-sm) + var(--space-12) + 8px); translate: 0 -50%;
   display: grid; place-items: center; width: var(--space-24); height: var(--space-24); padding: 0; border: 0; border-radius: 50%; background: none; cursor: pointer;
   color: var(--ink-tertiary);
   opacity: 0; transition: opacity var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
@@ -89,3 +147,4 @@
 .pk-info .c-icon, .pk-info svg { display: block; width: var(--size-icon-sm); height: var(--size-icon-sm); }
 .pk-row:hover .pk-info, .pk-info:focus-visible { opacity: 1; }
 .pk-info:hover { color: var(--ink-primary); background: var(--fill-hover); }
+.pk-acts .pk-combine { margin-left: 0; }

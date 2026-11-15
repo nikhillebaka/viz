@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { indexManifest } from "../../lib/api.js";
 import * as S from "../../features/selection.js";
-import { groupModels, subLine, panelWidth, ONE_COLUMN_MAX, catalog, matcher } from "../../features/ModelPicker.js";
+import { groupModels, subLine, panelWidth, ONE_COLUMN_MAX, catalog, matcher, parseQuery, coverageOf, facetsOf } from "../../features/ModelPicker.js";
 import { TILES, COLUMNS, matchLocations, tileNeighbor, nextRecent } from "../../features/LocationPicker.js";
 
 const H = "wk inc flu hosp", ED = "wk inc flu prop ed visits";
@@ -130,6 +130,55 @@ test("sub lines: facts, never the section's title or what the name says", () => 
   assert.equal(sub("flusight:ATeam-beta", "Not in 2025–26"), "ATeam · FluSight");
   assert.equal(sub("flusight:FluSight-ensemble", "FluSight"), "FluSight");  // never empty
   assert.equal(sub("flusight:UMass-gbqr", "FluSight"), "UMass");
+});
+
+test("filters: values per model; within a filter any of, across filters all of; counts ignore their own filter", () => {
+  const f = (o) => ({ source: new Set(), family: new Set(), team: new Set(), kind: new Set(), input: new Set(), ...o });
+  const ids = (filters) => groupModels(M, { target: H, season: "2025-2026", filters, when: "any" }).sections.flatMap((s) => s.ids);
+  assert.deepEqual(facetsOf(M, M.modelById.get("flusight:ZTeam-alpha")).source, ["FluSight"]);
+  assert.deepEqual(facetsOf(M, M.modelById.get("me-test_run")).source, ["Local"]);
+  const gbqr = ids(f({ family: new Set(["GBQR"]) }));
+  assert.ok(gbqr.length >= 4 && gbqr.every((id) => /gbqr/i.test(id)));
+  const both = ids(f({ family: new Set(["GBQR", "AR"]) }));
+  assert.ok(both.length > gbqr.length);
+  assert.deepEqual(ids(f({ family: new Set(["GBQR"]), source: new Set(["FluSight"]) })), ["flusight:UMass-gbqr"]);
+  const g = groupModels(M, { target: H, season: "2025-2026", filters: f({ family: new Set(["GBQR"]) }), when: "any" });
+  assert.ok(g.counts.family.get("AR") > 0, "a family's count ignores the family filter");
+  assert.equal(g.counts.source.get("Local") || 0, 0, "other filters' counts respect it");
+});
+
+test("typed search: key:value from the start of a word; unknown keys are words", () => {
+  assert.deepEqual(parseQuery("team:umass gbqr data:nssp"), { words: ["gbqr"], tokens: [{ key: "team", value: "umass" }, { key: "input", value: "nssp" }] });
+  assert.deepEqual(parseQuery("foo:bar").words, ["foo:bar"]);
+  const ids = (q) => groupModels(M, { target: H, season: "2025-2026", query: q, when: "any" }).sections.flatMap((s) => s.ids);
+  assert.deepEqual(ids("team:ateam").sort(), ["flusight:ATeam-alpha", "flusight:ATeam-beta"]);
+  assert.deepEqual(ids("team:team"), [], "not inside a word");
+});
+
+test("grouping and sort: by family (largest first), by team, one list; latest forecast first", () => {
+  const g = (o) => groupModels(M, { target: H, season: "2025-2026", when: "any", ...o });
+  assert.equal(g({ group: "family" }).sections[0].title, "GBQR");
+  assert.equal(g({ group: "none" }).sections.length, 1);
+  assert.ok(g({ group: "team" }).sections.some((s) => s.title === "ATeam"));
+  const Mr = indexManifest({ ...M, models: M.models.map((m) => ({ ...m, last: m.id === "UMass-AR6" ? "2026-05-30" : "2026-01-03" })) });
+  assert.equal(groupModels(Mr, { target: H, season: "2025-2026", when: "any", group: "none", sort: "recent" }).sections[0].ids[0], "UMass-AR6");
+});
+
+test("when: this season moves absent models to the bottom; this round, those without a forecast; any time, none", () => {
+  const away = (o) => groupModels(M, { target: H, season: "2025-2026", ...o }).sections.find((s) => s.key === "away");
+  assert.ok(away({}).ids.includes("UMass-gbqr_10src"));
+  assert.equal(away({ when: "any" }), undefined);
+  const r = away({ when: "round", round: { has: (id) => id !== "UMass-AR2", label: "Nov 29" } });
+  assert.deepEqual(r.ids, ["UMass-AR2"]);
+  assert.equal(r.title, "No forecast Nov 29");
+});
+
+test("coverage: the season's rounds from the hex mask, lowest bit first", () => {
+  // rounds in order: 2024-11-23, 2024-11-30, 2025-11-22, 2025-11-29 → bits 0..3; "a" = 1010: rounds 1 and 3
+  const m = { cov: "a" };
+  assert.deepEqual(coverageOf(M, m, "2024-2025"), { n: 1, total: 2, on: [false, true] });
+  assert.deepEqual(coverageOf(M, m, "2025-2026"), { n: 1, total: 2, on: [false, true] });
+  assert.deepEqual(coverageOf(M, {}, "2025-2026").n, 0);
 });
 
 test("panel width: half the viewport past 24 rows, else a quarter, at least --popover-width", () => {
