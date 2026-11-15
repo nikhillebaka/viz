@@ -89,6 +89,19 @@ async function boot() {
   mountShell(root, ctx);
   syncUrl(store, manifest);
   persist(store);
+  // a link that names models from a live hub that isn't synced here: say so, with a way to sync it
+  {
+    const named = (new URLSearchParams(location.search).get("models") || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const missing = named.filter((id) => /^[a-z][a-z0-9_]*:/.test(id) && !id.startsWith("local:") && !manifest.modelById.has(id));
+    if (missing.length) {
+      const hubId = missing[0].split(":")[0], hub = (manifest.hubs || []).find((x) => x.id === hubId);
+      const label = hub?.label || hubId, n = missing.length;
+      import("./ui/controls.js").then(({ toast }) => toast(`This link includes ${n} ${label} model${n === 1 ? "" : "s"} not synced here`, {
+        tone: "info", duration: 12000,
+        action: hub ? { label: "Sync…", onClick: () => import("./features/Hubs.js").then((m) => m.openHubs(document.querySelector(".app-more") || document.body, { manifest })) } : null,
+      }));
+    }
+  }
   // after Refresh data found new files and reloaded: say so once, on the fresh page
   try {
     const n = sessionStorage.getItem("viz.refreshed");

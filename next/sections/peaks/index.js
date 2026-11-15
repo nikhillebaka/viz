@@ -142,6 +142,19 @@ export function mount(el, ctx) {
       .then((j) => { pmap = j; renderMap(); }, (e) => { if (!isAbort(e)) { pmap = null; renderMap(); } });
   }
 
+  /* Live hubs that hold files synced before peak forecasts were kept (fetched once, quietly). */
+  let hubsInfo = null;
+  const outdatedHubs = () => {
+    if (hubsInfo === null) {
+      hubsInfo = [];
+      fetch("/api/remote/hubs").then((r) => (r.ok ? r.json() : null)).then((j) => {
+        hubsInfo = (j?.hubs || []).filter((x) => x.synced && x.enabled !== false && x.peak_outdated > 0);
+        if (hubsInfo.length && resp) renderNote();
+      }).catch(() => {});
+    }
+    return hubsInfo;
+  };
+
   /* Which models: the selected ones that forecast peaks this round; when none do, every model that does. */
   function choose() {
     const s = store.get();
@@ -202,6 +215,10 @@ export function mount(el, ctx) {
     const when = tm?.i50?.[0] && tm.i50[1] ? (tm.i50[0] === tm.i50[1] ? fmtDay(T(tm.i50[0])) : `${fmtDay(T(tm.i50[0]))} – ${fmtDay(T(tm.i50[1]))}`) : null;
     const high = sz?.i50 ? (V.value(sz.i50[0]) === V.value(sz.i50[1]) ? V.value(sz.i50[0]) : `${V.value(sz.i50[0])}–${V.value(sz.i50[1])}`) : null;
     if (when || high) out.push(" · ", h("span", { class: "pe-consensus" }, `Most likely ${[when, high].filter(Boolean).join(" · ")}`));
+    // a live hub synced before peak forecasts were kept is missing them until it is updated
+    const old = outdatedHubs();
+    if (old.length) out.push(" · ", `${old.map((x) => x.short_label || x.label).join(", ")} synced before peak forecasts were kept · `,
+      h("button", { type: "button", class: "c-link", onclick: () => import("../../features/Hubs.js").then((m) => m.openHubs(document.querySelector(".app-more") || document.body, { manifest })) }, "Update"));
     note.replaceChildren(...out);
   }
 

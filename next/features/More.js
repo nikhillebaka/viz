@@ -103,8 +103,10 @@ export function mountMore(zone, ctx) {
   const showSync = (st) => {
     dot.hidden = !st;
     dot.classList.toggle("is-failed", st === "failed");
-    btn.setAttribute("aria-label", st === "running" ? "More · hub syncing" : st === "failed" ? "More · hub sync failed" : "More");
-    tip.set(st === "running" ? "More · syncing" : st === "failed" ? "More · sync failed" : "More");
+    dot.classList.toggle("is-new", st === "new");
+    const say = { running: "hub syncing", failed: "hub sync failed", new: "new forecasts on a live hub" }[st];
+    btn.setAttribute("aria-label", say ? `More · ${say}` : "More");
+    tip.set(say ? `More · ${say}` : "More");
   };
   (window.requestIdleCallback ?? setTimeout)(() => {
     if (gone) return;

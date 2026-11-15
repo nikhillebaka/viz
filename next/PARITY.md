@@ -10,6 +10,10 @@ whether it is done. The line-by-line inventory (831 items, each with its source 
 | [parity/views.md](parity/views.md) | fan chart (and signals), spatial map, heatmap, season peak, with their endpoints | 326 |
 | [parity/evaluation.md](parity/evaluation.md) | leaderboard, diagnostics, evaluation window, scoring rules, ensemble studio, live hubs, CLI parity, exports | 259 |
 
+**Status (walked item by item, Nov 15 2026):** 547 done, 284 deliberately changed (each with its reason
+inline), 0 missing. "Done" means the behaviour exists in `next/` and was checked against the code; most areas
+also have a headless check (`next/tests/e2e/`), but not every line has its own test.
+
 **How to use it.** A line is checked (`- [x]`) when the behaviour exists in `next/`, has a test, and has
 been looked at. A line that is deliberately changed or dropped is marked `- [~]` with the reason
 (a row below). Items tagged (bug), (quirk) or (dead) in the inventory are not ported as they are: the
@@ -19,28 +23,28 @@ intended behaviour is, and the row below says so.
 
 | Old viz | In `next/` | Phase | Status |
 |---|---|---|---|
-| Target switch | Target bubble (only with more than one target) | 1 | built, first pass |
-| Location quick picks + dropdown | Location bubble: search, recent places, tile map | 1 | built, first pass |
-| Date stepper, date popover (search, season tabs, badges) | Date stepper + picker: season chips, a calendar of rounds | 1 | built, first pass |
-| Model bar: search, family and season filters, chips, hub shelves, Select all / Clear | Model picker: search, sections (Local, families, hubs, not this season), bulk select | 1 | built, first pass |
-| Fan chart: truth, forecasts, PI levels, width rulers, Truth toggle | The fan chart (`design/fan-chart.md`) | 1 | built, first pass |
-| URL parameters, share link | `features/url.js`; Copy link in the ↓ menu | 1 (chart keys), 3 (rest) | built, first pass |
-| Theme | Theme bubble | 1 | built, first pass |
-| Signals & Indicators drawer (as-of reports, NSSP, ILINet, FluSurv-NET, past seasons, peaks; modes, palettes) | Layers on the fan chart | 2 | built, first pass |
-| Leaderboard, telemetry strip, scope toolbar | Scores section: scope line, leaderboard | 3 | built, first pass |
-| Diagnostics tabs (anatomy, calibration, horizon) | Figures under the leaderboard; expanded rows | 3 | built, first pass |
-| Evaluation window popover | Dates popover in the scope line | 3 | built, first pass |
-| Heatmap view | Heatmap section, sharing the scope | 3 | built, first pass |
-| Exports, Copy CLI | ↓ menu in the scope line | 3 | built, first pass |
-| Model detail modal | Expanded leaderboard row; details in the picker | 3 | built, first pass |
-| Spatial map view | Map section | 4 | built, first pass |
-| Season peak view | Peaks section | 4 | built, first pass |
-| Ensemble studio | "Combine" on a selection, from the picker | 4 | built, first pass |
-| Live hubs modal, brand menu | ⋯ bubble | 4 | built, first pass |
-| Validation warnings | ⋯ bubble count; a glyph on affected rows | 4 | built, first pass |
-| Guide / Methodology modal, glossary popovers | The Guide (⋯ → Guide, G, `#guide/<topic>`), ? links beside section headings | 4 | built, first pass |
+| Target switch | Target bubble (only with more than one target) | 1 | at parity |
+| Location quick picks + dropdown | Location bubble: search, recent places, tile map | 1 | at parity |
+| Date stepper, date popover (search, season tabs, badges) | Date stepper + picker: season chips, a calendar of rounds | 1 | at parity |
+| Model bar: search, family and season filters, chips, hub shelves, Select all / Clear | Model picker: search, sections (Local, families, hubs, not this season), bulk select | 1 | at parity |
+| Fan chart: truth, forecasts, PI levels, width rulers, Truth toggle | The fan chart (`design/fan-chart.md`) | 1 | at parity |
+| URL parameters, share link | `features/url.js`; Copy link in the ↓ menu | 1 (chart keys), 3 (rest) | at parity |
+| Theme | Theme bubble | 1 | at parity |
+| Signals & Indicators drawer (as-of reports, NSSP, ILINet, FluSurv-NET, past seasons, peaks; modes, palettes) | Layers on the fan chart | 2 | at parity |
+| Leaderboard, telemetry strip, scope toolbar | Scores section: scope line, leaderboard | 3 | at parity |
+| Diagnostics tabs (anatomy, calibration, horizon) | Figures under the leaderboard; expanded rows | 3 | at parity |
+| Evaluation window popover | Dates popover in the scope line | 3 | at parity |
+| Heatmap view | Heatmap section, sharing the scope | 3 | at parity |
+| Exports, Copy CLI | ↓ menu in the scope line | 3 | at parity |
+| Model detail modal | Expanded leaderboard row; details in the picker | 3 | at parity |
+| Spatial map view | Map section | 4 | at parity |
+| Season peak view | Peaks section | 4 | at parity |
+| Ensemble studio | "Combine" on a selection, from the picker | 4 | at parity |
+| Live hubs modal, brand menu | ⋯ bubble | 4 | at parity |
+| Validation warnings | ⋯ bubble count; a glyph on affected rows | 4 | at parity |
+| Guide / Methodology modal, glossary popovers | The Guide (⋯ → Guide, G, `#guide/<topic>`), ? links beside section headings | 4 | at parity |
 | Presentation mode | — | 4 | deferred: owner wants a real design, not hidden buttons |
-| Keyboard shortcuts | Kept where the action exists; modifier keys respected | 1–4 | built, first pass |
+| Keyboard shortcuts | Kept where the action exists; modifier keys respected | 1–4 | at parity |
 
 ## Deliberate changes
 

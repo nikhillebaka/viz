@@ -30,12 +30,16 @@ const seasonLabel = (s) => { const [a, b] = s.split("-"); return `${a}–${b.sli
 const day = (iso) => (iso ? fmtDay(parseIso(iso)) : "–");
 const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
 
-/** "running" while a sync runs, "failed" after one failed (until the panel is opened), else "". */
-export const syncStatus = () => (hubs.some(running) ? "running" : failed ? "failed" : "");
+/* forecast files added, changed or removed upstream since a shown hub's last sync */
+const upstreamOf = (x) => { const p = x.pending || {}; return (p.new || 0) + Math.max(0, (p.changed || 0) - (p.outdated || 0)) + (p.removed || 0); };
+
+/** "running" while a sync runs, "failed" after one failed (until the panel is opened), "new" when a shown
+ * hub has new forecasts upstream, else "". */
+export const syncStatus = () => (hubs.some(running) ? "running" : failed ? "failed" : hubs.some((x) => x.synced && x.enabled !== false && upstreamOf(x) > 0) ? "new" : "");
 
 /**
  * Follow the sync status (called now, then on each change).
- * @param {(status: "running" | "failed" | "") => void} fn
+ * @param {(status: "running" | "failed" | "new" | "") => void} fn
  * @returns {() => void} stops
  */
 export function watchSync(fn) {
@@ -177,7 +181,7 @@ function hubBlock(x) {
   const meta = x.synced
     ? [plural(x.models || 0, "model"), plural(x.files || 0, "file"), fmtBytes(x.bytes), `synced ${fmtAgo(x.last_sync)}`].join(" · ")
     : "Nothing downloaded";
-  const p = x.pending || {}, upstream = (p.new || 0) + Math.max(0, (p.changed || 0) - (p.outdated || 0)) + (p.removed || 0);
+  const upstream = upstreamOf(x);
   const meta2 = x.synced ? [`latest ${day(x.latest_round)}`, x.latest_round_models ? plural(x.latest_round_models, "model") : null, x.truth?.oracle?.as_of ? `truth ${day(x.truth.oracle.as_of)}` : null, upstream ? `${upstream} changed upstream` : null].filter(Boolean).join(" · ") : null;
 
   // seasons: those stored, the current one, and whatever a check listed
