@@ -255,7 +255,8 @@ export function mount(el, ctx) {
         for (const r of order.unranked) kids.push(...rowEls(r, cols, st, sc, ui));
       }
     }
-    board.replaceChildren(headerRow(cols, ui, sc), ...kids);
+    kids.push(headerRow(cols, ui, sc));
+    board.replaceChildren(...kids);
     if (keepFocus) board.querySelector(`.sc-row[data-id="${CSS.escape(keepFocus)}"]`)?.focus({ preventScroll: true });
   }
 
@@ -360,7 +361,7 @@ export function mount(el, ctx) {
     }
   }
 
-  /* the column titles: above the rows, held under the top bubbles while a long table scrolls */
+  /* the column titles: a footer that rides the bottom of the screen and rests under the last row */
   function headerRow(cols, ui, sc) {
     const head = (key, text, cls = "") => {
       const active = ui.sort === key;

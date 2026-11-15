@@ -126,11 +126,11 @@
 }
 .sc-row.is-add { height: var(--size-row); }
 
-/* the column titles: above the rows, held just under the top bubbles while a long table scrolls */
+/* the column titles: a footer that rides the bottom of the screen, then rests under the last row */
 .sc-headrow {
-  position: sticky; top: calc(var(--inset) + var(--size-control) + var(--space-8)); z-index: var(--z-chrome);
-  height: var(--size-row); margin-bottom: var(--space-4);
-  border-bottom: var(--stroke-hairline) solid var(--line-hairline); border-radius: 0;
+  position: sticky; bottom: 0; z-index: var(--z-chrome);
+  height: var(--size-row); margin-top: var(--space-4);
+  border-top: var(--stroke-hairline) solid var(--line-hairline); border-radius: 0;
   background: var(--surface-paper);
 }
 .sc-head {
