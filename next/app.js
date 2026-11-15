@@ -89,6 +89,14 @@ async function boot() {
   mountShell(root, ctx);
   syncUrl(store, manifest);
   persist(store);
+  // after Refresh data found new files and reloaded: say so once, on the fresh page
+  try {
+    const n = sessionStorage.getItem("viz.refreshed");
+    if (n !== null) {
+      sessionStorage.removeItem("viz.refreshed");
+      import("./ui/controls.js").then(({ toast }) => toast(n ? `Data refreshed · ${n} models` : "Data refreshed"));
+    }
+  } catch {}
   window.__viz = { store, manifest, chart: ctx.chart, get nav() { return ctx.chart.nav; }, idle: () => ctx.chart.idle() };
 }
 

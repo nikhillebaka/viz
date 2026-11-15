@@ -185,6 +185,8 @@ class NextData:
             "hubs": hubs,
             "latest": {"date": loader.get_latest_reference_date(), "season": loader.get_latest_season()},
             "truth": loader.get_truth_info(),
+            # changes whenever forecasts or truth change on disk (the page compares it after a refresh)
+            "stamp": "|".join(str(x) for x in self._stamp()),
         }
 
     # ------------------------------------------------------------------ observed data

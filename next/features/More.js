@@ -119,7 +119,7 @@ export function mountMore(zone, ctx) {
       { label: "Data sources", onSelect: () => open("hubs") },
       warnings.count ? { label: "Warnings", shortcut: warnings.count.toLocaleString(), onSelect: () => open("warnings") } : null,
       "-",
-      { label: "Refresh data", onSelect: refresh },
+      { label: "Refresh data", onSelect: () => refresh(ctx) },
       { label: "Copy link", onSelect: copyLink },
       "-",
       { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
@@ -142,13 +142,17 @@ export function mountMore(zone, ctx) {
   return { destroy() { gone = true; offSync(); offKeys(); offHash(); tip.destroy(); g.destroy(); btn.remove(); } };
 }
 
-async function refresh() {
+/* The server re-reads the hub's files. If nothing on disk changed (the manifest's stamp is the same) the
+ * page stays as it is; otherwise it reloads once, so every part picks up the new data together, and the
+ * fresh page says so (app.js reads viz.refreshed). One message either way. */
+async function refresh(ctx) {
   const t = toast("Refreshing data…", { duration: 60000, tone: "info" });
   try {
     const r = await postJSON("/api/cache/refresh");
-    t.dismiss();
-    toast(`Refreshed · ${r.models_cached ?? 0} models`);
-    reloadSoon();
+    const fresh = await fetch("/api/next/manifest", { cache: "no-store" }).then((x) => x.json());
+    if (fresh.stamp && fresh.stamp === ctx.manifest.stamp) { t.dismiss(); toast("Up to date"); return; }
+    try { sessionStorage.setItem("viz.refreshed", String(r.models_cached ?? "")); } catch {}
+    location.reload();
   } catch (err) {
     t.dismiss();
     toast(`Refresh failed · ${err.message}`, { tone: "error" });
