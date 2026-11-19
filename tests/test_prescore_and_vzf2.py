@@ -4,12 +4,14 @@ dimension slicing, VZF2 binary encoding/size reduction, VZT1 trajectories, PMF e
 """
 
 import gzip
+import http.client
 import json
 from pathlib import Path
 import shutil
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 import http.server
@@ -23,6 +25,7 @@ from viz.core.evaluation import EvaluationEngine, EvaluationParams
 from viz.core.metrics import crps_ensemble_1d, energy_score, score_forecasts, score_pmf_forecasts, score_sample_forecasts
 from viz.core.next_api import NextData
 from viz.core.workspace import HubManager
+import viz.server as viz_server
 from viz.server import SandboxRequestHandler
 
 
@@ -289,6 +292,57 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_static_dir_redirect_and_gzip_etag(self):
+        tmp_next = Path(tempfile.mkdtemp())
+        (tmp_next / "lab").mkdir()
+        (tmp_next / "geo").mkdir()
+        (tmp_next / "lab" / "index.html").write_text("<!doctype html><title>Lab</title>" + ("<!-- pad -->" * 120), encoding="utf-8")
+        (tmp_next / "geo" / "sample.json").write_text(json.dumps({"items": list(range(400))}), encoding="utf-8")
+        mgr = HubManager(data_dir=self.data_dir, cli_hubs=[self.base], include_enclosing=False)
+
+        class H(SandboxRequestHandler):
+            hub_manager = mgr
+            def log_message(self, *args):
+                pass
+
+        with mock.patch.object(viz_server, "NEXT_DIR", tmp_next):
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                conn.request("GET", "/next/lab")
+                r1 = conn.getresponse()
+                r1.read()
+                self.assertEqual(r1.status, 301)
+                self.assertEqual(r1.getheader("Location"), "/next/lab/")
+
+                conn.request("GET", "/next/lab/", headers={"Accept-Encoding": "gzip"})
+                r2 = conn.getresponse()
+                body2 = r2.read()
+                self.assertEqual(r2.status, 200)
+                self.assertEqual(r2.getheader("Content-Encoding"), "gzip")
+                self.assertIn("<title>Lab</title>", gzip.decompress(body2).decode("utf-8"))
+
+                conn.request("GET", "/next/geo/sample.json", headers={"Accept-Encoding": "gzip"})
+                r3 = conn.getresponse()
+                body3 = r3.read()
+                self.assertEqual(r3.status, 200)
+                self.assertEqual(r3.getheader("Content-Encoding"), "gzip")
+                etag = r3.getheader("ETag")
+                self.assertTrue(etag)
+                self.assertEqual(json.loads(gzip.decompress(body3))["items"][10], 10)
+
+                conn.request("GET", "/next/geo/sample.json", headers={"If-None-Match": etag})
+                r4 = conn.getresponse()
+                r4.read()
+                self.assertEqual(r4.status, 304)
+                conn.close()
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                shutil.rmtree(tmp_next, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -413,9 +413,20 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Location", prefix + "/")
             self.end_headers()
             return
-        rel = urllib.parse.unquote(path[len(prefix) + 1:]) or "index.html"
-        target = (root / rel).resolve()
-        if root.resolve() not in target.parents or not target.is_file():
+        rel = urllib.parse.unquote(path[len(prefix) + 1:])
+        root_resolved = root.resolve()
+        target = (root_resolved / rel).resolve() if rel else root_resolved
+        if target != root_resolved and root_resolved not in target.parents:
+            self.send_error(404, "File not found")
+            return
+        if target.is_dir():
+            if not path.endswith("/"):
+                self.send_response(301)
+                self.send_header("Location", path + "/")
+                self.end_headers()
+                return
+            target = (target / "index.html").resolve()
+        if root_resolved not in target.parents or not target.is_file():
             self.send_error(404, "File not found")
             return
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
@@ -635,16 +646,18 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         *,
         etag: Optional[str] = None,
         allow_gzip: bool = True,
+        cache_control: Optional[str] = None,
     ):
+        cc = cache_control or "no-cache"
         if status == 200 and etag is not None:
             if self._etag_matches(self.headers.get("If-None-Match"), etag):
-                self._cache_control_override = "no-cache"
+                self._cache_control_override = cc
                 self.send_response(304)
                 self.send_header("ETag", etag)
                 self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 return
-            self._cache_control_override = "no-cache"
+            self._cache_control_override = cc
 
         body = raw_bytes
         use_gzip = False
@@ -672,13 +685,27 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         if not file_path.exists():
             self.send_error(404, "File not found")
             return
+        st = file_path.stat()
+        etag = f'W/"{st.st_mtime_ns:x}-{st.st_size:x}"'
+        base_type = content_type.split(";", 1)[0].strip().lower()
+        allow_gzip = base_type.startswith("text/") or base_type in (
+            "application/json",
+            "image/svg+xml",
+            "application/javascript",
+        )
+        immutable = file_path.suffix == ".woff2" or (
+            file_path.suffix == ".json" and "geo" in file_path.parts
+        )
         with open(file_path, "rb") as f:
             content = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
+        self._send_bytes(
+            content,
+            content_type,
+            status=200,
+            etag=etag,
+            allow_gzip=allow_gzip,
+            cache_control="public, max-age=3600" if immutable else "no-cache",
+        )
 
     def _handle_status(self, query: dict):
         mgr = self._mgr()

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viz · Design Lab</title>
+<script>
+  try { if (JSON.parse(localStorage.getItem("viz.theme")) === "light") document.documentElement.dataset.theme = "light"; } catch (e) {}
+</script>
+<link rel="preload" href="../fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="../fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="../styles/tokens.css">
+<link rel="stylesheet" href="../styles/base.css">
+<link rel="stylesheet" href="../styles/glass.css">
+<link rel="stylesheet" href="../styles/controls.css">
+<link rel="stylesheet" href="../styles/pickers.css">
+<link rel="stylesheet" href="../styles/views.css">
+<link rel="stylesheet" href="../styles/map.css">
+<link rel="stylesheet" href="lab.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="lab-header">
+  <div class="lab-brand">
+    <a class="c-pill sm lab-back" href="/next/" title="Return to main /next/ workspace">← /next/</a>
+    <span class="lab-wordmark">viz <span class="lab-muted">· Design Lab</span></span>
+  </div>
+  <nav id="lab-tabs" aria-label="Prototype screens"></nav>
+  <div class="lab-actions" id="lab-actions"></div>
+</header>
+<div id="lab-live-bar" class="lab-live-bar" hidden></div>
+<main id="lab-stage" class="lab-stage"></main>
+</body>
+</html>
