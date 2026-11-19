@@ -493,11 +493,13 @@ class HubContext:
             return None
 
     def invalidate_all(self):
-        """Clear every in-memory cache layer on this HubContext."""
+        """Clear every in-memory and derived score cache layer on this HubContext."""
         self.loader.invalidate_inventory()
         self.loader.ensemble_mgr.clear_cached_forecasts()
         with self.eval_engine._eval_cache_lock:
             self.eval_engine._eval_cache.clear()
+        if hasattr(self.eval_engine, "prescore"):
+            self.eval_engine.prescore.invalidate()
         self.next_data.invalidate()
 
     def _on_hub_inventory_change(self, hub_id: str, changed_models: List[str], *, propagate: bool = True):

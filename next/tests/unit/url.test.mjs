@@ -168,3 +168,18 @@ test("hub URL parameter validates against workspace_hubs and stays omitted on si
   assert.equal(qMulti, "?hub=covid");
   assert.equal(parseUrl(qMulti, multi).hub, "covid");
 });
+
+test("defaults and defaultDate adapt to geo.default_location and calendar.active_months", () => {
+  const eu = indexManifest({
+    ...manifest,
+    geo: { default_location: "DE" },
+    calendar: { active_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] },
+    locations: [{ id: "DE", abbr: "DE", name: "Germany" }, { id: "FR", abbr: "FR", name: "France" }],
+    seasons: [{ id: "2025-2026", rounds: ["2025-11-26", "2025-07-02"], start: "2025-07-28", end: "2026-07-26" }],
+    models: [{ id: "EU-m", abbr: "m", last: "2025-07-02" }],
+  });
+  const d = defaults(eu);
+  assert.equal(d.location, "DE");
+  assert.equal(d.date, "2025-07-02", "year-round hub selects July round instead of jumping out of summer");
+  assert.deepEqual(parseUrl("?hz=0,1,8,16", eu).scope.horizons, [0, 1, 8, 16]);
+});

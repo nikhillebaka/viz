@@ -42,7 +42,10 @@ export function parseLevels(v) {
  */
 export function defaults(manifest, sel) {
   const target = manifest.targetById.has(manifest.default_target) ? manifest.default_target : manifest.targets?.[0]?.id ?? "";
-  const location = manifest.locationById.has("US") ? "US" : manifest.locations?.[0]?.id ?? "US";
+  const pref = manifest.geo?.default_location ?? manifest.default_location;
+  const location = (pref && manifest.locationById.has(pref))
+    ? pref
+    : (manifest.locationById.has("US") ? "US" : manifest.locations?.[0]?.id ?? "US");
   const picks = (manifest.recommended || []).filter((id) => id !== manifest.baseline && manifest.modelById.has(id)).slice(0, 3);
   const def = create({ selected: picks });
   return { target, location, date: defaultDate(manifest, sel ?? def), sel: def, levels: [...DEFAULT_LEVELS], rulers: false, focus: null };
@@ -52,24 +55,27 @@ export function defaults(manifest, sel) {
  * The date a view opens on when nothing names one: the latest round on which a selected model has a
  * forecast (the newest `last` among them, snapped to a round at or before it); with nothing selected, or
  * nothing selected that ever forecast, the latest round any model forecast; else the latest round.
- * (The newest round of a hub often has only a few forecasts yet; opening there would show no models.)
- * Of those rounds, the latest one in season (November to March) is preferred, so the page doesn't open
- * on a flat off-season week; a hub with no such round opens on the latest.
+ * Active months come from `manifest.calendar.active_months` when available (defaulting to Nov–Mar).
  * @param {import("../lib/api.js").Manifest} manifest
  * @param {{ selected: string[] }} sel
  * @returns {string} a round's ISO date ("" when there are no rounds)
  */
-/* November to March: the weeks a flu season is doing something. */
-const IN_SEASON = (iso) => { const m = +iso.slice(5, 7); return m >= 11 || m <= 3; };
+const DEFAULT_ACTIVE_MONTHS = [11, 12, 1, 2, 3];
 
 export function defaultDate(manifest, sel) {
   const R = manifest.allRounds;
   if (!R.length) return "";
+  const months = new Set(
+    Array.isArray(manifest?.calendar?.active_months) && manifest.calendar.active_months.length
+      ? manifest.calendar.active_months
+      : DEFAULT_ACTIVE_MONTHS,
+  );
+  const inSeason = (iso) => months.has(+iso.slice(5, 7));
   const lastOf = (ids) => { let m = ""; for (const id of ids) { const l = manifest.modelById.get(id)?.last; if (typeof l === "string" && l > m) m = l; } return m; };
   const last = lastOf(sel?.selected ?? []) || lastOf(manifest.modelById.keys());
   if (!last) return R.at(-1).iso;
   let best = null, active = null;
-  for (const r of R) if (r.iso <= last) { best = r; if (IN_SEASON(r.iso)) active = r; }
+  for (const r of R) if (r.iso <= last) { best = r; if (inSeason(r.iso)) active = r; }
   return (active ?? best ?? R[0]).iso;
 }
 
@@ -194,8 +200,8 @@ function parseScope(q, manifest) {
   const wk = /^(\d{1,2})[-:](\d{1,2})$/.exec(q.get("wk") || "");
   if (wk) { const a = Math.max(1, Math.min(53, +wk[1])), b = Math.max(1, Math.min(53, +wk[2])); sc.weeks = [Math.min(a, b), Math.max(a, b)]; }
   if (["pre", "peak", "post"].includes(q.get("ph"))) sc.phase = q.get("ph");
-  const hz = [...new Set(list(q, "hz").map(Number))].filter((h) => [0, 1, 2, 3].includes(h)).sort();
-  if (hz.length && hz.length < 4) sc.horizons = hz;
+  const hz = [...new Set(list(q, "hz").map(Number))].filter((h) => Number.isInteger(h) && h >= -4 && h <= 53).sort((a, b) => a - b);
+  if (hz.length && (hz.length < 4 || !sameList(hz, [0, 1, 2, 3]))) sc.horizons = hz;
   if (["US", "current"].includes(q.get("pl"))) sc.place = q.get("pl");
   if (q.get("fair") === "1") sc.fair = true;
   if (q.get("bl") && manifest.modelById.has(q.get("bl"))) sc.baseline = q.get("bl");
@@ -221,7 +227,7 @@ function writeScope(p, sc, manifest) {
   if (Array.isArray(sc.seasons) && sc.seasons.length) p.push(["ss", sc.seasons.join(",")]);
   if (Array.isArray(sc.weeks) && sc.weeks.length === 2) p.push(["wk", `${sc.weeks[0]}-${sc.weeks[1]}`]);
   if (sc.phase) p.push(["ph", sc.phase]);
-  if (Array.isArray(sc.horizons) && sc.horizons.length && sc.horizons.length < 4) p.push(["hz", sc.horizons.join(",")]);
+  if (Array.isArray(sc.horizons) && sc.horizons.length && !sameList(sc.horizons, [0, 1, 2, 3])) p.push(["hz", sc.horizons.join(",")]);
   if (sc.place === "US" || sc.place === "current") p.push(["pl", sc.place]);
   if (sc.fair) p.push(["fair", "1"]);
   if (sc.baseline && sc.baseline !== manifest.baseline) p.push(["bl", sc.baseline]); // the hub's own is the default

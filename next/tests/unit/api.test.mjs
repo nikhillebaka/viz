@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeFan, indexManifest, loadFan, loadManifest, apiUrl, getActiveHub, setActiveHub } from "../../lib/api.js";
-import { parseIso, WEEK } from "../../lib/scale.js";
+import { decodeFan, decodeTrajectories, indexManifest, loadFan, loadManifest, apiUrl, getActiveHub, setActiveHub } from "../../lib/api.js";
+import { DAY, parseIso, WEEK } from "../../lib/scale.js";
 import { buildFan, spread, weeks, isoAdd } from "./fixtures/synthetic.mjs";
 
 // observed Aug 2 … Jan 31 every week, but Nov 22 missing
@@ -265,4 +265,103 @@ test("indexManifest resolves per-target and per-season baselines with fallback",
 
   const legacy = indexManifest({ ...MANIFEST, baseline: "Legacy-baseline" });
   assert.equal(legacy.baselineFor("wk inc flu hosp", "2026-2027"), "Legacy-baseline");
+});
+
+function buildVzf2({ target = "ILI incidence", season = "2025-2026", location = "DE", rounds, horizons, quantiles = [0.025, 0.5, 0.975], horizonOffsetDays = -3, dims = null, models }) {
+  const headerModels = [];
+  const chunks = [[0, 100]];
+  let offset = 1;
+  const obsArr = new Float32Array([42.5]);
+  for (const m of models) {
+    const mRounds = m.rounds;
+    const mHorizons = m.horizons;
+    const Q = quantiles.length;
+    const arr = new Float32Array(mRounds.length * mHorizons.length * Q);
+    mRounds.forEach((r, ri) => mHorizons.forEach((h, hi) => quantiles.forEach((q, qi) => {
+      arr[(ri * mHorizons.length + hi) * Q + qi] = m.fn(r, h, q);
+    })));
+    headerModels.push({ id: m.id, offset, rounds: mRounds, horizons: mHorizons });
+    chunks.push(arr);
+    offset += arr.length;
+  }
+  const head = {
+    version: 2,
+    target,
+    season,
+    location,
+    start: "2025-07-28",
+    end: "2026-07-26",
+    horizon_offset_days: horizonOffsetDays,
+    dims,
+    rounds,
+    horizons,
+    quantiles,
+    observed: { dates: ["2025-11-02"], offset: 0, length: 1 },
+    prior_max: 200,
+    models: headerModels,
+  };
+  let headBytes = new TextEncoder().encode(JSON.stringify(head));
+  const pad = (-headBytes.length) & 3;
+  const padded = new Uint8Array(headBytes.length + pad);
+  padded.set(headBytes);
+  padded.fill(32, headBytes.length);
+  const bodyFloats = new Float32Array(offset);
+  bodyFloats.set(obsArr, 0);
+  let pos = 1;
+  for (let i = 1; i < chunks.length; i++) { bodyFloats.set(chunks[i], pos); pos += chunks[i].length; }
+  const out = new Uint8Array(8 + padded.length + bodyFloats.byteLength);
+  out.set(new TextEncoder().encode("VZF2"), 0);
+  new DataView(out.buffer).setUint32(4, padded.length, true);
+  out.set(padded, 8);
+  out.set(new Uint8Array(bodyFloats.buffer), 8 + padded.length);
+  return out.buffer;
+}
+
+test("decodes VZF2 sparse blocks with horizon_offset_days (-3d RespiCast Wed -> Sun) and mixed horizons", () => {
+  const buf = buildVzf2({
+    rounds: ["2025-11-05", "2025-11-12"],
+    horizons: [1, 2, 3, 4],
+    horizonOffsetDays: -3,
+    dims: { age_group: "0-130" },
+    models: [
+      { id: "short", rounds: [1], horizons: [1, 2], fn: (r, h, q) => 100 + h * 10 + (q === 0.5 ? 0 : (q < 0.5 ? -5 : 5)) },
+      { id: "long", rounds: [0, 1], horizons: [1, 2, 3, 4], fn: (r, h, q) => 200 + r * 20 + h },
+    ],
+  });
+  const f = decodeFan(buf);
+  assert.equal(f.version, 2);
+  assert.equal(f.horizonOffsetDays, -3);
+  assert.deepEqual(f.dims, { age_group: "0-130" });
+  assert.ok(!f.has("short", 0), "sparse model absent on round 0");
+  assert.ok(f.has("short", 1));
+  const pts = f.points("short", 1, 0.95);
+  assert.deepEqual(pts.map((p) => p.h), [-1, 1, 2]);
+  // 2025-11-12 (Wed) + 1*7d - 3d = 2025-11-16 (Sun)
+  assert.equal(pts[1].t, parseIso("2025-11-12") + WEEK - 3 * DAY);
+  assert.equal(pts[1].t, parseIso("2025-11-16"));
+  assert.ok(Math.abs(pts[1].med - 110) < 1e-4);
+  assert.ok(Math.abs(f.yMax(["short"]) - 120) < 1e-4);
+});
+
+test("decodeTrajectories decodes VZT1 binary sample blocks", () => {
+  const head = {
+    version: 1, target: "Flu ED visits pct", season: "2025-2026", location: "provo",
+    reference_date: "2025-11-22", horizon_offset_days: 0, horizons: [0, 1, 2],
+    models: [{ id: "m-sample", offset: 0, n_samples: 2, sample_ids: ["0", "1"], horizons: [0, 1, 2] }],
+  };
+  let headBytes = new TextEncoder().encode(JSON.stringify(head));
+  const pad = (-headBytes.length) & 3;
+  const padded = new Uint8Array(headBytes.length + pad);
+  padded.set(headBytes);
+  padded.fill(32, headBytes.length);
+  const floats = new Float32Array([1.5, 2.5, 3.5, 2.0, 3.0, 4.0]);
+  const out = new Uint8Array(8 + padded.length + floats.byteLength);
+  out.set(new TextEncoder().encode("VZT1"), 0);
+  new DataView(out.buffer).setUint32(4, padded.length, true);
+  out.set(padded, 8);
+  out.set(new Uint8Array(floats.buffer), 8 + padded.length);
+  const decoded = decodeTrajectories(out.buffer);
+  const tm = decoded.modelTrajectories.get("m-sample");
+  assert.equal(tm.samples.length, 2);
+  assert.deepEqual(tm.samples[0].values, [1.5, 2.5, 3.5]);
 });

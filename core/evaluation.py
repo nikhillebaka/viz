@@ -1,8 +1,10 @@
 """
-Unified evaluation and scoring engine for the Sandbox suite.
-Serves as the single source of truth for both the headless CLI (score_cli.py)
-and the interactive web dashboard (server.py).
+Unified evaluation and scoring engine for Viz.
+Serves as the single source of truth for both the headless CLI (`score_cli.py`)
+and the interactive web dashboard (`server.py`).
 """
+
+from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -12,13 +14,12 @@ import logging
 import math
 from pathlib import Path
 import threading
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import polars as pl
 
 from viz.core.baselines import resolve_baseline, target_baseline_override
-from viz.core.peaks import is_peak_target
-from viz.core.config import VizConfig
+from viz.core.calendar import CalendarSpec
 from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
 from viz.core.metrics import (
     TASK_KEY_COLS,
@@ -27,15 +28,19 @@ from viz.core.metrics import (
     intersect_task_keys,
     model_task_keys,
     score_forecasts,
+    score_pmf_forecasts,
+    summarize_scored_tasks,
 )
 from viz.core.parallel import ordered_map, ordered_map_outcomes
+from viz.core.peaks import is_peak_target
+from viz.core.prescore import PreScoreStore
 
 logger = logging.getLogger("viz.evaluation")
 
 
 @dataclass
 class EvaluationParams:
-    """Parameters specifying the target, location, time scope, and models for evaluation."""
+    """Parameters specifying the target, location, time scope, dimensions, and models for evaluation."""
     target: Optional[str] = None
     location: str = "all"
     date: str = "all"
@@ -43,66 +48,89 @@ class EvaluationParams:
     models: Optional[List[str]] = None
     baseline: Optional[str] = None
     fair: bool = False
-    # Optional evaluation window within the selected seasons, applied to the forecast (target) week:
-    # weeks = "start-end" in season weeks (1 = MMWR week 31, early August); phase = pre | peak | post
+    # Optional evaluation window within selected seasons:
+    # weeks = "start-end" in hub season weeks; phase = pre | peak | post
     weeks: Optional[str] = None
     phase: Optional[str] = None
-    # Optional horizons to score (e.g. [0, 1]); forecasts at other horizons are dropped before scoring,
-    # so every number (relative WIS included) is computed on those horizons alone. None: all of them.
+    # Optional horizons to score (e.g. [0, 1]). None: all horizons.
     horizons: Optional[List[int]] = None
+    # Optional extra task-ID filters (e.g. {"age_group": "0-130"}).
+    dims: Optional[Dict[str, str]] = None
 
 
 PHASES = ("pre", "peak", "post")
 
 
-def _common_tasks_frame(common_task_set: Optional[Set[Tuple[str, str, int]]]) -> Optional[Any]:
-    """The frame score_forecasts builds from a common-task set, built once instead of once per model.
-
-    list(set) iterates the same set object in the same order every time, so this is row-for-row the
-    frame each score_forecasts call would have built. An empty set is passed through unchanged.
-    """
+def _common_tasks_frame(
+    common_task_set: Optional[Set[Tuple[Any, ...]]],
+    extra_task_ids: Sequence[str] = (),
+) -> Optional[Any]:
     if not common_task_set:
         return common_task_set
     task_list = list(common_task_set)
-    return pl.DataFrame({
+    sample = task_list[0]
+    data: Dict[str, List[Any]] = {
         "reference_date": [str(t[0]) for t in task_list],
         "location": [str(t[1]) for t in task_list],
         "horizon": [int(t[2]) for t in task_list],
-    })
+    }
+    if extra_task_ids and len(sample) >= 3 + len(extra_task_ids):
+        for idx, ec in enumerate(extra_task_ids):
+            data[ec] = [str(t[3 + idx]) for t in task_list]
+    return pl.DataFrame(data)
 
 
 def _finite_or_none(v: Any) -> Optional[float]:
     return float(v) if v is not None and not math.isnan(v) else None
 
 
-def _shared_task_wis(task_df: pl.DataFrame, shared: pl.DataFrame) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Overall (WIS, log WIS) of one model restricted to a set of (reference_date, location, horizon) tasks:
-    what score_forecasts(model_df, oracle, common_tasks=shared)["overall"] returns, read from the model's
-    unrestricted per-task scores. Per-task WIS is computed within each task, so restricting the tasks
-    afterwards gives the same task rows and values as restricting them before scoring. The pool rule is
-    score_forecasts's: states when any state is present, else national.
-    """
-    sub = task_df.join(shared, on=TASK_KEY_COLS, how="semi")
+def _shared_task_wis(
+    task_df: pl.DataFrame,
+    shared: pl.DataFrame,
+    aggregate_locations: Optional[Set[str]] = None,
+    extra_task_ids: Sequence[str] = (),
+) -> Tuple[Optional[float], Optional[float]]:
+    """Overall `(wis, wis_log)` of one model restricted to `shared` tasks."""
+    join_cols = [c for c in list(TASK_KEY_COLS) + list(extra_task_ids) if c in task_df.columns and c in shared.columns]
+    sub = task_df.join(shared, on=join_cols, how="semi")
     if sub.is_empty():
         return None, None
-    has_states = bool((sub.get_column("location") != "US").any())
-    primary = sub.filter(pl.col("location") != "US") if has_states else sub.filter(pl.col("location") == "US")
+    agg_list = sorted(aggregate_locations) if aggregate_locations is not None else ["US"]
+    is_agg = pl.col("location").is_in(agg_list) if agg_list else pl.lit(False)
+    has_primary = bool(sub.select((~is_agg).any()).item())
+    primary = sub.filter(~is_agg) if has_primary else sub.filter(is_agg)
     if primary.is_empty():
         return None, None
     wis, wis_log = primary.select(pl.col("wis").mean(), pl.col("wis_log").mean()).row(0)
     return _finite_or_none(wis), _finite_or_none(wis_log)
 
 
-def _overall_wis_on_tasks(df, oracle, target, tasks, non_negative) -> Tuple[Optional[float], Optional[float]]:
-    sc = score_forecasts(df, oracle, target=target, common_tasks=tasks, non_negative=non_negative)
+def _overall_wis_on_tasks(
+    df,
+    oracle,
+    target,
+    tasks,
+    non_negative,
+    *,
+    aggregate_locations: Optional[Set[str]] = None,
+    extra_task_ids: Sequence[str] = (),
+) -> Tuple[Optional[float], Optional[float]]:
+    sc = score_forecasts(
+        df,
+        oracle,
+        target=target,
+        common_tasks=tasks,
+        non_negative=non_negative,
+        extra_task_ids=extra_task_ids or None,
+        aggregate_locations=aggregate_locations,
+    )
     if not sc:
         return None, None
     return sc.get("overall", {}).get("wis"), sc.get("overall", {}).get("wis_log")
 
 
 def parse_week_range(weeks: Optional[str]) -> Optional[Tuple[int, int]]:
-    """Parse 'a-b' (season weeks, inclusive) into a clamped tuple; None or 'all' means the whole season."""
+    """Parse 'a-b' (season weeks, inclusive) into a clamped tuple; None or 'all' means full season."""
     if not weeks or str(weeks).strip().lower() in ("all", ""):
         return None
     try:
@@ -123,24 +151,30 @@ def parse_phase(phase: Optional[str]) -> Optional[str]:
 
 
 class WindowFilter:
-    """Keeps only tasks whose forecast (target) week falls inside a season-week range and/or a phase.
+    """Keeps only tasks whose forecast (target) week falls inside a season-week range and/or a phase."""
 
-    Phases are assigned per location from that location's own truth curve, so with 'All States' each
-    state is scored on its own peak weeks rather than the national peak.
-    """
-
-    def __init__(self, week_range: Optional[Tuple[int, int]], phase: Optional[str],
-                 phase_pairs: Optional[pl.DataFrame], peak_fraction: Optional[float] = None):
+    def __init__(
+        self,
+        week_range: Optional[Tuple[int, int]],
+        phase: Optional[str],
+        phase_pairs: Optional[pl.DataFrame],
+        peak_fraction: Optional[float] = None,
+        calendar: Optional[CalendarSpec] = None,
+    ):
         self.week_range = week_range
         self.phase = phase
         self.pairs = phase_pairs
         self.peak_fraction = peak_fraction
+        self.calendar = calendar
         self._allowed_dates = set(phase_pairs.get_column("target_end_date").to_list()) if phase_pairs is not None else None
         self._weeks: Dict[str, int] = {}
 
     def _season_week(self, d: str) -> int:
         if d not in self._weeks:
-            self._weeks[d] = date_to_season_and_week(d)[1]
+            if self.calendar is not None:
+                self._weeks[d] = self.calendar.date_to_season_and_week(d)[1]
+            else:
+                self._weeks[d] = date_to_season_and_week(d)[1]
         return self._weeks[d]
 
     def target_in_window(self, d: str) -> bool:
@@ -154,20 +188,32 @@ class WindowFilter:
             ref = datetime.strptime(reference_date, "%Y-%m-%d")
         except ValueError:
             return True
-        return any(self.target_in_window((ref + timedelta(weeks=h)).strftime("%Y-%m-%d")) for h in range(-1, 4))
+        offset_days = int(self.calendar.horizon_offset_days) if self.calendar is not None else 0
+        return any(
+            self.target_in_window((ref + timedelta(weeks=h, days=offset_days)).strftime("%Y-%m-%d"))
+            for h in range(-1, 4)
+        )
 
     def apply(self, df: pl.DataFrame) -> pl.DataFrame:
         if df is None or df.is_empty():
             return df
+        offset_days = int(self.calendar.horizon_offset_days) if self.calendar is not None else 0
         if "target_end_date" not in df.columns:
             df = df.with_columns(
-                (pl.col("reference_date").cast(pl.String).str.to_date() + pl.duration(weeks=pl.col("horizon")))
-                .dt.strftime("%Y-%m-%d").alias("target_end_date")
+                (pl.col("reference_date").cast(pl.String).str.to_date()
+                 + pl.duration(days=pl.col("horizon").cast(pl.Int64) * 7 + offset_days))
+                .dt.strftime("%Y-%m-%d")
+                .alias("target_end_date")
             )
-        df = df.with_columns(pl.col("target_end_date").cast(pl.String).str.slice(0, 10), pl.col("location").cast(pl.String))
+        df = df.with_columns(
+            pl.col("target_end_date").cast(pl.String).str.slice(0, 10),
+            pl.col("location").cast(pl.String),
+        )
         if self.week_range:
-            keep = [d for d in df.get_column("target_end_date").unique().to_list()
-                    if d and self.week_range[0] <= self._season_week(d) <= self.week_range[1]]
+            keep = [
+                d for d in df.get_column("target_end_date").unique().to_list()
+                if d and self.week_range[0] <= self._season_week(d) <= self.week_range[1]
+            ]
             df = df.filter(pl.col("target_end_date").is_in(keep))
         if self.pairs is not None:
             df = df.join(self.pairs, on=["location", "target_end_date"], how="semi")
@@ -202,8 +248,11 @@ class EvaluationResult:
     window: Optional[Dict[str, Any]] = None
     # Resolved scope, reused by task-level exports so they match the leaderboard exactly
     locations_filter: Optional[List[str]] = field(default=None, repr=False)
-    common_task_set: Optional[Set[Tuple[str, str, int]]] = field(default=None, repr=False)
+    common_task_set: Optional[Set[Tuple[Any, ...]]] = field(default=None, repr=False)
     window_filter: Optional[Any] = field(default=None, repr=False)
+    aggregate_locations: Optional[Set[str]] = field(default=None, repr=False)
+    extra_task_ids: Tuple[str, ...] = field(default=(), repr=False)
+    dim_filter: Dict[str, str] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert evaluation result to JSON-serializable dictionary."""
@@ -230,21 +279,20 @@ class EvaluationResult:
 class EvaluationEngine:
     """
     Decoupled evaluation orchestrator.
-    Handles data extraction, temporal scoping, task intersection, and comparative scoring.
-    Thread-safe with an in-memory cache for instant responses to repeated queries.
+    Handles data extraction, temporal scoping, task intersection, incremental pre-scoring, and comparative scoring.
     """
 
     def __init__(self, base_dir: Path, data_loader: Optional[SandboxDataLoader] = None):
         self.base_dir = Path(base_dir).resolve()
         self.loader = data_loader or SandboxDataLoader(self.base_dir)
         self.config = self.loader.config
+        self.prescore = PreScoreStore(self.loader.cache_mgr.cache_dir, self.loader)
         self._eval_cache: "OrderedDict[str, EvaluationResult]" = OrderedDict()
         self._eval_cache_size = 64
         self._eval_cache_lock = threading.Lock()
         self._eval_inflight: Dict[str, threading.Event] = {}
 
     def _compute_cache_key(self, params: EvaluationParams) -> str:
-        """Compute SHA256 cache key based on evaluation parameters and file mtimes."""
         oracle_pq = self.loader.cache_mgr.get_oracle_parquet()
         oracle_mtime = oracle_pq.stat().st_mtime if oracle_pq and oracle_pq.exists() else 0.0
 
@@ -255,15 +303,19 @@ class EvaluationEngine:
         for mid in sorted(models):
             if hasattr(self.loader, "ensemble_mgr") and self.loader.ensemble_mgr.get_config(mid):
                 cfg = self.loader.ensemble_mgr.get_config(mid)
-                mtimes.append(f"{mid}:synth:{cfg.method}:{cfg.spatial_split}:{cfg.missing_policy}:{cfg.models}:{cfg.state_models}:{cfg.national_models}:{cfg.created_at}")
+                mtimes.append(
+                    f"{mid}:synth:{cfg.method}:{cfg.spatial_split}:{cfg.missing_policy}:"
+                    f"{cfg.models}:{cfg.state_models}:{cfg.national_models}:{cfg.created_at}"
+                )
             else:
                 raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
                 pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
                 mtimes.append(f"{mid}:{pq.stat().st_mtime if pq and pq.exists() else 0.0}")
 
+        dims_key = tuple(sorted((str(k), str(v)) for k, v in (params.dims or {}).items()))
         raw = (
             f"{params.target}|{params.location}|{params.date}|{params.season}|{params.weeks}|{params.phase}|"
-            f"{sorted(models)}|{params.baseline}|{params.fair}|{oracle_mtime}|{mtimes}"
+            f"{sorted(models)}|{params.baseline}|{params.fair}|{oracle_mtime}|{mtimes}|{dims_key}"
         )
         if params.horizons is not None:
             raw += f"|horizons={sorted(set(int(h) for h in params.horizons))}"
@@ -274,7 +326,6 @@ class EvaluationEngine:
         all_models: Dict[str, Dict[str, Any]],
         extra_ids: Tuple[Optional[str], ...] = (),
     ) -> Dict[str, Dict[str, Any]]:
-        """Load lightweight YAML metadata for baseline candidates and explicitly configured defaults."""
         if not hasattr(self.loader, "get_model_metadata"):
             return {}
         watch = {mid for mid in extra_ids if mid}
@@ -291,7 +342,9 @@ class EvaluationEngine:
                     pass
         return meta_map
 
-    def _build_window_filter(self, target: str, weeks: Optional[str], phase: Optional[str]) -> Optional[WindowFilter]:
+    def _build_window_filter(
+        self, target: str, weeks: Optional[str], phase: Optional[str], calendar: Optional[CalendarSpec] = None
+    ) -> Optional[WindowFilter]:
         week_range = parse_week_range(weeks)
         ph = parse_phase(phase)
         if week_range is None and ph is None:
@@ -300,35 +353,43 @@ class EvaluationEngine:
         if ph is not None:
             table = self.loader.get_truth_phases(target)
             pairs = table.filter(pl.col("phase") == ph).select(["location", "target_end_date"])
-        return WindowFilter(week_range, ph, pairs, getattr(self.loader, "PEAK_FRACTION", None))
+        return WindowFilter(week_range, ph, pairs, getattr(self.loader, "PEAK_FRACTION", None), calendar=calendar)
 
     @staticmethod
-    def _weekly_wins(task_scores: Dict[str, pl.DataFrame]) -> Dict[str, Dict[str, int]]:
-        """
-        For each round, the model with the lowest mean WIS on the tasks every competing model forecast
-        that week wins it (ties all win). Returns {model: {won, won_log, competed}}.
-        """
-        keys = ["reference_date", "location", "horizon"]
+    def _weekly_wins(
+        task_scores: Dict[str, pl.DataFrame],
+        metric_cols: Tuple[Tuple[str, str], ...] = (("wis", "won"), ("wis_log", "won_log")),
+        extra_task_ids: Sequence[str] = (),
+    ) -> Dict[str, Dict[str, int]]:
+        """Model with lowest mean score on shared weekly tasks wins that week (ties all win)."""
+        keys = ["reference_date", "location", "horizon"] + list(extra_task_ids)
+        primary_col = metric_cols[0][0]
         frames = []
         for mid, df in task_scores.items():
-            if df is None or df.is_empty() or "wis" not in df.columns or not all(k in df.columns for k in keys):
+            if df is None or df.is_empty() or primary_col not in df.columns:
                 continue
-            cols = keys + [c for c in ("wis", "wis_log") if c in df.columns]
+            avail_keys = [k for k in keys if k in df.columns]
+            if len(avail_keys) < 3:
+                continue
+            cols = avail_keys + [mc for mc, _ in metric_cols if mc in df.columns]
             frames.append(df.select(cols).with_columns(pl.lit(mid).alias("model")))
         if len(frames) < 2:
             return {}
-        long = pl.concat(frames, how="diagonal_relaxed").drop_nulls("wis")
+        long = pl.concat(frames, how="diagonal_relaxed").drop_nulls(primary_col)
+        if long.is_empty():
+            return {}
+        active_keys = [k for k in keys if k in long.columns]
         n_week = long.group_by("reference_date").agg(pl.col("model").n_unique().alias("n"))
         shared = (
-            long.group_by(keys).agg(pl.col("model").n_unique().alias("k"))
+            long.group_by(active_keys).agg(pl.col("model").n_unique().alias("k"))
             .join(n_week, on="reference_date")
             .filter((pl.col("k") == pl.col("n")) & (pl.col("n") >= 2))
-            .select(keys)
+            .select(active_keys)
         )
-        sub = long.join(shared, on=keys, how="semi")
+        sub = long.join(shared, on=active_keys, how="semi")
         out: Dict[str, Dict[str, int]] = {}
-        for metric, label in (("wis", "won"), ("wis_log", "won_log")):
-            if metric not in sub.columns:
+        for metric, label in metric_cols:
+            if metric not in sub.columns or sub[metric].drop_nulls().is_empty():
                 continue
             means = sub.group_by(["reference_date", "model"]).agg(pl.col(metric).mean().alias("m"))
             best = means.group_by("reference_date").agg(pl.col("m").min().alias("best"))
@@ -372,34 +433,85 @@ class EvaluationEngine:
                     self._eval_inflight.pop(cache_key, None)
             event.set()
 
+    def _season_for_date(self, d: str) -> str:
+        if hasattr(self.loader, "get_season_for_date"):
+            return self.loader.get_season_for_date(d)
+        return self.loader.get_flu_season_for_date(d)
+
+    @staticmethod
+    def _filter_df_scope(
+        df: pl.DataFrame,
+        *,
+        target: Optional[str] = None,
+        locations: Optional[List[str]] = None,
+        reference_dates: Optional[List[str]] = None,
+        horizons: Optional[List[int]] = None,
+        dim_filter: Optional[Dict[str, str]] = None,
+        window_filter: Optional[WindowFilter] = None,
+    ) -> pl.DataFrame:
+        out = df
+        if target and "target" in out.columns:
+            out = out.filter(pl.col("target") == target)
+        if locations is not None and len(locations) > 0 and "all" not in locations:
+            out = out.filter(pl.col("location").cast(pl.String).is_in(locations))
+        if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates:
+            out = out.filter(pl.col("reference_date").cast(pl.String).is_in(reference_dates))
+        if horizons is not None and len(horizons) > 0:
+            out = out.filter(pl.col("horizon").cast(pl.Int64).is_in(horizons))
+        if dim_filter:
+            for col, val in dim_filter.items():
+                if col in out.columns:
+                    vals_present = out.get_column(col).cast(pl.String).unique().to_list()
+                    if val in vals_present:
+                        out = out.filter(pl.col(col).cast(pl.String) == val)
+        if window_filter is not None:
+            out = window_filter.apply(out)
+        return out
+
     def _evaluate_uncached(self, params: EvaluationParams) -> EvaluationResult:
-        """Compute evaluation metrics without reading or mutating `_eval_cache`."""
         target = params.target or self.config.get_default_target()
         if is_peak_target(target):
             raise ValueError(
                 f"'{target}' is a season peak target: it has no weekly horizons, so it is scored in the dashboard's "
                 "Season Peak view rather than on the weekly leaderboard"
             )
-        loc_param = params.location or "all"
+        loc_param = (params.location or "all").strip()
         date_param = params.date or "all"
         season_param = (params.season or "").strip()
         fair_flag = bool(params.fair)
+
+        cal = self.loader.get_calendar() if hasattr(self.loader, "get_calendar") else None
+        geo = self.loader.get_geo_graph() if hasattr(self.loader, "get_geo_graph") else None
 
         # 1. Oracle ground truth
         oracle = self.loader.get_oracle(as_polars=True)
         if oracle is None or oracle.is_empty():
             raise ValueError("No oracle ground truth data found.")
 
-        # 2. Location filtering
+        # 2. Hierarchical GeoGraph location resolution & aggregate separation
         locations_filter: Optional[List[str]] = None
-        if loc_param == "states":
-            locations_filter = [
-                loc["id"] for loc in self.loader.get_locations().values() if loc["id"] != "US"
-            ]
-        elif loc_param == "US":
-            locations_filter = ["US"]
-        elif loc_param != "all" and loc_param:
+        if loc_param in ("states", "primary"):
+            if geo is not None:
+                locations_filter = geo.resolve_pool("all") or None
+            else:
+                locations_filter = [loc["id"] for loc in self.loader.get_locations().values() if loc["id"] != "US"]
+        elif loc_param == "aggregates":
+            if geo is not None:
+                locations_filter = geo.resolve_pool("aggregates") or ["US"]
+            else:
+                locations_filter = ["US"]
+        elif loc_param == "all" or not loc_param:
+            locations_filter = None
+        elif geo is not None and (loc_param.startswith(("level:", "region:")) or "," in loc_param):
+            resolved = geo.resolve_pool(loc_param)
+            locations_filter = resolved if resolved else [s.strip() for s in loc_param.split(",") if s.strip()]
+        else:
             locations_filter = [loc_param]
+
+        if geo is not None:
+            agg_locs = set(geo.aggregate_locations_in_scope())
+        else:
+            agg_locs = {"US"}
 
         # 3. Temporal scope resolution
         forecast_seasons = self.loader.get_forecast_seasons()
@@ -407,7 +519,7 @@ class EvaluationEngine:
         default_latest_season = (
             forecast_seasons[-1]
             if forecast_seasons
-            else (all_avail_seasons[-1] if all_avail_seasons else f"{datetime.now().year - 1}-{datetime.now().year}")
+            else (all_avail_seasons[-1] if all_avail_seasons else self._season_for_date(datetime.now().strftime("%Y-%m-%d")))
         )
 
         scope_type = "date"
@@ -418,7 +530,7 @@ class EvaluationEngine:
             if season_param.lower() == "current":
                 scope_type = "season"
                 focal_season = (
-                    self.loader.get_flu_season_for_date(date_param)
+                    self._season_for_date(date_param)
                     if (date_param and date_param != "all")
                     else default_latest_season
                 )
@@ -440,19 +552,37 @@ class EvaluationEngine:
                 dates_filter = self.loader.get_dates_for_season("all")
             elif date_param:
                 scope_type = "date"
-                selected_seasons = [self.loader.get_flu_season_for_date(date_param)]
+                selected_seasons = [self._season_for_date(date_param)]
                 dates_filter = [date_param]
             else:
                 scope_type = "all"
                 selected_seasons = forecast_seasons or all_avail_seasons
                 dates_filter = self.loader.get_dates_for_season("all")
 
-        # 3b. Optional window within the season(s): week range and/or phase of the forecast (target) week
-        window_filter = self._build_window_filter(target, params.weeks, params.phase)
+        # 3b. Window filter
+        window_filter = self._build_window_filter(target, params.weeks, params.phase, calendar=cal)
         if window_filter is not None and dates_filter:
             dates_filter = [d for d in dates_filter if window_filter.round_in_window(d)]
 
-        # 4. Model selection & discovery
+        # 3c. Target metadata & extra Hubverse task_id dimensions
+        target_meta = self.config.get_target_metadata(target)
+        is_pmf_target = bool(
+            target_meta.get("is_categorical")
+            and "quantile" not in (target_meta.get("output_types") or [])
+        )
+        dim_defs = self.config.get_extra_task_ids(target)
+        extra_cols = sorted(dim_defs.keys())
+        dim_filter: Dict[str, str] = {}
+        req_dims = params.dims or {}
+        for col, dinfo in dim_defs.items():
+            val = req_dims.get(col)
+            if val is not None:
+                if str(val).lower() != "all":
+                    dim_filter[col] = str(val)
+            elif dinfo.get("default"):
+                dim_filter[col] = str(dinfo["default"])
+
+        # 4. Model selection & baseline resolution
         all_models = self.loader.scan_models()
         if not params.models:
             requested_model_ids = list(all_models.keys())
@@ -461,7 +591,6 @@ class EvaluationEngine:
             if "all" in [m.lower() for m in requested_model_ids]:
                 requested_model_ids = list(all_models.keys())
 
-        # Determine baseline model dynamically for this target and temporal scope
         season_hint = selected_seasons[0] if len(selected_seasons) == 1 else None
         raw_cfg_default = getattr(self.config, "_user_config", {}).get("default_baseline")
         cfg_default = str(raw_cfg_default).strip() if raw_cfg_default else None
@@ -480,30 +609,21 @@ class EvaluationEngine:
                 target_config_default=tgt_default,
             ) or self.config.get_default_baseline(list(all_models.keys()), target=target, model_meta=baseline_meta)
 
-        # If baseline is valid and not in requested models, load it in background for pairwise comparisons
         models_to_load = list(requested_model_ids)
         if baseline_id and baseline_id not in models_to_load and baseline_id in all_models:
             models_to_load.append(baseline_id)
 
-        # 5. Load forecasts in scope
-        model_dfs: Dict[str, pl.DataFrame] = {}
+        # 5. Resolve per-model active rounds in scope
         model_meta_stats: Dict[str, Dict[str, Any]] = {}
         total_scope_dates_count = len(dates_filter) if dates_filter else 0
-
         to_load: List[Tuple[str, List[str]]] = []
+
         for mid in models_to_load:
             if mid not in all_models:
                 continue
             available_dates = all_models[mid].get("dates", [])
-            model_active_seasons = sorted(
-                list({self.loader.get_flu_season_for_date(d) for d in available_dates})
-            )
-            eval_dates = (
-                [d for d in dates_filter if d in available_dates]
-                if dates_filter
-                else available_dates
-            )
-
+            model_active_seasons = sorted({self._season_for_date(d) for d in available_dates})
+            eval_dates = [d for d in dates_filter if d in available_dates] if dates_filter else available_dates
             model_meta_stats[mid] = {
                 "available_scope_dates": eval_dates,
                 "available_scope_dates_count": len(eval_dates),
@@ -511,32 +631,136 @@ class EvaluationEngine:
                 "active_seasons": model_active_seasons,
                 "has_scope_data": len(eval_dates) > 0,
             }
-
             if eval_dates:
                 to_load.append((mid, eval_dates))
 
         horizon_set = sorted(set(int(h) for h in params.horizons)) if params.horizons is not None else None
+        target_non_neg = self.config.is_target_non_negative(target)
+        pop_map = self._population_map(target)
 
-        def _load(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
+        # Dispatch categorical/PMF targets vs quantile targets
+        if is_pmf_target:
+            return self._evaluate_pmf(
+                target=target,
+                target_meta=target_meta,
+                oracle=oracle,
+                loc_param=loc_param,
+                date_param=date_param,
+                season_param=season_param,
+                scope_type=scope_type,
+                selected_seasons=selected_seasons,
+                dates_filter=dates_filter,
+                locations_filter=locations_filter,
+                agg_locs=agg_locs,
+                horizon_set=horizon_set,
+                window_filter=window_filter,
+                dim_filter=dim_filter,
+                extra_cols=extra_cols,
+                fair_flag=fair_flag,
+                all_models=all_models,
+                requested_model_ids=requested_model_ids,
+                baseline_id=baseline_id,
+                cfg_default=cfg_default,
+                tgt_default=tgt_default,
+                baseline_meta=baseline_meta,
+                model_meta_stats=model_meta_stats,
+                to_load=to_load,
+                season_hint=season_hint,
+                total_scope_dates_count=total_scope_dates_count,
+            )
+
+        # 6. Pre-score fast path for persistent quantile models + fallback load for synthetic / uncached models
+        load_mids = [mid for mid, _ in to_load]
+        prescored = self.prescore.get_model_task_scores(
+            target,
+            load_mids,
+            all_models,
+            oracle,
+            non_negative=target_non_neg,
+            extra_task_ids=extra_cols,
+        )
+
+        # Models NOT covered by prescore (e.g. synthetic ensembles or custom non-parquet mocks)
+        fallback_items = [(mid, ds) for mid, ds in to_load if mid not in prescored]
+        need_keys_for_prescored = fair_flag or window_filter is not None or horizon_set is not None
+
+        def _load_raw(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
             mid, eval_dates = item
             m_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
-            if m_df is not None and horizon_set is not None and not m_df.is_empty():
-                m_df = m_df.filter(pl.col("horizon").cast(pl.Int64).is_in(horizon_set))
-            if m_df is not None and window_filter is not None:
-                m_df = window_filter.apply(m_df)
-            return m_df
+            if m_df is None or m_df.is_empty():
+                return m_df
+            return self._filter_df_scope(
+                m_df,
+                horizons=horizon_set,
+                dim_filter=dim_filter,
+                window_filter=window_filter,
+            )
 
-        # Loaded on threads, inserted in the original order
-        for (mid, _), m_df in zip(to_load, ordered_map(_load, to_load)):
-            if m_df is not None and not m_df.is_empty():
-                model_dfs[mid] = m_df
+        model_dfs: Dict[str, pl.DataFrame] = {}
+        if fallback_items:
+            for (mid, _), m_df in zip(fallback_items, ordered_map(_load_raw, fallback_items)):
+                if m_df is not None and not m_df.is_empty():
+                    model_dfs[mid] = m_df
 
-        # 5b. With a window or a horizon subset, report the rounds that actually have forecasts left in
-        # scope at these locations (horizon subsets come only from /api/next/metrics)
+        # Lightweight submitted-task keys for window/horizon scope trimming and fair intersection
+        submitted_keys: Dict[str, pl.DataFrame] = {}
+        if need_keys_for_prescored:
+            prescored_mids = [mid for mid, _ in to_load if mid in prescored]
+
+            def _scan_keys(mid: str) -> Optional[pl.DataFrame]:
+                raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
+                lf = self.loader.cache_mgr.scan_model(raw_id, is_local=is_local)
+                if lf is None:
+                    return None
+                q = lf.filter(pl.col("target") == target)
+                names = q.collect_schema().names()
+                if "output_type" in names:
+                    q = q.filter(pl.col("output_type") == "quantile")
+                eval_dates = model_meta_stats[mid]["available_scope_dates"]
+                if eval_dates:
+                    q = q.filter(pl.col("reference_date").is_in(eval_dates))
+                if horizon_set is not None:
+                    q = q.filter(pl.col("horizon").cast(pl.Int64).is_in(horizon_set))
+                sel = [c for c in ("reference_date", "location", "horizon", "target_end_date", *extra_cols) if c in names]
+                df_k = q.select(sel).unique().collect()
+                if df_k.is_empty():
+                    return None
+                return self._filter_df_scope(
+                    df_k,
+                    locations=None,
+                    dim_filter=dim_filter,
+                    window_filter=window_filter,
+                )
+
+            if prescored_mids:
+                for mid, kdf in zip(prescored_mids, ordered_map(_scan_keys, prescored_mids)):
+                    if kdf is not None and not kdf.is_empty():
+                        submitted_keys[mid] = kdf
+
+            for mid, df in model_dfs.items():
+                kt = model_task_keys(
+                    df, target, locations=None, reference_dates=None, extra_task_ids=extra_cols
+                )
+                if kt is not None and not kt.is_empty():
+                    if "target_end_date" in df.columns:
+                        submitted_keys[mid] = df.filter(pl.col("target") == target).select(
+                            [c for c in ("reference_date", "location", "horizon", "target_end_date", *extra_cols) if c in df.columns]
+                        ).unique()
+                    else:
+                        submitted_keys[mid] = kt
+
+        # 5b. With a window or horizon subset, report remaining rounds in scope
         if window_filter is not None or horizon_set is not None:
             remaining: Set[str] = set()
-            for mid, df in model_dfs.items():
-                scoped = df.filter(pl.col("location").cast(pl.String).is_in(locations_filter)) if locations_filter else df
+            active_key_mids = set(submitted_keys.keys()) | set(model_dfs.keys())
+            for mid in active_key_mids:
+                src_df = submitted_keys.get(mid) if mid in submitted_keys else model_dfs.get(mid)
+                if src_df is None or src_df.is_empty():
+                    continue
+                scoped = (
+                    src_df.filter(pl.col("location").cast(pl.String).is_in(locations_filter))
+                    if locations_filter else src_df
+                )
                 ds = sorted({str(d) for d in scoped.get_column("reference_date").unique().to_list()})
                 if mid in model_meta_stats:
                     model_meta_stats[mid]["available_scope_dates"] = ds
@@ -544,7 +768,7 @@ class EvaluationEngine:
                 if mid in requested_model_ids:
                     remaining.update(ds)
             for mid, stat in model_meta_stats.items():
-                if mid not in model_dfs:
+                if mid not in active_key_mids:
                     stat["available_scope_dates"] = []
                     stat["available_scope_dates_count"] = 0
             total_scope_dates_count = len(remaining)
@@ -553,23 +777,34 @@ class EvaluationEngine:
                 stat["total_scope_dates_count"] = total_scope_dates_count
 
         # 6. Fair common task intersection
-        common_task_set: Optional[Set[Tuple[str, str, int]]] = None
+        common_task_set: Optional[Set[Tuple[Any, ...]]] = None
         common_task_status = "none"
         common_task_message: Optional[str] = None
 
-        eval_model_dfs = {m: model_dfs[m] for m in requested_model_ids if m in model_dfs}
+        eval_source_frames: Dict[str, pl.DataFrame] = {}
+        for m in requested_model_ids:
+            if m in model_dfs:
+                eval_source_frames[m] = model_dfs[m]
+            elif m in submitted_keys:
+                eval_source_frames[m] = submitted_keys[m]
+            elif m in prescored:
+                # Filter pre-scored task_df to dates/locations/dims if no window/horizon cut needed submitted_keys
+                tdf_full, _ = prescored[m]
+                if not tdf_full.is_empty():
+                    eval_source_frames[m] = tdf_full
 
-        if fair_flag and len(eval_model_dfs) > 1:
+        if fair_flag and len(eval_source_frames) > 1:
             common_task_set = find_common_tasks(
-                eval_model_dfs,
+                eval_source_frames,
                 target=target,
                 locations=locations_filter,
                 reference_dates=dates_filter,
+                extra_task_ids=extra_cols,
             )
             if not common_task_set:
                 common_task_status = "empty_disjoint"
                 disjoint_examples = []
-                for mid in list(eval_model_dfs.keys())[:3]:
+                for mid in list(eval_source_frames.keys())[:3]:
                     m_dates = model_meta_stats.get(mid, {}).get("available_scope_dates", [])
                     if m_dates:
                         disjoint_examples.append(f"{mid} ({m_dates[0][:4]}–{m_dates[-1][:4]})")
@@ -582,49 +817,79 @@ class EvaluationEngine:
             else:
                 common_task_status = "ok"
                 common_task_message = (
-                    f"Evaluated strictly on {len(common_task_set):,} shared tasks across all {len(eval_model_dfs)} models."
+                    f"Evaluated strictly on {len(common_task_set):,} shared tasks across all {len(eval_source_frames)} models."
                 )
-        elif fair_flag and len(eval_model_dfs) <= 1:
+        elif fair_flag and len(eval_source_frames) <= 1:
             common_task_status = "single_model"
             common_task_message = "Common tasks requires at least two models to compute an intersection."
 
-        # 7. Score models that have data in scope
+        # 7. Score models (PreScoreStore slicing for persistent models, score_forecasts for fallback)
         scores_by_model: Dict[str, Dict[str, Any]] = {}
-        target_non_neg = self.config.is_target_non_negative(target)
-        pop_map = self._population_map(target)
-
         if common_task_status != "empty_disjoint":
-            # Built once, exactly as score_forecasts would build it from the set on every call
-            common_tasks_arg = _common_tasks_frame(common_task_set)
+            common_tasks_arg = _common_tasks_frame(common_task_set, extra_task_ids=extra_cols)
 
-            def _score(df: pl.DataFrame) -> Dict[str, Any]:
-                return score_forecasts(
-                    df,
-                    oracle,
-                    target=target,
+            for mid, (tdf_full, mmeta) in prescored.items():
+                if tdf_full.is_empty():
+                    continue
+                sub_tdf = self._filter_df_scope(
+                    tdf_full,
                     locations=locations_filter,
                     reference_dates=dates_filter,
-                    common_tasks=common_tasks_arg,
-                    non_negative=target_non_neg,
-                    population_map=pop_map,
-                    return_task_df=True,
+                    horizons=horizon_set,
+                    dim_filter=dim_filter,
+                    window_filter=window_filter,
                 )
-
-            for mid, sc in zip(list(model_dfs.keys()), ordered_map(_score, list(model_dfs.values()))):
+                if common_tasks_arg is not None and not sub_tdf.is_empty():
+                    if isinstance(common_tasks_arg, pl.DataFrame):
+                        join_cols = [c for c in list(TASK_KEY_COLS) + extra_cols if c in sub_tdf.columns and c in common_tasks_arg.columns]
+                        sub_tdf = sub_tdf.join(common_tasks_arg, on=join_cols, how="semi")
+                    else:
+                        sub_tdf = pl.DataFrame()
+                if sub_tdf.is_empty():
+                    continue
+                sc = summarize_scored_tasks(
+                    sub_tdf,
+                    present_quantiles=mmeta.get("present_quantiles"),
+                    population_map=pop_map,
+                    aggregate_locations=agg_locs,
+                    negative_values_clipped=int(mmeta.get("negative_values_clipped", 0)),
+                    extra_task_ids=extra_cols,
+                    include_task_df=True,
+                )
                 if sc:
                     scores_by_model[mid] = sc
 
-        # Compute Hubverse/FluSight pairwise tournament relative WIS (Cramer et al. 2022) on the same
-        # location pool as the WIS column: states only whenever any state is scored, else national
-        states_pool = any(sc["metadata"]["has_states_data"] for sc in scores_by_model.values())
-        pool_filter = (pl.col("location") != "US") if states_pool else (pl.col("location") == "US")
+            if model_dfs:
+                def _score_fb(df: pl.DataFrame) -> Dict[str, Any]:
+                    return score_forecasts(
+                        df,
+                        oracle,
+                        target=target,
+                        locations=locations_filter,
+                        reference_dates=dates_filter,
+                        horizons=horizon_set,
+                        common_tasks=common_tasks_arg,
+                        non_negative=target_non_neg,
+                        population_map=pop_map,
+                        extra_task_ids=extra_cols or None,
+                        aggregate_locations=agg_locs,
+                        return_task_df=True,
+                    )
+
+                for mid, sc in zip(list(model_dfs.keys()), ordered_map(_score_fb, list(model_dfs.values()))):
+                    if sc:
+                        scores_by_model[mid] = sc
+
+        # Pairwise tournament pool: primary jurisdictions whenever any primary is scored, else aggregates
+        primary_pool = any(sc["metadata"]["has_states_data"] for sc in scores_by_model.values())
+        agg_list = sorted(agg_locs)
+        pool_filter = (~pl.col("location").is_in(agg_list)) if primary_pool else pl.col("location").is_in(agg_list)
         task_scores_by_model = {
             mid: sc["task_df"].filter(pool_filter)
             for mid, sc in scores_by_model.items()
             if "task_df" in sc and sc["task_df"] is not None
         }
 
-        # Resolve effective baseline for tournament scaling
         validation_warnings: List[str] = []
         effective_baseline = baseline_id if (baseline_id and baseline_id in task_scores_by_model) else None
         if not effective_baseline and task_scores_by_model:
@@ -651,34 +916,49 @@ class EvaluationEngine:
             )
 
         weekly_wins = self._weekly_wins(
-            {m: df for m, df in task_scores_by_model.items() if m in requested_model_ids}
+            {m: df for m, df in task_scores_by_model.items() if m in requested_model_ids},
+            extra_task_ids=extra_cols,
         )
 
         pairwise_tournament_rel_wis: Dict[str, Any] = {}
         pairwise_tournament_rel_wis_log: Dict[str, Any] = {}
         if task_scores_by_model:
             pairwise_tournament_rel_wis, pairwise_tournament_rel_wis_log = ordered_map(
-                lambda col: compute_pairwise_relative_wis(task_scores_by_model, effective_baseline, metric_col=col),
+                lambda col: compute_pairwise_relative_wis(
+                    task_scores_by_model,
+                    effective_baseline,
+                    metric_col=col,
+                    extra_task_ids=extra_cols,
+                ),
                 ["wis", "wis_log"],
             )
 
-        # 8. Compute relative delta % vs baseline (strictly on identical task subsets)
+        # Pairwise task keys for Δ% vs baseline in unconstrained mode
         comparisons: List[Dict[str, Any]] = []
         ref_baseline_id = effective_baseline
-
-        # Unconstrained mode compares each model with the baseline on their pairwise shared tasks. Each
-        # model's task keys are extracted once (on threads) instead of once per pair; the shared-task WIS
-        # means then come from the per-task scores already computed above (see _shared_task_wis).
         task_key_outcomes: Dict[str, Tuple[bool, Any]] = {}
         if ref_baseline_id and not (fair_flag and ref_baseline_id in scores_by_model):
             key_models = [ref_baseline_id] + [
                 m for m in requested_model_ids if m != ref_baseline_id and m in scores_by_model
             ]
             key_models = list(dict.fromkeys(key_models))
-            task_key_outcomes = dict(zip(key_models, ordered_map_outcomes(
-                lambda m: model_task_keys(model_dfs[m], target, locations_filter, dates_filter), key_models,
-            )))
+            req_kcols = list(TASK_KEY_COLS) + extra_cols
+            for km in key_models:
+                if km in scores_by_model and "task_df" in scores_by_model[km]:
+                    tdf_k = scores_by_model[km]["task_df"]
+                    use_cols = [c for c in req_kcols if c in tdf_k.columns]
+                    task_key_outcomes[km] = (True, tdf_k.select(use_cols).unique())
+                elif km in model_dfs:
+                    task_key_outcomes[km] = (
+                        True,
+                        model_task_keys(
+                            model_dfs[km], target, locations_filter, dates_filter, extra_task_ids=extra_cols
+                        ),
+                    )
+                else:
+                    task_key_outcomes[km] = (True, None)
 
+        # 8. Build rankings table
         for mid in requested_model_ids:
             if mid not in all_models:
                 continue
@@ -688,20 +968,26 @@ class EvaluationEngine:
             sc = scores_by_model.get(mid)
             is_local = all_models[mid].get("is_local", False)
 
-            # Forecasts for this target and location exist in scope, but none of their target weeks has
-            # been observed yet (a live round); distinct from a model that never forecast this location
             pending_truth = False
             no_location = False
             if has_data and sc is None and common_task_status != "empty_disjoint":
                 m_df = model_dfs.get(mid)
+                if m_df is None and mid in submitted_keys:
+                    m_df = submitted_keys[mid]
+                elif m_df is None:
+                    # Lightweight check only when a model returned 0 scored tasks
+                    eval_ds = m_stat.get("available_scope_dates", [])
+                    m_df = _load_raw((mid, eval_ds)) if eval_ds else None
                 in_scope = m_df is not None and not m_df.is_empty()
                 if in_scope:
-                    m_df = m_df.filter(pl.col("target") == target) if "target" in m_df.columns else m_df
+                    if "target" in m_df.columns:
+                        m_df = m_df.filter(pl.col("target") == target)
                     if locations_filter:
                         m_df = m_df.filter(pl.col("location").cast(pl.String).is_in(locations_filter))
                     in_scope = not m_df.is_empty()
                 pending_truth = in_scope
                 no_location = not in_scope
+
             if not has_data or sc is None:
                 seasons_str = ", ".join(selected_seasons) if selected_seasons else "selected scope"
                 act_str = ", ".join(m_stat.get("active_seasons", []))
@@ -711,7 +997,11 @@ class EvaluationEngine:
                 elif pending_truth:
                     status_note = "Awaiting truth: no observations yet for these target weeks"
                 elif no_location:
-                    where = "these locations" if locations_filter and len(locations_filter) > 1 else (loc_param if loc_param not in ("all", "states") else "this scope")
+                    where = (
+                        "these locations"
+                        if locations_filter and len(locations_filter) > 1
+                        else (loc_param if loc_param not in ("all", "states", "primary") else "this scope")
+                    )
                     status_note = f"No {target} forecasts for {where} in this window"
 
                 comparisons.append({
@@ -753,6 +1043,7 @@ class EvaluationEngine:
                     "locations_count": 0,
                     "states_wis": None,
                     "us_wis": None,
+                    "aggregate_wis": None,
                     "by_horizon": {},
                 })
                 continue
@@ -763,48 +1054,42 @@ class EvaluationEngine:
             pct_diff = None
             pct_diff_log = None
 
-            # Pairwise relative WIS vs baseline (evaluated on STRICTLY IDENTICAL task subsets)
             if ref_baseline_id:
                 if mid == ref_baseline_id:
                     pct_diff = 0.0
-                    pct_diff_log = 0.0
+                    pct_diff_log = 0.0 if wis_log is not None else None
                 elif wis is not None:
                     if fair_flag and ref_baseline_id in scores_by_model:
-                        # In fair mode, all models and baseline were evaluated on the mutual common_task_set
                         base_wis_shared = scores_by_model[ref_baseline_id]["overall"].get("wis")
                         if base_wis_shared and base_wis_shared > 0:
                             pct_diff = ((wis - base_wis_shared) / base_wis_shared) * 100.0
                         base_wis_shared_log = scores_by_model[ref_baseline_id]["overall"].get("wis_log")
                         if base_wis_shared_log and base_wis_shared_log > 0 and wis_log is not None:
                             pct_diff_log = ((wis_log - base_wis_shared_log) / base_wis_shared_log) * 100.0
-                    else:
-                        # Unconstrained mode: evaluate BOTH mid and baseline strictly on their pairwise shared tasks
-                        # (same tasks find_common_tasks({mid, baseline}) returns, same early exits and errors)
+                    elif mid in task_key_outcomes and ref_baseline_id in task_key_outcomes:
                         shared_with_baseline = intersect_task_keys(
-                            [task_key_outcomes[mid], task_key_outcomes[ref_baseline_id]]
+                            [task_key_outcomes[mid], task_key_outcomes[ref_baseline_id]],
+                            extra_task_ids=extra_cols,
                         )
                         if shared_with_baseline is not None and not shared_with_baseline.is_empty():
-                            if not fair_flag:
-                                base_wis_shared, base_wis_shared_log = _shared_task_wis(
-                                    scores_by_model[ref_baseline_id]["task_df"], shared_with_baseline
-                                )
-                                model_wis_shared, model_wis_shared_log = _shared_task_wis(
-                                    scores_by_model[mid]["task_df"], shared_with_baseline
-                                )
-                            else:
-                                # Unreachable today (in fair mode the effective baseline is always scored), but if it
-                                # were reached the main task scores are restricted to the common tasks, so re-score.
-                                shared_set = {(str(r[0]), str(r[1]), int(r[2])) for r in shared_with_baseline.iter_rows()}
-                                base_wis_shared, base_wis_shared_log = _overall_wis_on_tasks(
-                                    model_dfs[ref_baseline_id], oracle, target, shared_set, target_non_neg)
-                                model_wis_shared, model_wis_shared_log = _overall_wis_on_tasks(
-                                    model_dfs[mid], oracle, target, shared_set, target_non_neg)
-
+                            base_wis_shared, base_wis_shared_log = _shared_task_wis(
+                                scores_by_model[ref_baseline_id]["task_df"],
+                                shared_with_baseline,
+                                aggregate_locations=agg_locs,
+                                extra_task_ids=extra_cols,
+                            )
+                            model_wis_shared, model_wis_shared_log = _shared_task_wis(
+                                scores_by_model[mid]["task_df"],
+                                shared_with_baseline,
+                                aggregate_locations=agg_locs,
+                                extra_task_ids=extra_cols,
+                            )
                             if model_wis_shared is not None and base_wis_shared and base_wis_shared > 0:
                                 pct_diff = ((model_wis_shared - base_wis_shared) / base_wis_shared) * 100.0
                             if model_wis_shared_log is not None and base_wis_shared_log and base_wis_shared_log > 0:
                                 pct_diff_log = ((model_wis_shared_log - base_wis_shared_log) / base_wis_shared_log) * 100.0
 
+            us_wis_val = sc["us"].get("wis") if sc.get("us") else None
             comparisons.append({
                 "model_id": mid,
                 "is_local": is_local,
@@ -825,8 +1110,16 @@ class EvaluationEngine:
                 "has_23_quantiles": sc["overall"].get("has_23_quantiles", True),
                 "pct_diff_vs_baseline": round(pct_diff, 1) if pct_diff is not None else None,
                 "pct_diff_vs_baseline_log": round(pct_diff_log, 1) if pct_diff_log is not None else None,
-                "relative_wis": pairwise_tournament_rel_wis.get(mid, {}).get("relative_wis") if isinstance(pairwise_tournament_rel_wis.get(mid), dict) else pairwise_tournament_rel_wis.get(mid),
-                "relative_wis_log": pairwise_tournament_rel_wis_log.get(mid, {}).get("relative_wis") if isinstance(pairwise_tournament_rel_wis_log.get(mid), dict) else pairwise_tournament_rel_wis_log.get(mid),
+                "relative_wis": (
+                    pairwise_tournament_rel_wis.get(mid, {}).get("relative_wis")
+                    if isinstance(pairwise_tournament_rel_wis.get(mid), dict)
+                    else pairwise_tournament_rel_wis.get(mid)
+                ),
+                "relative_wis_log": (
+                    pairwise_tournament_rel_wis_log.get(mid, {}).get("relative_wis")
+                    if isinstance(pairwise_tournament_rel_wis_log.get(mid), dict)
+                    else pairwise_tournament_rel_wis_log.get(mid)
+                ),
                 "wis_per_100k": sc["overall"].get("wis_per_100k"),
                 "baseline_model": ref_baseline_id,
                 "mae": sc["overall"].get("mae"),
@@ -842,12 +1135,12 @@ class EvaluationEngine:
                 "evaluated_dates_count": sc.get("metadata", {}).get("dates_count", 1),
                 "locations_count": sc.get("metadata", {}).get("locations_count", 1),
                 "benchmark_pool": sc.get("metadata", {}).get("benchmark_pool", "states"),
-                "states_wis": sc.get("states", {}).get("wis") if sc.get("states") else None,
-                "us_wis": sc.get("us", {}).get("wis") if sc.get("us") else None,
+                "states_wis": sc["states"].get("wis") if sc.get("states") else None,
+                "us_wis": us_wis_val,
+                "aggregate_wis": us_wis_val,
                 "by_horizon": sc.get("by_horizon", {}),
             })
 
-        # Sort: active models by tournament relative WIS (comparable across unequal task sets), then raw WIS
         comparisons.sort(
             key=lambda x: (
                 not x["has_data_in_scope"],
@@ -857,17 +1150,16 @@ class EvaluationEngine:
             )
         )
 
-        # 9. Collect validation warnings across loaded models and evaluation
+        # 9. Collect validation warnings
         validation_warnings += self.loader.get_validation_warnings(requested_model_ids)
         for comp in comparisons:
             if comp["has_data_in_scope"] and comp["quantile_count"] < 7:
                 validation_warnings.append(
                     f"Model '{comp['model_id']}' has only {comp['quantile_count']} quantiles (standard is 7 or 23)."
                 )
+        validation_warnings = sorted(set(validation_warnings))
 
-        validation_warnings = sorted(list(set(validation_warnings)))
-
-        result = EvaluationResult(
+        return EvaluationResult(
             target=target,
             location_filter=loc_param,
             date_filter=date_param,
@@ -887,27 +1179,218 @@ class EvaluationEngine:
             locations_filter=locations_filter,
             common_task_set=common_task_set,
             window_filter=window_filter,
+            aggregate_locations=agg_locs,
+            extra_task_ids=tuple(extra_cols),
+            dim_filter=dim_filter,
         )
-        return result
+
+    def _evaluate_pmf(
+        self,
+        *,
+        target: str,
+        target_meta: Dict[str, Any],
+        oracle: pl.DataFrame,
+        loc_param: str,
+        date_param: str,
+        season_param: str,
+        scope_type: str,
+        selected_seasons: List[str],
+        dates_filter: Optional[List[str]],
+        locations_filter: Optional[List[str]],
+        agg_locs: Set[str],
+        horizon_set: Optional[List[int]],
+        window_filter: Optional[WindowFilter],
+        dim_filter: Dict[str, str],
+        extra_cols: List[str],
+        fair_flag: bool,
+        all_models: Dict[str, Dict[str, Any]],
+        requested_model_ids: List[str],
+        baseline_id: Optional[str],
+        cfg_default: Optional[str],
+        tgt_default: Optional[str],
+        baseline_meta: Dict[str, Dict[str, Any]],
+        model_meta_stats: Dict[str, Dict[str, Any]],
+        to_load: List[Tuple[str, List[str]]],
+        season_hint: Optional[str],
+        total_scope_dates_count: int,
+    ) -> EvaluationResult:
+        """Evaluate categorical/ordinal PMF targets (RPS, Log Score, Brier Score)."""
+        categories = target_meta.get("categories") or None
+        ordinal = bool(categories and len(categories) >= 2)
+
+        def _load_pmf(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
+            mid, eval_dates = item
+            raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
+            lf = self.loader.cache_mgr.scan_model_pmf(raw_id, is_local=is_local)
+            df = None
+            if lf is not None:
+                df = lf.filter((pl.col("target") == target) & pl.col("reference_date").is_in(eval_dates)).collect()
+            if df is None or df.is_empty():
+                raw_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
+                if raw_df is not None and not raw_df.is_empty() and "output_type" in raw_df.columns:
+                    df = raw_df.filter((pl.col("target") == target) & (pl.col("output_type") == "pmf"))
+            if df is None or df.is_empty():
+                return None
+            return self._filter_df_scope(
+                df,
+                horizons=horizon_set,
+                dim_filter=dim_filter,
+                window_filter=window_filter,
+            )
+
+        pmf_dfs: Dict[str, pl.DataFrame] = {}
+        for (mid, _), df in zip(to_load, ordered_map(_load_pmf, to_load)):
+            if df is not None and not df.is_empty():
+                pmf_dfs[mid] = df
+
+        scores_by_model: Dict[str, Dict[str, Any]] = {}
+        if pmf_dfs:
+            def _score_pmf(df: pl.DataFrame) -> Dict[str, Any]:
+                return score_pmf_forecasts(
+                    df,
+                    oracle,
+                    target,
+                    categories=categories,
+                    ordinal=ordinal,
+                    locations=locations_filter,
+                    reference_dates=dates_filter,
+                    horizons=horizon_set,
+                    extra_task_ids=extra_cols or None,
+                    aggregate_locations=agg_locs,
+                    return_task_df=True,
+                )
+
+            for mid, sc in zip(list(pmf_dfs.keys()), ordered_map(_score_pmf, list(pmf_dfs.values()))):
+                if sc:
+                    scores_by_model[mid] = sc
+
+        primary_pool = any(sc["metadata"]["has_states_data"] for sc in scores_by_model.values())
+        agg_list = sorted(agg_locs)
+        pool_filter = (~pl.col("location").is_in(agg_list)) if primary_pool else pl.col("location").is_in(agg_list)
+        task_scores = {
+            mid: sc["task_df"].filter(pool_filter)
+            for mid, sc in scores_by_model.items()
+            if "task_df" in sc and sc["task_df"] is not None
+        }
+        rank_col = "rps" if ordinal else "log_score"
+        effective_baseline = baseline_id if (baseline_id and baseline_id in task_scores) else None
+        if not effective_baseline and task_scores:
+            effective_baseline = resolve_baseline(
+                all_models,
+                model_meta=baseline_meta,
+                target=target,
+                dates=dates_filter,
+                season=season_hint,
+                config_default=cfg_default,
+                target_config_default=tgt_default,
+                eligible_ids=set(task_scores.keys()),
+            ) or list(task_scores.keys())[0]
+
+        rel_skill = (
+            compute_pairwise_relative_wis(task_scores, effective_baseline, metric_col=rank_col, extra_task_ids=extra_cols)
+            if task_scores else {}
+        )
+
+        comparisons: List[Dict[str, Any]] = []
+        for mid in requested_model_ids:
+            if mid not in all_models:
+                continue
+            m_stat = model_meta_stats.get(mid, {})
+            has_data = m_stat.get("has_scope_data", False)
+            sc = scores_by_model.get(mid)
+            is_local = all_models[mid].get("is_local", False)
+            if not has_data or sc is None:
+                comparisons.append({
+                    "model_id": mid,
+                    "is_local": is_local,
+                    "is_synthetic": False,
+                    "has_data_in_scope": False,
+                    "pending_truth": mid in pmf_dfs,
+                    "status_note": "Awaiting categorical truth or no PMF forecasts in scope",
+                    "active_seasons": m_stat.get("active_seasons", []),
+                    "scope_rounds_available": m_stat.get("available_scope_dates_count", 0),
+                    "scope_rounds_total": total_scope_dates_count,
+                    "rps": None,
+                    "log_score": None,
+                    "brier": None,
+                    "hit_mode": None,
+                    "wis": None,
+                    "relative_wis": None,
+                    "baseline_model": effective_baseline,
+                    "count": 0,
+                    "by_horizon": {},
+                })
+                continue
+
+            rs = rel_skill.get(mid, {}) if isinstance(rel_skill.get(mid), dict) else {}
+            comparisons.append({
+                "model_id": mid,
+                "is_local": is_local,
+                "is_synthetic": False,
+                "has_data_in_scope": True,
+                "status_note": None,
+                "active_seasons": m_stat.get("active_seasons", []),
+                "scope_rounds_available": m_stat.get("available_scope_dates_count", 0),
+                "scope_rounds_total": total_scope_dates_count,
+                "rps": sc["overall"].get("rps"),
+                "log_score": sc["overall"].get("log_score"),
+                "brier": sc["overall"].get("brier"),
+                "hit_mode": sc["overall"].get("hit_mode"),
+                "wis": None,
+                "relative_wis": rs.get("relative_wis"),
+                "pct_diff_vs_baseline": rs.get("direct_pct_vs_baseline"),
+                "baseline_model": effective_baseline,
+                "count": sc["overall"].get("count", 0),
+                "evaluated_dates_count": sc.get("metadata", {}).get("dates_count", 1),
+                "locations_count": sc.get("metadata", {}).get("locations_count", 1),
+                "by_horizon": sc.get("by_horizon", {}),
+            })
+
+        comparisons.sort(
+            key=lambda x: (
+                not x["has_data_in_scope"],
+                x.get(rank_col) is None,
+                x.get(rank_col) if x.get(rank_col) is not None else float("inf"),
+            )
+        )
+
+        return EvaluationResult(
+            target=target,
+            location_filter=loc_param,
+            date_filter=date_param,
+            season_filter=season_param,
+            scope_type=scope_type,
+            selected_seasons=selected_seasons,
+            scope_dates_count=total_scope_dates_count,
+            scope_dates=dates_filter,
+            baseline_model=effective_baseline,
+            fair_intersection=fair_flag,
+            common_task_status="none",
+            common_task_message=None,
+            common_tasks_count=None,
+            rankings=comparisons,
+            validation_warnings=sorted(set(self.loader.get_validation_warnings(requested_model_ids))),
+            window=window_filter.describe() if window_filter is not None else None,
+            locations_filter=locations_filter,
+            common_task_set=None,
+            window_filter=window_filter,
+            aggregate_locations=agg_locs,
+            extra_task_ids=tuple(extra_cols),
+            dim_filter=dim_filter,
+        )
 
     def _population_map(self, target: str) -> Optional[Dict[str, int]]:
-        """Location populations for per-100k WIS; None for targets that are already rates or proportions."""
         if self.config.get_target_metadata(target)["is_rate"]:
             return None
         return {loc: info["population"] for loc, info in self.loader.get_locations().items() if info.get("population")}
 
     def get_task_scores_dataframe(self, params: EvaluationParams) -> Optional[pl.DataFrame]:
-        """
-        Return task-level scores (location x date x horizon x model scores) as a unified DataFrame.
-        Uses the exact scope of the matching leaderboard (locations, dates, common tasks).
-        Enables researchers to export disaggregated scores for further statistical analysis or R integration.
-        """
+        """Return task-level scores matching the exact scope of `evaluate(params)`."""
         target = params.target or self.config.get_default_target()
         oracle = self.loader.get_oracle(as_polars=True)
         if oracle is None or oracle.is_empty():
             return None
 
-        # Execute evaluation to resolve scope and common tasks
         result = self.evaluate(params)
         active_mids = [r["model_id"] for r in result.rankings if r.get("has_data_in_scope")]
         if not active_mids:
@@ -915,14 +1398,19 @@ class EvaluationEngine:
 
         pop_map = self._population_map(target)
         target_non_neg = self.config.is_target_non_negative(target)
-
-        common_tasks_arg = _common_tasks_frame(result.common_task_set)
+        common_tasks_arg = _common_tasks_frame(result.common_task_set, extra_task_ids=result.extra_task_ids)
 
         def _task_scores(mid: str) -> Optional[pl.DataFrame]:
             df = self.loader.load_combined_forecasts(mid, result.scope_dates, as_polars=True)
-            if df is not None and result.window_filter is not None:
-                df = result.window_filter.apply(df)
             if df is None or df.is_empty():
+                return None
+            df = self._filter_df_scope(
+                df,
+                horizons=params.horizons,
+                dim_filter=result.dim_filter,
+                window_filter=result.window_filter,
+            )
+            if df.is_empty():
                 return None
             sc = score_forecasts(
                 df,
@@ -930,9 +1418,12 @@ class EvaluationEngine:
                 target=target,
                 locations=result.locations_filter,
                 reference_dates=result.scope_dates,
+                horizons=params.horizons,
                 common_tasks=common_tasks_arg,
                 non_negative=target_non_neg,
                 population_map=pop_map,
+                extra_task_ids=result.extra_task_ids or None,
+                aggregate_locations=result.aggregate_locations,
                 return_task_df=True,
             )
             if sc and "task_df" in sc and sc["task_df"] is not None:
@@ -940,7 +1431,6 @@ class EvaluationEngine:
             return None
 
         dfs = [t_df for t_df in ordered_map(_task_scores, active_mids) if t_df is not None]
-
         if not dfs:
             return None
         return pl.concat(dfs, how="diagonal")

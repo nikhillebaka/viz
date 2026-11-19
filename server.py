@@ -4,6 +4,8 @@ Built on Python standard library http.server + socketserver with zero external w
 """
 
 import errno
+import gzip
+import hashlib
 import http.server
 import json
 import logging
@@ -15,7 +17,7 @@ import socketserver
 import sys
 import threading
 import urllib.parse
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import _bootstrap
 
@@ -27,6 +29,7 @@ from viz.core.synthetic_ensemble import SyntheticEnsembleConfig
 from viz.core.workspace import HubContext, HubManager
 from viz.remote.s3 import S3Error
 from viz.remote.sync import current_season
+from viz.remote.transports import TransportError
 
 
 logging.basicConfig(
@@ -93,6 +96,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     hub_manager: Optional[HubManager] = HUB_MANAGER
 
     def __init__(self, *args, **kwargs):
+        self._cache_control_override: Optional[str] = None
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
     def setup(self):
@@ -141,7 +145,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Viz-Hub")
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        cc = self._cache_control_override or "no-cache, no-store, must-revalidate"
+        self._cache_control_override = None
+        self.send_header("Cache-Control", cc)
         super().end_headers()
 
     def do_OPTIONS(self):
@@ -495,36 +501,66 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 man.pop("hub_path", None)
             man["workspace_hubs"] = mgr.workspace_hubs_brief()
-            self._send_json(man)
+            man_etag = self._weak_etag(f"man|{man.get('stamp')}|{mgr.mode}|{ctx.hub_id}|{len(man['workspace_hubs'])}")
+            self._send_json(man, etag=man_etag)
             return
 
         ctx = self._require_ctx(query)
         if ctx is None:
             return
+        def_loc = self._default_location(ctx)
         if name == "fan":
             target = query.get("target", [ctx.config.get_default_target()])[0]
             season = query.get("season", [""])[0]
-            location = query.get("location", ["US"])[0]
+            location = query.get("location", [def_loc])[0] or def_loc
+            dims = self._extract_dims(ctx, target, query)
+            raw_ver = query.get("v", ["2"])[0].strip()
+            try:
+                ver = int(raw_ver)
+            except ValueError:
+                ver = 2
             if not season:
                 self._send_json({"error": "Missing 'season' parameter"}, status=400)
                 return
-            payload = ctx.next_data.fan(target, season, location)
+            payload = ctx.next_data.fan(target, season, location, dims=dims, version=ver)
             if payload is None:
                 self._send_json({"error": f"No forecast rounds in season '{season}'"}, status=404)
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+            stamp = ctx.next_data._stamp()
+            fan_etag = self._weak_etag(f"fan|{ver}|{target}|{season}|{location}|{sorted((dims or {}).items())}|{stamp}")
+            self._send_bytes(payload, "application/octet-stream", etag=fan_etag)
+        elif name == "trajectories":
+            target = query.get("target", [ctx.config.get_default_target()])[0]
+            season = query.get("season", [ctx.loader.get_latest_season()])[0]
+            location = query.get("location", [def_loc])[0] or def_loc
+            ref_date = query.get("date", [""])[0].strip()
+            if not ref_date:
+                self._send_json({"error": "Missing 'date' parameter"}, status=400)
+                return
+            models_param = query.get("models", [""])[0]
+            models = [m.strip() for m in models_param.split(",") if m.strip()] or None
+            dims = self._extract_dims(ctx, target, query)
+            payload = ctx.next_data.trajectories(target, season, location, ref_date, models=models, dims=dims)
+            if payload is None:
+                self._send_json({"error": "No trajectory samples found for the requested slice"}, status=404)
+                return
+            self._send_bytes(payload, "application/octet-stream")
+        elif name == "pmf":
+            target = query.get("target", [ctx.config.get_default_target()])[0]
+            season = query.get("season", [ctx.loader.get_latest_season()])[0]
+            location = query.get("location", [def_loc])[0] or def_loc
+            ref_date = query.get("date", [""])[0].strip() or None
+            models_param = query.get("models", [""])[0]
+            models = [m.strip() for m in models_param.split(",") if m.strip()] or None
+            dims = self._extract_dims(ctx, target, query)
+            self._send_json(ctx.next_data.pmf(target, season, location, round_date=ref_date, models=models, dims=dims))
         elif name == "asof":
-            # the target as published at every round of a season (one request for the whole season)
             season = query.get("season", [""])[0]
             if not season:
                 self._send_json({"error": "Missing 'season' parameter"}, status=400)
                 return
             target = query.get("target", [ctx.config.get_default_target()])[0]
-            self._send_json(ctx.next_data.asof(target, season, query.get("location", ["US"])[0]))
+            self._send_json(ctx.next_data.asof(target, season, query.get("location", [def_loc])[0] or def_loc))
         elif name == "heatmap":
             # /api/heatmap, plus the evaluation window: horizons=0,1 and dates=<rounds in scope>
             self._handle_heatmap(ctx, query, next_api=True)
@@ -548,13 +584,89 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self._send_json({"error": f"Unknown endpoint '{path}'"}, status=404)
 
-    def _send_json(self, data: Any, status: int = 200):
-        body = json.dumps(data).encode("utf-8")
+    @staticmethod
+    def _default_location(ctx: HubContext) -> str:
+        try:
+            return ctx.loader.get_geo_graph().default_location()
+        except Exception:
+            return "US"
+
+    @staticmethod
+    def _extract_dims(ctx: HubContext, target: str, query: dict) -> Optional[Dict[str, str]]:
+        extra_defs = ctx.config.get_extra_task_ids(target)
+        out: Dict[str, str] = {}
+        raw_dims = query.get("dims", [""])[0].strip()
+        if raw_dims:
+            for item in raw_dims.split(","):
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    if k.strip() and v.strip():
+                        out[k.strip()] = v.strip()
+        for col in extra_defs:
+            val = query.get(col, [""])[0].strip()
+            if val:
+                out[col] = val
+        return out or None
+
+    @staticmethod
+    def _weak_etag(seed: str) -> str:
+        return f'W/"{hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]}"'
+
+    @staticmethod
+    def _etag_matches(header_val: Optional[str], etag: str) -> bool:
+        if not header_val:
+            return False
+        raw = header_val.strip()
+        if raw == "*":
+            return True
+        norm = etag[2:] if etag.startswith("W/") else etag
+        for part in raw.split(","):
+            tok = part.strip()
+            tok_norm = tok[2:] if tok.startswith("W/") else tok
+            if tok == etag or tok_norm == norm:
+                return True
+        return False
+
+    def _send_bytes(
+        self,
+        raw_bytes: bytes,
+        content_type: str,
+        status: int = 200,
+        *,
+        etag: Optional[str] = None,
+        allow_gzip: bool = True,
+    ):
+        if status == 200 and etag is not None:
+            if self._etag_matches(self.headers.get("If-None-Match"), etag):
+                self._cache_control_override = "no-cache"
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Vary", "Accept-Encoding")
+                self.end_headers()
+                return
+            self._cache_control_override = "no-cache"
+
+        body = raw_bytes
+        use_gzip = False
+        if allow_gzip and len(raw_bytes) > 1024:
+            accept_enc = (self.headers.get("Accept-Encoding") or "").lower()
+            if "gzip" in accept_enc:
+                body = gzip.compress(raw_bytes, compresslevel=6)
+                use_gzip = True
+
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
+        if etag is not None and status == 200:
+            self.send_header("ETag", etag)
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json(self, data: Any, status: int = 200, *, etag: Optional[str] = None):
+        self._send_bytes(json.dumps(data).encode("utf-8"), "application/json", status=status, etag=etag)
 
     def _serve_file(self, file_path: Path, content_type: str):
         if not file_path.exists():
@@ -733,7 +845,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_forecast(self, ctx: HubContext, query: dict):
         target = query.get("target", [ctx.config.get_default_target()])[0]
-        location = query.get("location", ["US"])[0]
+        def_loc = self._default_location(ctx)
+        location = query.get("location", [def_loc])[0] or def_loc
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()]
@@ -772,9 +885,10 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_peaks(self, ctx: HubContext, query: dict):
         """Season Peak view: one round's peak forecasts, their evolution over the season, and peak skill."""
         target = query.get("target", [ctx.config.get_default_target()])[0]
-        location = query.get("location", ["US"])[0] or "US"
+        def_loc = self._default_location(ctx)
+        location = query.get("location", [def_loc])[0] or def_loc
         if location in ("states", "all"):
-            location = "US"
+            location = def_loc
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
         if models_param.strip().lower() == "all":
@@ -810,7 +924,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_surveillance(self, ctx: HubContext, query: dict, precise: bool = False):
         target = query.get("target", [ctx.config.get_default_target()])[0]
-        location = query.get("location", ["US"])[0]
+        def_loc = self._default_location(ctx)
+        location = query.get("location", [def_loc])[0] or def_loc
         models = ctx.loader.scan_models()
         dates = [m.get("max_date") for m in models.values() if m.get("max_date")]
         fallback_date = max(dates) if dates else "2024-01-13"
@@ -892,9 +1007,10 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_season_curves(self, ctx: HubContext, query: dict):
         """Truth curves per season for one location, aligned by season week, with peak/pre/post phases."""
         target = query.get("target", [ctx.config.get_default_target()])[0]
-        location = query.get("location", ["US"])[0] or "US"
+        def_loc = self._default_location(ctx)
+        location = query.get("location", [def_loc])[0] or def_loc
         if location in ("states", "all"):
-            location = "US"
+            location = def_loc
         seasons_param = query.get("seasons", [""])[0]
         seasons = [s.strip() for s in seasons_param.split(",") if s.strip()] or ctx.loader.get_forecast_seasons()
         self._send_json(ctx.loader.get_season_curves(target, location, seasons))
@@ -913,6 +1029,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         phase_param = query.get("phase", [""])[0].strip() or None
 
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()] if models_param else None
+        dims = self._extract_dims(ctx, target, query)
 
         params = EvaluationParams(
             target=target,
@@ -925,6 +1042,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             weeks=weeks_param,
             phase=phase_param,
             horizons=horizons,
+            dims=dims,
         )
 
         try:
@@ -942,7 +1060,10 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         hub_id = str(body.get("hub", "")).strip()
         try:
             if path == "/api/remote/add":
-                result = ctx.remote_mgr.add_hub(str(body.get("bucket", "")), body.get("label"))
+                source = str(body.get("source") or body.get("bucket") or "").strip()
+                transport = body.get("transport")
+                branch = str(body.get("branch") or "main").strip() or "main"
+                result = ctx.remote_mgr.add_hub(source, body.get("label"), transport=transport, branch=branch)
                 self._send_json(result, status=200 if result.get("ok") else 422)
             elif path == "/api/remote/check":
                 self._send_json(ctx.remote_mgr.check(hub_id))
@@ -966,7 +1087,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
         except RuntimeError as exc:
             self._send_json({"error": str(exc)}, status=409)
-        except S3Error as exc:
+        except (S3Error, TransportError) as exc:
             self._send_json({"error": str(exc)}, status=502)
 
     def _handle_ensemble_list(self, ctx: HubContext):

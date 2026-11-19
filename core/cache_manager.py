@@ -31,7 +31,7 @@ from viz.core.truth import (
     reconcile_truth_sources,
     reconcile_vintages,
 )
-from viz.remote.store import RemoteStore
+from viz.remote.store import RemoteStore, TRUTH_FILES
 
 logger = logging.getLogger("viz.cache")
 
@@ -111,6 +111,9 @@ class ParquetCacheManager:
         allowed_targets_provider: Optional[Callable[[], Set[str]]] = None,
         allowed_locations_provider: Optional[Callable[[], Set[str]]] = None,
         remote_store: Optional[RemoteStore] = None,
+        calendar_provider: Optional[Callable[[], Any]] = None,
+        geo_provider: Optional[Callable[[], Any]] = None,
+        is_non_negative_provider: Optional[Callable[[str], bool]] = None,
     ):
         self.base_dir = Path(base_dir).resolve()
         # Hub data synced from S3 is only used by the dashboard; the CLI scores repository models only
@@ -159,6 +162,9 @@ class ParquetCacheManager:
         self._peer_truth_provider = peer_truth_provider
         self._allowed_targets_provider = allowed_targets_provider
         self._allowed_locations_provider = allowed_locations_provider
+        self._calendar_provider = calendar_provider
+        self._geo_provider = geo_provider
+        self._is_non_negative_provider = is_non_negative_provider
 
         self._model_locks = LockRegistry()
         self._target_locks = LockRegistry()
@@ -166,6 +172,23 @@ class ParquetCacheManager:
         self._missing_logged: set = set()
 
         self._ensure_dirs()
+
+    def _calendar(self):
+        if self._calendar_provider is not None:
+            return self._calendar_provider()
+        from viz.core.config import VizConfig
+        return VizConfig(self.base_dir).get_calendar()
+
+    def _geo(self):
+        if self._geo_provider is not None:
+            return self._geo_provider()
+        return None
+
+    def _pad_fips(self) -> bool:
+        geo = self._geo()
+        if geo is not None:
+            return bool(getattr(geo, "uses_us_fips", True))
+        return True
 
     def get_validation_warnings(self, sources: Optional[List[str]] = None) -> List[str]:
         """Return captured validation warnings for specified models or all models."""
@@ -257,148 +280,325 @@ class ParquetCacheManager:
             return None
         return hub_id, name
 
-    def get_model_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
-        """
-        Get path to the cached Parquet file for a model.
-        Automatically converts and builds cache if stale or missing.
-        Thread-safe: uses per-model locking and atomic file writes.
-        """
+    def _resolve_model_paths(self, model_id: str, is_local: bool = False) -> Optional[Tuple[Path, Path, str, Optional[Tuple[str, str]], bool]]:
+        """Resolve `(source_dir, dest_dir, file_stem, hub_tuple_or_None, is_local)` for a model."""
         hub = self.hub_key(model_id)
         if hub is not None:
-            # Hub models: normalized copies under .cache/remote/<hub>/model-output, consolidated per model
             source_dir = self.remote_store.model_dir(*hub)
             if not source_dir.is_dir():
                 return None
             dest_dir = self.hub_models_cache_dir / hub[0]
             dest_dir.mkdir(parents=True, exist_ok=True)
-            file_stem = hub[1]
-        else:
-            source_dir = (self.local_output_dir if is_local else self.model_output_dir) / model_id
-            if not source_dir.exists() or not source_dir.is_dir():
-                # If not found in preferred dir, check the other dir as fallback
-                alt_dir = (self.model_output_dir if is_local else self.local_output_dir) / model_id
-                if alt_dir.exists() and alt_dir.is_dir():
-                    source_dir = alt_dir
-                    is_local = not is_local
-                else:
-                    return None
-            dest_dir = self.local_models_cache_dir if is_local else self.models_cache_dir
-            file_stem = model_id
+            return source_dir, dest_dir, hub[1], hub, False
+
+        if model_id.startswith("local:"):
+            model_id, is_local = model_id[6:], True
+        source_dir = (self.local_output_dir if is_local else self.model_output_dir) / model_id
+        if not source_dir.exists() or not source_dir.is_dir():
+            alt_dir = (self.model_output_dir if is_local else self.local_output_dir) / model_id
+            if alt_dir.exists() and alt_dir.is_dir():
+                source_dir = alt_dir
+                is_local = not is_local
+            else:
+                return None
+        dest_dir = self.local_models_cache_dir if is_local else self.models_cache_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        return source_dir, dest_dir, model_id, None, is_local
+
+    @staticmethod
+    def _atomic_write_parquet(df: pl.DataFrame, dest: Path):
+        tid = f"{os.getpid()}_{threading.get_ident()}"
+        tmp = dest.with_suffix(f".tmp.{tid}.parquet")
+        try:
+            df.write_parquet(tmp, compression="zstd")
+            os.replace(tmp, dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _read_model_file(f: Path) -> pl.DataFrame:
+        if f.suffix.lower() == ".parquet":
+            return pl.read_parquet(f)
+        return pl.read_csv(
+            f,
+            schema_overrides={
+                "location": pl.String,
+                "horizon": pl.Int32,
+                "output_type_id": pl.String,
+                "value": pl.Float64,
+                "output_type": pl.String,
+                "target": pl.String,
+                "target_end_date": pl.String,
+                "reference_date": pl.String,
+                "origin_date": pl.String,
+                "age_group": pl.String,
+            },
+            null_values=NULL_VALUES,
+            ignore_errors=False,
+        )
+
+    def _consolidate_sidecar_parquets(self, source_dir: Path, dest_pq: Path, meta_path: Path, model_id: str, prefix: str) -> Optional[Path]:
+        """Consolidate pre-normalized remote sidecar files (sample-output / pmf-output) into one Parquet."""
+        if not source_dir.is_dir():
+            return None
+        files, fp = self._scan_source_files(source_dir)
+        if not files:
+            return None
+        if self._is_cache_fresh(dest_pq, meta_path, fp):
+            return dest_pq
+        with self._model_locks.get(f"{prefix}::{model_id}"):
+            if self._is_cache_fresh(dest_pq, meta_path, fp):
+                return dest_pq
+            frames = []
+            for f in files:
+                try:
+                    df = pl.read_parquet(f) if f.suffix.lower() == ".parquet" else pl.read_csv(f, null_values=NULL_VALUES)
+                    if not df.is_empty():
+                        frames.append(df)
+                except Exception as exc:
+                    logger.warning("Skipping %s file %s: %s", prefix, f, exc)
+            if not frames:
+                dest_pq.unlink(missing_ok=True)
+                return None
+            combined = pl.concat(frames, how="diagonal_relaxed")
+            self._atomic_write_parquet(combined, dest_pq)
+            tid = f"{os.getpid()}_{threading.get_ident()}"
+            tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
+            try:
+                with open(tmp_meta, "w", encoding="utf-8") as fm:
+                    json.dump(fp, fm)
+                os.replace(tmp_meta, meta_path)
+            finally:
+                tmp_meta.unlink(missing_ok=True)
+            return dest_pq
+
+    def get_model_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
+        """
+        Build/return consolidated quantile Parquet (plus samples, pmf, and derived peak sidecars)
+        via unified `viz.core.ingest.normalize_forecast_frame`.
+        Thread-safe with per-model locking and atomic filesystem replacement.
+        """
+        from viz.core.ingest import NormalizationError, normalize_forecast_frame
+
+        resolved = self._resolve_model_paths(model_id, is_local=is_local)
+        if resolved is None:
+            return None
+        source_dir, dest_dir, file_stem, hub, is_local = resolved
 
         pq_path = dest_dir / f"{file_stem}.parquet"
+        samples_pq = dest_dir / f"{file_stem}.samples.parquet"
+        pmf_pq = dest_dir / f"{file_stem}.pmf.parquet"
+        peak_pq = dest_dir / f"{file_stem}.peak.parquet"
         meta_path = dest_dir / f"{file_stem}.meta.json"
+        peak_meta_path = dest_dir / f"{file_stem}.peak.meta.json"
 
         source_files, fp = self._scan_source_files(source_dir)
         if not source_files:
             return None
 
-        # Quick check before lock
+        # Quick check before lock (if meta is fresh and marks quantile-empty, skip rebuild cleanly)
         if self._is_cache_fresh(pq_path, meta_path, fp):
             return pq_path
+        if not pq_path.exists() and meta_path.exists():
+            try:
+                saved = json.loads(meta_path.read_text(encoding="utf-8"))
+                if (
+                    saved.get("empty_quantiles")
+                    and saved.get("count") == fp["count"]
+                    and saved.get("total_size") == fp["total_size"]
+                    and abs(saved.get("max_mtime", 0.0) - fp["max_mtime"]) < 1e-3
+                ):
+                    return None
+            except Exception:
+                pass
 
-        lock = self._model_locks.get(model_id)
+        lock_key = f"{'local' if is_local else ('hub' if hub else 'repo')}::{model_id}"
+        lock = self._model_locks.get(lock_key)
         with lock:
-            # Double-check inside mutex
             if self._is_cache_fresh(pq_path, meta_path, fp):
                 return pq_path
 
-            dfs = []
+            cal = self._calendar()
+            geo = self._geo()
+            known_locs = set(geo.nodes.keys()) if geo is not None and geo.nodes else None
+
+            q_dfs: List[pl.DataFrame] = []
+            s_dfs: List[pl.DataFrame] = []
+            p_dfs: List[pl.DataFrame] = []
+            pk_dfs: List[pl.DataFrame] = []
+            all_targets: Set[str] = set()
+            q_targets: Set[str] = set()
+            pmf_targets: Set[str] = set()
+            pk_targets: Set[str] = set()
+            output_types: Set[str] = set()
+            extra_task_ids: Set[str] = set()
+            derived_targets: Set[str] = set()
+            quality_warnings: List[str] = []
+
             for f in source_files:
                 d_str = f.name[:10]
                 try:
-                    if f.suffix == ".parquet":
-                        df = pl.read_parquet(f)
-                    else:
-                        df = pl.read_csv(
-                            f,
-                            schema_overrides={
-                                "location": pl.String,
-                                "horizon": pl.Int32,
-                                "output_type_id": pl.String,
-                                "value": pl.Float64,
-                                "output_type": pl.String,
-                                "target": pl.String,
-                                "target_end_date": pl.String,
-                                "reference_date": pl.String,
-                            },
-                            null_values=NULL_VALUES,
-                            ignore_errors=False,
-                        )
+                    df = self._read_model_file(f)
                     if df.is_empty():
                         self.warning_registry.add_warning(
                             model_id, f"Forecast file '{f.name}' for model '{model_id}' contains zero data rows."
                         )
                         continue
 
-                    # Validate required columns
-                    missing_req = [c for c in ["location", "output_type_id", "value"] if c not in df.columns]
-                    if missing_req:
-                        self.warning_registry.add_warning(
-                            model_id,
-                            f"Forecast file '{f.name}' for model '{model_id}' is missing required columns: {missing_req}",
-                        )
+                    if hub is not None and "output_type" in df.columns and df.select((pl.col("output_type") == "quantile").all()).item():
+                        # Already-normalized remote parquet: validate quickly and keep canonical columns
+                        missing_req = [c for c in ["location", "output_type_id", "value"] if c not in df.columns]
+                        if missing_req:
+                            raise NormalizationError(f"missing required columns: {missing_req}")
+                        norm = filter_quantile_rows(df)
+                        if not norm.is_empty():
+                            q_dfs.append(norm)
+                            if "target" in norm.columns:
+                                qt = {str(t) for t in norm.get_column("target").unique().to_list() if t}
+                                q_targets.update(qt)
+                                all_targets.update(qt)
+                            output_types.add("quantile")
+                            from viz.core.ingest import STANDARD_RAW_COLS
+                            extra_task_ids.update(c for c in norm.columns if c not in STANDARD_RAW_COLS)
                         continue
 
-                    if "reference_date" not in df.columns:
-                        df = df.with_columns(pl.lit(d_str).alias("reference_date"))
-                    else:
-                        df = df.with_columns(pl.col("reference_date").cast(pl.String))
-
-                    if "target_end_date" in df.columns:
-                        df = df.with_columns(pl.col("target_end_date").cast(pl.String))
-
-                    if "location" in df.columns:
-                        df = df.with_columns(pl.col("location").cast(pl.String))
-
-                    # Only quantile forecasts are scored or plotted; other output types (e.g. pmf) carry
-                    # categorical output_type_ids, so drop them before casting quantile levels to floats.
-                    # Season peak targets (no horizon or target end date) live in the separate peak table.
-                    if "target" in df.columns:
-                        df = df.filter(~pl.col("target").cast(pl.String).str.to_lowercase().str.starts_with("peak "))
-                    df = filter_quantile_rows(df)
-                    if df.is_empty():
-                        continue
-
-                    # Check for duplicate quantiles on identical tasks
-                    check_cols = [c for c in ["target", "location", "horizon", "output_type_id"] if c in df.columns]
-                    if df.select(check_cols).is_duplicated().any():
-                        self.warning_registry.add_warning(
-                            model_id,
-                            f"Forecast file '{f.name}' for model '{model_id}' contains duplicate quantile values.",
-                        )
-
-                    dfs.append(df)
+                    res = normalize_forecast_frame(
+                        df,
+                        model=model_id,
+                        reference_date=d_str,
+                        calendar=cal,
+                        geo=geo,
+                        known_locations=known_locs,
+                        is_non_negative=self._is_non_negative_provider,
+                    )
+                    for w in res.info.get("warnings") or []:
+                        if "unknown location codes" not in w or known_locs:
+                            quality_warnings.append(w)
+                    all_targets.update(res.info.get("all_targets") or [])
+                    output_types.update(res.info.get("output_types") or [])
+                    extra_task_ids.update(res.info.get("extra_task_ids") or [])
+                    derived_targets.update(res.info.get("derived_from_samples") or [])
+                    if not res.quantiles.is_empty():
+                        q_dfs.append(res.quantiles)
+                        q_targets.update(res.info.get("quantile_targets") or [])
+                    if not res.samples.is_empty():
+                        s_dfs.append(res.samples)
+                    if not res.pmf.is_empty():
+                        p_dfs.append(res.pmf)
+                        pmf_targets.update(res.info.get("pmf_targets") or [])
+                    if not res.peaks.is_empty():
+                        pk_dfs.append(res.peaks)
+                        pk_targets.update(res.info.get("peak_targets") or [])
+                except NormalizationError as exc:
+                    msg = f"Forecast file '{f.name}' for model '{model_id}' is {exc}"
+                    logger.warning(msg)
+                    self.warning_registry.add_warning(model_id, msg)
+                    continue
                 except Exception as exc:
                     msg = f"Failed to parse forecast file '{f.name}' for model '{model_id}': {exc}"
                     logger.warning(msg)
                     self.warning_registry.add_warning(model_id, msg)
                     continue
 
-            if not dfs:
+            if not q_dfs and not s_dfs and not p_dfs and not pk_dfs:
                 return None
 
-            # Atomic write to temporary file then rename
             tid = f"{os.getpid()}_{threading.get_ident()}"
-            tmp_pq = pq_path.with_suffix(f".tmp.{tid}.parquet")
             tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
-
             try:
-                combined = pl.concat(dfs, how="diagonal")
-                combined.write_parquet(tmp_pq, compression="zstd")
-                with open(tmp_meta, "w", encoding="utf-8") as f_meta:
-                    json.dump(fp, f_meta)
+                if q_dfs:
+                    combined_q = pl.concat(q_dfs, how="diagonal_relaxed")
+                    self._atomic_write_parquet(combined_q, pq_path)
+                else:
+                    pq_path.unlink(missing_ok=True)
 
-                os.replace(tmp_pq, pq_path)
+                if s_dfs:
+                    self._atomic_write_parquet(pl.concat(s_dfs, how="diagonal_relaxed"), samples_pq)
+                elif hub is None:
+                    samples_pq.unlink(missing_ok=True)
+
+                if p_dfs:
+                    self._atomic_write_parquet(pl.concat(p_dfs, how="diagonal_relaxed"), pmf_pq)
+                elif hub is None:
+                    pmf_pq.unlink(missing_ok=True)
+
+                if pk_dfs:
+                    combined_pk = pl.concat(pk_dfs, how="diagonal_relaxed").unique(
+                        subset=[c for c in ("reference_date", "location", "target", "output_type", "output_type_id", *sorted(extra_task_ids)) if c in pk_dfs[0].columns],
+                        keep="last",
+                    )
+                    self._atomic_write_parquet(combined_pk, peak_pq)
+                    tmp_pk_meta = peak_meta_path.with_suffix(f".tmp.{tid}.json")
+                    with open(tmp_pk_meta, "w", encoding="utf-8") as fpk:
+                        json.dump({**fp, "empty": False}, fpk)
+                    os.replace(tmp_pk_meta, peak_meta_path)
+
+                meta_payload = {
+                    **fp,
+                    "targets": sorted(all_targets or q_targets | pmf_targets),
+                    "quantile_targets": sorted(q_targets),
+                    "pmf_targets": sorted(pmf_targets),
+                    "peak_targets": sorted(pk_targets),
+                    "output_types": sorted(output_types),
+                    "extra_task_ids": sorted(extra_task_ids),
+                    "from_samples": sorted(derived_targets),
+                    "has_samples": bool(s_dfs),
+                    "has_pmf": bool(p_dfs),
+                    "has_peaks": bool(pk_dfs),
+                    "empty_quantiles": not bool(q_dfs),
+                    "quality_warnings": quality_warnings[:50],
+                }
+                with open(tmp_meta, "w", encoding="utf-8") as f_meta:
+                    json.dump(meta_payload, f_meta)
                 os.replace(tmp_meta, meta_path)
-                return pq_path
+                return pq_path if q_dfs else None
             except Exception as exc:
                 logger.error("Failed to write parquet cache for model %s: %s", model_id, exc)
                 return None
             finally:
-                if tmp_pq.exists():
-                    tmp_pq.unlink(missing_ok=True)
-                if tmp_meta.exists():
-                    tmp_meta.unlink(missing_ok=True)
+                tmp_meta.unlink(missing_ok=True)
+
+    def get_model_samples_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
+        """Get or build consolidated weekly sample-trajectory Parquet (`<model>.samples.parquet`)."""
+        resolved = self._resolve_model_paths(model_id, is_local=is_local)
+        if resolved is None:
+            return None
+        source_dir, dest_dir, file_stem, hub, is_local = resolved
+        if hub is not None:
+            s_dir = self.remote_store.sample_dir(*hub)
+            if not s_dir.is_dir():
+                return None
+            return self._consolidate_sidecar_parquets(
+                s_dir, dest_dir / f"{file_stem}.samples.parquet", dest_dir / f"{file_stem}.samples.meta.json", model_id, "samples"
+            )
+        self.get_model_parquet(model_id, is_local=is_local)
+        p = dest_dir / f"{file_stem}.samples.parquet"
+        return p if p.is_file() else None
+
+    def get_model_pmf_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
+        """Get or build consolidated weekly PMF Parquet (`<model>.pmf.parquet`)."""
+        resolved = self._resolve_model_paths(model_id, is_local=is_local)
+        if resolved is None:
+            return None
+        source_dir, dest_dir, file_stem, hub, is_local = resolved
+        if hub is not None:
+            p_dir = self.remote_store.pmf_dir(*hub)
+            if not p_dir.is_dir():
+                return None
+            return self._consolidate_sidecar_parquets(
+                p_dir, dest_dir / f"{file_stem}.pmf.parquet", dest_dir / f"{file_stem}.pmf.meta.json", model_id, "pmf"
+            )
+        self.get_model_parquet(model_id, is_local=is_local)
+        p = dest_dir / f"{file_stem}.pmf.parquet"
+        return p if p.is_file() else None
+
+    def scan_model_samples(self, model_id: str, is_local: bool = False) -> Optional[pl.LazyFrame]:
+        p = self.get_model_samples_parquet(model_id, is_local=is_local)
+        return pl.scan_parquet(p) if (p and p.exists()) else None
+
+    def scan_model_pmf(self, model_id: str, is_local: bool = False) -> Optional[pl.LazyFrame]:
+        p = self.get_model_pmf_parquet(model_id, is_local=is_local)
+        return pl.scan_parquet(p) if (p and p.exists()) else None
 
     def get_model_peak_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
         """
@@ -453,8 +653,26 @@ class ParquetCacheManager:
             hit = fresh()
             if hit is not None:
                 return hit[1]
+            # For local/repo models that only submit weekly trajectories (sample-only long-term models),
+            # normalize through get_model_parquet first so derived season peaks are materialized cleanly.
+            if hub is None:
+                has_sample = False
+                for f in source_files[:1]:
+                    try:
+                        lf_chk = pl.scan_parquet(f) if f.suffix.lower() == ".parquet" else pl.scan_csv(f, infer_schema_length=0, null_values=NULL_VALUES)
+                        names = lf_chk.collect_schema().names()
+                        if "output_type" in names and not lf_chk.filter(pl.col("output_type") == "sample").head(1).collect().is_empty():
+                            has_sample = True
+                    except Exception:
+                        pass
+                if has_sample:
+                    self.get_model_parquet(model_id, is_local=is_local)
+                    hit = fresh()
+                    if hit is not None:
+                        return hit[1]
             from viz.core.peaks import extract_peak_rows
             frames = []
+            pad_fips = self._pad_fips()
             for f in source_files:
                 try:
                     if f.suffix == ".parquet":
@@ -467,7 +685,7 @@ class ParquetCacheManager:
                     df = lf.filter(pl.col("target").cast(pl.String).str.to_lowercase().str.starts_with("peak ")).collect()
                     if df.is_empty():
                         continue
-                    peak = extract_peak_rows(df, reference_date=f.name[:10])
+                    peak = extract_peak_rows(df, reference_date=f.name[:10], pad_single_digit_fips=pad_fips)
                     if not peak.is_empty():
                         frames.append(peak)
                 except Exception as exc:
@@ -590,13 +808,16 @@ class ParquetCacheManager:
                     "location": pl.String,
                     "horizon": pl.Int32,
                     "oracle_value": pl.Float64,
+                    "observation": pl.Float64,
                     "value": pl.Float64,
                     "target_end_date": pl.String,
+                    "truth_date": pl.String,
                     "date": pl.String,
                     "target": pl.String,
                     "as_of": pl.String,
                     "output_type": pl.String,
                     "output_type_id": pl.String,
+                    "age_group": pl.String,
                 },
                 null_values=NULL_VALUES,
                 ignore_errors=False,
@@ -620,7 +841,11 @@ class ParquetCacheManager:
         return next((p for p in paths if p.exists() and p.is_file()), None)
 
     def get_oracle_parquet(self) -> Optional[Path]:
-        """Reconcile oracle truth across the active repo, compatible S3 hubs, and sibling local hubs."""
+        """
+        Reconcile oracle/truth observations across ALL Hubverse `target-data/` layouts
+        (`oracle-output`, `time-series`, `latest-data`, RespiCast `latest-*.csv`), compatible
+        remote hubs, and sibling local hubs.
+        """
         sources: List[TruthSource] = []
 
         repo_oracle = self._first_existing([
@@ -629,26 +854,47 @@ class ParquetCacheManager:
         ])
         if repo_oracle is not None:
             sources.append(TruthSource(source_id="repo", label="repo", kind="oracle", priority=PRIORITY_REPO, path=repo_oracle))
-        else:
-            repo_ts = self._first_existing([
-                self.target_data_dir / "time-series.parquet",
-                self.target_data_dir / "time-series.csv",
-            ])
-            if repo_ts is not None:
-                sources.append(TruthSource(source_id="repo", label="repo", kind="time_series", priority=PRIORITY_REPO, path=repo_ts))
+
+        repo_ts = self._first_existing([
+            self.target_data_dir / "time-series.parquet",
+            self.target_data_dir / "time-series.csv",
+        ])
+        if repo_ts is not None:
+            sources.append(TruthSource(source_id="repo_ts", label="repo time-series", kind="time_series", priority=PRIORITY_REPO - 1, path=repo_ts))
+
+        repo_latest = self._first_existing([
+            self.target_data_dir / "latest-data.parquet",
+            self.target_data_dir / "latest-data.csv",
+        ])
+        if repo_latest is not None:
+            sources.append(TruthSource(source_id="repo_latest", label="repo latest", kind="latest", priority=PRIORITY_REPO - 2, path=repo_latest))
+
+        if self.target_data_dir.is_dir():
+            for p_respi in sorted(self.target_data_dir.glob("latest-*.csv")):
+                if p_respi.name != "latest-data.csv":
+                    sources.append(TruthSource(
+                        source_id=f"repo_respi:{p_respi.name}",
+                        label=p_respi.stem,
+                        kind="latest",
+                        priority=PRIORITY_REPO - 2,
+                        path=p_respi,
+                    ))
 
         remote_ids = self.active_remote_hub_ids()
         for hub_id in remote_ids:
-            p = self.remote_store.truth_path(hub_id, "oracle")
-            if p.exists():
-                sources.append(TruthSource(
-                    source_id=f"remote:{hub_id}",
-                    label=hub_id,
-                    kind="oracle",
-                    priority=PRIORITY_REMOTE,
-                    path=p,
-                    inferred_as_of=self._remote_oracle_inferred_as_of(hub_id, "oracle"),
-                ))
+            for kind, prio_off in (("oracle", 0), ("time_series", -1), ("latest", -2)):
+                if kind not in TRUTH_FILES:
+                    continue
+                p = self.remote_store.truth_path(hub_id, kind)
+                if p.exists():
+                    sources.append(TruthSource(
+                        source_id=f"remote:{hub_id}:{kind}",
+                        label=hub_id,
+                        kind=kind,
+                        priority=PRIORITY_REMOTE + prio_off,
+                        path=p,
+                        inferred_as_of=self._remote_oracle_inferred_as_of(hub_id, kind),
+                    ))
 
         for peer in self._peer_truth_descriptors():
             p_base = Path(peer["base_dir"]) / "target-data"
@@ -657,6 +903,8 @@ class ParquetCacheManager:
                 p_base / "oracle-output.csv",
                 p_base / "time-series.parquet",
                 p_base / "time-series.csv",
+                p_base / "latest-data.parquet",
+                p_base / "latest-data.csv",
             ])
             if p_oracle is not None:
                 sources.append(TruthSource(
@@ -670,10 +918,11 @@ class ParquetCacheManager:
         if not sources:
             return None
 
-        has_external = any(s.priority < PRIORITY_REPO for s in sources)
+        has_external = any(s.priority < PRIORITY_REPO - 5 for s in sources)
         cache_name = "oracle_hub" if has_external else "oracle"
         file_paths = [s.path for s in sources if s.path is not None]
         allowed_targets, allowed_locations = self._allowed_scope()
+        pad_fips = self._pad_fips()
 
         def _build_reconciled() -> Optional[pl.DataFrame]:
             from viz.core.config import VizConfig
@@ -697,6 +946,7 @@ class ParquetCacheManager:
                 collapse_constant_horizons=True,
                 target_default=default_target,
                 conflict_callback=lambda msg: self.warning_registry.add_warning("truth", msg),
+                pad_single_digit_fips=pad_fips,
             )
 
         return self._build_cached_table(cache_name, file_paths, _build_reconciled)
@@ -753,11 +1003,15 @@ class ParquetCacheManager:
         if is_flu_hosp_target(target) and bundled_adm.is_file():
             sources.append(TruthSource(source_id="bundled_surv", label="surveillance", kind="admissions", priority=PRIORITY_ARCHIVE, path=bundled_adm))
 
-        # Graceful fallback when no admissions CSV exists anywhere: synthesize from repo oracle
+        # Graceful fallback when no admissions CSV exists anywhere: synthesize from repo truth tables
         if not sources:
             repo_oracle = self._first_existing([
                 self.target_data_dir / "oracle-output.parquet",
                 self.target_data_dir / "oracle-output.csv",
+                self.target_data_dir / "latest-data.parquet",
+                self.target_data_dir / "latest-data.csv",
+                self.target_data_dir / "time-series.parquet",
+                self.target_data_dir / "time-series.csv",
             ])
             if repo_oracle is not None:
                 sources.append(TruthSource(source_id="repo_oracle_adm", label="repo oracle", kind="oracle", priority=PRIORITY_REPO, path=repo_oracle))
@@ -794,6 +1048,7 @@ class ParquetCacheManager:
                 allowed_locations=allowed_locations,
                 filter_external_only=True,
                 target_default=target,
+                pad_single_digit_fips=self._pad_fips(),
             )
             keep_cols = [c for c in ("target", "location", "target_end_date", "horizon", "oracle_value", "as_of") if c in out.columns]
             return out.select(keep_cols)
@@ -885,6 +1140,13 @@ class ParquetCacheManager:
         if any(is_flu_hosp_target(t) for t in (allowed_targets or {default_target})) and as_of_file.is_file():
             sources.append(TruthSource(source_id="bundled_asof", label="surveillance", kind="as_of", priority=PRIORITY_ARCHIVE, path=as_of_file))
 
+        repo_ts = self._first_existing([
+            self.target_data_dir / "time-series.parquet",
+            self.target_data_dir / "time-series.csv",
+        ])
+        if repo_ts is not None:
+            sources.append(TruthSource(source_id="repo_ts_vint", label="repo time-series", kind="time_series", priority=PRIORITY_REPO - 1, path=repo_ts))
+
         sources.extend(self._archive_snapshot_sources(self.base_dir, "repo", "repo archive", PRIORITY_REPO, default_target))
         repo_oracle = self._first_existing([
             self.target_data_dir / "oracle-output.parquet",
@@ -897,13 +1159,16 @@ class ParquetCacheManager:
             p_asof = self.remote_store.truth_path(hub_id, "as_of")
             if p_asof.exists():
                 sources.append(TruthSource(source_id=f"remote_asof:{hub_id}", label=hub_id, kind="as_of", priority=PRIORITY_REMOTE, path=p_asof))
+            p_ts = self.remote_store.truth_path(hub_id, "time_series") if "time_series" in TRUTH_FILES else None
+            if p_ts is not None and p_ts.exists():
+                sources.append(TruthSource(source_id=f"remote_ts:{hub_id}", label=hub_id, kind="time_series", priority=PRIORITY_REMOTE - 1, path=p_ts))
             p_ora = self.remote_store.truth_path(hub_id, "oracle")
             if p_ora.exists():
                 sources.append(TruthSource(
                     source_id=f"remote_ora:{hub_id}",
                     label=hub_id,
                     kind="oracle",
-                    priority=PRIORITY_REMOTE - 1,
+                    priority=PRIORITY_REMOTE - 2,
                     path=p_ora,
                     inferred_as_of=self._remote_oracle_inferred_as_of(hub_id, "oracle"),
                 ))
@@ -949,6 +1214,7 @@ class ParquetCacheManager:
                 allowed_targets=allowed_targets,
                 allowed_locations=allowed_locations,
                 filter_external_only=True,
+                pad_single_digit_fips=self._pad_fips(),
             )
 
         return self._build_cached_table(cache_name, file_paths, _build_reconciled_vintages)
@@ -1112,20 +1378,21 @@ class ParquetCacheManager:
 
     def clear_cache(self, model_id: Optional[str] = None):
         """Remove cached parquet and metadata files to force regeneration."""
+        suffixes = (".parquet", ".meta.json", ".peak.parquet", ".peak.meta.json", ".samples.parquet", ".samples.meta.json", ".pmf.parquet", ".pmf.meta.json")
         if model_id:
             hub = self.hub_key(model_id)
             if hub is not None:
                 d = self.hub_models_cache_dir / hub[0]
-                for suffix in (".parquet", ".meta.json", ".peak.parquet", ".peak.meta.json"):
+                for suffix in suffixes:
                     (d / f"{hub[1]}{suffix}").unlink(missing_ok=True)
                 return
             for d in [self.models_cache_dir, self.local_models_cache_dir]:
-                for suffix in (".parquet", ".meta.json", ".peak.parquet", ".peak.meta.json"):
+                for suffix in suffixes:
                     (d / f"{model_id}{suffix}").unlink(missing_ok=True)
         else:
             # Consolidated tables only; synced hub copies under .cache/remote are kept (removed via the UI)
             hub_dirs = [p for p in self.hub_models_cache_dir.iterdir() if p.is_dir()] if self.hub_models_cache_dir.exists() else []
-            for d in [self.models_cache_dir, self.local_models_cache_dir, self.targets_cache_dir] + hub_dirs:
+            for d in [self.models_cache_dir, self.local_models_cache_dir, self.targets_cache_dir, self.cache_dir / "scores"] + hub_dirs:
                 if d.exists():
                     for f in d.iterdir():
                         if f.is_file():

@@ -80,11 +80,17 @@ def empty_peak_frame() -> pl.DataFrame:
     return pl.DataFrame(schema=PEAK_SCHEMA)
 
 
-def extract_peak_rows(df: pl.DataFrame, reference_date: Optional[str] = None) -> pl.DataFrame:
+def extract_peak_rows(
+    df: pl.DataFrame,
+    reference_date: Optional[str] = None,
+    *,
+    pad_single_digit_fips: bool = True,
+    extra_task_ids: Optional[Sequence[str]] = None,
+) -> pl.DataFrame:
     """
     Peak-target rows of one forecast file in the canonical peak schema: pmf rows for timing targets (dates as
-    YYYY-MM-DD) and quantile rows for size targets (levels as rounded decimal strings). Other output types
-    (samples, cdf) are dropped. Returns an empty frame when the file has no peak targets.
+    YYYY-MM-DD) and quantile rows for size targets (levels as rounded decimal strings). Preserves extra
+    task_id columns (e.g. `age_group`) when present. Other output types (samples, cdf) are dropped.
     """
     if df is None or df.is_empty() or "target" not in df.columns or "output_type" not in df.columns:
         return empty_peak_frame()
@@ -92,10 +98,11 @@ def extract_peak_rows(df: pl.DataFrame, reference_date: Optional[str] = None) ->
     if sub.is_empty():
         return empty_peak_frame()
 
-    if "reference_date" in sub.columns:
-        dtype = sub.schema["reference_date"]
-        ref = (pl.col("reference_date").dt.strftime("%Y-%m-%d") if dtype in (pl.Date, pl.Datetime) or isinstance(dtype, pl.Datetime)
-               else pl.col("reference_date").cast(pl.String).str.slice(0, 10))
+    ref_col = "reference_date" if "reference_date" in sub.columns else ("origin_date" if "origin_date" in sub.columns else None)
+    if ref_col is not None:
+        dtype = sub.schema[ref_col]
+        ref = (pl.col(ref_col).dt.strftime("%Y-%m-%d") if dtype in (pl.Date, pl.Datetime) or isinstance(dtype, pl.Datetime)
+               else pl.col(ref_col).cast(pl.String).str.slice(0, 10))
     else:
         ref = pl.lit(reference_date, dtype=pl.String)
 
@@ -103,14 +110,21 @@ def extract_peak_rows(df: pl.DataFrame, reference_date: Optional[str] = None) ->
     oid = (pl.col("output_type_id").dt.strftime("%Y-%m-%d") if oid_dtype in (pl.Date, pl.Datetime) or isinstance(oid_dtype, pl.Datetime)
            else pl.col("output_type_id").cast(pl.String).str.strip_chars())
     loc = pl.col("location").cast(pl.String).str.strip_chars()
-    sub = sub.select([
+    loc_expr = (
+        pl.when(loc.str.contains(r"^\d$")).then(loc.str.zfill(2)).otherwise(loc).alias("location")
+        if pad_single_digit_fips
+        else loc.alias("location")
+    )
+    extras = [c for c in (extra_task_ids or ()) if c in sub.columns]
+    sel_exprs = [
         ref.alias("reference_date"),
-        pl.when(loc.str.contains(r"^\d$")).then(loc.str.zfill(2)).otherwise(loc).alias("location"),
+        loc_expr,
         pl.col("target").cast(pl.String),
         pl.col("output_type").cast(pl.String),
         oid.alias("output_type_id"),
         pl.col("value").cast(pl.Float64, strict=False),
-    ])
+    ] + [pl.col(c).cast(pl.String).str.strip_chars() for c in extras]
+    sub = sub.select(sel_exprs)
     timing = sub.filter(
         pl.col("target").str.to_lowercase().str.starts_with("peak week ") & (pl.col("output_type") == "pmf")
     ).with_columns(pl.col("output_type_id").str.slice(0, 10))
@@ -121,7 +135,9 @@ def extract_peak_rows(df: pl.DataFrame, reference_date: Optional[str] = None) ->
         levels = size.get_column("output_type_id").cast(pl.Float64, strict=False).round(4)
         size = size.with_columns(levels.cast(pl.String).alias("output_type_id")).drop_nulls("output_type_id")
     out = pl.concat([timing, size], how="vertical_relaxed").drop_nulls(["location", "output_type_id"])
-    return out.select(PEAK_COLUMNS).cast(PEAK_SCHEMA)
+    schema = {**PEAK_SCHEMA, **{c: pl.String for c in extras}}
+    cols = PEAK_COLUMNS + extras
+    return out.select(cols).cast(schema)
 
 
 def peak_quality_warnings(peak: pl.DataFrame, label: str) -> List[str]:
@@ -327,8 +343,10 @@ def observed_peak(
     }
 
 
-def default_window(season: str) -> Tuple[str, str]:
-    """Forecast window when no submission tells us its candidate weeks: first Saturday of October to the last of May."""
+def default_window(season: str, calendar: Any = None) -> Tuple[str, str]:
+    """Forecast window when no submission tells us its candidate weeks."""
+    if calendar is not None:
+        return calendar.default_peak_window(season)
     y = int(season[:4])
     d = date(y, 10, 1)
     d += timedelta(days=(5 - d.weekday()) % 7)

@@ -137,19 +137,31 @@ class TestCompatibility(unittest.TestCase):
         res = assess_compatibility({"name": "Flu"}, flu_tasks(), LOCATIONS)
         self.assertTrue(res["supported"], res["reason"])
 
-    def test_covid_hub_rejected_with_flu_only_message(self):
-        res = assess_compatibility({}, flu_tasks(targets=("wk inc covid hosp",)), LOCATIONS)
-        self.assertFalse(res["supported"])
-        self.assertIn("only supports flu", res["reason"])
+    def test_covid_and_mixed_pathogen_hubs_supported(self):
+        res_covid = assess_compatibility({"name": "COVID"}, flu_tasks(targets=("wk inc covid hosp",)), LOCATIONS)
+        self.assertTrue(res_covid["supported"], res_covid["reason"])
+        res_mixed = assess_compatibility({"name": "Resp"}, flu_tasks(targets=(TARGET, "wk inc rsv hosp")), LOCATIONS)
+        self.assertTrue(res_mixed["supported"], res_mixed["reason"])
 
-    def test_mixed_pathogen_hub_rejected(self):
-        res = assess_compatibility({}, flu_tasks(targets=(TARGET, "wk inc rsv hosp")), LOCATIONS)
-        self.assertFalse(res["supported"])
+    def test_international_and_substate_locations_supported(self):
+        res_cities = assess_compatibility({}, flu_tasks(locations=("nyc", "boston", "chicago", "denver", "austin")), LOCATIONS)
+        self.assertTrue(res_cities["supported"], res_cities["reason"])
+        res_eu = assess_compatibility({}, flu_tasks(locations=("DE", "FR", "IT", "GB-ENG"), targets=("ILI incidence",)), LOCATIONS)
+        self.assertTrue(res_eu["supported"], res_eu["reason"])
 
-    def test_city_level_flu_hub_rejected(self):
-        res = assess_compatibility({}, flu_tasks(locations=("nyc", "boston", "chicago", "denver", "austin")), LOCATIONS)
-        self.assertFalse(res["supported"])
-        self.assertIn("locations", res["reason"])
+    def test_invalid_or_empty_tasks_rejected(self):
+        res_no_rounds = assess_compatibility({"name": "Empty"}, {"rounds": []}, LOCATIONS)
+        self.assertFalse(res_no_rounds["supported"])
+        bad_ot = {
+            "rounds": [{
+                "model_tasks": [{
+                    "task_ids": {"target": {"optional": [TARGET]}, "location": {"optional": ["US"]}},
+                    "output_type": {"mean": {}},
+                }]
+            }]
+        }
+        res_ot = assess_compatibility({"name": "MeanOnly"}, bad_ot, LOCATIONS)
+        self.assertFalse(res_ot["supported"])
 
     def test_bucket_names_only(self):
         self.assertEqual(validate_bucket_name("s3://my-flu-hub/"), "my-flu-hub")
@@ -361,11 +373,17 @@ class TestSyncLifecycle(unittest.TestCase):
         self.assertTrue(any("Skipped" in w["message"] for w in self.mgr.warnings("flusight")))
 
     def test_unsupported_hub_is_not_registered(self):
-        self.s3.put("hub-config/tasks.json", json.dumps(flu_tasks(targets=("wk inc covid hosp",))))
-        res = self.mgr.add_hub("some-covid-hub")
+        self.s3.put("hub-config/tasks.json", json.dumps({"rounds": []}))
+        res = self.mgr.add_hub("some-empty-hub")
         self.assertFalse(res["ok"])
-        self.assertIn("only supports flu", res["reason"])
-        self.assertEqual([s.id for s in self.loader.remote_store.hub_specs()], ["flusight"])
+        self.assertIn("no forecast rounds", res["reason"].lower())
+        self.assertEqual([s.id for s in self.loader.remote_store.hub_specs() if not s.builtin], [])
+
+    def test_covid_hub_can_be_registered(self):
+        self.s3.put("hub-config/tasks.json", json.dumps(flu_tasks(targets=("wk inc covid hosp",))))
+        res = self.mgr.add_hub("some-custom-covid-hub")
+        self.assertTrue(res["ok"], res)
+        self.assertIn(res["hub"]["id"], [s.id for s in self.loader.remote_store.hub_specs()])
 
 
 if __name__ == "__main__":

@@ -3,9 +3,11 @@
  *
  * decodeFan() and indexManifest() are pure, so node tests run them on real or synthetic payloads;
  * loadManifest() and loadFan() add the fetching and caching. */
-import { WEEK, parseIso } from "./scale.js";
+import { DAY, WEEK, parseIso } from "./scale.js";
 
-const MAGIC = "VZF1";
+const MAGIC_V1 = "VZF1";
+const MAGIC_V2 = "VZF2";
+const TRAJ_MAGIC = "VZT1";
 const FAN_CACHE = 24;
 const TOL = 1e-6; // quantile levels are matched within this
 // interval level → its lower and upper quantile
@@ -169,14 +171,15 @@ async function getJson(url) {
  */
 
 /**
- * Decodes the binary fan format ("VZF1" | uint32 LE header length | header JSON | float32 LE body).
+ * Decodes the binary fan format (`VZF1` or `VZF2` | uint32 LE header length | header JSON | float32 LE body).
  * @param {ArrayBuffer} buf
  * @returns {Fan} see the contract in next/ARCHITECTURE.md; everything returned is read-only
- * @throws when the payload is not a VZF1 fan
+ * @throws when the payload is not a VZF1/VZF2 fan
  */
 export function decodeFan(buf) {
   const bytes = new Uint8Array(buf);
-  if (bytes.length < 8 || String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== MAGIC) throw new Error("not a VZF1 fan");
+  const magic = bytes.length >= 8 ? String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) : "";
+  if (magic !== MAGIC_V1 && magic !== MAGIC_V2) throw new Error("not a VZF1/VZF2 fan");
   const dv = new DataView(buf);
   const n = dv.getUint32(4, true);
   const head = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + n)));
@@ -184,16 +187,19 @@ export function decodeFan(buf) {
   let body;
   if (start % 4 === 0 && new Uint8Array(new Uint16Array([1]).buffer)[0] === 1) body = new Float32Array(buf, start, count);
   else { body = new Float32Array(count); for (let i = 0; i < count; i++) body[i] = dv.getFloat32(start + 4 * i, true); }
-  return new Fan(head, body);
+  return new Fan(head, body, magic === MAGIC_V2 ? 2 : 1);
 }
 
 /** One (target, season, location): observed data and every model's quantiles for every round. */
 export class Fan {
-  /** @param {object} head the decoded header @param {Float32Array} body */
-  constructor(head, body) {
+  /** @param {object} head the decoded header @param {Float32Array} body @param {number} [version=1] */
+  constructor(head, body, version = 1) {
+    this.version = head.version ?? version;
     this.target = head.target;
     this.season = head.season;
     this.location = head.location;
+    this.horizonOffsetDays = Number.isFinite(head.horizon_offset_days) ? head.horizon_offset_days : 0;
+    this.dims = head.dims ? Object.freeze({ ...head.dims }) : null;
     this.rounds = Object.freeze([...head.rounds]);
     this.horizons = Object.freeze([...head.horizons]);
     this.quantiles = Object.freeze([...head.quantiles]);
@@ -216,20 +222,35 @@ export class Fan {
     this.#obsAt = new Map(obs.map((o) => [o.t, o.v]));
 
     this.#body = body;
-    this.#H = this.horizons.length;
     this.#Q = this.quantiles.length;
-    this.#models = new Map((head.models || []).map((m) => [m.id, { offset: m.offset, rounds: new Set(m.rounds) }]));
+    this.#models = new Map((head.models || []).map((m) => {
+      const sparse = Array.isArray(m.horizons);
+      const roundList = m.rounds || [];
+      const roundMap = new Map();
+      if (sparse) roundList.forEach((r, idx) => roundMap.set(r, idx));
+      else roundList.forEach((r) => roundMap.set(r, r));
+      return [
+        m.id,
+        {
+          offset: m.offset,
+          rounds: new Set(roundList),
+          roundMap,
+          horizons: sparse ? Object.freeze([...m.horizons]) : this.horizons,
+        },
+      ];
+    }));
     this.present = new Set([...this.#models].filter(([, m]) => m.rounds.size).map(([id]) => id));
     this.#med = this.#qIndex(0.5);
 
+    const offsetMs = this.horizonOffsetDays * DAY;
     const lastH = this.horizons.length ? Math.max(...this.horizons) : 0;
     const lastRound = rt.length ? this.dates.at(-1) : NaN;
     const first = obs.length ? obs[0].t : t0 - WEEK;
-    const last = Math.max(obs.length ? obs.at(-1).t : -Infinity, lastRound + lastH * WEEK);
+    const last = Math.max(obs.length ? obs.at(-1).t : -Infinity, lastRound + lastH * WEEK + offsetMs);
     this.window = Object.freeze([first, last]);
   }
 
-  #body; #H; #Q; #med; #models; #obsAt;
+  #body; #Q; #med; #models; #obsAt;
   #pts = new Map();   // id → level → (FanPoint[] | null | undefined)[] by timeline index
   #anchor = [];       // timeline index → observed anchor (or null)
   #ymax = new Map();
@@ -296,16 +317,19 @@ export class Fan {
 
   #build(id, di, level) {
     const m = this.#models.get(id), r = this.roundAt[di];
-    if (!m || r === undefined || r < 0 || !m.rounds.has(r) || this.#med < 0) return null;
+    if (!m || r === undefined || r < 0) return null;
+    const localR = m.roundMap.get(r);
+    if (localR === undefined || this.#med < 0) return null;
     const [ql, qh] = level ? LEVEL_Q(level) : [NaN, NaN];
     const li = level ? this.#qIndex(ql) : -1, hi = level ? this.#qIndex(qh) : -1;
-    const B = this.#body, H = this.#H, Q = this.#Q, ref = this.dates[di];
+    const B = this.#body, mH = m.horizons.length, Q = this.#Q, ref = this.dates[di];
+    const offsetMs = this.horizonOffsetDays * DAY;
     const out = [];
-    for (let k = 0; k < H; k++) {
-      const base = m.offset + (r * H + k) * Q, med = B[base + this.#med];
+    for (let k = 0; k < mH; k++) {
+      const base = m.offset + (localR * mH + k) * Q, med = B[base + this.#med];
       if (!Number.isFinite(med)) continue;
-      const h = this.horizons[k];
-      out.push(Object.freeze({ t: ref + h * WEEK, h, lo: li < 0 ? NaN : B[base + li], hi: hi < 0 ? NaN : B[base + hi], med }));
+      const h = m.horizons[k];
+      out.push(Object.freeze({ t: ref + h * WEEK + offsetMs, h, lo: li < 0 ? NaN : B[base + li], hi: hi < 0 ? NaN : B[base + hi], med }));
     }
     if (!out.length) return null;
     const a = this.#anchorAt(di);
@@ -325,11 +349,15 @@ export class Fan {
     if (v !== undefined) return v;
     let m = -Infinity;
     for (const o of this.observed) if (o.v > m) m = o.v;
-    const B = this.#body, H = this.#H, Q = this.#Q, med = this.#med;
+    const B = this.#body, Q = this.#Q, med = this.#med;
     if (med >= 0) for (const id of list) {
       const mm = this.#models.get(id);
       if (!mm) continue;
-      for (const r of mm.rounds) for (let k = 0; k < H; k++) { const x = B[mm.offset + (r * H + k) * Q + med]; if (x > m) m = x; }
+      const mH = mm.horizons.length;
+      for (const localR of mm.roundMap.values()) for (let k = 0; k < mH; k++) {
+        const x = B[mm.offset + (localR * mH + k) * Q + med];
+        if (x > m) m = x;
+      }
     }
     if (this.observed.length < 4 && this.priorMax > 0) m = Math.max(m, 0.5 * this.priorMax);
     v = m > 0 ? m : 1;
@@ -338,23 +366,55 @@ export class Fan {
   }
 }
 
+/**
+ * Decodes binary trajectory payload (`VZT1` | uint32 LE header len | header JSON | float32 LE body).
+ * @param {ArrayBuffer} buf
+ */
+export function decodeTrajectories(buf) {
+  const bytes = new Uint8Array(buf);
+  const magic = bytes.length >= 8 ? String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) : "";
+  if (magic !== TRAJ_MAGIC) throw new Error("not a VZT1 trajectory payload");
+  const dv = new DataView(buf);
+  const n = dv.getUint32(4, true);
+  const head = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + n)));
+  const start = 8 + n, count = (buf.byteLength - start) >> 2;
+  let body;
+  if (start % 4 === 0 && new Uint8Array(new Uint16Array([1]).buffer)[0] === 1) body = new Float32Array(buf, start, count);
+  else { body = new Float32Array(count); for (let i = 0; i < count; i++) body[i] = dv.getFloat32(start + 4 * i, true); }
+  const models = new Map();
+  for (const m of head.models || []) {
+    const H = m.horizons.length;
+    const samples = [];
+    for (let s = 0; s < m.n_samples; s++) {
+      const row = body.subarray(m.offset + s * H, m.offset + (s + 1) * H);
+      samples.push({ id: m.sample_ids[s], values: Array.from(row) });
+    }
+    models.set(m.id, { horizons: m.horizons, samples });
+  }
+  return { ...head, modelTrajectories: models };
+}
+
 /* ================================================================ loading */
 
 const fans = new Map(); // key → Promise<Fan>, least recently used first
 
 /**
- * GET /api/next/fan for one target, season and location, decoded. Cached (the last 24); concurrent
- * requests for the same fan share one fetch; a failed load is not cached.
+ * GET /api/next/fan for one target, season and location, decoded.
  * @param {string} target
  * @param {string} season
  * @param {string} location
+ * @param {{ dims?: Record<string, string>, version?: number }} [opts]
  * @returns {Promise<Fan>}
  */
-export function loadFan(target, season, location) {
-  const key = `${target}\n${season}\n${location}`;
+export function loadFan(target, season, location, opts = {}) {
+  const dimsKey = opts.dims ? Object.entries(opts.dims).sort().map(([k, v]) => `${k}=${v}`).join("&") : "";
+  const verKey = opts.version ? String(opts.version) : "";
+  const key = `${target}\n${season}\n${location}\n${dimsKey}\n${verKey}`;
   const hit = fans.get(key);
   if (hit) { fans.delete(key); fans.set(key, hit); return hit; }
   const q = new URLSearchParams({ target, season, location });
+  if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));
+  if (opts.version) q.set("v", String(opts.version));
   const p = fetch(apiUrl(`/api/next/fan?${q}`))
     .then((r) => { if (!r.ok) throw new Error(`fan ${season} ${location}: ${r.status}`); return r.arrayBuffer(); })
     .then(decodeFan);
@@ -362,6 +422,23 @@ export function loadFan(target, season, location) {
   fans.set(key, p);
   while (fans.size > FAN_CACHE) fans.delete(fans.keys().next().value);
   return p;
+}
+
+export function loadTrajectories(target, season, location, date, opts = {}) {
+  const q = new URLSearchParams({ target, season, location, date });
+  if (opts.models?.length) q.set("models", opts.models.join(","));
+  if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));
+  return fetch(apiUrl(`/api/next/trajectories?${q}`))
+    .then((r) => { if (!r.ok) throw new Error(`trajectories ${date} ${location}: ${r.status}`); return r.arrayBuffer(); })
+    .then(decodeTrajectories);
+}
+
+export function loadPmf(target, season, location, opts = {}) {
+  const q = new URLSearchParams({ target, season, location });
+  if (opts.date) q.set("date", opts.date);
+  if (opts.models?.length) q.set("models", opts.models.join(","));
+  if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));
+  return getJson(`/api/next/pmf?${q}`);
 }
 
 /**

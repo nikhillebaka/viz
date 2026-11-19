@@ -23,6 +23,26 @@ import polars as pl
 NULL_VALUES = ["", "NA", "null", "NaN", "None", "NULL"]
 ORACLE_KEYS = ["target", "target_end_date", "location", "horizon", "output_type", "output_type_id"]
 ADMISSIONS_KEYS = ["target", "location", "target_end_date", "horizon"]
+TRUTH_EXTRA_IGNORE = frozenset({
+    "year_week",
+    "data_source",
+    "initial_report_date",
+    "observation_date",
+    "state",
+    "state_abb",
+    "location_name",
+    "population",
+})
+_TRUTH_CORE_COLS = frozenset({
+    "as_of",
+    "target",
+    "target_end_date",
+    "location",
+    "horizon",
+    "output_type",
+    "output_type_id",
+    "oracle_value",
+})
 
 PRIORITY_REPO = 40
 PRIORITY_REMOTE = 30
@@ -52,10 +72,12 @@ class TruthSource:
     inferred_as_of: Optional[str] = None
 
 
-def normalize_location_expr(col: str = "location") -> pl.Expr:
-    """Coerce location IDs to string and left-pad single-digit numeric FIPS codes ('1' -> '01')."""
+def normalize_location_expr(col: str = "location", *, pad_single_digit_fips: bool = True) -> pl.Expr:
+    """Coerce location IDs to string and optionally left-pad single-digit numeric FIPS codes ('1' -> '01')."""
     loc = pl.col(col).cast(pl.String).str.strip_chars()
-    return pl.when(loc.str.contains(r"^\d$")).then(loc.str.zfill(2)).otherwise(loc).alias(col)
+    if pad_single_digit_fips:
+        return pl.when(loc.str.contains(r"^\d$")).then(loc.str.zfill(2)).otherwise(loc).alias(col)
+    return loc.alias(col)
 
 
 def iso_date_expr(col: str, dtype: pl.DataType) -> pl.Expr:
@@ -72,23 +94,35 @@ def _frame_max_date(df: pl.DataFrame, col: str = "target_end_date") -> str:
     return str(val)[:10] if val else ""
 
 
-def _standardize_truth_frame(df: pl.DataFrame, target_default: Optional[str] = None) -> Optional[pl.DataFrame]:
-    """Normalize column names and dtypes for oracle / admissions / time-series frames."""
+def _standardize_truth_frame(
+    df: pl.DataFrame,
+    target_default: Optional[str] = None,
+    *,
+    pad_single_digit_fips: bool = True,
+) -> Optional[pl.DataFrame]:
+    """Normalize column names (`observation`/`value`, `truth_date`/`date`) and dtypes for truth frames."""
     if df is None or df.is_empty():
         return None
     rename_map: Dict[str, str] = {}
-    if "oracle_value" not in df.columns and "value" in df.columns:
-        rename_map["value"] = "oracle_value"
-    if "target_end_date" not in df.columns and "date" in df.columns:
-        rename_map["date"] = "target_end_date"
+    if "oracle_value" not in df.columns:
+        for alt in ("observation", "value"):
+            if alt in df.columns:
+                rename_map[alt] = "oracle_value"
+                break
+    if "target_end_date" not in df.columns:
+        for alt in ("truth_date", "date"):
+            if alt in df.columns:
+                rename_map[alt] = "target_end_date"
+                break
     if rename_map:
         df = df.rename(rename_map)
 
     if not {"location", "target_end_date", "oracle_value"}.issubset(df.columns):
         return None
 
+    extra_cols = sorted(c for c in df.columns if c not in _TRUTH_CORE_COLS and c not in TRUTH_EXTRA_IGNORE)
     exprs: List[pl.Expr] = [
-        normalize_location_expr("location"),
+        normalize_location_expr("location", pad_single_digit_fips=pad_single_digit_fips),
         iso_date_expr("target_end_date", df.schema["target_end_date"]),
         pl.col("oracle_value").cast(pl.Float64, strict=False),
     ]
@@ -106,8 +140,10 @@ def _standardize_truth_frame(df: pl.DataFrame, target_default: Optional[str] = N
         exprs.append(pl.col("output_type").cast(pl.String))
     if "output_type_id" in df.columns:
         exprs.append(pl.col("output_type_id").cast(pl.String))
+    for ec in extra_cols:
+        exprs.append(pl.col(ec).cast(pl.String).str.strip_chars())
 
-    out = df.with_columns(exprs).filter(
+    out = df.with_columns(exprs).drop([c for c in TRUTH_EXTRA_IGNORE if c in df.columns]).filter(
         pl.col("location").is_not_null()
         & (pl.col("location") != "")
         & pl.col("target_end_date").is_not_null()
@@ -147,11 +183,11 @@ def _annotate_vintage(
     ])
 
 
-def _collapse_invariant_horizons(df: pl.DataFrame, varying_targets: Set[str]) -> pl.DataFrame:
+def _collapse_invariant_horizons(df: pl.DataFrame, varying_targets: Set[str], extra_cols: Sequence[str] = ()) -> pl.DataFrame:
     """Drop redundant replicated horizons per source for targets whose truth does not vary by horizon."""
     if df.is_empty() or "target" not in df.columns:
         return df
-    group_base = [c for c in ("_src_id", "_ord", "target", "target_end_date", "location", "output_type", "output_type_id", "_eff_as_of") if c in df.columns]
+    group_base = [c for c in ("_src_id", "_ord", "target", "target_end_date", "location", *extra_cols, "output_type", "output_type_id", "_eff_as_of") if c in df.columns]
     const_df = df.filter(~pl.col("target").is_in(list(varying_targets))) if varying_targets else df
     vary_df = df.filter(pl.col("target").is_in(list(varying_targets))) if varying_targets else pl.DataFrame()
     if not const_df.is_empty():
@@ -263,16 +299,23 @@ def reconcile_truth_sources(
     collapse_constant_horizons: bool = False,
     target_default: Optional[str] = None,
     conflict_callback: Optional[Callable[[str], None]] = None,
+    pad_single_digit_fips: bool = True,
 ) -> pl.DataFrame:
     """
     Reconcile normalized truth frames across local repos, S3 hubs, sibling workspace hubs, and archives.
     Returns one row per unique observation key with canonical column types.
     """
     prepared: List[Tuple[TruthSource, pl.DataFrame]] = []
+    extra_cols_set: Set[str] = set()
     for src, raw in sources:
-        df = _standardize_truth_frame(raw, target_default=target_default)
+        df = _standardize_truth_frame(
+            raw,
+            target_default=target_default,
+            pad_single_digit_fips=pad_single_digit_fips,
+        )
         if df is None:
             continue
+        extra_cols_set.update(c for c in df.columns if c not in _TRUTH_CORE_COLS and c not in TRUTH_EXTRA_IGNORE)
         apply_filter = (not filter_external_only) or (src.priority < external_priority_below)
         if apply_filter:
             if allowed_targets and "target" in df.columns:
@@ -284,6 +327,7 @@ def reconcile_truth_sources(
 
     if not prepared:
         return pl.DataFrame()
+    extra_cols = sorted(extra_cols_set)
 
     # Check once per source/target whether oracle values actually differ across horizons
     varying_targets: Set[str] = set()
@@ -297,7 +341,7 @@ def reconcile_truth_sources(
             )
             if non_pmf.is_empty():
                 continue
-            check_cols = [c for c in ("target", "location", "target_end_date", "as_of", "output_type_id") if c in non_pmf.columns]
+            check_cols = [c for c in ("target", "location", *extra_cols, "target_end_date", "as_of", "output_type_id") if c in non_pmf.columns]
             v_tgts = (
                 non_pmf.group_by(check_cols)
                 .agg(pl.col("oracle_value").n_unique().alias("_nv"))
@@ -332,8 +376,9 @@ def reconcile_truth_sources(
             .alias("as_of")
         )
 
+    base_keys = list(dict.fromkeys(list(keys) + extra_cols))
     if not collapse_constant_horizons:
-        active_keys = [k for k in keys if k in combined.columns]
+        active_keys = [k for k in base_keys if k in combined.columns]
         if conflict_callback is not None:
             _detect_same_vintage_conflicts(combined, active_keys, conflict_callback)
         out = combined.sort(["_eff_as_of", "_as_of_explicit", "_priority", "_ord"]).unique(
@@ -347,17 +392,18 @@ def reconcile_truth_sources(
     pmf_part = combined.filter(pl.col("output_type") == "pmf") if has_ot else pl.DataFrame()
     cont_part = combined.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf")) if has_ot else combined
 
+    full_oracle_keys = list(dict.fromkeys(ORACLE_KEYS + extra_cols))
     results: List[pl.DataFrame] = []
     for part, dedup_keys, is_cont in (
-        (pmf_part, [k for k in ORACLE_KEYS if k in combined.columns], False),
+        (pmf_part, [k for k in full_oracle_keys if k in combined.columns], False),
         (cont_part, None, True),
     ):
         if part.is_empty():
             continue
         if is_cont:
-            collapsed = _collapse_invariant_horizons(part, varying_targets)
-            const_keys = [k for k in ORACLE_KEYS if k != "horizon" and k in collapsed.columns]
-            vary_keys = [k for k in ORACLE_KEYS if k in collapsed.columns]
+            collapsed = _collapse_invariant_horizons(part, varying_targets, extra_cols=extra_cols)
+            const_keys = [k for k in full_oracle_keys if k != "horizon" and k in collapsed.columns]
+            vary_keys = [k for k in full_oracle_keys if k in collapsed.columns]
             has_tgt = "target" in collapsed.columns
             sub_const = collapsed.filter(~pl.col("target").is_in(list(varying_targets))) if (has_tgt and varying_targets) else (pl.DataFrame() if varying_targets else collapsed)
             sub_vary = collapsed.filter(pl.col("target").is_in(list(varying_targets))) if (has_tgt and varying_targets) else pl.DataFrame()
@@ -393,11 +439,13 @@ def reconcile_weekly_series(
     target: str,
     *,
     include_admissions: bool = False,
+    dims: Optional[Dict[str, str]] = None,
+    pad_single_digit_fips: bool = True,
 ) -> pl.DataFrame:
     """
-    Build one canonical weekly observed series per (location, target_end_date) for a target:
-    reconciles oracle (non-PMF) and admissions by newest effective vintage, rather than letting stale
-    oracle shadow newer admissions or vice versa.
+    Build one canonical weekly observed series per `(location, target_end_date)` for a target:
+    reconciles oracle (non-PMF) and admissions by newest effective vintage, filtering optional
+    extra task-ID dimensions (`dims`, e.g. `age_group`) when present.
     """
     empty = pl.DataFrame(schema={"location": pl.String, "target_end_date": pl.String, "value": pl.Float64})
     sources: List[Tuple[TruthSource, pl.DataFrame]] = []
@@ -408,6 +456,10 @@ def reconcile_weekly_series(
             o = o.filter(pl.col("target") == target)
         if "output_type" in o.columns:
             o = o.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+        if dims:
+            for dcol, dval in dims.items():
+                if dcol in o.columns and dval is not None:
+                    o = o.filter(pl.col(dcol).cast(pl.String) == str(dval))
         if not o.is_empty():
             cols = [c for c in ("target", "location", "target_end_date", "oracle_value", "as_of") if c in o.columns]
             sources.append((
@@ -416,11 +468,16 @@ def reconcile_weekly_series(
             ))
 
     if include_admissions and admissions_df is not None and not admissions_df.is_empty():
-        adm_cols = [c for c in ("location", "target_end_date", "oracle_value", "as_of") if c in admissions_df.columns]
-        if {"location", "target_end_date", "oracle_value"}.issubset(adm_cols):
+        adm = admissions_df
+        if dims:
+            for dcol, dval in dims.items():
+                if dcol in adm.columns and dval is not None:
+                    adm = adm.filter(pl.col(dcol).cast(pl.String) == str(dval))
+        adm_cols = [c for c in ("location", "target_end_date", "oracle_value", "as_of") if c in adm.columns]
+        if {"location", "target_end_date", "oracle_value"}.issubset(adm_cols) and not adm.is_empty():
             sources.append((
                 TruthSource(source_id="admissions", label="admissions", kind="admissions", priority=10),
-                admissions_df.select(adm_cols).with_columns(pl.lit(target).alias("target")),
+                adm.select(adm_cols).with_columns(pl.lit(target).alias("target")),
             ))
 
     if not sources:
@@ -430,6 +487,7 @@ def reconcile_weekly_series(
         sources,
         ["target", "location", "target_end_date"],
         target_default=target,
+        pad_single_digit_fips=pad_single_digit_fips,
     )
     if merged.is_empty():
         return empty
@@ -446,10 +504,11 @@ def reconcile_vintages(
     allowed_locations: Optional[Set[str]] = None,
     filter_external_only: bool = True,
     external_priority_below: int = PRIORITY_REPO,
+    pad_single_digit_fips: bool = True,
 ) -> pl.DataFrame:
     """
     Merge historical point-in-time (`as_of`) surveillance/oracle snapshots across hubs while preserving
-    every distinct `(as_of, target, location, target_end_date)` snapshot.
+    every distinct `(as_of, target, location, [extra_task_ids...], target_end_date)` snapshot.
     """
     schema = {
         "as_of": pl.String,
@@ -460,8 +519,9 @@ def reconcile_vintages(
         "oracle_value": pl.Float64,
     }
     frames: List[pl.DataFrame] = []
+    extra_cols_set: Set[str] = set()
     for idx, (src, raw) in enumerate(sources):
-        df = _standardize_truth_frame(raw)
+        df = _standardize_truth_frame(raw, pad_single_digit_fips=pad_single_digit_fips)
         if df is None:
             continue
         if "output_type" in df.columns:
@@ -484,8 +544,10 @@ def reconcile_vintages(
                 df = df.filter(pl.col("location").is_in(list(allowed_locations)))
         if df.is_empty():
             continue
+        df_extra = [c for c in df.columns if c not in _TRUTH_CORE_COLS and c not in TRUTH_EXTRA_IGNORE]
+        extra_cols_set.update(df_extra)
         frames.append(
-            df.select(["as_of", "target", "location", "target_end_date", "horizon", "oracle_value"])
+            df.select(["as_of", "target", "location", "target_end_date", "horizon", "oracle_value"] + df_extra)
             .with_columns([
                 pl.lit(int(src.priority), dtype=pl.Int32).alias("_priority"),
                 pl.lit(int(idx), dtype=pl.Int32).alias("_ord"),
@@ -495,12 +557,15 @@ def reconcile_vintages(
     if not frames:
         return pl.DataFrame(schema=schema)
 
+    extra_cols = sorted(extra_cols_set)
+    full_schema = {**schema, **{c: pl.String for c in extra_cols}}
+    dedup_keys = ["as_of", "target", "location", "target_end_date"] + extra_cols
     merged = (
-        pl.concat(frames, how="vertical_relaxed")
+        pl.concat(frames, how="diagonal_relaxed")
         .sort(["_priority", "_ord"])
-        .unique(subset=["as_of", "target", "location", "target_end_date"], keep="last", maintain_order=True)
+        .unique(subset=dedup_keys, keep="last", maintain_order=True)
         .drop(["_priority", "_ord"])
-        .cast(schema)
-        .sort(["target", "location", "as_of", "target_end_date"])
+        .cast(full_schema)
+        .sort(["target", "location"] + extra_cols + ["as_of", "target_end_date"])
     )
     return merged

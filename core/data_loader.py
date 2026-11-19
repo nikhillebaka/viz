@@ -23,7 +23,9 @@ except ImportError:
     yaml = None
 
 from viz.core.cache_manager import ParquetCacheManager, NULL_VALUES, filter_quantile_rows
+from viz.core.calendar import CalendarSpec, infer_calendar
 from viz.core.config import VizConfig
+from viz.core.geo import GeoGraph, HHS_REGIONS, STATE_TO_HHS_REGION, build_geo_graph
 from viz.core.metrics import find_quantile_column, score_forecasts
 from viz.core.peak_data import PeakService
 from viz.core.peaks import is_peak_target
@@ -31,25 +33,6 @@ from viz.core.synthetic_ensemble import SyntheticEnsembleManager, SyntheticEnsem
 from viz.core.truth import is_flu_hosp_target, reconcile_weekly_series
 
 logger = logging.getLogger("viz.data_loader")
-
-# US Department of Health and Human Services (HHS) 10 Public Health Regions
-HHS_REGIONS: Dict[int, Dict[str, Any]] = {
-    1: {"name": "Region 1 (New England)", "short": "New England", "states": ["CT", "ME", "MA", "NH", "RI", "VT"]},
-    2: {"name": "Region 2 (New York & NJ)", "short": "New York & NJ", "states": ["NJ", "NY", "PR", "VI"]},
-    3: {"name": "Region 3 (Mid-Atlantic)", "short": "Mid-Atlantic", "states": ["DE", "DC", "MD", "PA", "VA", "WV"]},
-    4: {"name": "Region 4 (Southeast)", "short": "Southeast", "states": ["AL", "FL", "GA", "KY", "MS", "NC", "SC", "TN"]},
-    5: {"name": "Region 5 (Great Lakes)", "short": "Great Lakes", "states": ["IL", "IN", "MI", "MN", "OH", "WI"]},
-    6: {"name": "Region 6 (South Central)", "short": "South Central", "states": ["AR", "LA", "NM", "OK", "TX"]},
-    7: {"name": "Region 7 (Central)", "short": "Central", "states": ["IA", "KS", "MO", "NE"]},
-    8: {"name": "Region 8 (Mountain)", "short": "Mountain", "states": ["CO", "MT", "ND", "SD", "UT", "WY"]},
-    9: {"name": "Region 9 (Pacific Southwest)", "short": "Pacific SW", "states": ["AZ", "CA", "HI", "NV", "AS", "GU", "MP"]},
-    10: {"name": "Region 10 (Pacific Northwest)", "short": "Pacific NW", "states": ["AK", "ID", "OR", "WA"]},
-}
-
-STATE_TO_HHS_REGION: Dict[str, int] = {}
-for r_id, r_info in HHS_REGIONS.items():
-    for st in r_info["states"]:
-        STATE_TO_HHS_REGION[st] = r_id
 
 
 
@@ -173,6 +156,9 @@ class SandboxDataLoader:
             peer_truth_provider=peer_truth_provider,
             allowed_targets_provider=lambda: set(self.config.get_targets()),
             allowed_locations_provider=lambda: set(self.get_locations().keys()),
+            calendar_provider=self.get_calendar,
+            geo_provider=self.get_geo_graph,
+            is_non_negative_provider=self.config.is_target_non_negative,
             remote_store=remote_store,
         )
         self.remote_store = self.cache_mgr.remote_store
@@ -188,6 +174,8 @@ class SandboxDataLoader:
         self.peaks = PeakService(self)
 
         self._locations_cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._geo_cache: Optional[GeoGraph] = None
+        self._calendar_cache: Optional[CalendarSpec] = None
         self._hub_seasons_cache: Optional[Dict[str, List[str]]] = None
         self._raw_hub_seasons_cache: Optional[Dict[str, List[str]]] = None
         self._tasks_mtime: float = -1.0
@@ -199,36 +187,76 @@ class SandboxDataLoader:
         self._phase_cache: Dict[str, Tuple[Tuple[Any, ...], pl.DataFrame]] = {}
         self._phase_cache_lock = threading.Lock()
 
-    def get_locations(self) -> Dict[str, Dict[str, Any]]:
-        """Get mapping of location code -> metadata (name, abbreviation, population)."""
-        if self._locations_cache is not None:
-            return self._locations_cache
+    def get_calendar(self) -> CalendarSpec:
+        """Return the inferred or configured CalendarSpec for this hub."""
+        if self._calendar_cache is not None:
+            return self._calendar_cache
+        cal = self.config.get_calendar()
+        self._calendar_cache = cal
+        return cal
+
+    def get_season_for_date(self, date_str: Any) -> str:
+        """Map a date string or date into the hub's season identifier."""
+        return self.get_calendar().season_for_date(date_str)
+
+    def get_season_bounds(self, season_or_year: Any) -> Tuple[str, str]:
+        """Return inclusive (start_iso, end_iso) for a season identifier or start year."""
+        return self.get_calendar().season_bounds(season_or_year)
+
+    def get_geo_graph(self) -> GeoGraph:
+        """Build or return the hub's hierarchical GeoGraph (safe against truth/model reentrancy)."""
+        if self._geo_cache is not None:
+            return self._geo_cache
 
         loc_file = self.auxiliary_data_dir / "locations.csv"
-        locations = {}
-        if loc_file.exists():
+        if not loc_file.exists() and self.include_remote and self.remote_store is not None:
             try:
-                df = pl.read_csv(
-                    loc_file,
-                    schema_overrides={"location": pl.String, "population": pl.Int64},
-                    null_values=NULL_VALUES,
-                    ignore_errors=False,
-                )
-                for row in df.iter_rows(named=True):
-                    loc_id = str(row["location"])
-                    pop = row.get("population")
-                    locations[loc_id] = {
-                        "id": loc_id,
-                        "abbreviation": str(row.get("abbreviation") or loc_id),
-                        "name": str(row.get("location_name") or loc_id),
-                        "population": int(pop) if pop is not None else None,
-                    }
-            except Exception as exc:
-                logger.warning("Error reading locations.csv: %s", exc)
+                for hid in self.cache_mgr.active_remote_hub_ids():
+                    cand = self.remote_store.locations_path(hid)
+                    if cand is not None and cand.exists():
+                        loc_file = cand
+                        break
+            except Exception:
+                pass
 
-        if "US" not in locations:
-            locations["US"] = {"id": "US", "abbreviation": "US", "name": "United States", "population": None}
+        tasks_cfg = getattr(self.config, "_tasks_config", None)
+        if tasks_cfg is None:
+            tasks_cfg = self.config._load_tasks_config()
+        observed_locs: Optional[List[str]] = None
+        if not loc_file.exists():
+            # Fallback for CSV-free hubs (e.g. RespiCast) when parquet truth already exists on disk.
+            for pq_name in ("oracle.parquet", "admissions.parquet"):
+                pq_path = self.cache_mgr.targets_cache_dir / pq_name
+                if pq_path.exists():
+                    try:
+                        observed_locs = (
+                            pl.scan_parquet(pq_path)
+                            .select("location")
+                            .unique()
+                            .collect()["location"]
+                            .drop_nulls()
+                            .cast(pl.String)
+                            .to_list()
+                        )
+                        if observed_locs:
+                            break
+                    except Exception:
+                        pass
 
+        graph = build_geo_graph(
+            loc_file if loc_file.exists() else None,
+            tasks_config=tasks_cfg,
+            observed_locations=observed_locs,
+            fallback_us=True,
+        )
+        self._geo_cache = graph
+        return graph
+
+    def get_locations(self) -> Dict[str, Dict[str, Any]]:
+        """Get mapping of location code -> metadata (name, abbreviation, population, hierarchy)."""
+        if self._locations_cache is not None:
+            return self._locations_cache
+        locations = self.get_geo_graph().to_legacy_locations_map()
         self._locations_cache = locations
         return locations
 
@@ -360,8 +388,9 @@ class SandboxDataLoader:
                 self._phase_cache[target] = (stamp, result)
             return result
 
-        sw = {d: date_to_season_and_week(d) for d in weekly.get_column("target_end_date").unique().to_list()}
-        season_of = {d: f"{v[0][:4]}-{int(v[0][:4]) + 1}" for d, v in sw.items()}
+        cal = self.get_calendar()
+        sw = {d: cal.date_to_season_and_week(d) for d in weekly.get_column("target_end_date").unique().to_list()}
+        season_of = {d: v[0] for d, v in sw.items()}
         weekly = weekly.with_columns(
             pl.col("target_end_date").replace_strict(season_of, return_dtype=pl.String).alias("season"),
             pl.col("target_end_date").replace_strict({d: v[1] for d, v in sw.items()}, return_dtype=pl.Int32).alias("season_week"),
@@ -375,7 +404,7 @@ class SandboxDataLoader:
             peak_val = max(vals) if vals else 0
             if n >= 3 and peak_val and peak_val > 0:
                 i = vals.index(peak_val)
-                season_end = self.get_season_calendar_bounds(int(season[:4]))[1]
+                season_end = cal.season_bounds(season)[1]
                 last_obs = g.get_column("target_end_date")[-1]
                 still_open = (datetime.strptime(season_end, "%Y-%m-%d") - datetime.strptime(last_obs, "%Y-%m-%d")).days > 21
                 if still_open and i >= n - 2:
@@ -418,10 +447,10 @@ class SandboxDataLoader:
                 "peaked": bool(peak_weeks),
             })
 
-        # Month ticks on the season-week axis (MMWR week 31 = season week 1, early August)
-        ref_start = int(seasons[0][:4]) if seasons else datetime.now().year
-        start, _ = self.get_season_calendar_bounds(ref_start)
-        first_sat = datetime.strptime(start, "%Y-%m-%d") + timedelta(days=6)
+        # Month ticks on the hub's season-week axis (week 1 -> week 52)
+        cal = self.get_calendar()
+        ref_season = seasons[0] if seasons else cal.season_for_date(datetime.now())
+        first_sat = cal.first_week_end_in_season(ref_season)
         ticks, last_month = [], None
         for w in range(1, 53):
             d = first_sat + timedelta(weeks=w - 1)
@@ -435,7 +464,7 @@ class SandboxDataLoader:
             "peak_fraction": self.PEAK_FRACTION,
             "curves": curves,
             "month_ticks": ticks,
-            "reference_season": f"{ref_start}-{ref_start + 1}",
+            "reference_season": ref_season,
             "week_dates": week_dates,
         }
 
@@ -527,6 +556,8 @@ class SandboxDataLoader:
         self._tasks_mtime = -1.0
         self._hub_seasons_sig = None
         self._locations_cache = None
+        self._geo_cache = None
+        self._calendar_cache = None
         with self._phase_cache_lock:
             self._phase_cache.clear()
 
@@ -538,6 +569,7 @@ class SandboxDataLoader:
             if spec.id not in active_hubs:
                 continue
             man = self.remote_store.load_manifest(spec.id)
+            cal = self.get_calendar()
             per_model: Dict[str, Dict[str, Any]] = {}
             peak_info: Dict[str, Dict[str, set]] = {}
             for f in man.get("files", {}).values():
@@ -545,12 +577,30 @@ class SandboxDataLoader:
                     pk = peak_info.setdefault(f["model"], {"targets": set(), "dates": set()})
                     pk["targets"].update(f["peak_targets"])
                     pk["dates"].add(f["reference_date"])
-                if not f.get("path"):
+                if not (f.get("path") or f.get("samples_path") or f.get("pmf_path")):
                     continue
-                pm = per_model.setdefault(f["model"], {"dates": set(), "targets": set(), "warnings": [],
-                                                       "revisions": 0, "posted": ""})
+                pm = per_model.setdefault(
+                    f["model"],
+                    {
+                        "dates": set(),
+                        "targets": set(),
+                        "output_types": set(),
+                        "extra_task_ids": set(),
+                        "has_samples": False,
+                        "has_pmf": False,
+                        "from_samples": False,
+                        "warnings": [],
+                        "revisions": 0,
+                        "posted": "",
+                    },
+                )
                 pm["dates"].add(f["reference_date"])
                 pm["targets"].update(f.get("targets", []))
+                pm["output_types"].update(f.get("output_types", []))
+                pm["extra_task_ids"].update(f.get("extra_task_ids", []))
+                pm["has_samples"] = pm["has_samples"] or bool(f.get("samples")) or ("sample" in f.get("output_types", []))
+                pm["has_pmf"] = pm["has_pmf"] or bool(f.get("pmf")) or ("pmf" in f.get("output_types", []))
+                pm["from_samples"] = pm["from_samples"] or bool(f.get("from_samples"))
                 pm["warnings"].extend(f.get("warnings", []))
                 pm["revisions"] += int(f.get("revisions", 0))
                 pm["posted"] = max(pm["posted"], f.get("last_modified", ""))
@@ -575,9 +625,14 @@ class SandboxDataLoader:
                     "path": str(self.remote_store.model_dir(spec.id, name)),
                     "count": len(dates),
                     "dates": dates,
-                    "seasons": sorted({self.get_flu_season_for_date(d) for d in dates}),
+                    "seasons": sorted({cal.season_for_date(d) for d in dates}),
                     # Weekly targets only; season peak targets are listed separately
                     "targets": sorted(t for t in pm["targets"] if not is_peak_target(t)),
+                    "output_types": sorted(pm["output_types"]),
+                    "extra_task_ids": sorted(pm["extra_task_ids"]),
+                    "has_samples": pm["has_samples"],
+                    "has_pmf": pm["has_pmf"],
+                    "from_samples": pm["from_samples"],
                     "peak_targets": sorted(peak_info.get(name, {}).get("targets", [])),
                     "peak_dates": sorted(peak_info.get(name, {}).get("dates", [])),
                     "family": self.infer_model_family(name),
@@ -589,59 +644,119 @@ class SandboxDataLoader:
                 }
         return models
 
-    def _get_model_targets(self, model_id: str, is_local: bool = False, files: Optional[List[Path]] = None) -> List[str]:
-        """Detect and return distinct targets forecasted by the model, cached in meta.json."""
+    def _read_model_meta(
+        self, model_id: str, is_local: bool = False, files: Optional[List[Path]] = None
+    ) -> Dict[str, Any]:
+        """Read cached model summary (targets, output_types, sidecar presence) from meta.json or parquet/raw fallback."""
         dest_dir = self.cache_mgr.local_models_cache_dir if is_local else self.cache_mgr.models_cache_dir
         meta_path = dest_dir / f"{model_id}.meta.json"
         if meta_path.exists():
             try:
                 with open(meta_path, "r", encoding="utf-8") as f_meta:
                     saved = json.load(f_meta)
-                    if "targets" in saved and isinstance(saved["targets"], list):
-                        return saved["targets"]
+                    if isinstance(saved, dict) and isinstance(saved.get("targets"), list):
+                        return {
+                            "targets": list(saved["targets"]),
+                            "output_types": list(saved.get("output_types") or []),
+                            "extra_task_ids": list(saved.get("extra_task_ids") or []),
+                            "has_samples": bool(saved.get("has_samples", (dest_dir / f"{model_id}.samples.parquet").exists())),
+                            "has_pmf": bool(saved.get("has_pmf", (dest_dir / f"{model_id}.pmf.parquet").exists())),
+                            "from_samples": bool(saved.get("from_samples", False)),
+                        }
             except Exception:
                 pass
 
         pq_path = dest_dir / f"{model_id}.parquet"
-        if pq_path.exists():
+        has_samples = (dest_dir / f"{model_id}.samples.parquet").exists()
+        has_pmf = (dest_dir / f"{model_id}.pmf.parquet").exists()
+        tgts_set: Set[str] = set()
+        ots_set: Set[str] = set()
+        for cand_pq, ot_label in (
+            (pq_path, "quantile"),
+            (dest_dir / f"{model_id}.samples.parquet", "sample"),
+            (dest_dir / f"{model_id}.pmf.parquet", "pmf"),
+        ):
+            if not cand_pq.exists():
+                continue
             try:
-                schema = pl.scan_parquet(pq_path).collect_schema()
+                schema = pl.scan_parquet(cand_pq).collect_schema()
                 if "target" in schema.names():
-                    tgts = sorted(pl.scan_parquet(pq_path).select("target").unique().collect()["target"].to_list())
-                    lock_key = f"meta::{'local' if is_local else 'repo'}::{model_id}"
-                    with self.cache_mgr._model_locks.get(lock_key):
-                        if meta_path.exists():
-                            tmp_meta = meta_path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.json")
-                            try:
-                                with open(meta_path, "r", encoding="utf-8") as f_meta:
-                                    saved = json.load(f_meta)
-                                saved["targets"] = tgts
-                                with open(tmp_meta, "w", encoding="utf-8") as f_meta:
-                                    json.dump(saved, f_meta)
-                                os.replace(tmp_meta, meta_path)
-                            except Exception:
-                                pass
-                            finally:
-                                tmp_meta.unlink(missing_ok=True)
-                    return tgts
+                    tgts_set.update(pl.scan_parquet(cand_pq).select("target").unique().collect()["target"].to_list())
+                if "output_type" in schema.names():
+                    ots_set.update(pl.scan_parquet(cand_pq).select("output_type").unique().collect()["output_type"].to_list())
+                else:
+                    ots_set.add(ot_label)
             except Exception:
                 pass
+        if tgts_set:
+            tgts = sorted(str(t) for t in tgts_set if t is not None)
+            ots = sorted(str(o) for o in ots_set if o is not None)
+            lock_key = f"meta::{'local' if is_local else 'repo'}::{model_id}"
+            with self.cache_mgr._model_locks.get(lock_key):
+                if meta_path.exists():
+                    tmp_meta = meta_path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.json")
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as f_meta:
+                            saved = json.load(f_meta)
+                        saved["targets"] = tgts
+                        if ots:
+                            saved["output_types"] = ots
+                        saved["has_samples"] = has_samples
+                        saved["has_pmf"] = has_pmf
+                        with open(tmp_meta, "w", encoding="utf-8") as f_meta:
+                            json.dump(saved, f_meta)
+                        os.replace(tmp_meta, meta_path)
+                    except Exception:
+                        pass
+                    finally:
+                        tmp_meta.unlink(missing_ok=True)
+            return {
+                "targets": tgts,
+                "output_types": ots,
+                "extra_task_ids": [],
+                "has_samples": has_samples,
+                "has_pmf": has_pmf,
+                "from_samples": False,
+            }
+
+        from viz.core.ingest import STANDARD_RAW_COLS
 
         targets: Set[str] = set()
+        output_types: Set[str] = set()
+        extra_task_ids: Set[str] = set()
         if files:
             sample_files = [files[0]] if len(files) == 1 else [files[0], files[-1]]
             for sample_f in sample_files:
                 try:
                     if sample_f.suffix == ".parquet":
-                        tgts = pl.scan_parquet(sample_f).select("target").unique().collect()["target"].to_list()
-                        targets.update(tgts)
+                        lf_s = pl.scan_parquet(sample_f)
+                        s_cols = lf_s.collect_schema().names()
+                        extra_task_ids.update(c for c in s_cols if c not in STANDARD_RAW_COLS)
+                        if "target" in s_cols:
+                            targets.update(lf_s.select("target").unique().collect()["target"].to_list())
+                        if "output_type" in s_cols:
+                            output_types.update(lf_s.select("output_type").unique().collect()["output_type"].to_list())
                     elif sample_f.suffix == ".csv":
-                        df_sample = pl.read_csv(sample_f, columns=["target"], n_rows=100)
+                        df_sample = pl.read_csv(sample_f, n_rows=200)
+                        extra_task_ids.update(c for c in df_sample.columns if c not in STANDARD_RAW_COLS)
                         if "target" in df_sample.columns:
-                            targets.update(df_sample["target"].unique().to_list())
+                            targets.update(df_sample["target"].drop_nulls().unique().to_list())
+                        if "output_type" in df_sample.columns:
+                            output_types.update(df_sample["output_type"].drop_nulls().unique().to_list())
                 except Exception:
                     pass
-        return sorted(list(targets))
+        return {
+            "targets": sorted(str(t) for t in targets if t is not None),
+            "output_types": sorted(str(o) for o in output_types if o is not None),
+            "extra_task_ids": sorted(extra_task_ids),
+            "has_samples": has_samples or ("sample" in output_types),
+            "has_pmf": has_pmf or ("pmf" in output_types),
+            "from_samples": False,
+        }
+
+    def _get_model_targets(self, model_id: str, is_local: bool = False, files: Optional[List[Path]] = None) -> List[str]:
+        """Detect and return distinct targets forecasted by the model, cached in meta.json."""
+        return self._read_model_meta(model_id, is_local=is_local, files=files)["targets"]
 
     def scan_models(self, force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
         """
@@ -654,6 +769,7 @@ class SandboxDataLoader:
             if not force_refresh and self._models_cache is not None and self._models_cache_mtime == current_mtime:
                 return self._models_cache
 
+            cal = self.get_calendar()
             models = {}
 
             # 1. Production / Main model-output
@@ -663,8 +779,9 @@ class SandboxDataLoader:
                         forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)
                         if forecast_files:
                             dates = [f.name[:10] for f in forecast_files if len(f.name) >= 10]
-                            seasons = sorted(list(set(self.get_flu_season_for_date(d) for d in dates)))
-                            targets = [t for t in self._get_model_targets(p.name, is_local=False, files=forecast_files) if not is_peak_target(t)]
+                            seasons = sorted(list(set(cal.season_for_date(d) for d in dates)))
+                            mmeta = self._read_model_meta(p.name, is_local=False, files=forecast_files)
+                            targets = [t for t in mmeta["targets"] if not is_peak_target(t)]
                             models[p.name] = {
                                 "id": p.name,
                                 "raw_name": p.name,
@@ -677,6 +794,11 @@ class SandboxDataLoader:
                                 "dates": dates,
                                 "seasons": seasons,
                                 "targets": targets,
+                                "output_types": mmeta["output_types"],
+                                "extra_task_ids": mmeta["extra_task_ids"],
+                                "has_samples": mmeta["has_samples"],
+                                "has_pmf": mmeta["has_pmf"],
+                                "from_samples": mmeta["from_samples"],
                                 "family": self.infer_model_family(p.name),
                                 "min_date": dates[0] if dates else None,
                                 "max_date": dates[-1] if dates else None,
@@ -689,7 +811,7 @@ class SandboxDataLoader:
                         forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)
                         if forecast_files:
                             dates = [f.name[:10] for f in forecast_files if len(f.name) >= 10]
-                            seasons = sorted(list(set(self.get_flu_season_for_date(d) for d in dates)))
+                            seasons = sorted(list(set(cal.season_for_date(d) for d in dates)))
                             model_key = p.name
                             display_name = f"{p.name} (Local)"
                             if p.name in models:
@@ -698,7 +820,8 @@ class SandboxDataLoader:
                                 logger.info(msg)
                                 self.cache_mgr.warning_registry.add_warning(model_key, msg)
 
-                            targets = [t for t in self._get_model_targets(p.name, is_local=True, files=forecast_files) if not is_peak_target(t)]
+                            mmeta = self._read_model_meta(p.name, is_local=True, files=forecast_files)
+                            targets = [t for t in mmeta["targets"] if not is_peak_target(t)]
                             models[model_key] = {
                                 "id": model_key,
                                 "raw_name": p.name,
@@ -711,6 +834,11 @@ class SandboxDataLoader:
                                 "dates": dates,
                                 "seasons": seasons,
                                 "targets": targets,
+                                "output_types": mmeta["output_types"],
+                                "extra_task_ids": mmeta["extra_task_ids"],
+                                "has_samples": mmeta["has_samples"],
+                                "has_pmf": mmeta["has_pmf"],
+                                "from_samples": mmeta["from_samples"],
                                 "family": self.infer_model_family(p.name),
                                 "min_date": dates[0] if dates else None,
                                 "max_date": dates[-1] if dates else None,
@@ -732,7 +860,7 @@ class SandboxDataLoader:
                             ens_dates_set.update(models[c_mid].get("dates", []))
                             ens_targets_set.update(models[c_mid].get("targets", []))
                     ens_dates = sorted(list(ens_dates_set), reverse=True)
-                    seasons = sorted(list(set(self.get_flu_season_for_date(d) for d in ens_dates)), reverse=True)
+                    seasons = sorted(list(set(cal.season_for_date(d) for d in ens_dates)), reverse=True)
                     models[eid] = {
                         "id": eid,
                         "raw_name": eid,
@@ -747,6 +875,11 @@ class SandboxDataLoader:
                         "dates": ens_dates,
                         "seasons": seasons,
                         "targets": sorted(list(ens_targets_set)) if ens_targets_set else [],
+                        "output_types": ["quantile"],
+                        "extra_task_ids": [],
+                        "has_samples": False,
+                        "has_pmf": False,
+                        "from_samples": False,
                         "family": "Synthetic Ensemble",
                         "min_date": ens_dates[-1] if ens_dates else None,
                         "max_date": ens_dates[0] if ens_dates else None,
@@ -974,11 +1107,11 @@ class SandboxDataLoader:
                 "season_end_date": None,
             }
 
-        # Determine focal season bounds (exact MMWR week 31 start to week 30 end)
+        # Determine focal season bounds using hub calendar
         try:
-            s_str, _ = date_to_season_and_week(reference_date)
-            focal_start_yr = int(s_str.split("/")[0])
-            season_start_date, season_end_date = self.get_season_calendar_bounds(focal_start_yr)
+            cal = self.get_calendar()
+            s_str = cal.season_for_date(reference_date)
+            season_start_date, season_end_date = cal.season_bounds(s_str)
         except Exception:
             season_start_date = "2000-01-01"
             season_end_date = "2099-12-31"
@@ -1174,15 +1307,11 @@ class SandboxDataLoader:
                 }
 
         # 4. Historical Aligned Waves
-        ref_season, _ = date_to_season_and_week(ref_dt) if ref_dt else (date_to_season_and_week(datetime.now())[0], 23)
-        ref_start_year = int(ref_season.split("/")[0])
-
-        ref_jan4 = date(ref_start_year, 1, 4)
-        ref_start_sun = ref_jan4 - timedelta(days=(ref_jan4.weekday() + 1) % 7)
-        ref_sun_wk31 = ref_start_sun + timedelta(weeks=30)
-        ref_sat_wk31 = ref_sun_wk31 + timedelta(days=6)
+        cal = self.get_calendar()
+        ref_season, _ = cal.date_to_season_and_week(ref_dt) if ref_dt else cal.date_to_season_and_week(datetime.now())
+        first_wk_end = cal.first_week_end_in_season(ref_season)
         ref_calendar = {
-            wk: (ref_sat_wk31 + timedelta(weeks=wk - 1)).strftime("%Y-%m-%d")
+            wk: (first_wk_end + timedelta(weeks=wk - 1)).strftime("%Y-%m-%d")
             for wk in range(1, 54)
         }
 
@@ -1204,7 +1333,7 @@ class SandboxDataLoader:
                 for r in adm_all.iter_rows():
                     d_str = str(r[0])
                     v_val = float(r[1])
-                    s_str, s_wk = date_to_season_and_week(d_str)
+                    s_str, s_wk = cal.date_to_season_and_week(d_str)
                     if s_str not in hist_rows_dict:
                         hist_rows_dict[s_str] = {}
                     hist_rows_dict[s_str][s_wk] = v_val
@@ -1223,9 +1352,10 @@ class SandboxDataLoader:
                                 "season_week": wk,
                             })
                     if aligned_data:
+                        label = f"'{s_key[2:4]}–'{s_key[-2:]} Season" if "-" in s_key else f"{s_key} Season"
                         result["historical_seasons"][s_key] = {
                             "season": s_key,
-                            "label": f"'{s_key[2:4]}–'{s_key[-2:]} Season",
+                            "label": label,
                             "data": aligned_data,
                             "peak": max(d["value"] for d in aligned_data),
                         }
@@ -1279,8 +1409,7 @@ class SandboxDataLoader:
                     for r in snap_focal.iter_rows():
                         d_str = str(r[0])
                         v_val = float(r[1])
-                        s_str, _ = date_to_season_and_week(d_str)
-                        if s_str == ref_season:
+                        if cal.season_for_date(d_str) == ref_season:
                             as_of_data.append({
                                 "date": d_str,
                                 "value": v_val if precise else round(v_val, 1),
@@ -1416,9 +1545,11 @@ class SandboxDataLoader:
                     o_sub = o_sub.sort("as_of").group_by(["location", "target_end_date"]).last()
                 o_sub = o_sub.select(["location", "target_end_date", "oracle_value"]).drop_nulls()
 
+        geo = self.get_geo_graph()
+        primary_ids = set(geo.resolve_pool("all") or [l for l in locations if l != "US"])
         states_data = {}
         for loc_id, loc_info in locations.items():
-            if loc_id == "US":
+            if loc_id not in primary_ids:
                 continue
             abbr = loc_info["abbreviation"]
             pop = loc_info.get("population")
@@ -1434,7 +1565,7 @@ class SandboxDataLoader:
         if not o_sub.is_empty():
             for row in o_sub.iter_rows(named=True):
                 loc = str(row["location"])
-                if loc in locations and loc != "US":
+                if loc in locations and loc in primary_ids:
                     abbr = locations[loc]["abbreviation"]
                     val = float(row["oracle_value"]) if row["oracle_value"] is not None and not np.isnan(row["oracle_value"]) else None
                     ted = str(row["target_end_date"])
@@ -1499,7 +1630,7 @@ class SandboxDataLoader:
 
             for row in piv.iter_rows(named=True):
                 loc = str(row["location"])
-                if loc not in locations or loc == "US":
+                if loc not in locations or loc not in primary_ids:
                     continue
                 abbr = locations[loc]["abbreviation"]
                 h = int(row["horizon"])
@@ -1661,12 +1792,18 @@ class SandboxDataLoader:
                 rows, cols = "location", "date"
 
         # -------------------------------------------------------------
-        # Jurisdiction Filter (All States vs Single Location / Region)
+        # Jurisdiction Filter (Primary Jurisdictions vs Aggregates / Region)
         # -------------------------------------------------------------
-        all_state_items = [(abbr, loc_id, info) for loc_id, info in locations.items() if (abbr := info.get("abbreviation")) and loc_id != "US"]
-        
+        geo = self.get_geo_graph()
+        primary_ids = set(geo.resolve_pool("all") or [l for l in locations if l != "US"])
+        all_state_items = [
+            (info.get("abbreviation") or loc_id, loc_id, info)
+            for loc_id, info in locations.items()
+            if (info.get("abbreviation") or loc_id) and loc_id in primary_ids
+        ]
+
         def resolve_state_items(loc_param: Optional[str]) -> List[Tuple[str, str, Dict[str, Any]]]:
-            if not loc_param or loc_param.lower() in ("states", "all", ""):
+            if not loc_param or loc_param.lower() in ("states", "primary", "all", ""):
                 return all_state_items
             p = loc_param.strip()
             # HHS Region
@@ -1679,15 +1816,27 @@ class SandboxDataLoader:
                         return matched
                 except Exception:
                     pass
-            # Abbreviation match (e.g. "CA", "MA")
+            # GeoGraph hierarchical/aggregate pools (aggregates, level:*, region:*)
+            if p.lower() == "aggregates" or p.lower().startswith(("level:", "region:")):
+                pooled = geo.resolve_pool(p)
+                if pooled:
+                    return [
+                        (locations[lid].get("abbreviation") or lid, lid, locations[lid])
+                        for lid in pooled
+                        if lid in locations
+                    ]
+            # Abbreviation match (e.g. "CA", "MA", "DE")
             matched_abbr = [item for item in all_state_items if item[0].upper() == p.upper()]
             if matched_abbr:
                 return matched_abbr
-            # FIPS ID match (e.g. "06", "25")
+            # Location ID match (e.g. "06", "25", "provo")
             matched_fips = [item for item in all_state_items if item[1] == p]
             if matched_fips:
                 return matched_fips
-            # "US" National
+            # Explicit aggregate / "US" national match
+            if p in locations:
+                info = locations[p]
+                return [(info.get("abbreviation") or p, p, info)]
             if p.upper() == "US" and "US" in locations:
                 return [("US", "US", locations["US"])]
             return all_state_items
@@ -1701,13 +1850,14 @@ class SandboxDataLoader:
         # Temporal Scope (Date, Season, Custom Seasons, All Time)
         # -------------------------------------------------------------
         all_dates = self.get_available_dates(target)
+        cal = self.get_calendar()
         if season and season != "all":
             if season == "current":
-                focal_season = self.get_flu_season_for_date(all_dates[-1]) if all_dates else "2024-2025"
+                focal_season = cal.season_for_date(all_dates[-1]) if all_dates else cal.season_for_date(datetime.now())
                 seasons_set = {focal_season}
             else:
                 seasons_set = {s.strip() for s in season.split(",") if s.strip()}
-            scope_dates = [d for d in all_dates if self.get_flu_season_for_date(d) in seasons_set]
+            scope_dates = [d for d in all_dates if cal.season_for_date(d) in seasons_set]
             if not scope_dates:
                 for s in seasons_set:
                     scope_dates.extend(self.get_dates_for_season(s) or [])
@@ -2773,6 +2923,7 @@ class SandboxDataLoader:
         if self._raw_hub_seasons_cache is not None and abs(mtime - self._tasks_mtime) < 1e-6:
             return self._raw_hub_seasons_cache
 
+        cal = self.get_calendar()
         seasons: Dict[str, List[str]] = {}
         if tasks_path.exists():
             try:
@@ -2783,7 +2934,7 @@ class SandboxDataLoader:
                         ref_spec = task_ids.get("reference_date") or task_ids.get("origin_date") or {}
                         dates = (ref_spec.get("optional") or []) + (ref_spec.get("required") or [])
                         for d in dates:
-                            s = self.get_flu_season_for_date(d)
+                            s = cal.season_for_date(d)
                             if s not in seasons:
                                 seasons[s] = []
                             if d not in seasons[s]:
@@ -2831,6 +2982,7 @@ class SandboxDataLoader:
 
     def get_all_seasons(self) -> List[str]:
         """Return all distinct seasons found in historical surveillance or model forecasts."""
+        cal = self.get_calendar()
         seasons_set = set()
         truth_df = self.get_admissions_ground_truth(as_polars=True)
         if truth_df is None or truth_df.is_empty():
@@ -2838,19 +2990,20 @@ class SandboxDataLoader:
         if truth_df is not None and not truth_df.is_empty() and "target_end_date" in truth_df.columns:
             for d in truth_df.select(pl.col("target_end_date").unique())["target_end_date"].to_list():
                 if d is not None:
-                    seasons_set.add(self.get_flu_season_for_date(str(d)))
+                    seasons_set.add(cal.season_for_date(str(d)))
 
         hub_seasons = self.get_hub_seasons()
         seasons_set.update(hub_seasons.keys())
 
         for m in self.scan_models().values():
             for d in m.get("dates", []):
-                seasons_set.add(self.get_flu_season_for_date(d))
+                seasons_set.add(cal.season_for_date(d))
 
         return sorted(list(seasons_set), reverse=True)
 
     def get_dates_for_season(self, season: str) -> List[str]:
         """Return all reference dates belonging to a specific season."""
+        cal = self.get_calendar()
         dates_set = set()
         hub_seasons = self.get_hub_seasons()
         if season == "all":
@@ -2861,7 +3014,7 @@ class SandboxDataLoader:
 
         for m in self.scan_models().values():
             for d in m.get("dates", []):
-                if season == "all" or self.get_flu_season_for_date(d) == season:
+                if season == "all" or cal.season_for_date(d) == season:
                     dates_set.add(d)
 
         return sorted(list(dates_set), reverse=True)
@@ -2890,12 +3043,13 @@ class SandboxDataLoader:
 
     def get_forecast_seasons(self) -> List[str]:
         """Return all seasons that have actual model forecasts or official hub rounds."""
+        cal = self.get_calendar()
         seasons_set = set()
         hub_seasons = self.get_hub_seasons()
         seasons_set.update(hub_seasons.keys())
         for m in self.scan_models().values():
             for d in m.get("dates", []):
-                seasons_set.add(self.get_flu_season_for_date(d))
+                seasons_set.add(cal.season_for_date(d))
         return sorted([s for s in seasons_set if len(self.get_dates_for_season(s)) > 0])
 
     def get_latest_reference_date(self) -> Optional[str]:
@@ -2916,16 +3070,14 @@ class SandboxDataLoader:
         return None
 
     def get_latest_season(self) -> str:
-        """Dynamically get the latest active flu season."""
+        """Dynamically get the latest active season."""
         seasons = self.get_forecast_seasons()
         if seasons:
             return sorted(seasons, reverse=True)[0]
         latest_date = self.get_latest_reference_date()
         if latest_date:
-            return self.get_flu_season_for_date(latest_date)
-        now = datetime.now()
-        year = now.year
-        return f"{year}-{year+1}" if now.month >= 7 else f"{year-1}-{year}"
+            return self.get_season_for_date(latest_date)
+        return self.get_season_for_date(datetime.now())
 
     def get_season_summaries(self) -> List[Dict[str, Any]]:
         """Return rich summaries for each forecast season for UI display and validation."""
@@ -3165,11 +3317,12 @@ class SandboxDataLoader:
         for d_list in hub_seasons.values():
             all_hub_dates.update(d_list)
 
+        cal = self.get_calendar()
         rounds_list = []
         for d in dates:
             rounds_list.append({
                 "date": d,
-                "season": self.get_flu_season_for_date(d),
+                "season": cal.season_for_date(d),
                 "is_hub_round": d in all_hub_dates,
             })
 
@@ -3200,15 +3353,22 @@ class SandboxDataLoader:
 
         locs = self.get_locations()
         loc_count = len(locs) if locs else 53
+        m_targets = m_info.get("targets") or [self.config.get_default_target()]
+        t_meta = self.config.get_target_metadata(m_targets[0])
+        h_meta = t_meta.get("horizons") or {}
+        horizons = sorted(set((h_meta.get("required") or []) + (h_meta.get("optional") or []))) or [0, 1, 2, 3]
 
         specs = {
-            "horizons": [0, 1, 2, 3],
-            "targets": m_info.get("targets") or ["wk inc flu hosp"],
+            "horizons": horizons,
+            "targets": m_targets,
+            "output_types": m_info.get("output_types") or ["quantile"],
+            "has_samples": bool(m_info.get("has_samples", False)),
+            "has_pmf": bool(m_info.get("has_pmf", False)),
             "locations_count": loc_count,
             "total_files": total_files if total_files > 0 else len(dates),
             "total_disk_bytes": total_disk_bytes,
             "total_disk_human": total_disk_human,
-            "total_predictions_est": len(dates) * loc_count * 4 * 23,
+            "total_predictions_est": len(dates) * loc_count * len(horizons) * 23,
         }
         # Season peak forecasts submitted alongside the weekly targets (kept in a separate table)
         if not m_info.get("is_synthetic"):
@@ -3247,7 +3407,7 @@ class SandboxDataLoader:
         for s in all_season_keys:
             hub_dates = hub_seasons.get(s, [])
             if not hub_dates:
-                hub_dates = [d for d in dates if self.get_flu_season_for_date(d) == s]
+                hub_dates = [d for d in dates if cal.season_for_date(d) == s]
             sub_dates = [d for d in hub_dates if d in dates_set]
 
             tiles = []

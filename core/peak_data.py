@@ -154,9 +154,9 @@ class PeakService:
         return [(d, v) for d, v in self._truth(base_target).get(str(location), []) if start <= d <= end]
 
     @staticmethod
-    def season_window(season: str, candidate_dates: Set[str]) -> Tuple[str, str]:
+    def season_window(season: str, candidate_dates: Set[str], calendar: Optional[Any] = None) -> Tuple[str, str]:
         """The forecast window of a season: the candidate weeks submissions used, else October through May."""
-        start, end = default_window(season)
+        start, end = default_window(season, calendar=calendar)
         if candidate_dates:
             start = min(start, min(candidate_dates))
             end = max(candidate_dates)
@@ -185,10 +185,13 @@ class PeakService:
                     skill_scope: str = "location", common: bool = False) -> Dict[str, Any]:
         loader = self.loader
         pt = peak_targets_for(base_target)
-        season = loader.get_flu_season_for_date(reference_date)
-        cal_start, cal_end = loader.get_season_calendar_bounds(int(season[:4]))
+        cal = loader.get_calendar()
+        season = cal.season_for_date(reference_date)
+        cal_start, cal_end = cal.season_bounds(season)
         locations = loader.get_locations()
-        state_locs = [l for l in locations if l != "US"]
+        geo = loader.get_geo_graph()
+        state_locs = geo.resolve_pool("all", active_ids=locations.keys()) or [l for l in locations if l != "US"]
+        agg_locs = sorted(geo.aggregate_locations_in_scope(active_ids=locations.keys()))
 
         out: Dict[str, Any] = {
             "base_target": base_target,
@@ -208,7 +211,7 @@ class PeakService:
         if not pt:
             return out
 
-        # Peak rows of every model for this season (all locations needed only for the all-states skill)
+        # Peak rows of every model for this season (all primary locations needed only for aggregate-free skill)
         need_states = skill_scope == "states"
         per_model: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
         candidates: Set[str] = set()
@@ -219,12 +222,12 @@ class PeakService:
                 out["missing"].append(mid)
                 continue
             latest_any = max(latest_any or "", dates[-1])
-            in_season = [d for d in dates if loader.get_flu_season_for_date(d) == season]
+            in_season = [d for d in dates if cal.season_for_date(d) == season]
             if not in_season:
                 per_model[mid] = {}
                 continue
-            df = self._rows(mid, base_target, ref_dates=in_season,
-                            locations=(state_locs + ["US"]) if need_states else [location])
+            req_locs = sorted(set(state_locs) | set(agg_locs) | {str(location)}) if need_states else [location]
+            df = self._rows(mid, base_target, ref_dates=in_season, locations=req_locs)
             summ = self._summaries(df, pt, None)
             per_model[mid] = summ
             for s in summ.values():
@@ -232,7 +235,7 @@ class PeakService:
                     candidates.update(s["timing"]["dates"])
         out["latest_peak_round"] = latest_any
 
-        window = self.season_window(season, candidates)
+        window = self.season_window(season, candidates, calendar=cal)
         out["window"] = list(window)
         out["observed"] = self.observed(base_target, location, season, window)
         out["truth"] = [{"date": d, "value": v} for d, v in self.truth_series(base_target, location, cal_start, cal_end)]
@@ -345,8 +348,9 @@ class PeakService:
             if s.get("size"):
                 s["size"] = {k: s["size"][k] for k in ("median", "i50", "i90", "i95")}
             models.append({"model_id": mid, **s})
-        season = self.loader.get_flu_season_for_date(reference_date)
-        window = self.season_window(season, candidates)
+        cal = self.loader.get_calendar()
+        season = cal.season_for_date(reference_date)
+        window = self.season_window(season, candidates, calendar=cal)
         return {"targets": pt, "models": models, "observed": self.observed(base_target, location, season, window),
                 "window": list(window)}
 
@@ -362,9 +366,10 @@ class PeakService:
             return out
         df = self._rows(model_id, base_target, ref_dates=[reference_date])
         summ = self._summaries(df, pt, _shift(reference_date, -7))
-        season = self.loader.get_flu_season_for_date(reference_date)
+        cal = self.loader.get_calendar()
+        season = cal.season_for_date(reference_date)
         candidates = {d for s in summ.values() if s.get("timing") for d in s["timing"]["dates"]}
-        window = self.season_window(season, candidates)
+        window = self.season_window(season, candidates, calendar=cal)
         out["window"] = list(window)
         for (ref, loc), s in summ.items():
             pop = (locations.get(loc) or {}).get("population")

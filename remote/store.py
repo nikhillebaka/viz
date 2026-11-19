@@ -2,17 +2,22 @@
 On-disk layout for hub data copied into the viz cache, plus the hub registry and per-hub manifests.
 
 viz/.cache/remote/
-├── hubs.json                         # registry: custom hubs and which hubs are shown in the dashboard
+├── hubs.json                                          # registry: custom hubs and which hubs are shown
 └── <hub_id>/
-    ├── manifest.json                 # every copied S3 object (etag, size, timestamps, data-quality notes)
+    ├── manifest.json                                  # synced objects (etag, size, timestamps, warnings)
+    ├── auxiliary-data/locations.csv                   # optional hub locations table
     ├── hub-config/{admin,tasks}.json
     ├── model-metadata/<model>.yml
-    ├── model-output/<model>/<date>-<model>.parquet   # normalized weekly quantile rows
-    ├── peak-output/<model>/<date>-<model>.parquet    # season peak rows (size quantiles, peak-week pmf)
-    └── target-data/{oracle,admissions,as_of_snapshots}.parquet
+    ├── model-output/<model>/<date>-<model>.parquet    # normalized weekly quantile rows
+    ├── sample-output/<model>/<date>-<model>.parquet   # normalized sample trajectories
+    ├── pmf-output/<model>/<date>-<model>.parquet      # normalized categorical PMF rows
+    ├── peak-output/<model>/<date>-<model>.parquet     # season peak rows (size quantiles, peak-week pmf)
+    └── target-data/{oracle,admissions,as_of_snapshots,latest,time_series}.parquet
 
 Nothing here touches the network; it is safe to use from request handlers and from the CLI.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -25,12 +30,19 @@ from viz.remote.hubs import BUILTIN_HUBS, HubSpec
 
 _BUILTIN_DEFAULT_TARGETS: Dict[str, Set[str]] = {
     "flusight": {"wk inc flu hosp", "wk flu hosp rate change", "wk inc flu prop ed visits"},
+    "flu_metrocast": {"Flu ED visits pct", "Flu hosp admits"},
+    "covid19": {"wk inc covid hosp", "wk inc covid hosp rate change"},
+    "rsv": {"wk inc rsv hosp"},
+    "respicast_syndromic": {"ILI incidence", "ARI incidence"},
+    "respicast_covid19": {"wk inc covid cases", "wk inc covid deaths", "wk inc covid hosp"},
 }
 
 TRUTH_FILES = {
     "oracle": "oracle.parquet",
     "admissions": "admissions.parquet",
     "as_of": "as_of_snapshots.parquet",
+    "latest": "latest.parquet",
+    "time_series": "time_series.parquet",
 }
 
 _write_lock = threading.Lock()
@@ -75,9 +87,24 @@ class RemoteStore:
         specs = list(BUILTIN_HUBS)
         seen = {s.id for s in specs}
         for h in self._registry().get("custom_hubs", []):
+            if not isinstance(h, dict):
+                continue
             try:
-                spec = HubSpec(**{k: h[k] for k in ("id", "bucket", "label", "short_label")}, builtin=False,
-                               repo_url=h.get("repo_url"))
+                spec = HubSpec(
+                    id=str(h["id"]),
+                    bucket=str(h.get("bucket") or ""),
+                    label=str(h.get("label") or h["id"]),
+                    short_label=str(h.get("short_label") or h["id"]),
+                    builtin=False,
+                    repo_url=h.get("repo_url"),
+                    transport=str(h.get("transport") or ("github" if h.get("github_repo") and not h.get("bucket") else "s3")),
+                    github_repo=h.get("github_repo"),
+                    branch=str(h.get("branch") or "main"),
+                    pathogen=str(h.get("pathogen") or "influenza"),
+                    geography=str(h.get("geography") or "US"),
+                    description=str(h.get("description") or ""),
+                    archive_sources=list(h.get("archive_sources") or []),
+                )
             except (KeyError, TypeError):
                 continue
             if spec.id not in seen:
@@ -126,11 +153,20 @@ class RemoteStore:
     def model_dir(self, hub_id: str, model: str) -> Path:
         return self.hub_dir(hub_id) / "model-output" / model
 
+    def sample_dir(self, hub_id: str, model: str) -> Path:
+        return self.hub_dir(hub_id) / "sample-output" / model
+
+    def pmf_dir(self, hub_id: str, model: str) -> Path:
+        return self.hub_dir(hub_id) / "pmf-output" / model
+
     def peak_dir(self, hub_id: str, model: str) -> Path:
         return self.hub_dir(hub_id) / "peak-output" / model
 
     def metadata_path(self, hub_id: str, model: str) -> Path:
         return self.hub_dir(hub_id) / "model-metadata" / f"{model}.yml"
+
+    def locations_path(self, hub_id: str) -> Path:
+        return self.hub_dir(hub_id) / "auxiliary-data" / "locations.csv"
 
     def truth_path(self, hub_id: str, kind: str) -> Path:
         return self.hub_dir(hub_id) / "target-data" / TRUTH_FILES[kind]
@@ -205,7 +241,7 @@ class RemoteStore:
         targets: Optional[Set[str]] = None,
         locations: Optional[Set[str]] = None,
     ) -> bool:
-        """True when a remote S3 hub shares targets (and locations, if known) with the active hub."""
+        """True when a remote hub shares targets (and locations, if known) with the active hub."""
         h_targets, h_locs = self._tasks_summary(hub_id)
         if targets and h_targets and not (targets & h_targets):
             return False
@@ -222,7 +258,7 @@ class RemoteStore:
         targets: Optional[Set[str]] = None,
         locations: Optional[Set[str]] = None,
     ) -> List[str]:
-        """Active synced S3 hubs compatible with `targets` and `locations`."""
+        """Active synced hubs compatible with `targets` and `locations`."""
         return [h for h in self.active_hub_ids() if self.is_compatible(h, targets=targets, locations=locations)]
 
     # ---- manifest ---------------------------------------------------------------------------------------

@@ -1,31 +1,39 @@
 """
-Remote hub definitions and the compatibility check run before any hub is synced.
-The suite currently only displays influenza forecasts at US state/national level, so other hubs are rejected.
+Remote hub definitions and Hubverse structural compatibility checks.
+Supports S3 buckets and GitHub repositories across influenza, COVID-19, RSV, and syndromic hubs.
 """
 
-from dataclasses import asdict, dataclass
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set
 
-from viz.remote.s3 import S3Client, S3Error, S3NotFound
+from viz.core.calendar import infer_calendar
+from viz.remote.transports import TransportError, TransportNotFound, validate_bucket_name, validate_github_repo
 
 HUB_ID_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 # Prefixes already used for model namespaces elsewhere in the suite
 RESERVED_HUB_IDS = {"local", "synthetic", "repo", "all", "hub"}
-
-FLU_ONLY_MESSAGE = "Viz only supports flu forecast hubs for now."
-OTHER_PATHOGENS = ("covid", "rsv", "sars", "measles", "dengue", "mpox", "ebola")
+SUPPORTED_OUTPUT_TYPES = ("quantile", "sample", "pmf", "median")
 
 
 @dataclass
 class HubSpec:
     id: str
-    bucket: str
-    label: str
-    short_label: str
+    bucket: str = ""
+    label: str = ""
+    short_label: str = ""
     builtin: bool = False
     repo_url: Optional[str] = None
+    transport: str = "s3"  # "s3" | "github"
+    github_repo: Optional[str] = None
+    branch: str = "main"
+    pathogen: str = "influenza"
+    geography: str = "US"
+    description: str = ""
+    archive_sources: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -39,116 +47,251 @@ BUILTIN_HUBS: List[HubSpec] = [
         short_label="FluSight",
         builtin=True,
         repo_url="https://github.com/cdcepi/FluSight-forecast-hub",
+        transport="s3",
+        github_repo="cdcepi/FluSight-forecast-hub",
+        branch="main",
+        pathogen="influenza",
+        geography="US",
+        description="CDC / Reich Lab US Influenza Hospitalization & ED Visit Forecast Hub",
+    ),
+    HubSpec(
+        id="flu_metrocast",
+        bucket="reichlab-flu-metrocast-hub",
+        label="Flu MetroCast",
+        short_label="MetroCast",
+        builtin=True,
+        repo_url="https://github.com/reichlab/flu-metrocast",
+        transport="s3",
+        github_repo="reichlab/flu-metrocast",
+        branch="main",
+        pathogen="influenza",
+        geography="US",
+        description="epiENGAGE US sub-state / HSA Influenza ED visits & admissions hub",
+    ),
+    HubSpec(
+        id="covid19",
+        bucket="covid19-forecast-hub",
+        label="US COVID-19 Forecast Hub",
+        short_label="COVID-19",
+        builtin=True,
+        repo_url="https://github.com/CDCgov/covid19-forecast-hub",
+        transport="s3",
+        github_repo="CDCgov/covid19-forecast-hub",
+        branch="main",
+        pathogen="covid19",
+        geography="US",
+        description="CDC / Hubverse US COVID-19 hospitalization & rate-change hub",
+    ),
+    HubSpec(
+        id="rsv",
+        bucket="rsv-forecast-hub",
+        label="US RSV Forecast Hub",
+        short_label="US RSV",
+        builtin=True,
+        repo_url="https://github.com/CDCgov/rsv-forecast-hub",
+        transport="s3",
+        github_repo="CDCgov/rsv-forecast-hub",
+        branch="main",
+        pathogen="rsv",
+        geography="US",
+        description="CDC US RSV age-stratified hospitalization forecast hub",
+    ),
+    HubSpec(
+        id="respicast_syndromic",
+        bucket="",
+        label="RespiCast Syndromic (ILI/ARI)",
+        short_label="RespiCast",
+        builtin=True,
+        repo_url="https://github.com/european-modelling-hubs/RespiCast-SyndromicIndicators",
+        transport="github",
+        github_repo="european-modelling-hubs/RespiCast-SyndromicIndicators",
+        branch="main",
+        pathogen="respiratory_syndromic",
+        geography="EU",
+        description="European Modelling Hubs / ECDC ILI & ARI incidence forecasts (EU/EEA + UK)",
+        archive_sources=[
+            {
+                "transport": "github",
+                "github_repo": "european-modelling-hubs/flu-forecast-hub_archive",
+                "branch": "main",
+                "label": "RespiCast Flu Archive (2023–24)",
+            },
+            {
+                "transport": "github",
+                "github_repo": "european-modelling-hubs/ari-forecast-hub_archive",
+                "branch": "main",
+                "label": "RespiCast ARI Archive (2023–24)",
+            },
+        ],
+    ),
+    HubSpec(
+        id="respicast_covid19",
+        bucket="",
+        label="RespiCast COVID-19",
+        short_label="RespiCast COVID",
+        builtin=True,
+        repo_url="https://github.com/european-modelling-hubs/RespiCast-Covid19",
+        transport="github",
+        github_repo="european-modelling-hubs/RespiCast-Covid19",
+        branch="main",
+        pathogen="covid19",
+        geography="EU",
+        description="European Modelling Hubs COVID-19 short-term forecast hub",
     ),
 ]
 
 
-def hub_id_from_bucket(bucket: str, taken: Iterable[str]) -> str:
-    """Derive a short, unique namespace id (used in model keys like '<id>:Team-model') from a bucket name."""
-    base = re.sub(r"[^a-z0-9]+", "_", bucket.lower())
-    for noise in ("_forecast_hub", "_hub", "cdcepi_", "cdcgov_"):
+def hub_id_from_source(source: str, taken: Iterable[str]) -> str:
+    """Derive a short, unique namespace id from an S3 bucket name or `owner/repo` slug."""
+    raw = (source or "").strip()
+    if "/" in raw:
+        raw = raw.rsplit("/", 1)[-1]
+    base = re.sub(r"[^a-z0-9]+", "_", raw.lower())
+    for noise in ("_forecast_hub", "_hub", "cdcepi_", "cdcgov_", "reichlab_"):
         base = base.replace(noise, "")
     base = base.strip("_")[:24] or "hub"
     if not base[0].isalpha():
         base = f"h{base}"
     candidate, n = base, 2
-    taken = set(taken) | RESERVED_HUB_IDS
-    while candidate in taken:
+    taken_set = set(taken) | RESERVED_HUB_IDS
+    while candidate in taken_set:
         candidate = f"{base}{n}"
         n += 1
     return candidate
 
 
+def hub_id_from_bucket(bucket: str, taken: Iterable[str]) -> str:
+    """Backwards-compatible alias for `hub_id_from_source`."""
+    return hub_id_from_source(bucket, taken)
+
+
 def _task_values(tasks: Dict[str, Any], task_id: str) -> Set[str]:
     values: Set[str] = set()
     for rnd in tasks.get("rounds", []) or []:
+        if not isinstance(rnd, dict):
+            continue
         for mt in rnd.get("model_tasks", []) or []:
+            if not isinstance(mt, dict):
+                continue
             spec = (mt.get("task_ids") or {}).get(task_id) or {}
+            if not isinstance(spec, dict):
+                continue
             for k in ("required", "optional"):
                 v = spec.get(k)
                 if isinstance(v, list):
-                    values.update(str(x) for x in v if x is not None)
-                elif v is not None:
-                    values.add(str(v))
+                    values.update(str(x).strip() for x in v if x is not None and str(x).strip())
+                elif v is not None and str(v).strip():
+                    values.add(str(v).strip())
     return values
 
 
-def _quantile_targets(tasks: Dict[str, Any]) -> Set[str]:
-    out: Set[str] = set()
+def _output_types(tasks: Dict[str, Any]) -> Set[str]:
+    ots: Set[str] = set()
     for rnd in tasks.get("rounds", []) or []:
+        if not isinstance(rnd, dict):
+            continue
         for mt in rnd.get("model_tasks", []) or []:
-            if "quantile" not in (mt.get("output_type") or {}):
+            if not isinstance(mt, dict):
                 continue
-            spec = (mt.get("task_ids") or {}).get("target") or {}
-            for k in ("required", "optional"):
-                v = spec.get(k)
-                if isinstance(v, list):
-                    out.update(str(x) for x in v if x is not None)
-                elif v is not None:
-                    out.add(str(v))
-    return out
+            ot_map = mt.get("output_type") or {}
+            if isinstance(ot_map, dict):
+                ots.update(str(k).strip().lower() for k in ot_map.keys() if k)
+    return ots
 
 
 def is_flu_target(target: str) -> bool:
     t = target.lower()
-    return ("flu" in t or "influenza" in t or " ili" in f" {t}") and not any(p in t for p in OTHER_PATHOGENS)
+    return "flu" in t or "influenza" in t or " ili" in f" {t}"
 
 
-def assess_compatibility(admin: Dict[str, Any], tasks: Dict[str, Any], known_locations: Set[str]) -> Dict[str, Any]:
+def _infer_repo_url(admin: Dict[str, Any]) -> Optional[str]:
+    repo = admin.get("repository") or {}
+    if not isinstance(repo, dict):
+        return None
+    owner, name = repo.get("owner"), repo.get("name")
+    if owner and name:
+        return f"https://github.com/{owner}/{name}"
+    if isinstance(name, str) and name.startswith(("http://", "https://")):
+        return name
+    return None
+
+
+def assess_compatibility(
+    admin: Dict[str, Any],
+    tasks: Dict[str, Any],
+    known_locations: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     """
-    Decide whether a hub can be displayed: it must forecast at least one flu quantile target, carry no
-    other pathogen's targets, and use the same US state/national location codes as the local hub.
+    Structural Hubverse schema compatibility check:
+    Accepts any Hubverse hub with configured rounds/model_tasks, at least one target,
+    and at least one supported output type (quantile, sample, pmf, median).
     """
-    targets = sorted(_task_values(tasks, "target"))
-    flu_quantile = sorted(t for t in _quantile_targets(tasks) if is_flu_target(t))
-    other = sorted(t for t in targets if not is_flu_target(t))
-    locations = _task_values(tasks, "location")
-    unknown_locs = sorted(locations - known_locations) if known_locations else []
+    rounds = tasks.get("rounds") if isinstance(tasks, dict) else None
+    targets = sorted(_task_values(tasks if isinstance(tasks, dict) else {}, "target"))
+    output_types = sorted(_output_types(tasks if isinstance(tasks, dict) else {}))
+    supported_ots = [ot for ot in output_types if ot in SUPPORTED_OUTPUT_TYPES]
+    locations = _task_values(tasks if isinstance(tasks, dict) else {}, "location")
 
     supported, reason = True, ""
-    if not flu_quantile:
+    if not rounds or not isinstance(rounds, list):
         supported = False
-        shown = ", ".join(targets[:4]) or "none found"
-        reason = f"{FLU_ONLY_MESSAGE} This hub's targets are: {shown}."
-    elif other:
+        reason = "Hub tasks.json defines no forecast rounds."
+    elif not targets:
         supported = False
-        reason = f"{FLU_ONLY_MESSAGE} This hub also forecasts non-flu targets ({', '.join(other[:3])})."
-    elif locations and unknown_locs and len(unknown_locs) > max(3, len(locations) // 5):
+        reason = "Hub tasks.json defines no forecast targets."
+    elif not supported_ots:
+        shown = ", ".join(output_types[:4]) or "none"
         supported = False
         reason = (
-            "Viz only supports hubs that forecast US states and the national total for now. "
-            f"This hub uses other locations (e.g. {', '.join(unknown_locs[:3])})."
+            f"Unsupported output types ({shown}); viz supports "
+            f"{', '.join(SUPPORTED_OUTPUT_TYPES)}."
         )
+
+    cal = infer_calendar(tasks if isinstance(tasks, dict) else None, targets=targets)
+    display_targets = [t for t in targets if not t.strip().lower().startswith("peak ")]
+    repo_dict = admin.get("repository") if isinstance(admin, dict) else {}
 
     return {
         "supported": supported,
         "reason": reason,
-        "name": admin.get("name") or "",
-        "maintainer": admin.get("maintainer") or "",
-        "timezone": admin.get("timezone") or "US/Eastern",
-        "repository": admin.get("repository") or {},
+        "name": (admin.get("name") or "") if isinstance(admin, dict) else "",
+        "maintainer": (admin.get("maintainer") or "") if isinstance(admin, dict) else "",
+        "timezone": (admin.get("timezone") or "UTC") if isinstance(admin, dict) else "UTC",
+        "repository": repo_dict or {},
+        "repo_url": _infer_repo_url(admin if isinstance(admin, dict) else {}),
         "targets": targets,
-        "display_targets": flu_quantile,
+        "display_targets": display_targets or targets,
+        "output_types": output_types,
+        "locations_count": len(locations),
+        "calendar": cal.to_dict(),
     }
 
 
-def inspect_hub(client: S3Client, known_locations: Set[str]) -> Dict[str, Any]:
-    """Fetch hub-config/admin.json and tasks.json from a bucket and assess whether viz can display it."""
+def inspect_hub(client: Any, known_locations: Optional[Set[str]] = None) -> Dict[str, Any]:
+    """Fetch hub-config/admin.json and tasks.json from any HubTransport and assess compatibility."""
+    src_label = (
+        getattr(client, "source_name", None)
+        or getattr(client, "bucket", None)
+        or getattr(client, "repo", None)
+        or "hub"
+    )
     try:
         admin = json.loads(client.get("hub-config/admin.json"))
         tasks = json.loads(client.get("hub-config/tasks.json"))
-    except S3NotFound:
+    except TransportNotFound:
         return {
             "supported": False,
-            "reason": f"Bucket '{client.bucket}' does not look like a Hubverse hub (no hub-config/admin.json or tasks.json).",
+            "reason": f"'{src_label}' does not look like a Hubverse hub (no hub-config/admin.json or tasks.json).",
         }
     except (ValueError, json.JSONDecodeError):
-        return {"supported": False, "reason": f"Bucket '{client.bucket}' has an unreadable hub-config."}
-    except S3Error:
+        return {"supported": False, "reason": f"'{src_label}' has an unreadable hub-config."}
+    except TransportError:
         raise
+
     result = assess_compatibility(admin, tasks, known_locations)
-    cloud = (admin.get("cloud") or {}).get("host") or {}
-    if cloud.get("storage_location") and cloud.get("storage_location") != client.bucket:
+    cloud = ((admin.get("cloud") or {}).get("host") or {}) if isinstance(admin, dict) else {}
+    bucket = getattr(client, "bucket", None)
+    if bucket and cloud.get("storage_location") and cloud.get("storage_location") != bucket:
         result["note"] = f"admin.json names storage location '{cloud.get('storage_location')}'."
     result["admin"] = admin
     result["tasks"] = tasks

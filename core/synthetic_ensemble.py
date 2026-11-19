@@ -59,17 +59,23 @@ class SyntheticEnsembleConfig:
         )
 
 
+_MONOTONE_NON_KEY_COLS = frozenset({
+    "output_type_id", "value", "model_id", "component_model_id", "n_task_models", "n_level_models",
+})
+
+
 def enforce_quantile_monotonicity(df: pl.DataFrame) -> pl.DataFrame:
     """
     Ensure quantile predictions are strictly non-decreasing across quantile levels
-    within each (reference_date, target, horizon, location, target_end_date) task.
+    within each (reference_date, target, horizon, location, target_end_date, ...) task.
     Implements standard quantile rearrangement to prevent quantile crossing.
     """
     if df.is_empty():
         return df
 
     group_cols = ["reference_date", "target", "horizon", "location", "target_end_date", "output_type"]
-    avail_group = [c for c in group_cols if c in df.columns]
+    extra_cols = [c for c in df.columns if c not in group_cols and c not in _MONOTONE_NON_KEY_COLS]
+    avail_group = [c for c in group_cols if c in df.columns] + sorted(extra_cols)
 
     # Sort quantiles by output_type_id, then sort values monotonically
     return (
@@ -343,13 +349,22 @@ class SyntheticEnsembleManager:
 
         combined_raw = pl.concat(loaded_dfs, how="diagonal")
 
-        # Apply spatial split routing
+        # Apply spatial split routing using dynamic GeoGraph aggregates
+        agg_locs: List[str] = ["US"]
+        if hasattr(self.data_loader, "get_geo_graph"):
+            try:
+                resolved_agg = sorted(self.data_loader.get_geo_graph().aggregate_locations_in_scope())
+                if resolved_agg:
+                    agg_locs = resolved_agg
+            except Exception:
+                pass
+
         if config.spatial_split:
             state_slice = combined_raw.filter(
-                (pl.col("location") != "US") & (pl.col("component_model_id").is_in(list(state_models)))
+                (~pl.col("location").is_in(agg_locs)) & (pl.col("component_model_id").is_in(list(state_models)))
             )
             national_slice = combined_raw.filter(
-                (pl.col("location") == "US") & (pl.col("component_model_id").is_in(list(national_models)))
+                pl.col("location").is_in(agg_locs) & (pl.col("component_model_id").is_in(list(national_models)))
             )
             routed = pl.concat([state_slice, national_slice], how="diagonal")
         else:
@@ -358,7 +373,12 @@ class SyntheticEnsembleManager:
         if routed.is_empty():
             return pl.DataFrame(), {"total_tasks": 0, "warnings": ["No forecast rows after spatial filtering."]}
 
-        task_cols = ["reference_date", "target", "horizon", "location", "target_end_date"]
+        base_task_cols = ["reference_date", "target", "horizon", "location", "target_end_date"]
+        extra_task_cols = sorted(
+            c for c in routed.columns
+            if c not in base_task_cols and c not in ("output_type", "output_type_id", "value", "model_id", "component_model_id")
+        )
+        task_cols = base_task_cols + extra_task_cols
         group_cols = task_cols + ["output_type_id"]
 
         # Members contributing to each task, and to each quantile level within it
@@ -372,9 +392,9 @@ class SyntheticEnsembleManager:
         dropped_levels = routed.filter(pl.col("n_level_models") < pl.col("n_task_models")).select(group_cols).n_unique()
         routed = routed.filter(pl.col("n_level_models") == pl.col("n_task_models"))
 
-        # Expected member count per task: national pool for US when spatially split, state pool otherwise
+        # Expected member count per task: aggregate pool when spatially split, primary pool otherwise
         n_expected = (
-            pl.when(pl.col("location") == "US").then(pl.lit(len(national_models))).otherwise(pl.lit(len(state_models)))
+            pl.when(pl.col("location").is_in(agg_locs)).then(pl.lit(len(national_models))).otherwise(pl.lit(len(state_models)))
             if config.spatial_split
             else pl.lit(len(state_models))
         )
