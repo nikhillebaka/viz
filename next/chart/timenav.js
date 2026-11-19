@@ -276,8 +276,18 @@ export class TimeNav {
     this.raf = requestAnimationFrame(tick);
   }
   #stop() { cancelAnimationFrame(this.raf); this.raf = 0; }
-  #clampT(T) { const n = this.N - 1; return T < 0 ? -rubber(-T) : T > n ? n + rubber(T - n) : T; }
-  #rawT(T) { const n = this.N - 1; return T < 0 ? -unrubber(-T) : T > n ? n + unrubber(T - n) : T; }
+  #clampT(T) {
+    const n = this.N - 1;
+    if (T < 0) return this.canCross?.(-1) ? -rubber(-T) : 0;
+    if (T > n) return this.canCross?.(1) ? n + rubber(T - n) : n;
+    return T;
+  }
+  #rawT(T) {
+    const n = this.N - 1;
+    if (T < 0) return this.canCross?.(-1) ? -unrubber(-T) : 0;
+    if (T > n) return this.canCross?.(1) ? n + unrubber(T - n) : n;
+    return T;
+  }
   #pxPerWeek() { const [r0, r1] = this.scale().range(), [d0, d1] = this.domain(); return (r1 - r0) / ((d1 - d0) / WEEK); }
   /* Pixels of side scroll per week of date change. Close up at the home span this is 1:1 with the content.
    * Zoomed out, weeks get narrow and 1:1 would fly through dates (in Season ~4 weeks per small flick), so
@@ -290,7 +300,11 @@ export class TimeNav {
   /* a scroll or drag moved the content by a weeks: scrub the date if the forecast is on screen, else pan */
   #advance(a, { grab = false } = {}) { // grab: a is already weeks of date (a pointer drag sets its own rate)
     const k = grab ? 1 : this.#pxPerWeek() / this.#scrubPx();
-    const scrub = (d) => { this.#stop(); this.vT = 0; this.busy = true; this.#setT(this.#clampT(this.#rawT(this.T) + d * k)); return "scrub"; };
+    const scrub = (d) => {
+      const nextT = this.#clampT(this.#rawT(this.T) + d * k);
+      if (nextT === this.T && this.T === this.tT) { this.busy = false; return "edge"; }
+      this.#stop(); this.vT = 0; this.busy = true; this.#setT(nextT); return "scrub";
+    };
     // Forecast off-screen: plain scroll and drag pan instead, and keep panning ("returning") until the
     // view is back at its home position, exactly where the recenter pill would put it. Only then does
     // the rest of the gesture scrub. Measuring "home" (P = 0) rather than "visible" makes the hand-off

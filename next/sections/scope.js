@@ -67,6 +67,10 @@ export function scopeOf(state, manifest) {
   const hs = Array.isArray(sc.horizons) ? HORIZONS.filter((h) => sc.horizons.includes(h)) : [];
   const place = ["US", "current"].includes(sc.place) ? sc.place : "all";
   const location = place === "US" ? "US" : place === "current" ? state.location || "US" : "states";
+  const target = state.target || manifest.default_target || manifest.targets?.[0]?.id || "";
+  const defaultBaseline = typeof manifest.baselineFor === "function"
+    ? manifest.baselineFor(target, seasons.length === 1 ? seasons[0] : null)
+    : manifest.baseline;
   return {
     seasons, following, weeks,
     from: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[0])) : null,
@@ -75,7 +79,7 @@ export function scopeOf(state, manifest) {
     horizons: hs.length && hs.length < HORIZONS.length ? hs : null,
     place, location,
     fair: !!sc.fair,
-    baseline: sc.baseline || manifest.baseline || "",
+    baseline: sc.baseline || defaultBaseline || "",
     rank: sc.rank === "selected" ? "selected" : "all",
     scale: sc.scale === "log" ? "log" : "natural",
   };

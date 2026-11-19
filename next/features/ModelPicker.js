@@ -319,7 +319,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   const seasonNow = () => manifest.seasonOf(store.get().date);
   let season = seasonNow(), query = "", g = null, hover = null, roundKey = "", lastClicked = null, order = [];
   const offs = [];
-  let els = null, raf = 0;
+  let els = null;
   const width = () => Math.round(Math.min(innerWidth * 0.64, 1060));
 
   function roundNow() {
@@ -332,7 +332,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
 
   const layer = openPopover(anchor, {
     morph: true, timeKeys: true, className: "pk-panel mb-panel", width: width(),
-    onClose() { offs.forEach((off) => off()); cancelAnimationFrame(raf); chart?.setInset(0); chart?.preview(false); },
+    onClose() { offs.forEach((off) => off()); chart?.setInset(0); chart?.preview(false); },
     content(body, lay) {
       const input = h("input", { type: "search", autocomplete: "off", spellcheck: "false", "aria-label": "Search models" });
       const when = h("div", { class: "mb-when", role: "radiogroup", "aria-label": "When" },
@@ -369,7 +369,6 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   if (!layer) return null;
   chart?.preview(true);
   chart?.setInset(inset() + width() + tokenNum("--space-24", 24));
-  if (chart) raf = requestAnimationFrame(function watch() { if (roundNow().key !== roundKey) render(); raf = requestAnimationFrame(watch); });
   return layer;
 
   /* ---------------- rendering ---------------- */
@@ -616,7 +615,8 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     offs.push(
       store.select(["sel"], () => render()),
       store.select(["target"], () => render(true)),
-      store.select(["date"], () => { const now = seasonNow(); if (now !== season) { season = now; render(); } }),
+      store.select(["date"], () => { const now = seasonNow(); if (now !== season) { season = now; render(); } else if (roundNow().key !== roundKey) render(); }),
+      chart?.onWeekChange ? chart.onWeekChange(() => { const now = seasonNow(); if (now !== season) season = now; if (roundNow().key !== roundKey) render(); }) : () => {},
       on(window, "resize", () => { panel.style.width = `${width()}px`; chart?.setInset(inset() + width() + tokenNum("--space-24", 24)); }),
     );
     input.addEventListener("input", () => { query = input.value.trim(); render(true); renderSuggest(); });

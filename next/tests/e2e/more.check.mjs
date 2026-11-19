@@ -42,7 +42,8 @@ export default async function more(page, t) {
 
   await t.step("Data sources shows synced hubs", async () => {
     await menuItem(page, "Data sources");
-    await page.waitFor(() => document.querySelectorAll(".mo-src[data-hub]").length > 0, { timeout: 5000, message: "hub rows" });
+    await page.waitFor(() => document.querySelectorAll(".mo-src[data-hub]").length > 0 && document.querySelectorAll(".mo-src[data-local-hub]").length > 0, { timeout: 5000, message: "hub rows" });
+    t.ok((await page.count(".mo-src[data-local-hub]")) > 0, "local hub rows");
     const meta = await page.text(".mo-src[data-hub] .mo-src-meta");
     t.ok(/model/.test(meta || ""), `hub meta (${meta})`);
     await page.frames(10);

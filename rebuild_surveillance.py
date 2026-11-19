@@ -19,9 +19,9 @@ Features:
 - Atomic Parquet cache re-indexing for instant sub-2ms query performance.
 
 Usage:
-    python viz/rebuild_surveillance.py
-    python viz/rebuild_surveillance.py --force
-    python viz/rebuild_surveillance.py --check-freshness
+    python rebuild_surveillance.py
+    python rebuild_surveillance.py --hub /path/to/hub --force
+    python rebuild_surveillance.py --check-freshness
 """
 
 import argparse
@@ -37,9 +37,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import polars as pl
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+import _bootstrap
+
+APP_DIR = _bootstrap.ensure_viz_package()
+
 from viz.core.cache_manager import ParquetCacheManager
 from viz.core.data_loader import date_to_season_and_week
+from viz.core.paths import detect_enclosing_hub, get_data_dir, is_hub_dir
+from viz.core.workspace import WorkspaceRegistry, resolve_hub_storage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("rebuild_surveillance")
@@ -53,28 +61,59 @@ REICHLAB_DASHBOARD_TAR_URL = (
 DELPHI_EPIDATA_BASE_URL = "https://api.delphi.cmu.edu/epidata"
 
 
+def _resolve_hub_dir(base_dir: Optional[Path] = None) -> Path:
+    """Resolve the hub directory from explicit arg, VIZ_HUB_DIR, enclosing hub, active workspace, or APP_DIR."""
+    if base_dir is not None:
+        return Path(base_dir).resolve()
+
+    env_hub = os.environ.get("VIZ_HUB_DIR", "").strip()
+    if env_hub:
+        p = Path(env_hub).expanduser().resolve()
+        if p.is_dir() and is_hub_dir(p):
+            return p
+
+    enclosing = detect_enclosing_hub()
+    if enclosing is not None:
+        return enclosing
+
+    data_dir = get_data_dir()
+    registry = WorkspaceRegistry(data_dir)
+    active_id = registry.get_active_id()
+    if active_id:
+        rec = registry.get_hub(active_id)
+        if rec is not None:
+            p = Path(rec.path).expanduser().resolve()
+            if p.is_dir() and is_hub_dir(p):
+                return p
+
+    return APP_DIR
+
+
 def get_viz_paths(base_dir: Optional[Path] = None) -> Dict[str, Path]:
     """Resolve repository and self-contained viz paths."""
-    if base_dir is None:
-        curr = Path(__file__).resolve().parent
-        if curr.name == "viz":
-            viz_dir = curr
-            repo_root = curr.parent
-        else:
-            repo_root = curr
-            viz_dir = repo_root / "viz"
-    else:
-        repo_root = Path(base_dir).resolve()
-        viz_dir = repo_root / "viz" if (repo_root / "viz").is_dir() else repo_root
-
+    viz_dir = APP_DIR
+    repo_root = _resolve_hub_dir(base_dir)
     surveillance_dir = viz_dir / "data" / "surveillance"
+    seed_dir = viz_dir / "data" / "seed"
     target_data_dir = repo_root / "target-data"
-    cache_dir = viz_dir / ".cache"
+
+    if repo_root == viz_dir:
+        cache_dir = viz_dir / ".cache"
+    else:
+        data_dir = get_data_dir()
+        rec = WorkspaceRegistry(data_dir).find_by_path(repo_root)
+        cache_dir = resolve_hub_storage(
+            repo_root,
+            data_dir,
+            hub_id=rec.id if rec is not None else None,
+            cli_fallback=True,
+        )["cache_dir"]
 
     return {
         "repo_root": repo_root,
         "viz_dir": viz_dir,
         "surveillance_dir": surveillance_dir,
+        "seed_dir": seed_dir,
         "target_data_dir": target_data_dir,
         "cache_dir": cache_dir,
     }
@@ -576,7 +615,7 @@ def seed_surveillance_history(paths: Dict[str, Path]) -> None:
     data/seed/ is tracked and never written, so updating the working copies in data/surveillance/
     (git-ignored) never leaves the viz checkout dirty or blocks `git pull`.
     """
-    seed_dir = paths["viz_dir"] / "data" / "seed"
+    seed_dir = paths.get("seed_dir") or (paths["viz_dir"] / "data" / "seed")
     for name in ("ilinet.csv", "flusurvnet.csv"):
         dest = paths["surveillance_dir"] / name
         seed = seed_dir / name
@@ -609,7 +648,12 @@ def rebuild_surveillance_data(
     # Clear target cache if force refresh requested
     if force:
         try:
-            ParquetCacheManager(paths["repo_root"]).clear_cache()
+            ParquetCacheManager(
+                paths["repo_root"],
+                cache_dir=paths["cache_dir"],
+                surveillance_dir=paths["surveillance_dir"],
+                seed_dir=paths["seed_dir"],
+            ).clear_cache()
         except Exception:
             pass
 
@@ -634,7 +678,12 @@ def rebuild_surveillance_data(
     fsn_res = fetch_and_update_flusurvnet(dest_fsn)
 
     # 4. Refresh Parquet cache atomically via ParquetCacheManager
-    cache_mgr = ParquetCacheManager(paths["repo_root"])
+    cache_mgr = ParquetCacheManager(
+        paths["repo_root"],
+        cache_dir=paths["cache_dir"],
+        surveillance_dir=paths["surveillance_dir"],
+        seed_dir=paths["seed_dir"],
+    )
     cached_adm = cache_mgr.get_admissions_parquet()
     cached_init = cache_mgr.get_initial_admissions_parquet()
     cached_as_of = cache_mgr.get_as_of_admissions_parquet()
@@ -764,6 +813,11 @@ def main():
         description="Rebuild self-contained FluSight surveillance data and Parquet caches."
     )
     parser.add_argument(
+        "--hub",
+        default=None,
+        help="Optional local Hubverse hub path for oracle fallback / locations / cache refresh",
+    )
+    parser.add_argument(
         "--url",
         default=DEFAULT_CDC_ADMISSIONS_URL,
         help="Official CDC FluSight Hub admissions CSV URL",
@@ -779,9 +833,10 @@ def main():
         help="Check temporal coverage and record counts across all surveillance datasets without downloading",
     )
     args = parser.parse_args()
+    hub_dir = Path(args.hub) if args.hub else None
 
     if args.check_freshness:
-        freshness = check_surveillance_freshness()
+        freshness = check_surveillance_freshness(base_dir=hub_dir)
         print("\n" + "=" * 80)
         print("  SURVEILLANCE FRESHNESS & STREAM AUDIT")
         print("=" * 80)
@@ -792,7 +847,7 @@ def main():
         print("\n" + "=" * 80 + "\n")
         return
 
-    report = rebuild_surveillance_data(admissions_url=args.url, force=args.force)
+    report = rebuild_surveillance_data(base_dir=hub_dir, admissions_url=args.url, force=args.force)
     print("\n" + "=" * 70)
     print("  SURVEILLANCE REBUILD REPORT")
     print("=" * 70)

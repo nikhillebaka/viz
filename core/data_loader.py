@@ -8,6 +8,7 @@ from datetime import datetime, date, timedelta
 import functools
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import threading
@@ -27,6 +28,7 @@ from viz.core.metrics import find_quantile_column, score_forecasts
 from viz.core.peak_data import PeakService
 from viz.core.peaks import is_peak_target
 from viz.core.synthetic_ensemble import SyntheticEnsembleManager, SyntheticEnsembleConfig
+from viz.core.truth import is_flu_hosp_target, reconcile_weekly_series
 
 logger = logging.getLogger("viz.data_loader")
 
@@ -125,13 +127,29 @@ def _safe_to_pandas(df: Optional[pl.DataFrame]) -> Any:
         raise ImportError("Converting to pandas requires both 'pandas' and 'pyarrow' to be installed.") from exc
 
 
+_is_flu_hosp_target = is_flu_hosp_target
+
+
 class SandboxDataLoader:
     """
     High-performance data loader for forecasts, surveillance streams, and ground truth.
     Powered directly by Polars SIMD queries and ParquetCacheManager.
     """
 
-    def __init__(self, base_dir: Path, include_remote: bool = True):
+    def __init__(
+        self,
+        base_dir: Path,
+        include_remote: bool = True,
+        cache_dir: Optional[Path] = None,
+        surveillance_dir: Optional[Path] = None,
+        seed_dir: Optional[Path] = None,
+        app_dir: Optional[Path] = None,
+        synthetic_dir: Optional[Path] = None,
+        remote_dir: Optional[Path] = None,
+        hub_models_cache_dir: Optional[Path] = None,
+        peer_truth_provider: Optional[Any] = None,
+        remote_store: Optional[Any] = None,
+    ):
         self.base_dir = Path(base_dir).resolve()
         # Hub data synced from S3 (viz/.cache/remote) is shown in the dashboard only, never in the CLI
         self.include_remote = include_remote
@@ -141,24 +159,45 @@ class SandboxDataLoader:
         self.auxiliary_data_dir = self.base_dir / "auxiliary-data"
         self.model_metadata_dir = self.base_dir / "model-metadata"
         self.hub_config_dir = self.base_dir / "hub-config"
-        self.config = VizConfig(self.base_dir)
+        self.config = VizConfig(self.base_dir, app_dir=app_dir)
 
         # Initialize transparent Parquet acceleration layer
-        self.cache_mgr = ParquetCacheManager(self.base_dir, include_remote=include_remote)
+        self.cache_mgr = ParquetCacheManager(
+            self.base_dir,
+            include_remote=include_remote,
+            cache_dir=cache_dir,
+            surveillance_dir=surveillance_dir,
+            seed_dir=seed_dir,
+            remote_dir=remote_dir,
+            hub_models_cache_dir=hub_models_cache_dir,
+            peer_truth_provider=peer_truth_provider,
+            allowed_targets_provider=lambda: set(self.config.get_targets()),
+            allowed_locations_provider=lambda: set(self.get_locations().keys()),
+            remote_store=remote_store,
+        )
         self.remote_store = self.cache_mgr.remote_store
 
         # Initialize Synthetic Ensemble Engine
-        self.ensemble_mgr = SyntheticEnsembleManager(self.base_dir, data_loader=self)
+        self.ensemble_mgr = SyntheticEnsembleManager(
+            self.base_dir,
+            data_loader=self,
+            synthetic_dir=synthetic_dir,
+        )
 
         # Season peak forecasts (separate peak tables, never mixed into weekly forecasts)
         self.peaks = PeakService(self)
 
         self._locations_cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._hub_seasons_cache: Optional[Dict[str, List[str]]] = None
+        self._raw_hub_seasons_cache: Optional[Dict[str, List[str]]] = None
+        self._tasks_mtime: float = -1.0
+        self._hub_seasons_sig: Optional[Tuple[Any, ...]] = None
         self._model_details_cache: Dict[str, Dict[str, Any]] = {}
         self._models_cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._models_cache_mtime: float = -1.0
         self._models_cache_lock = threading.Lock()
+        self._phase_cache: Dict[str, Tuple[Tuple[Any, ...], pl.DataFrame]] = {}
+        self._phase_cache_lock = threading.Lock()
 
     def get_locations(self) -> Dict[str, Dict[str, Any]]:
         """Get mapping of location code -> metadata (name, abbreviation, population)."""
@@ -227,20 +266,31 @@ class SandboxDataLoader:
         return sorted(list(set(warnings)))
 
     def _compute_models_mtime(self) -> float:
-        """Compute maximum modification time across model directories for cache invalidation."""
+        """Compute maximum modification time across model directories and forecast files for cache invalidation."""
         mtime = 0.0
         try:
-            if self.model_output_dir.exists():
-                mtime = max(mtime, self.model_output_dir.stat().st_mtime)
-                for p in self.model_output_dir.iterdir():
-                    if p.is_dir() and not p.name.startswith("."):
-                        mtime = max(mtime, p.stat().st_mtime)
-            if self.local_output_dir.exists():
-                mtime = max(mtime, self.local_output_dir.stat().st_mtime)
-                for p in self.local_output_dir.iterdir():
-                    if p.is_dir() and not p.name.startswith("."):
-                        mtime = max(mtime, p.stat().st_mtime)
-            synth_dir = self.local_output_dir / "synthetic"
+            for root in (self.model_output_dir, self.local_output_dir):
+                if not root.exists():
+                    continue
+                mtime = max(mtime, root.stat().st_mtime)
+                with os.scandir(root) as it:
+                    for ent in it:
+                        if ent.name.startswith(".") or (root == self.local_output_dir and ent.name == "synthetic"):
+                            continue
+                        if not ent.is_dir():
+                            continue
+                        mtime = max(mtime, ent.stat().st_mtime)
+                        try:
+                            with os.scandir(ent.path) as sub:
+                                for fent in sub:
+                                    if fent.name.startswith("."):
+                                        continue
+                                    ext = os.path.splitext(fent.name)[1].lower()
+                                    if ext in (".csv", ".parquet") and fent.is_file():
+                                        mtime = max(mtime, fent.stat().st_mtime)
+                        except OSError:
+                            pass
+            synth_dir = self.ensemble_mgr.synthetic_dir
             if synth_dir.exists():
                 mtime = max(mtime, synth_dir.stat().st_mtime)
             if self.include_remote:
@@ -256,34 +306,33 @@ class SandboxDataLoader:
     PEAK_FRACTION = 0.6  # peak = contiguous weeks around the season maximum at >= 60% of that maximum
 
     def _weekly_truth(self, target: str) -> pl.DataFrame:
-        """One observed value per (location, week) for a target: newest oracle vintage, admissions filling gaps."""
-        frames = []
+        """One observed value per (location, week) for a target: newest vintage wins across oracle and admissions."""
+        oracle_df: Optional[pl.DataFrame] = None
         lf_oracle = self.cache_mgr.scan_oracle()
         if lf_oracle is not None:
             o = lf_oracle.filter(pl.col("target") == target)
             names = o.collect_schema().names()
             if "output_type" in names:
                 o = o.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
-            o = o.select(
-                ["location", "target_end_date", "oracle_value"] + (["as_of"] if "as_of" in names else [])
-            ).drop_nulls(["oracle_value"]).collect()
-            if "as_of" in o.columns:
-                o = o.sort("as_of").unique(subset=["location", "target_end_date"], keep="last").drop("as_of")
-            else:
-                o = o.unique(subset=["location", "target_end_date"], keep="first")
-            frames.append(o)
-        if "hosp" in target.lower():
+            cols = [c for c in ("target", "location", "target_end_date", "oracle_value", "as_of") if c in names]
+            oracle_df = o.select(cols).collect()
+
+        adm_df: Optional[pl.DataFrame] = None
+        use_adm = _is_flu_hosp_target(target)
+        if use_adm:
             lf_adm = self.cache_mgr.scan_admissions()
             if lf_adm is not None:
-                adm = lf_adm.select(["location", "target_end_date", "oracle_value"]).drop_nulls().collect()
-                adm = adm.unique(subset=["location", "target_end_date"], keep="first")
-                if frames:
-                    adm = adm.join(frames[0], on=["location", "target_end_date"], how="anti")
-                frames.append(adm)
-        frames = [f for f in frames if not f.is_empty()]
-        if not frames:
-            return pl.DataFrame(schema={"location": pl.String, "target_end_date": pl.String, "oracle_value": pl.Float64})
-        return pl.concat(frames, how="vertical_relaxed").rename({"oracle_value": "value"})
+                adm_names = lf_adm.collect_schema().names()
+                adm_cols = [c for c in ("location", "target_end_date", "oracle_value", "as_of") if c in adm_names]
+                if {"location", "target_end_date", "oracle_value"}.issubset(adm_cols):
+                    adm_df = lf_adm.select(adm_cols).collect()
+
+        return reconcile_weekly_series(
+            oracle_df,
+            adm_df,
+            target,
+            include_admissions=use_adm,
+        )
 
     def get_truth_phases(self, target: str) -> pl.DataFrame:
         """
@@ -292,18 +341,23 @@ class SandboxDataLoader:
         'post' are the weeks before and after. A season whose highest week is still one of its latest
         observations (and is not over) has not peaked yet, so all of its weeks are 'pre'.
         """
-        sources = [self.cache_mgr.get_oracle_parquet(), self.cache_mgr.get_admissions_parquet()]
+        sources = [
+            self.cache_mgr.get_oracle_parquet(),
+            self.cache_mgr.get_admissions_parquet() if _is_flu_hosp_target(target) else None,
+        ]
         stamp = (target,) + tuple((str(p), p.stat().st_mtime) if p and p.exists() else None for p in sources)
-        cached = getattr(self, "_phase_cache", None)
-        if cached is not None and cached[0] == stamp:
-            return cached[1]
+        with self._phase_cache_lock:
+            cached = self._phase_cache.get(target)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
 
         weekly = self._weekly_truth(target)
         out_schema = {"location": pl.String, "target_end_date": pl.String, "season": pl.String,
                       "season_week": pl.Int32, "value": pl.Float64, "phase": pl.String}
         if weekly.is_empty():
             result = pl.DataFrame(schema=out_schema)
-            self._phase_cache = (stamp, result)
+            with self._phase_cache_lock:
+                self._phase_cache[target] = (stamp, result)
             return result
 
         sw = {d: date_to_season_and_week(d) for d in weekly.get_column("target_end_date").unique().to_list()}
@@ -337,7 +391,10 @@ class SandboxDataLoader:
             phase_frames.append(g.with_columns(pl.Series("phase", phases, dtype=pl.String)))
 
         result = pl.concat(phase_frames, how="vertical_relaxed").select(list(out_schema)).cast(out_schema)
-        self._phase_cache = (stamp, result)
+        with self._phase_cache_lock:
+            if len(self._phase_cache) >= 32:
+                self._phase_cache.clear()
+            self._phase_cache[target] = (stamp, result)
         return result
 
     def get_season_curves(self, target: str, location: str, seasons: List[str]) -> Dict[str, Any]:
@@ -384,24 +441,76 @@ class SandboxDataLoader:
 
     def get_truth_info(self) -> Dict[str, Any]:
         """Which truth sources are merged (newest vintage wins per observation) and how current they are."""
-        hubs = []
+        has_flu_hosp = any(_is_flu_hosp_target(t) for t in self.config.get_targets())
+        hubs: List[str] = []
         if self.include_remote:
-            hubs = [h for h in self.remote_store.active_hub_ids()
-                    if self.remote_store.truth_path(h, "oracle").exists()]
-        info: Dict[str, Any] = {"policy": "auto", "sources": ["repo"] + hubs, "as_of": None, "latest_observation": None}
+            for h in self.cache_mgr.active_remote_hub_ids():
+                has_oracle = self.remote_store.truth_path(h, "oracle").exists()
+                has_adm = has_flu_hosp and self.remote_store.truth_path(h, "admissions").exists()
+                if has_oracle or has_adm:
+                    hubs.append(h)
+        peers = [f"peer:{p['hub_id']}" for p in self.cache_mgr._peer_truth_descriptors()]
+
+        info: Dict[str, Any] = {
+            "policy": "latest_vintage",
+            "sources": ["repo"] + hubs + peers,
+            "as_of": None,
+            "latest_observation": None,
+            "by_target": {},
+        }
         pq = self.cache_mgr.get_oracle_parquet()
         if pq is not None and pq.exists():
             try:
                 lf = pl.scan_parquet(pq)
                 names = lf.collect_schema().names()
+                valid = (
+                    lf.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+                    if "output_type" in names else lf
+                )
                 aggs = [pl.col("target_end_date").max().alias("latest")]
                 if "as_of" in names:
                     aggs.append(pl.col("as_of").max().alias("as_of"))
-                row = lf.select(aggs).collect().row(0, named=True)
-                info["latest_observation"] = row.get("latest")
-                info["as_of"] = row.get("as_of") or None
+                row = valid.select(aggs).collect().row(0, named=True)
+                if row.get("latest"):
+                    info["latest_observation"] = str(row["latest"])[:10]
+                if row.get("as_of"):
+                    info["as_of"] = str(row["as_of"])[:10]
+                if "target" in names:
+                    per_t = (
+                        valid.group_by("target")
+                        .agg(pl.col("target_end_date").max().alias("latest"))
+                        .collect()
+                    )
+                    for r in per_t.iter_rows(named=True):
+                        if r.get("target") and r.get("latest"):
+                            info["by_target"][str(r["target"])] = str(r["latest"])[:10]
             except Exception as exc:
                 logger.debug("Could not summarize oracle truth: %s", exc)
+
+        if has_flu_hosp:
+            adm_pq = self.cache_mgr.get_admissions_parquet()
+            if adm_pq is not None and adm_pq.exists():
+                try:
+                    lf_adm = pl.scan_parquet(adm_pq)
+                    names = lf_adm.collect_schema().names()
+                    aggs = [pl.col("target_end_date").max().alias("latest")]
+                    if "as_of" in names:
+                        aggs.append(pl.col("as_of").max().alias("as_of"))
+                    row = lf_adm.select(aggs).collect().row(0, named=True)
+                    adm_latest = str(row["latest"])[:10] if row.get("latest") else None
+                    adm_asof = str(row["as_of"])[:10] if row.get("as_of") else None
+                    if adm_latest and (info["latest_observation"] is None or adm_latest > info["latest_observation"]):
+                        info["latest_observation"] = adm_latest
+                    if adm_asof and (info["as_of"] is None or adm_asof > info["as_of"]):
+                        info["as_of"] = adm_asof
+                    if adm_latest:
+                        for t in self.config.get_targets():
+                            if _is_flu_hosp_target(t):
+                                prev = info["by_target"].get(t)
+                                if prev is None or adm_latest > prev:
+                                    info["by_target"][t] = adm_latest
+                except Exception as exc:
+                    logger.debug("Could not summarize admissions truth: %s", exc)
         return info
 
     def invalidate_inventory(self):
@@ -414,12 +523,19 @@ class SandboxDataLoader:
             self._models_cache_mtime = -1.0
         self._model_details_cache.clear()
         self._hub_seasons_cache = None
+        self._raw_hub_seasons_cache = None
+        self._tasks_mtime = -1.0
+        self._hub_seasons_sig = None
+        self._locations_cache = None
+        with self._phase_cache_lock:
+            self._phase_cache.clear()
 
     def _scan_hub_models(self, taken: Set[str]) -> Dict[str, Dict[str, Any]]:
-        """Inventory of models copied from active hubs, read from each hub's manifest (no Parquet scans)."""
+        """Inventory of models copied from active compatible hubs, read from each hub's manifest (no Parquet scans)."""
         models: Dict[str, Dict[str, Any]] = {}
+        active_hubs = set(self.cache_mgr.active_remote_hub_ids())
         for spec in self.remote_store.hub_specs():
-            if spec.id not in self.remote_store.active_hub_ids():
+            if spec.id not in active_hubs:
                 continue
             man = self.remote_store.load_manifest(spec.id)
             per_model: Dict[str, Dict[str, Any]] = {}
@@ -492,15 +608,21 @@ class SandboxDataLoader:
                 schema = pl.scan_parquet(pq_path).collect_schema()
                 if "target" in schema.names():
                     tgts = sorted(pl.scan_parquet(pq_path).select("target").unique().collect()["target"].to_list())
-                    if meta_path.exists():
-                        try:
-                            with open(meta_path, "r", encoding="utf-8") as f_meta:
-                                saved = json.load(f_meta)
-                            saved["targets"] = tgts
-                            with open(meta_path, "w", encoding="utf-8") as f_meta:
-                                json.dump(saved, f_meta)
-                        except Exception:
-                            pass
+                    lock_key = f"meta::{'local' if is_local else 'repo'}::{model_id}"
+                    with self.cache_mgr._model_locks.get(lock_key):
+                        if meta_path.exists():
+                            tmp_meta = meta_path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.json")
+                            try:
+                                with open(meta_path, "r", encoding="utf-8") as f_meta:
+                                    saved = json.load(f_meta)
+                                saved["targets"] = tgts
+                                with open(tmp_meta, "w", encoding="utf-8") as f_meta:
+                                    json.dump(saved, f_meta)
+                                os.replace(tmp_meta, meta_path)
+                            except Exception:
+                                pass
+                            finally:
+                                tmp_meta.unlink(missing_ok=True)
                     return tgts
             except Exception:
                 pass
@@ -833,45 +955,12 @@ class SandboxDataLoader:
         - Forecast evaluation truth: Actual oracle outcomes covering the forecast horizons (target_end_date >= reference_date).
         - Anchor: Last historical point to allow continuous line connection.
         """
-        lf_oracle = self.cache_mgr.scan_oracle()
-        sub = pl.DataFrame()
-
-        if lf_oracle is not None:
-            o_filtered = (
-                lf_oracle.filter((pl.col("target") == target) & (pl.col("location") == str(location)))
-                .collect()
-            )
-            if not o_filtered.is_empty():
-                if "as_of" in o_filtered.columns:
-                    o_filtered = (
-                        o_filtered.sort("as_of")
-                        .group_by("target_end_date")
-                        .last()
-                    )
-                sub = (
-                    o_filtered.select(["target_end_date", "oracle_value"])
-                    .drop_nulls()
-                    .sort("target_end_date")
-                )
-
-        # Supplement with admissions surveillance ground truth for hospitalizations (covers back to 2020)
-        if "hosp" in target.lower() or target == "wk inc flu hosp":
-            lf_adm = self.cache_mgr.scan_admissions()
-            if lf_adm is not None:
-                adm_filtered = (
-                    lf_adm.filter(pl.col("location") == str(location))
-                    .select(["target_end_date", "oracle_value"])
-                    .drop_nulls()
-                    .collect()
-                )
-                if not adm_filtered.is_empty():
-                    if sub.is_empty():
-                        sub = adm_filtered.sort("target_end_date")
-                    else:
-                        existing_dates = set(sub["target_end_date"].to_list())
-                        missing_adm = adm_filtered.filter(~pl.col("target_end_date").is_in(existing_dates))
-                        if not missing_adm.is_empty():
-                            sub = pl.concat([sub, missing_adm], how="vertical").sort("target_end_date")
+        sub = (
+            self._weekly_truth(target)
+            .filter(pl.col("location") == str(location))
+            .select(["target_end_date", pl.col("value").alias("oracle_value")])
+            .sort("target_end_date")
+        )
 
         if sub.is_empty():
             return {
@@ -1097,8 +1186,8 @@ class SandboxDataLoader:
             for wk in range(1, 54)
         }
 
-        # Load historical admissions
-        lf_adm = self.cache_mgr.scan_admissions()
+        # Load historical admissions (flu hosp only) or oracle truth for this target
+        lf_adm = self.cache_mgr.scan_admissions() if _is_flu_hosp_target(target) else None
         if lf_adm is None:
             lf_oracle = self.cache_mgr.scan_oracle()
             if lf_oracle is not None:
@@ -2621,19 +2710,77 @@ class SandboxDataLoader:
             "summary": summary,
         }
 
-    def get_hub_seasons(self) -> Dict[str, List[str]]:
-        """Extract official hub round dates grouped by season from tasks.json or scanned dates."""
-        if self._hub_seasons_cache is not None:
-            return self._hub_seasons_cache
+    def _latest_truth_date(self) -> Optional[str]:
+        """Return the latest observed target_end_date across reconciled oracle and admissions Parquets."""
+        getters = [self.cache_mgr.get_oracle_parquet]
+        if any(_is_flu_hosp_target(t) for t in self.config.get_targets()):
+            getters.append(self.cache_mgr.get_admissions_parquet)
 
+        latest: Optional[str] = None
+        for getter in getters:
+            try:
+                pq = getter()
+                if pq is None or not pq.exists():
+                    continue
+                lf = pl.scan_parquet(pq)
+                names = lf.collect_schema().names()
+                if "target_end_date" not in names:
+                    continue
+                if "output_type" in names:
+                    lf = lf.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+                val = lf.select(pl.col("target_end_date").drop_nulls().max()).collect().item()
+                if val:
+                    s_val = str(val)[:10]
+                    if latest is None or s_val > latest:
+                        latest = s_val
+            except Exception as exc:
+                logger.debug("Could not read latest truth date: %s", exc)
+        return latest
+
+    def _truth_sig(self) -> Tuple[Any, ...]:
+        """Lightweight mtime signature across truth Parquets and target-data inputs."""
+        sig: List[Any] = []
+        for sub_name in ("oracle", "oracle_hub", "admissions", "admissions_hub"):
+            p = self.cache_mgr.targets_cache_dir / f"{sub_name}.parquet"
+            try:
+                sig.append(p.stat().st_mtime if p.exists() else None)
+            except OSError:
+                sig.append(None)
+        try:
+            if self.target_data_dir.is_dir():
+                sig.append(self.target_data_dir.stat().st_mtime)
+                children = sorted(
+                    (f.name, f.stat().st_mtime)
+                    for f in self.target_data_dir.iterdir()
+                    if f.is_file() and not f.name.startswith(".")
+                )
+                sig.append(tuple(children))
+            else:
+                sig.append(None)
+        except OSError:
+            sig.append(None)
+        return tuple(sig)
+
+    def _parse_hub_seasons_unlocked(self) -> Dict[str, List[str]]:
+        """Parse raw round dates from hub-config/tasks.json, re-reading if tasks.json changes on disk."""
         tasks_path = self.hub_config_dir / "tasks.json"
+        mtime = -1.0
+        try:
+            if tasks_path.exists():
+                mtime = tasks_path.stat().st_mtime
+        except OSError:
+            pass
+        if self._raw_hub_seasons_cache is not None and abs(mtime - self._tasks_mtime) < 1e-6:
+            return self._raw_hub_seasons_cache
+
         seasons: Dict[str, List[str]] = {}
         if tasks_path.exists():
             try:
                 data = json.loads(tasks_path.read_text(encoding="utf-8"))
                 for r in data.get("rounds", []):
                     for mt in r.get("model_tasks", []):
-                        ref_spec = mt.get("task_ids", {}).get("reference_date", {})
+                        task_ids = mt.get("task_ids", {})
+                        ref_spec = task_ids.get("reference_date") or task_ids.get("origin_date") or {}
                         dates = (ref_spec.get("optional") or []) + (ref_spec.get("required") or [])
                         for d in dates:
                             s = self.get_flu_season_for_date(d)
@@ -2647,16 +2794,51 @@ class SandboxDataLoader:
         for s in seasons:
             seasons[s].sort(reverse=True)
 
-        self._hub_seasons_cache = seasons
+        self._raw_hub_seasons_cache = seasons
+        self._tasks_mtime = mtime
         return seasons
+
+    def get_hub_seasons(self, include_future: bool = False) -> Dict[str, List[str]]:
+        """Extract official hub round dates grouped by season, excluding unstarted future rounds by default."""
+        raw = self._parse_hub_seasons_unlocked()
+        if include_future:
+            return {s: list(ds) for s, ds in raw.items()}
+
+        sig = (self._tasks_mtime, self._compute_models_mtime(), self._truth_sig())
+        if self._hub_seasons_cache is not None and self._hub_seasons_sig == sig:
+            return {s: list(ds) for s, ds in self._hub_seasons_cache.items()}
+
+        forecast_dates: Set[str] = set()
+        for m in self.scan_models().values():
+            forecast_dates.update(str(d) for d in (m.get("dates") or []) if d)
+        latest_forecast = max(forecast_dates) if forecast_dates else None
+        latest_truth = self._latest_truth_date()
+        caps = [d for d in (latest_forecast, latest_truth) if d]
+        cap = max(caps) if caps else None
+
+        if cap is None:
+            filtered = {s: list(ds) for s, ds in raw.items()}
+        else:
+            filtered = {}
+            for s, ds in raw.items():
+                kept = [d for d in ds if d <= cap or d in forecast_dates]
+                if kept:
+                    filtered[s] = kept
+
+        self._hub_seasons_cache = filtered
+        self._hub_seasons_sig = sig
+        return {s: list(ds) for s, ds in filtered.items()}
 
     def get_all_seasons(self) -> List[str]:
         """Return all distinct seasons found in historical surveillance or model forecasts."""
         seasons_set = set()
-        adm_df = self.get_admissions_ground_truth(as_polars=True)
-        if adm_df is not None and not adm_df.is_empty():
-            for d in adm_df.select(pl.col("target_end_date").unique())["target_end_date"].to_list():
-                seasons_set.add(self.get_flu_season_for_date(str(d)))
+        truth_df = self.get_admissions_ground_truth(as_polars=True)
+        if truth_df is None or truth_df.is_empty():
+            truth_df = self.get_oracle(as_polars=True)
+        if truth_df is not None and not truth_df.is_empty() and "target_end_date" in truth_df.columns:
+            for d in truth_df.select(pl.col("target_end_date").unique())["target_end_date"].to_list():
+                if d is not None:
+                    seasons_set.add(self.get_flu_season_for_date(str(d)))
 
         hub_seasons = self.get_hub_seasons()
         seasons_set.update(hub_seasons.keys())
@@ -2699,9 +2881,11 @@ class SandboxDataLoader:
             dates_set.update(d_list)
         for m in self.scan_models().values():
             dates_set.update(m.get("dates", []))
-        adm_df = self.get_admissions_ground_truth(as_polars=True)
-        if adm_df is not None and not adm_df.is_empty():
-            dates_set.update([str(d) for d in adm_df["target_end_date"].unique().to_list()])
+        truth_df = self.get_admissions_ground_truth(as_polars=True)
+        if truth_df is None or truth_df.is_empty():
+            truth_df = self.get_oracle(as_polars=True)
+        if truth_df is not None and not truth_df.is_empty() and "target_end_date" in truth_df.columns:
+            dates_set.update([str(d) for d in truth_df["target_end_date"].unique().to_list() if d is not None])
         return sorted(list(dates_set))
 
     def get_forecast_seasons(self) -> List[str]:
@@ -2722,9 +2906,13 @@ class SandboxDataLoader:
             dates_set.update(m.get("dates", []))
         if dates_set:
             return max(dates_set)
-        adm_df = self.get_admissions_ground_truth(as_polars=True)
-        if adm_df is not None and not adm_df.is_empty():
-            return max(adm_df["target_end_date"].to_list())
+        truth_df = self.get_admissions_ground_truth(as_polars=True)
+        if truth_df is None or truth_df.is_empty():
+            truth_df = self.get_oracle(as_polars=True)
+        if truth_df is not None and not truth_df.is_empty() and "target_end_date" in truth_df.columns:
+            vals = [str(d) for d in truth_df["target_end_date"].drop_nulls().to_list()]
+            if vals:
+                return max(vals)
         return None
 
     def get_latest_season(self) -> str:

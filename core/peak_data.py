@@ -33,7 +33,8 @@ class PeakService:
     def __init__(self, loader):
         self._tls = threading.local()  # one model list per request (see _snapshot)
         self.loader = loader
-        self._truth_cache: Optional[Tuple[Any, Dict[str, List[Tuple[str, float]]]]] = None
+        self._truth_cache: Dict[str, Tuple[Any, Dict[str, List[Tuple[str, float]]]]] = {}
+        self._truth_cache_lock = threading.Lock()
 
     # ---- availability -----------------------------------------------------------------------------------
 
@@ -135,13 +136,18 @@ class PeakService:
         cm = self.loader.cache_mgr
         sources = [cm.get_oracle_parquet(), cm.get_admissions_parquet()]
         stamp = (base_target,) + tuple((str(p), p.stat().st_mtime) if p and p.exists() else None for p in sources)
-        if self._truth_cache is not None and self._truth_cache[0] == stamp:
-            return self._truth_cache[1]
+        with self._truth_cache_lock:
+            hit = self._truth_cache.get(base_target)
+            if hit is not None and hit[0] == stamp:
+                return hit[1]
         weekly = self.loader._weekly_truth(base_target).sort(["location", "target_end_date"])
         by_loc: Dict[str, List[Tuple[str, float]]] = {}
         for loc, d, v in weekly.select(["location", "target_end_date", "value"]).iter_rows():
             by_loc.setdefault(str(loc), []).append((str(d), float(v)))
-        self._truth_cache = (stamp, by_loc)
+        with self._truth_cache_lock:
+            if len(self._truth_cache) >= 32:
+                self._truth_cache.clear()
+            self._truth_cache[base_target] = (stamp, by_loc)
         return by_loc
 
     def truth_series(self, base_target: str, location: str, start: str, end: str) -> List[Tuple[str, float]]:

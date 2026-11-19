@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import polars as pl
 
+from viz.core.baselines import build_manifest_baselines
+
 logger = logging.getLogger("viz.next")
 
 FAN_MAGIC = b"VZF1"
@@ -62,34 +64,61 @@ def _season_label(season: str) -> str:
 class NextData:
     """Builds and caches the payloads behind /api/next/*."""
 
-    def __init__(self, loader, config, remote_mgr=None, fan_cache_size: int = 48):
+    def __init__(
+        self,
+        loader,
+        config,
+        remote_mgr=None,
+        fan_cache_size: int = 48,
+        hub_meta: Optional[Dict[str, Any]] = None,
+    ):
         self.loader = loader
         self.config = config
         self.remote_mgr = remote_mgr
+        self.hub_meta = dict(hub_meta) if hub_meta else {}
         self._lock = threading.Lock()
         self._fan_cache: "OrderedDict[Tuple, Tuple[Tuple, bytes]]" = OrderedDict()
+        self._fan_inflight: Dict[Tuple, threading.Event] = {}
         self._fan_cache_size = fan_cache_size
         self._meta_cache: Dict[str, Dict[str, Any]] = {}
         self._meta_stamp: Optional[float] = None
         self._truth_cache: Dict[str, Tuple[Tuple, Dict[str, Tuple[List[str], List[float]]]]] = {}
 
     # ------------------------------------------------------------------ stamps
+    def invalidate(self):
+        """Drop all cached Next payloads and metadata after truth or model inventory updates."""
+        with self._lock:
+            self._fan_cache.clear()
+            self._truth_cache.clear()
+            self._meta_cache.clear()
+            self._meta_stamp = None
+
     def _stamp(self) -> Tuple:
-        """Changes whenever forecasts or truth change on disk; every cache here is keyed by it."""
+        """Changes whenever forecasts, truth, or hub round schedules change on disk."""
         cache = self.loader.cache_mgr
         parts: List[Any] = [self.loader._compute_models_mtime()]
-        for getter in (cache.get_oracle_parquet, cache.get_admissions_parquet):
+        for getter in (
+            cache.get_oracle_parquet,
+            cache.get_admissions_parquet,
+            cache.get_as_of_admissions_parquet,
+        ):
             try:
                 p = getter()
                 parts.append(p.stat().st_mtime if p is not None and p.exists() else None)
             except Exception:
                 parts.append(None)
+        tasks_path = self.loader.hub_config_dir / "tasks.json"
+        try:
+            parts.append(tasks_path.stat().st_mtime if tasks_path.exists() else None)
+        except Exception:
+            parts.append(None)
         return tuple(parts)
 
     # ------------------------------------------------------------------ manifest
     def _model_meta(self, model_id: str, info: Dict[str, Any]) -> Dict[str, Any]:
         """The light metadata the picker and labels need; the full record stays behind /api/model-details."""
-        cached = self._meta_cache.get(model_id)
+        with self._lock:
+            cached = self._meta_cache.get(model_id)
         if cached is not None:
             return cached
         raw = info.get("raw_name", model_id)
@@ -120,16 +149,18 @@ class NextData:
         if info.get("is_synthetic"):
             out["abbr"] = str(info.get("name") or model_id)
             out["team"] = ""
-        self._meta_cache[model_id] = out
+        with self._lock:
+            self._meta_cache[model_id] = out
         return out
 
     def manifest(self) -> Dict[str, Any]:
         loader, config = self.loader, self.config
         models = loader.scan_models()
         mtime = loader._compute_models_mtime()
-        if self._meta_stamp != mtime:
-            self._meta_cache.clear()
-            self._meta_stamp = mtime
+        with self._lock:
+            if self._meta_stamp != mtime:
+                self._meta_cache.clear()
+                self._meta_stamp = mtime
 
         target_meta = []
         for t in config.get_weekly_targets():
@@ -207,15 +238,38 @@ class NextData:
         hubs = []
         if self.remote_mgr is not None:
             try:
-                hubs = [{k: h.get(k) for k in ("id", "label", "short_label", "synced", "enabled")} for h in self.remote_mgr.list_hubs()]
+                hubs = [
+                    {k: h.get(k) for k in ("id", "label", "short_label", "synced", "enabled", "compatible")}
+                    for h in self.remote_mgr.list_hubs()
+                ]
             except Exception as exc:
                 logger.debug("hub list: %s", exc)
         repo_ids = [m for m, v in models.items() if v.get("source") != "hub"]
-        return {
-            "hub": loader.base_dir.name,
+        meta_by_id = {m["id"]: {"baseline_model": m["kind"] == "baseline"} for m in model_list}
+        seasons_map = {s["id"]: s["rounds"] for s in seasons}
+        baselines_info = build_manifest_baselines(
+            models,
+            model_meta=meta_by_id,
+            targets=[t["id"] for t in target_meta],
+            seasons_map=seasons_map,
+            config=config,
+            default_target=config.get_default_target(),
+        )
+        default_baseline = (
+            baselines_info.get("default")
+            or config.get_default_baseline(
+                repo_ids or list(models.keys()),
+                target=config.get_default_target(),
+                model_meta=meta_by_id,
+            )
+        )
+        out = {
+            "hub": self.hub_meta.get("label") or loader.base_dir.name,
+            "hub_id": self.hub_meta.get("id"),
             "targets": target_meta,
             "default_target": config.get_default_target(),
-            "baseline": config.get_default_baseline(repo_ids or list(models.keys())),
+            "baseline": default_baseline,
+            "baselines": baselines_info,
             "recommended": config.get_recommended_models(repo_ids),
             "locations": locations,
             "seasons": seasons,
@@ -226,19 +280,30 @@ class NextData:
             # changes whenever forecasts or truth change on disk (the page compares it after a refresh)
             "stamp": "|".join(str(x) for x in self._stamp()),
         }
+        if self.hub_meta.get("description"):
+            out["hub_description"] = self.hub_meta["description"]
+        if self.hub_meta.get("mode"):
+            out["mode"] = self.hub_meta["mode"]
+        if self.hub_meta.get("path"):
+            out["hub_path"] = self.hub_meta["path"]
+        return out
 
     # ------------------------------------------------------------------ observed data
     def _observed(self, target: str) -> Dict[str, Tuple[List[str], List[float]]]:
         """Weekly observed values per location (newest vintage, admissions filling gaps), as old viz draws them."""
         stamp = self._stamp()[1:]
-        hit = self._truth_cache.get(target)
+        with self._lock:
+            hit = self._truth_cache.get(target)
         if hit is not None and hit[0] == stamp:
             return hit[1]
         weekly = self.loader._weekly_truth(target).sort(["location", "target_end_date"])
         out: Dict[str, Tuple[List[str], List[float]]] = {}
         for (loc,), g in weekly.group_by(["location"], maintain_order=True):
             out[str(loc)] = (g.get_column("target_end_date").to_list(), g.get_column("value").to_list())
-        self._truth_cache[target] = (stamp, out)
+        with self._lock:
+            if len(self._truth_cache) >= 32:
+                self._truth_cache.clear()
+            self._truth_cache[target] = (stamp, out)
         return out
 
     # ------------------------------------------------------------------ fan
@@ -300,12 +365,36 @@ class NextData:
         """
         key = (target, season, str(location))
         stamp = self._stamp()
-        with self._lock:
-            hit = self._fan_cache.get(key)
-            if hit is not None and hit[0] == stamp:
-                self._fan_cache.move_to_end(key)
-                return hit[1]
+        cache_key = (key, stamp)
+        while True:
+            with self._lock:
+                hit = self._fan_cache.get(key)
+                if hit is not None and hit[0] == stamp:
+                    self._fan_cache.move_to_end(key)
+                    return hit[1]
+                event = self._fan_inflight.get(cache_key)
+                if event is None:
+                    event = threading.Event()
+                    self._fan_inflight[cache_key] = event
+                    break
+            event.wait()
 
+        try:
+            payload = self._build_fan_payload(target, season, location)
+            if payload is not None:
+                with self._lock:
+                    self._fan_cache[key] = (stamp, payload)
+                    self._fan_cache.move_to_end(key)
+                    while len(self._fan_cache) > self._fan_cache_size:
+                        self._fan_cache.popitem(last=False)
+            return payload
+        finally:
+            with self._lock:
+                if self._fan_inflight.get(cache_key) is event:
+                    self._fan_inflight.pop(cache_key, None)
+            event.set()
+
+    def _build_fan_payload(self, target: str, season: str, location: str) -> Optional[bytes]:
         loader = self.loader
         rounds = sorted(loader.get_dates_for_season(season))
         if not rounds:
@@ -352,17 +441,31 @@ class NextData:
         collected = pl.collect_all(frames) if frames else []
         present = [(mid, df) for mid, df in zip(ids, collected) if not df.is_empty()]
 
-        quantiles = sorted({float(q) for _, df in present for q in df.get_column("q").unique().to_list() if q is not None})
-        max_h = max((int(df.get_column("horizon").max()) for _, df in present), default=3)
-        horizons = list(range(0, max(max_h, 3) + 1))
-        R, H, Q = len(rounds), len(horizons), len(quantiles)
-        q_index = {q: i for i, q in enumerate(quantiles)}
-
         d_all, v_all = self._observed(target).get(str(location), ([], []))
         obs = [(d, v) for d, v in zip(d_all, v_all) if start <= d <= end]
         # the scale of the season before, for a season that has hardly begun
         prev_start, prev_end = loader.get_season_calendar_bounds(int(season[:4]) - 1)
         prior = [v for d, v in zip(d_all, v_all) if prev_start <= d <= prev_end]
+
+        # Trim trailing rounds strictly beyond both observed truth and forecasts for this target
+        latest_obs = obs[-1][0] if obs else None
+        latest_model_round = max(
+            (str(df.get_column("reference_date").max())[:10] for _, df in present),
+            default=None,
+        )
+        data_caps = [d for d in (latest_obs, latest_model_round) if d]
+        if data_caps:
+            cap_round = max(data_caps)
+            trimmed = [r for r in rounds if r <= cap_round]
+            if trimmed:
+                rounds = trimmed
+                round_index = {r: i for i, r in enumerate(rounds)}
+
+        quantiles = sorted({float(q) for _, df in present for q in df.get_column("q").unique().to_list() if q is not None})
+        max_h = max((int(df.get_column("horizon").max()) for _, df in present), default=3)
+        horizons = list(range(0, max(max_h, 3) + 1))
+        R, H, Q = len(rounds), len(horizons), len(quantiles)
+        q_index = {q: i for i, q in enumerate(quantiles)}
 
         body = [np.asarray([v for _, v in obs], dtype="<f4")]
         offset = len(obs)
@@ -394,11 +497,4 @@ class NextData:
         }
         head = json.dumps(header, separators=(",", ":")).encode("utf-8")
         head += b" " * (-len(head) % 4)
-        payload = FAN_MAGIC + struct.pack("<I", len(head)) + head + np.concatenate(body).tobytes()
-
-        with self._lock:
-            self._fan_cache[key] = (stamp, payload)
-            self._fan_cache.move_to_end(key)
-            while len(self._fan_cache) > self._fan_cache_size:
-                self._fan_cache.popitem(last=False)
-        return payload
+        return FAN_MAGIC + struct.pack("<I", len(head)) + head + np.concatenate(body).tobytes()

@@ -102,3 +102,53 @@ test("TimeNav: step, zoom, reset, destroy (reduced motion: targets apply at once
   nav.destroy();
   assert.ok(listeners.every((l) => l.signal.aborted));
 });
+
+test("side scroll stops hard at the latest round when no next season exists, while cmd+scroll still pans", () => {
+  globalThis.matchMedia = () => ({ matches: false });
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  const handlers = {};
+  const surface = {
+    clientWidth: 1440,
+    style: {},
+    addEventListener: (type, fn) => { (handlers[type] ||= []).push(fn); },
+  };
+  const dates = Array.from({ length: 8 }, (_, i) => S0 + (11 + i) * WEEK);
+  const wheel = (deltaX, opts = {}) => handlers.wheel.forEach((fn) => fn({
+    target: surface, deltaX, deltaY: 0, deltaMode: 0,
+    metaKey: false, ctrlKey: false, shiftKey: false,
+    timeStamp: 100, preventDefault() {},
+    ...opts,
+  }));
+
+  // Without a next season: hard-stopped at dates.length - 1
+  let nav;
+  nav = new TimeNav({
+    surface, dates, index: dates.length - 1, season: SEASON,
+    scale: () => linear(nav.domain(), [64, 1440 - 168]),
+    canCross: () => false,
+  });
+  wheel(80, { timeStamp: 100 });
+  wheel(80, { timeStamp: 116 });
+  assert.equal(nav.T, dates.length - 1, "does not overshoot past latest round");
+  assert.equal(nav.pull, 0);
+  assert.equal(nav.busy, false);
+
+  // Command + side-scroll still pans smoothly across the season
+  wheel(80, { metaKey: true, timeStamp: 140 });
+  assert.ok(nav.P > 0, "cmd+scroll pans right");
+  assert.equal(nav.T, dates.length - 1, "date stays put during cmd+pan");
+  nav.destroy();
+
+  // With a neighbouring season: pull still stretches past the end to cross
+  let crossNav;
+  crossNav = new TimeNav({
+    surface, dates, index: dates.length - 1, season: SEASON,
+    scale: () => linear(crossNav.domain(), [64, 1440 - 168]),
+    canCross: (d) => d > 0,
+  });
+  wheel(80, { timeStamp: 200 });
+  assert.ok(crossNav.T > dates.length - 1, "rubber-bands when crossing is available");
+  assert.ok(crossNav.pull > 0);
+  crossNav.destroy();
+});

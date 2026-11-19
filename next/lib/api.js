@@ -11,6 +11,38 @@ const TOL = 1e-6; // quantile levels are matched within this
 // interval level → its lower and upper quantile
 const LEVEL_Q = (level) => [(1 - level) / 2, 1 - (1 - level) / 2];
 
+let activeHubId = typeof location !== "undefined" ? (new URLSearchParams(location.search).get("hub") || null) : null;
+
+/** Current workspace hub id (from `?hub=` or the loaded manifest). */
+export function getActiveHub() {
+  return activeHubId;
+}
+
+/** Set the active workspace hub id and clear manifest/fan caches. */
+export function setActiveHub(id) {
+  activeHubId = id ? String(id) : null;
+  manifestP = null;
+  fans.clear();
+}
+
+/**
+ * Append `workspace=<activeHubId>` to `/api/...` URLs (excluding `/api/workspace*`) without altering
+ * existing query params such as `/api/remote/*`'s `hub=`.
+ * @param {string} url
+ * @returns {string}
+ */
+export function apiUrl(url) {
+  if (!activeHubId || typeof url !== "string" || !url.startsWith("/api/")) return url;
+  if (url === "/api/workspace" || url.startsWith("/api/workspace/") || url.startsWith("/api/workspace?")) return url;
+  const qIdx = url.indexOf("?");
+  if (qIdx !== -1) {
+    const params = new URLSearchParams(url.slice(qIdx + 1));
+    if (params.has("workspace")) return url;
+    return `${url}&workspace=${encodeURIComponent(activeHubId)}`;
+  }
+  return `${url}?workspace=${encodeURIComponent(activeHubId)}`;
+}
+
 /* ================================================================ manifest */
 
 /**
@@ -37,9 +69,12 @@ export function indexManifest(json) {
   const seasons = json.seasons || [];
   const seasonById = byId(seasons);
   const allRounds = Object.freeze(
-    seasons.flatMap((s) => s.rounds.map((iso) => Object.freeze({ season: s.id, iso, t: parseIso(iso) }))).sort((a, b) => a.t - b.t),
+    seasons.flatMap((s) => (s.rounds || []).map((iso) => Object.freeze({ season: s.id, iso, t: parseIso(iso) }))).sort((a, b) => a.t - b.t),
   );
-  const spans = seasons.map((s) => ({ id: s.id, r0: parseIso(s.rounds[0]), r1: parseIso(s.rounds.at(-1)), s0: parseIso(s.start), s1: parseIso(s.end) }));
+  const spans = seasons.map((s) => {
+    const rs = s.rounds || [];
+    return { id: s.id, r0: parseIso(rs[0]), r1: parseIso(rs.at(-1)), s0: parseIso(s.start), s1: parseIso(s.end) };
+  });
 
   /** The season whose rounds span `iso`, else the one whose calendar [start, end] holds it, else null. */
   function seasonOf(iso) {
@@ -82,12 +117,19 @@ export function indexManifest(json) {
     return name;
   }
 
+  /** Default baseline model ID for a given (target, season), falling back to hub default. */
+  function baselineFor(target, season) {
+    const byTS = target && season ? json.baselines?.by_target_season?.[target]?.[season] : null;
+    const byT = target ? json.baselines?.by_target?.[target] : null;
+    return byTS || byT || json.baselines?.default || json.baseline || null;
+  }
+
   return {
     ...json,
     modelById, hubById, seasonById,
     locationById: byId(json.locations),
     targetById: byId(json.targets),
-    allRounds, seasonOf, label, sourceLabel,
+    allRounds, seasonOf, label, sourceLabel, baselineFor,
   };
 }
 
@@ -97,12 +139,20 @@ let manifestP = null;
  * @returns {Promise<Manifest>}
  */
 export function loadManifest() {
-  return (manifestP ||= getJson("/api/next/manifest").then(indexManifest, (e) => { manifestP = null; throw e; }));
+  return (manifestP ||= getJson("/api/next/manifest").then((json) => {
+    if (!activeHubId && json?.hub_id) activeHubId = json.hub_id;
+    return indexManifest(json);
+  }, (e) => { manifestP = null; throw e; }));
 }
 
 async function getJson(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  const targetUrl = apiUrl(url);
+  const r = await fetch(targetUrl);
+  if (!r.ok) {
+    const e = new Error(`${targetUrl}: ${r.status}`);
+    e.status = r.status;
+    throw e;
+  }
   return r.json();
 }
 
@@ -305,7 +355,7 @@ export function loadFan(target, season, location) {
   const hit = fans.get(key);
   if (hit) { fans.delete(key); fans.set(key, hit); return hit; }
   const q = new URLSearchParams({ target, season, location });
-  const p = fetch(`/api/next/fan?${q}`)
+  const p = fetch(apiUrl(`/api/next/fan?${q}`))
     .then((r) => { if (!r.ok) throw new Error(`fan ${season} ${location}: ${r.status}`); return r.arrayBuffer(); })
     .then(decodeFan);
   p.catch(() => { if (fans.get(key) === p) fans.delete(key); });

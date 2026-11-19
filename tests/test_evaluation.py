@@ -4,13 +4,21 @@ Tests scope resolution, model loading, common task intersection,
 custom baseline override, and output parity.
 """
 
-import unittest
 from pathlib import Path
-from viz.core.evaluation import EvaluationEngine, EvaluationParams
+import sys
+import unittest
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from conftest import resolve_sandbox_hub  # noqa: E402
+from viz.core.evaluation import EvaluationEngine, EvaluationParams  # noqa: E402
+
+BASE_DIR = resolve_sandbox_hub()
 
 
+@unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
 class TestEvaluation(unittest.TestCase):
     def setUp(self):
         self.engine = EvaluationEngine(BASE_DIR)

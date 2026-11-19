@@ -97,7 +97,8 @@ export function openLocationPicker(anchor, { manifest, store }) {
     onClose: () => offs.forEach((off) => off()),
     content(body, layer) {
       const input = h("input", { type: "search", placeholder: `Search ${locs.length} locations`, "aria-label": "Search locations", autocomplete: "off", spellcheck: "false" });
-      const recent = (storage.get(PLACES_KEY, []) || []).filter((id) => id !== current && manifest.locationById.has(id)).slice(0, RECENT);
+      const storedPlaces = (manifest.hub_id ? storage.get(`viz.h.${manifest.hub_id}.places`) : null) ?? storage.get(PLACES_KEY, []);
+      const recent = (Array.isArray(storedPlaces) ? storedPlaces : []).filter((id) => id !== current && manifest.locationById.has(id)).slice(0, RECENT);
       const place = (l, cls, label) => h("button", {
         type: "button", class: cls, "data-loc": l.id, title: l.name || l.id, "aria-label": l.name || l.id,
         "aria-current": l.id === current ? "true" : null,

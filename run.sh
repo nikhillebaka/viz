@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Launch the FluSight Sandbox dashboard.
-#   Usage: ./viz/run.sh [PORT] [HOST]        (defaults: 8501 127.0.0.1)
-# Run ./viz/setup.sh once first.
+# Launch the viz Hubverse dashboard.
+#   Usage:
+#     ./run.sh [PORT] [HOST] [EXTRA_FLAGS...]    (defaults: 8501 127.0.0.1)
+#     ./run.sh --hub /path/to/hub --port 8600
+# Run ./setup.sh once first.
 # ==============================================================================
 
 set -e
@@ -24,18 +26,31 @@ elif [ -f "$ROOT_DIR/env/bin/python" ]; then
 elif command -v python3 &> /dev/null; then
     PYTHON_BIN="python3"
 else
-    echo "ERROR: Could not locate Python. Run ./viz/setup.sh first."
+    echo "ERROR: Could not locate Python. Run ./setup.sh first."
     exit 1
 fi
 
 if ! "$PYTHON_BIN" -c "import polars, pyarrow, yaml" &> /dev/null; then
     echo "ERROR: viz dependencies are not installed for $PYTHON_BIN."
-    echo "Run ./viz/setup.sh first (or: pip install -r viz/requirements.txt)."
+    echo "Run ./setup.sh first (or: pip install -r \"$DIR/requirements.txt\")."
     exit 1
 fi
 
-PORT="${1:-8501}"
-HOST="${2:-127.0.0.1}"
+if [ $# -gt 0 ] && [[ "$1" == -* ]]; then
+    echo "Starting viz (the server prints its URL once it is listening)..."
+    exec "$PYTHON_BIN" "$DIR/server.py" "$@"
+fi
+
+PORT="8501"
+HOST="127.0.0.1"
+if [ $# -gt 0 ]; then
+    PORT="$1"
+    shift
+fi
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+    HOST="$1"
+    shift
+fi
 
 echo "Starting viz on port ${PORT} (the server prints its URL once it is listening)..."
-exec "$PYTHON_BIN" "$DIR/server.py" --port "$PORT" --host "$HOST"
+exec "$PYTHON_BIN" "$DIR/server.py" --port "$PORT" --host "$HOST" "$@"

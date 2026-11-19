@@ -90,10 +90,14 @@ class SyntheticEnsembleManager:
     and filesystem export to 'local-output/synthetic/'.
     """
 
-    def __init__(self, base_dir: Path, data_loader: Any = None):
+    def __init__(self, base_dir: Path, data_loader: Any = None, synthetic_dir: Optional[Path] = None):
         self.base_dir = Path(base_dir).resolve()
         self.data_loader = data_loader
-        self.synthetic_dir = self.base_dir / "local-output" / "synthetic"
+        self.synthetic_dir = (
+            Path(synthetic_dir).resolve()
+            if synthetic_dir is not None
+            else (self.base_dir / "local-output" / "synthetic").resolve()
+        )
         self._session_ensembles: Dict[str, SyntheticEnsembleConfig] = {}
         self._cached_forecasts: Dict[Tuple[str, Tuple[str, ...]], pl.DataFrame] = {}
         self._lock = threading.Lock()
@@ -101,12 +105,10 @@ class SyntheticEnsembleManager:
         # Discover previously saved synthetic ensembles on disk
         self._discover_saved_ensembles()
 
-    def _discover_saved_ensembles(self):
-        """Scan local-output/synthetic/ for persisted ensemble configurations."""
-        if not self.synthetic_dir.exists():
+    def _discover_from_dir(self, directory: Path):
+        if not directory.exists():
             return
-
-        for p in self.synthetic_dir.iterdir():
+        for p in directory.iterdir():
             if p.is_dir() and not p.name.startswith("."):
                 manifest = p / "synthetic_recipe.json"
                 if manifest.exists():
@@ -121,6 +123,13 @@ class SyntheticEnsembleManager:
                             self._session_ensembles[config.id] = config
                     except Exception as exc:
                         logger.warning("Failed to load synthetic recipe %s: %s", manifest, exc)
+
+    def _discover_saved_ensembles(self):
+        """Scan synthetic_dir (and hub local-output/synthetic read-only if different) for persisted recipes."""
+        hub_synth = (self.base_dir / "local-output" / "synthetic").resolve()
+        if hub_synth != self.synthetic_dir.resolve():
+            self._discover_from_dir(hub_synth)
+        self._discover_from_dir(self.synthetic_dir)
 
     def register_ensemble(self, config: SyntheticEnsembleConfig) -> SyntheticEnsembleConfig:
         """Register a new session ensemble."""

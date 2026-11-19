@@ -10,18 +10,32 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import threading
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
 import polars as pl
 
+from viz.core.parallel import ordered_map
+from viz.core.truth import (
+    ADMISSIONS_KEYS,
+    NULL_VALUES,
+    ORACLE_KEYS,
+    PRIORITY_ARCHIVE,
+    PRIORITY_PEER,
+    PRIORITY_REMOTE,
+    PRIORITY_REPO,
+    TruthSource,
+    is_flu_hosp_target,
+    merge_truth_frames,
+    reconcile_truth_sources,
+    reconcile_vintages,
+)
 from viz.remote.store import RemoteStore
 
 logger = logging.getLogger("viz.cache")
 
-NULL_VALUES = ["", "NA", "null", "NaN", "None", "NULL"]
-ORACLE_KEYS = ["target", "target_end_date", "location", "horizon", "output_type", "output_type_id"]
-ADMISSIONS_KEYS = ["target", "location", "target_end_date", "horizon"]
+SNAPSHOT_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.csv$")
 
 
 def filter_quantile_rows(df: pl.DataFrame) -> pl.DataFrame:
@@ -29,27 +43,6 @@ def filter_quantile_rows(df: pl.DataFrame) -> pl.DataFrame:
     if "output_type" in df.columns:
         df = df.filter(pl.col("output_type") == "quantile")
     return df.with_columns(pl.col("output_type_id").cast(pl.Float64).round(3))
-
-
-def merge_truth_frames(frames: List[pl.DataFrame], keys: List[str]) -> pl.DataFrame:
-    """
-    Union truth tables so every observation comes from the most recent source and older sources only fill
-    gaps. Frames are ordered oldest to newest; when an `as_of` column exists the newest vintage wins per key
-    regardless of frame order. The result has exactly one row per key, so series never double up or break.
-    """
-    frames = [f for f in frames if f is not None and not f.is_empty()]
-    if not frames:
-        return pl.DataFrame()
-    if len(frames) == 1:
-        return frames[0]
-    tagged = [f.with_columns(pl.lit(i).alias("_src")) for i, f in enumerate(frames)]
-    df = pl.concat(tagged, how="diagonal_relaxed")
-    order = ["_src"]
-    if "as_of" in df.columns:
-        df = df.with_columns(pl.col("as_of").cast(pl.String).fill_null(""))
-        order = ["as_of", "_src"]
-    keys = [k for k in keys if k in df.columns]
-    return df.sort(order).unique(subset=keys, keep="last", maintain_order=True).drop("_src")
 
 
 class LockRegistry:
@@ -105,7 +98,20 @@ class ParquetCacheManager:
     mtime-based cache validation, per-model mutexes, and atomic filesystem renames.
     """
 
-    def __init__(self, base_dir: Path, include_remote: bool = True):
+    def __init__(
+        self,
+        base_dir: Path,
+        include_remote: bool = True,
+        cache_dir: Optional[Path] = None,
+        surveillance_dir: Optional[Path] = None,
+        seed_dir: Optional[Path] = None,
+        remote_dir: Optional[Path] = None,
+        hub_models_cache_dir: Optional[Path] = None,
+        peer_truth_provider: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+        allowed_targets_provider: Optional[Callable[[], Set[str]]] = None,
+        allowed_locations_provider: Optional[Callable[[], Set[str]]] = None,
+        remote_store: Optional[RemoteStore] = None,
+    ):
         self.base_dir = Path(base_dir).resolve()
         # Hub data synced from S3 is only used by the dashboard; the CLI scores repository models only
         self.include_remote = include_remote
@@ -123,14 +129,36 @@ class ParquetCacheManager:
         else:
             self.viz_dir = self.base_dir / "viz"
 
-        self.surveillance_dir = self.viz_dir / "data" / "surveillance"
-        self.cache_dir = self.viz_dir / ".cache"
+        self.surveillance_dir = (
+            Path(surveillance_dir).resolve()
+            if surveillance_dir is not None
+            else (self.viz_dir / "data" / "surveillance")
+        )
+        self.cache_dir = (
+            Path(cache_dir).resolve()
+            if cache_dir is not None
+            else (self.viz_dir / ".cache")
+        )
+        if seed_dir is not None:
+            self.seed_dir = Path(seed_dir).resolve()
+        elif (self.viz_dir / "data" / "seed").is_dir():
+            self.seed_dir = self.viz_dir / "data" / "seed"
+        else:
+            from viz.core.paths import APP_DIR
+            self.seed_dir = APP_DIR / "data" / "seed"
 
         self.models_cache_dir = self.cache_dir / "models"
         self.local_models_cache_dir = self.cache_dir / "local_models"
-        self.hub_models_cache_dir = self.cache_dir / "hub_models"
+        self.hub_models_cache_dir = (
+            Path(hub_models_cache_dir).resolve()
+            if hub_models_cache_dir is not None
+            else (self.cache_dir / "hub_models")
+        )
         self.targets_cache_dir = self.cache_dir / "targets"
-        self.remote_store = RemoteStore(self.cache_dir)
+        self.remote_store = remote_store if remote_store is not None else RemoteStore(self.cache_dir, root=remote_dir)
+        self._peer_truth_provider = peer_truth_provider
+        self._allowed_targets_provider = allowed_targets_provider
+        self._allowed_locations_provider = allowed_locations_provider
 
         self._model_locks = LockRegistry()
         self._target_locks = LockRegistry()
@@ -150,15 +178,44 @@ class ParquetCacheManager:
         self.targets_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
+    def _scan_source_files(source_dir: Path) -> Tuple[List[Path], Dict[str, Any]]:
+        """Single-pass os.scandir collection of .csv/.parquet files plus fingerprint metadata."""
+        entries: List[Tuple[str, Path, os.stat_result]] = []
+        try:
+            with os.scandir(source_dir) as it:
+                for ent in it:
+                    if ent.name.startswith("."):
+                        continue
+                    ext = os.path.splitext(ent.name)[1].lower()
+                    if ext not in (".csv", ".parquet"):
+                        continue
+                    if ent.is_file():
+                        st = ent.stat()
+                        entries.append((ent.name, Path(ent.path), st))
+        except OSError:
+            return [], {"count": 0, "max_mtime": 0.0, "total_size": 0}
+
+        if not entries:
+            return [], {"count": 0, "max_mtime": 0.0, "total_size": 0}
+        # CSVs sorted then Parquets sorted to match prior ordering cleanly
+        entries.sort(key=lambda item: (0 if item[1].suffix.lower() == ".csv" else 1, item[0]))
+        files = [item[1] for item in entries]
+        fp = {
+            "count": len(entries),
+            "max_mtime": max(item[2].st_mtime for item in entries),
+            "total_size": sum(item[2].st_size for item in entries),
+        }
+        return files, fp
+
+    @staticmethod
     def _compute_dir_fingerprint(csv_files: List[Path]) -> Dict[str, Any]:
         if not csv_files:
             return {"count": 0, "max_mtime": 0.0, "total_size": 0}
-        max_mtime = max(f.stat().st_mtime for f in csv_files)
-        total_size = sum(f.stat().st_size for f in csv_files)
+        stats = [f.stat() for f in csv_files]
         return {
             "count": len(csv_files),
-            "max_mtime": max_mtime,
-            "total_size": total_size,
+            "max_mtime": max(st.st_mtime for st in stats),
+            "total_size": sum(st.st_size for st in stats),
         }
 
     def _is_cache_fresh(self, pq_path: Path, meta_path: Path, fingerprint: Dict[str, Any]) -> bool:
@@ -167,13 +224,27 @@ class ParquetCacheManager:
         try:
             with open(meta_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            return (
-                saved.get("count") == fingerprint["count"]
-                and abs(saved.get("max_mtime", 0.0) - fingerprint["max_mtime"]) < 1e-3
-                and saved.get("total_size") == fingerprint["total_size"]
-            )
+            if (
+                saved.get("count") != fingerprint["count"]
+                or abs(saved.get("max_mtime", 0.0) - fingerprint["max_mtime"]) >= 1e-3
+                or saved.get("total_size") != fingerprint["total_size"]
+            ):
+                return False
+            if "paths" in fingerprint and saved.get("paths") != fingerprint["paths"]:
+                return False
+            return True
         except Exception:
             return False
+
+    def active_remote_hub_ids(self) -> List[str]:
+        """Remote S3 hubs enabled AND compatible with the active hub's targets/locations."""
+        if not self.include_remote:
+            return []
+        targets = self._allowed_targets_provider() if self._allowed_targets_provider else None
+        locations = self._allowed_locations_provider() if self._allowed_locations_provider else None
+        if targets or locations:
+            return self.remote_store.compatible_hub_ids(targets=targets, locations=locations)
+        return self.remote_store.active_hub_ids()
 
     def hub_key(self, model_id: str) -> Optional[Tuple[str, str]]:
         """Split a hub model key like 'flusight:UMass-flusion' into (hub_id, model). None for other models."""
@@ -182,7 +253,7 @@ class ParquetCacheManager:
         hub_id, _, name = model_id.partition(":")
         if hub_id in ("local", "synthetic") or not name or "/" in name or "\\" in name or name.startswith("."):
             return None
-        if hub_id not in self.remote_store.active_hub_ids():
+        if hub_id not in self.active_remote_hub_ids():
             return None
         return hub_id, name
 
@@ -217,13 +288,9 @@ class ParquetCacheManager:
         pq_path = dest_dir / f"{file_stem}.parquet"
         meta_path = dest_dir / f"{file_stem}.meta.json"
 
-        csv_files = sorted(source_dir.glob("*.csv"))
-        parquet_files = sorted(source_dir.glob("*.parquet"))
-        source_files = csv_files + parquet_files
+        source_files, fp = self._scan_source_files(source_dir)
         if not source_files:
             return None
-
-        fp = self._compute_dir_fingerprint(source_files)
 
         # Quick check before lock
         if self._is_cache_fresh(pq_path, meta_path, fp):
@@ -359,10 +426,9 @@ class ParquetCacheManager:
         if not source_dir.is_dir():
             return None
 
-        source_files = sorted(source_dir.glob("*.csv")) + sorted(source_dir.glob("*.parquet"))
+        source_files, fp = self._scan_source_files(source_dir)
         if not source_files:
             return None
-        fp = self._compute_dir_fingerprint(source_files)
         pq_path = dest_dir / f"{file_stem}.peak.parquet"
         meta_path = dest_dir / f"{file_stem}.peak.meta.json"
 
@@ -465,7 +531,10 @@ class ParquetCacheManager:
         pq_path = self.targets_cache_dir / f"{cache_name}.parquet"
         meta_path = self.targets_cache_dir / f"{cache_name}.meta.json"
 
-        fp = self._compute_dir_fingerprint(existing_sources)
+        fp = {
+            **self._compute_dir_fingerprint(existing_sources),
+            "paths": [str(f) for f in existing_sources],
+        }
         if self._is_cache_fresh(pq_path, meta_path, fp):
             return pq_path
 
@@ -480,6 +549,8 @@ class ParquetCacheManager:
             try:
                 df = builder_fn()
                 if df is None or df.is_empty():
+                    pq_path.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
                     return None
                 df.write_parquet(tmp_pq, compression="zstd")
                 with open(tmp_meta, "w", encoding="utf-8") as f_meta:
@@ -504,69 +575,135 @@ class ParquetCacheManager:
             self._missing_logged.add(key)
             logger.info("Surveillance file %s not found; run `python viz/rebuild_surveillance.py` to fetch it.", path)
 
-    def get_oracle_parquet(self) -> Optional[Path]:
-        """Get or create cached Parquet file for target-data/oracle-output (.parquet or .csv) atomically."""
-        oracle_pq = self.target_data_dir / "oracle-output.parquet"
-        oracle_csv = self.target_data_dir / "oracle-output.csv"
-        oracle_source = oracle_pq if oracle_pq.exists() else (oracle_csv if oracle_csv.exists() else None)
-        hub_files = self._hub_truth_files("oracle")
-        if not oracle_source and not hub_files:
+    def _allowed_scope(self) -> Tuple[Optional[Set[str]], Optional[Set[str]]]:
+        targets = self._allowed_targets_provider() if self._allowed_targets_provider else None
+        locs = self._allowed_locations_provider() if self._allowed_locations_provider else None
+        return (targets or None), (locs or None)
+
+    def _read_truth_file(self, path: Path) -> Optional[pl.DataFrame]:
+        try:
+            if path.suffix.lower() == ".parquet":
+                return pl.read_parquet(path)
+            return pl.read_csv(
+                path,
+                schema_overrides={
+                    "location": pl.String,
+                    "horizon": pl.Int32,
+                    "oracle_value": pl.Float64,
+                    "value": pl.Float64,
+                    "target_end_date": pl.String,
+                    "date": pl.String,
+                    "target": pl.String,
+                    "as_of": pl.String,
+                    "output_type": pl.String,
+                    "output_type_id": pl.String,
+                },
+                null_values=NULL_VALUES,
+                ignore_errors=False,
+            )
+        except Exception as exc:
+            logger.warning("Failed reading truth file %s: %s", path, exc)
             return None
 
-        def _build_oracle():
-            if oracle_source is None:
-                return None
-            if oracle_source.suffix.lower() == ".parquet":
-                df = pl.read_parquet(oracle_source)
-            else:
-                df = pl.read_csv(
-                    oracle_source,
-                    schema_overrides={
-                        "location": pl.String,
-                        "horizon": pl.Int32,
-                        "oracle_value": pl.Float64,
-                        "target_end_date": pl.String,
-                        "target": pl.String,
-                        "as_of": pl.String,
-                    },
-                    null_values=NULL_VALUES,
-                    ignore_errors=False,
-                )
-            cols = [
-                pl.col("location").cast(pl.String),
-                pl.col("target_end_date").cast(pl.String),
-                pl.col("oracle_value").cast(pl.Float64),
-            ]
-            if "horizon" in df.columns:
-                cols.append(pl.col("horizon").fill_null(0).cast(pl.Int32))
-            else:
-                cols.append(pl.lit(0).cast(pl.Int32).alias("horizon"))
-            if "target" in df.columns:
-                cols.append(pl.col("target").cast(pl.String))
-            return df.with_columns(cols)
-
-        if not hub_files:
-            return self._build_cached_table("oracle", [oracle_source], _build_oracle)
-
-        def _build_merged_oracle():
-            # Newest as_of vintage wins per observation; the repository oracle fills anything the hub lacks
-            frames = [_build_oracle()] + [pl.read_parquet(p) for p in hub_files]
-            return merge_truth_frames(frames, ORACLE_KEYS)
-
-        sources = ([oracle_source] if oracle_source else []) + hub_files
-        return self._build_cached_table("oracle_hub", sources, _build_merged_oracle)
-
-    def _hub_truth_files(self, kind: str) -> List[Path]:
-        """Truth tables copied from active hubs (empty for the CLI or when no hub is synced)."""
-        if not self.include_remote:
+    def _peer_truth_descriptors(self) -> List[Dict[str, Any]]:
+        if not self._peer_truth_provider:
             return []
-        return self.remote_store.active_truth_files(kind)
+        return list(self._peer_truth_provider())
+
+    def _remote_oracle_inferred_as_of(self, hub_id: str, kind: str) -> Optional[str]:
+        man = self.remote_store.load_manifest(hub_id)
+        entry = (man.get("truth") or {}).get(kind) or {}
+        return entry.get("as_of") or ((entry.get("last_modified") or "")[:10] or None) or entry.get("max_date")
 
     @staticmethod
-    def _order_by_recency(frames: List[pl.DataFrame], date_col: str = "target_end_date") -> List[pl.DataFrame]:
-        """Order truth frames oldest to newest by their latest observation, so the freshest source wins."""
-        frames = [f for f in frames if f is not None and not f.is_empty()]
-        return sorted(frames, key=lambda f: str(f.get_column(date_col).max() or ""))
+    def _first_existing(paths: List[Path]) -> Optional[Path]:
+        return next((p for p in paths if p.exists() and p.is_file()), None)
+
+    def get_oracle_parquet(self) -> Optional[Path]:
+        """Reconcile oracle truth across the active repo, compatible S3 hubs, and sibling local hubs."""
+        sources: List[TruthSource] = []
+
+        repo_oracle = self._first_existing([
+            self.target_data_dir / "oracle-output.parquet",
+            self.target_data_dir / "oracle-output.csv",
+        ])
+        if repo_oracle is not None:
+            sources.append(TruthSource(source_id="repo", label="repo", kind="oracle", priority=PRIORITY_REPO, path=repo_oracle))
+        else:
+            repo_ts = self._first_existing([
+                self.target_data_dir / "time-series.parquet",
+                self.target_data_dir / "time-series.csv",
+            ])
+            if repo_ts is not None:
+                sources.append(TruthSource(source_id="repo", label="repo", kind="time_series", priority=PRIORITY_REPO, path=repo_ts))
+
+        remote_ids = self.active_remote_hub_ids()
+        for hub_id in remote_ids:
+            p = self.remote_store.truth_path(hub_id, "oracle")
+            if p.exists():
+                sources.append(TruthSource(
+                    source_id=f"remote:{hub_id}",
+                    label=hub_id,
+                    kind="oracle",
+                    priority=PRIORITY_REMOTE,
+                    path=p,
+                    inferred_as_of=self._remote_oracle_inferred_as_of(hub_id, "oracle"),
+                ))
+
+        for peer in self._peer_truth_descriptors():
+            p_base = Path(peer["base_dir"]) / "target-data"
+            p_oracle = self._first_existing([
+                p_base / "oracle-output.parquet",
+                p_base / "oracle-output.csv",
+                p_base / "time-series.parquet",
+                p_base / "time-series.csv",
+            ])
+            if p_oracle is not None:
+                sources.append(TruthSource(
+                    source_id=f"peer:{peer['hub_id']}",
+                    label=peer["label"],
+                    kind="oracle",
+                    priority=PRIORITY_PEER,
+                    path=p_oracle,
+                ))
+
+        if not sources:
+            return None
+
+        has_external = any(s.priority < PRIORITY_REPO for s in sources)
+        cache_name = "oracle_hub" if has_external else "oracle"
+        file_paths = [s.path for s in sources if s.path is not None]
+        allowed_targets, allowed_locations = self._allowed_scope()
+
+        def _build_reconciled() -> Optional[pl.DataFrame]:
+            from viz.core.config import VizConfig
+            default_target = VizConfig(self.base_dir).get_default_target()
+            self.warning_registry.clear("truth")
+            pairs: List[Tuple[TruthSource, pl.DataFrame]] = []
+            for src in sources:
+                if src.path is None:
+                    continue
+                df = self._read_truth_file(src.path)
+                if df is not None and not df.is_empty():
+                    pairs.append((src, df))
+            if not pairs:
+                return None
+            return reconcile_truth_sources(
+                pairs,
+                ORACLE_KEYS,
+                allowed_targets=allowed_targets,
+                allowed_locations=allowed_locations,
+                filter_external_only=True,
+                collapse_constant_horizons=True,
+                target_default=default_target,
+                conflict_callback=lambda msg: self.warning_registry.add_warning("truth", msg),
+            )
+
+        return self._build_cached_table(cache_name, file_paths, _build_reconciled)
+
+    def _hub_truth_files(self, kind: str) -> List[Path]:
+        """Truth tables copied from active compatible hubs (empty for the CLI or when no hub is synced)."""
+        return self.remote_store.active_truth_files(kind, hub_ids=self.active_remote_hub_ids())
 
     def scan_oracle(self) -> Optional[pl.LazyFrame]:
         """Return a Polars LazyFrame for oracle truth."""
@@ -576,97 +713,92 @@ class ParquetCacheManager:
         return None
 
     def get_admissions_parquet(self, target: Optional[str] = None) -> Optional[Path]:
-        """Get or create cached Parquet for target-hospital-admissions.csv atomically."""
+        """Reconcile admissions surveillance across repo target-data, surveillance archives, S3 hubs, and sibling hubs."""
         if not target:
             from viz.core.config import VizConfig
             target = VizConfig(self.base_dir).get_default_target()
 
-        # 1. Prefer self-contained viz/data/surveillance/
-        adm_csv = self.surveillance_dir / "target-hospital-admissions.csv"
-        if not adm_csv.exists():
-            # 2. Check legacy repo root auxiliary-data/surveillance/
-            legacy_csv = self.auxiliary_data_dir / "surveillance" / "target-hospital-admissions.csv"
-            if legacy_csv.exists():
-                adm_csv = legacy_csv
+        sources: List[TruthSource] = []
+        repo_adm = self.target_data_dir / "target-hospital-admissions.csv"
+        if repo_adm.is_file():
+            sources.append(TruthSource(source_id="repo_adm", label="repo", kind="admissions", priority=PRIORITY_REPO, path=repo_adm))
+        legacy_adm = self.auxiliary_data_dir / "surveillance" / "target-hospital-admissions.csv"
+        if legacy_adm.is_file():
+            sources.append(TruthSource(source_id="repo_aux_adm", label="repo archive", kind="admissions", priority=PRIORITY_REPO - 5, path=legacy_adm))
 
-        if adm_csv.exists():
-            def _build_from_adm():
-                df = pl.read_csv(
-                    adm_csv,
-                    schema_overrides={
-                        "location": pl.String,
-                        "date": pl.String,
-                        "value": pl.Float64,
-                    },
-                    null_values=NULL_VALUES,
-                    ignore_errors=False,
-                )
-                return (
-                    df.with_columns([
-                        pl.col("location").cast(pl.String),
-                        pl.col("date").cast(pl.String).alias("target_end_date"),
-                        pl.col("value").cast(pl.Float64).alias("oracle_value"),
-                        pl.lit(target).alias("target"),
-                        pl.lit(0).cast(pl.Int32).alias("horizon"),
-                    ])
-                    .select(["target", "location", "target_end_date", "horizon", "oracle_value"])
-                    .drop_nulls(subset=["oracle_value", "target_end_date", "location"])
-                )
+        for hub_id in self.active_remote_hub_ids():
+            p = self.remote_store.truth_path(hub_id, "admissions")
+            if p.exists():
+                sources.append(TruthSource(
+                    source_id=f"remote:{hub_id}",
+                    label=hub_id,
+                    kind="admissions",
+                    priority=PRIORITY_REMOTE,
+                    path=p,
+                    inferred_as_of=self._remote_oracle_inferred_as_of(hub_id, "admissions"),
+                ))
 
-            return self._admissions_with_hubs("admissions", [adm_csv], _build_from_adm, target)
+        for peer in self._peer_truth_descriptors():
+            p_adm = Path(peer["base_dir"]) / "target-data" / "target-hospital-admissions.csv"
+            if p_adm.is_file():
+                sources.append(TruthSource(
+                    source_id=f"peer:{peer['hub_id']}",
+                    label=peer["label"],
+                    kind="admissions",
+                    priority=PRIORITY_PEER,
+                    path=p_adm,
+                ))
 
-        # 3. Graceful fallback: synthesize admissions series from target-data/oracle-output (.parquet or .csv)
-        oracle_pq = self.target_data_dir / "oracle-output.parquet"
-        oracle_csv = self.target_data_dir / "oracle-output.csv"
-        oracle_source = oracle_pq if oracle_pq.exists() else (oracle_csv if oracle_csv.exists() else None)
-        if oracle_source:
-            def _build_from_oracle():
-                if oracle_source.suffix.lower() == ".parquet":
-                    df = pl.read_parquet(oracle_source)
+        bundled_adm = self.surveillance_dir / "target-hospital-admissions.csv"
+        if is_flu_hosp_target(target) and bundled_adm.is_file():
+            sources.append(TruthSource(source_id="bundled_surv", label="surveillance", kind="admissions", priority=PRIORITY_ARCHIVE, path=bundled_adm))
+
+        # Graceful fallback when no admissions CSV exists anywhere: synthesize from repo oracle
+        if not sources:
+            repo_oracle = self._first_existing([
+                self.target_data_dir / "oracle-output.parquet",
+                self.target_data_dir / "oracle-output.csv",
+            ])
+            if repo_oracle is not None:
+                sources.append(TruthSource(source_id="repo_oracle_adm", label="repo oracle", kind="oracle", priority=PRIORITY_REPO, path=repo_oracle))
+
+        if not sources:
+            return None
+
+        has_external = any(s.priority in (PRIORITY_REMOTE, PRIORITY_PEER) for s in sources)
+        cache_name = "admissions_hub" if has_external else "admissions"
+        file_paths = [s.path for s in sources if s.path is not None]
+        _, allowed_locations = self._allowed_scope()
+
+        def _build_merged_admissions() -> Optional[pl.DataFrame]:
+            pairs: List[Tuple[TruthSource, pl.DataFrame]] = []
+            for src in sources:
+                if src.path is None:
+                    continue
+                df = self._read_truth_file(src.path)
+                if df is None or df.is_empty():
+                    continue
+                if "target" in df.columns:
+                    df = df.filter(pl.col("target") == target)
                 else:
-                    df = pl.read_csv(
-                        oracle_source,
-                        schema_overrides={
-                            "location": pl.String,
-                            "target": pl.String,
-                            "target_end_date": pl.String,
-                            "oracle_value": pl.Float64,
-                        },
-                        null_values=NULL_VALUES,
-                        ignore_errors=False,
-                    )
-                cols = [
-                    pl.col("location").cast(pl.String),
-                    pl.col("target_end_date").cast(pl.String),
-                    pl.col("oracle_value").cast(pl.Float64),
-                ]
-                if "horizon" in df.columns:
-                    cols.append(pl.col("horizon").fill_null(0).cast(pl.Int32))
-                else:
-                    cols.append(pl.lit(0).cast(pl.Int32).alias("horizon"))
+                    df = df.with_columns(pl.lit(target).alias("target"))
+                if "output_type" in df.columns:
+                    df = df.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+                if not df.is_empty():
+                    pairs.append((src, df))
+            if not pairs:
+                return None
+            out = reconcile_truth_sources(
+                pairs,
+                ADMISSIONS_KEYS,
+                allowed_locations=allowed_locations,
+                filter_external_only=True,
+                target_default=target,
+            )
+            keep_cols = [c for c in ("target", "location", "target_end_date", "horizon", "oracle_value", "as_of") if c in out.columns]
+            return out.select(keep_cols)
 
-                filtered = df.filter(pl.col("target") == target).with_columns(cols)
-                return (
-                    filtered.select(["target", "location", "target_end_date", "horizon", "oracle_value"])
-                    .drop_nulls(subset=["oracle_value", "target_end_date", "location"])
-                )
-
-            return self._admissions_with_hubs("admissions", [oracle_source], _build_from_oracle, target)
-
-        return self._admissions_with_hubs("admissions", [], lambda: None, target)
-
-    def _admissions_with_hubs(self, cache_name: str, sources: List[Path], local_builder: Any, target: str) -> Optional[Path]:
-        """Build the admissions series, overlaying any hub copies so the freshest source wins per week."""
-        hub_files = self._hub_truth_files("admissions")
-        if not hub_files:
-            return self._build_cached_table(cache_name, sources, local_builder) if sources else None
-
-        def _build_merged():
-            hub_frames = [pl.read_parquet(p).with_columns(pl.lit(target).alias("target")) for p in hub_files]
-            frames = self._order_by_recency([local_builder() if sources else None] + hub_frames)
-            return merge_truth_frames(frames, ADMISSIONS_KEYS)
-
-        return self._build_cached_table(f"{cache_name}_hub", sources + hub_files, _build_merged)
+        return self._build_cached_table(cache_name, file_paths, _build_merged_admissions)
 
     def get_initial_admissions_parquet(self, target: Optional[str] = None) -> Optional[Path]:
         """Get or create cached Parquet for initial-hospital-admissions.csv atomically."""
@@ -721,28 +853,105 @@ class ParquetCacheManager:
             return pl.scan_parquet(pq_path)
         return None
 
+    def _archive_snapshot_sources(self, base_dir: Path, source_prefix: str, label: str, priority: int, default_target: str) -> List[TruthSource]:
+        archive_dir = base_dir / "auxiliary-data" / "target-data-archive"
+        if not archive_dir.is_dir():
+            return []
+        out: List[TruthSource] = []
+        try:
+            for p in sorted(archive_dir.glob("*.csv")):
+                m = SNAPSHOT_DATE_RE.search(p.name)
+                if m:
+                    out.append(TruthSource(
+                        source_id=f"{source_prefix}_arch:{p.name}",
+                        label=label,
+                        kind="as_of",
+                        priority=priority,
+                        path=p,
+                        inferred_as_of=m.group(1),
+                    ))
+        except OSError:
+            pass
+        return out
+
     def get_as_of_admissions_parquet(self) -> Optional[Path]:
-        """Get or create cached Parquet for point-in-time as-of surveillance vintages."""
+        """Reconcile point-in-time `as_of` surveillance & oracle vintages across all compatible sources."""
+        from viz.core.config import VizConfig
+        default_target = VizConfig(self.base_dir).get_default_target()
+        allowed_targets, allowed_locations = self._allowed_scope()
+        sources: List[TruthSource] = []
+
         as_of_file = self.surveillance_dir / "as-of-hospital-admissions.parquet"
-        if not as_of_file.exists():
-            self._log_missing_surveillance(as_of_file)
+        if any(is_flu_hosp_target(t) for t in (allowed_targets or {default_target})) and as_of_file.is_file():
+            sources.append(TruthSource(source_id="bundled_asof", label="surveillance", kind="as_of", priority=PRIORITY_ARCHIVE, path=as_of_file))
+
+        sources.extend(self._archive_snapshot_sources(self.base_dir, "repo", "repo archive", PRIORITY_REPO, default_target))
+        repo_oracle = self._first_existing([
+            self.target_data_dir / "oracle-output.parquet",
+            self.target_data_dir / "oracle-output.csv",
+        ])
+        if repo_oracle is not None:
+            sources.append(TruthSource(source_id="repo_oracle_vint", label="repo", kind="oracle", priority=PRIORITY_REPO - 2, path=repo_oracle))
+
+        for hub_id in self.active_remote_hub_ids():
+            p_asof = self.remote_store.truth_path(hub_id, "as_of")
+            if p_asof.exists():
+                sources.append(TruthSource(source_id=f"remote_asof:{hub_id}", label=hub_id, kind="as_of", priority=PRIORITY_REMOTE, path=p_asof))
+            p_ora = self.remote_store.truth_path(hub_id, "oracle")
+            if p_ora.exists():
+                sources.append(TruthSource(
+                    source_id=f"remote_ora:{hub_id}",
+                    label=hub_id,
+                    kind="oracle",
+                    priority=PRIORITY_REMOTE - 1,
+                    path=p_ora,
+                    inferred_as_of=self._remote_oracle_inferred_as_of(hub_id, "oracle"),
+                ))
+
+        for peer in self._peer_truth_descriptors():
+            p_dir = Path(peer["base_dir"])
+            sources.extend(self._archive_snapshot_sources(p_dir, f"peer:{peer['hub_id']}", peer["label"], PRIORITY_PEER, default_target))
+            p_ora = self._first_existing([
+                p_dir / "target-data" / "oracle-output.parquet",
+                p_dir / "target-data" / "oracle-output.csv",
+            ])
+            if p_ora is not None:
+                sources.append(TruthSource(
+                    source_id=f"peer_ora:{peer['hub_id']}",
+                    label=peer["label"],
+                    kind="oracle",
+                    priority=PRIORITY_PEER - 1,
+                    path=p_ora,
+                ))
+
+        if not sources:
             return None
 
-        def _build_from_as_of():
-            return pl.read_parquet(as_of_file)
+        has_external = any(s.priority <= PRIORITY_REMOTE and s.source_id != "bundled_asof" for s in sources)
+        cache_name = "as_of_admissions_hub" if has_external else "as_of_admissions"
+        file_paths = [s.path for s in sources if s.path is not None]
 
-        hub_files = self._hub_truth_files("as_of")
-        if not hub_files:
-            return self._build_cached_table("as_of_admissions", [as_of_file], _build_from_as_of)
+        def _build_reconciled_vintages() -> Optional[pl.DataFrame]:
+            pairs: List[Tuple[TruthSource, pl.DataFrame]] = []
+            for src in sources:
+                if src.path is None:
+                    continue
+                df = self._read_truth_file(src.path)
+                if df is None or df.is_empty():
+                    continue
+                if "target" not in df.columns and src.kind == "as_of":
+                    df = df.with_columns(pl.lit(default_target).alias("target"))
+                pairs.append((src, df))
+            if not pairs:
+                return None
+            return reconcile_vintages(
+                pairs,
+                allowed_targets=allowed_targets,
+                allowed_locations=allowed_locations,
+                filter_external_only=True,
+            )
 
-        def _build_merged_as_of():
-            # Hub snapshots only add vintages newer than the bundled file; each (as_of, week) appears once
-            local = _build_from_as_of()
-            frames = [local] + [pl.read_parquet(p).select([c for c in local.columns if c in pl.read_parquet_schema(p)])
-                                for p in hub_files]
-            return merge_truth_frames(frames, ["as_of"] + ADMISSIONS_KEYS)
-
-        return self._build_cached_table("as_of_admissions_hub", [as_of_file] + hub_files, _build_merged_as_of)
+        return self._build_cached_table(cache_name, file_paths, _build_reconciled_vintages)
 
     def scan_as_of_admissions(self) -> Optional[pl.LazyFrame]:
         """Return a Polars LazyFrame for point-in-time as-of admissions surveillance data."""
@@ -762,7 +971,7 @@ class ParquetCacheManager:
         """Get or create cached Parquet for ilinet.csv atomically."""
         ili_csv = self.surveillance_dir / "ilinet.csv"
         if not ili_csv.exists():
-            ili_csv = self.viz_dir / "data" / "seed" / "ilinet.csv"
+            ili_csv = self.seed_dir / "ilinet.csv"
         if not ili_csv.exists():
             legacy_csv = self.auxiliary_data_dir / "surveillance" / "ilinet.csv"
             if legacy_csv.exists():
@@ -796,7 +1005,7 @@ class ParquetCacheManager:
         """Get or create cached Parquet for flusurvnet.csv atomically."""
         fsn_csv = self.surveillance_dir / "flusurvnet.csv"
         if not fsn_csv.exists():
-            fsn_csv = self.viz_dir / "data" / "seed" / "flusurvnet.csv"
+            fsn_csv = self.seed_dir / "flusurvnet.csv"
         if not fsn_csv.exists():
             legacy_csv = self.auxiliary_data_dir / "surveillance" / "flusurvnet.csv"
             if legacy_csv.exists():
@@ -826,9 +1035,9 @@ class ParquetCacheManager:
             return pl.scan_parquet(pq_path)
         return None
 
-    def warmup_cache(self, model_ids: Optional[List[str]] = None) -> int:
+    def warmup_cache(self, model_ids: Optional[List[str]] = None, include_remote_models: bool = True) -> int:
         """
-        Pre-cache models and target files in batch.
+        Pre-cache models and target files in parallel batch.
         Can be called on startup or on demand. Returns count of models cached.
         """
         self.get_oracle_parquet()
@@ -838,37 +1047,68 @@ class ParquetCacheManager:
         self.get_ilinet_parquet()
         self.get_flusurvnet_parquet()
 
-        cached_count = 0
-        all_dirs = []
+        tasks: List[Tuple[str, bool]] = []
         if self.model_output_dir.exists():
             for p in self.model_output_dir.iterdir():
                 if p.is_dir() and not p.name.startswith("."):
                     if model_ids is None or p.name in model_ids:
-                        all_dirs.append((p.name, False))
+                        tasks.append((p.name, False))
         if self.local_output_dir.exists():
             for p in self.local_output_dir.iterdir():
-                if p.is_dir() and not p.name.startswith("."):
+                if p.is_dir() and not p.name.startswith(".") and p.name != "synthetic":
                     if model_ids is None or p.name in model_ids:
-                        all_dirs.append((p.name, True))
+                        tasks.append((p.name, True))
 
-        for mid, is_loc in all_dirs:
-            p = self.get_model_parquet(mid, is_local=is_loc)
-            if p is not None:
-                cached_count += 1
-
-        # Hub copies already on disk (never fetched here: warmup does no network access)
-        if self.include_remote:
-            for hub_id in self.remote_store.active_hub_ids():
+        if include_remote_models and self.include_remote:
+            for hub_id in self.active_remote_hub_ids():
                 mo_dir = self.remote_store.hub_dir(hub_id) / "model-output"
                 if not mo_dir.is_dir():
                     continue
                 for p in mo_dir.iterdir():
                     key = f"{hub_id}:{p.name}"
                     if p.is_dir() and (model_ids is None or key in model_ids):
-                        if self.get_model_parquet(key) is not None:
-                            cached_count += 1
+                        tasks.append((key, False))
 
-        return cached_count
+        results = ordered_map(lambda item: self.get_model_parquet(item[0], is_local=item[1]), tasks)
+        return sum(1 for p in results if p is not None)
+
+    def refresh_local_cache(self) -> Dict[str, int]:
+        """
+        Fast incremental refresh for truth/surveillance tables and modified local models.
+        Avoids blocking on untouched models or remote S3 mirrors (which sync manages).
+        """
+        self.get_oracle_parquet()
+        self.get_admissions_parquet()
+        self.get_initial_admissions_parquet()
+        self.get_as_of_admissions_parquet()
+        self.get_ilinet_parquet()
+        self.get_flusurvnet_parquet()
+
+        to_rebuild: List[Tuple[str, bool]] = []
+        total_dirs = 0
+        for root, is_loc, dest_dir in (
+            (self.model_output_dir, False, self.models_cache_dir),
+            (self.local_output_dir, True, self.local_models_cache_dir),
+        ):
+            if not root.is_dir():
+                continue
+            for p in root.iterdir():
+                if not p.is_dir() or p.name.startswith(".") or (is_loc and p.name == "synthetic"):
+                    continue
+                total_dirs += 1
+                pq_path = dest_dir / f"{p.name}.parquet"
+                meta_path = dest_dir / f"{p.name}.meta.json"
+                # Rebuild local-output runs immediately, plus any already-cached model whose files changed
+                if is_loc or pq_path.exists():
+                    source_files, fp = self._scan_source_files(p)
+                    if source_files and not self._is_cache_fresh(pq_path, meta_path, fp):
+                        to_rebuild.append((p.name, is_loc))
+
+        rebuilt = 0
+        if to_rebuild:
+            res = ordered_map(lambda item: self.get_model_parquet(item[0], is_local=item[1]), to_rebuild)
+            rebuilt = sum(1 for p in res if p is not None)
+        return {"models_total": total_dirs, "rebuilt": rebuilt}
 
     def clear_cache(self, model_id: Optional[str] = None):
         """Remove cached parquet and metadata files to force regeneration."""

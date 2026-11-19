@@ -4,19 +4,25 @@ Compatible with both standard library unittest and pytest test runners.
 """
 
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
 import polars as pl
 
-from viz.core.cache_manager import ParquetCacheManager
-from viz.core.data_loader import SandboxDataLoader
-from viz.rebuild_surveillance import (
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
+from conftest import APP_DIR, resolve_sandbox_hub  # noqa: E402
+from viz.core.cache_manager import ParquetCacheManager  # noqa: E402
+from viz.core.data_loader import SandboxDataLoader  # noqa: E402
+from viz.rebuild_surveillance import (  # noqa: E402
     validate_admissions_csv,
     synthesize_admissions_from_oracle,
 )
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+BASE_DIR = resolve_sandbox_hub()
 
 
 class TestSurveillanceRebuild(unittest.TestCase):
@@ -25,7 +31,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
         cls.repo_root = BASE_DIR
 
     def test_validate_admissions_csv(self):
-        adm_csv = self.repo_root / "viz" / "data" / "surveillance" / "target-hospital-admissions.csv"
+        adm_csv = APP_DIR / "data" / "surveillance" / "target-hospital-admissions.csv"
         if adm_csv.exists():
             result = validate_admissions_csv(adm_csv)
             self.assertTrue(result["valid"])
@@ -34,6 +40,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
             self.assertIsNotNone(result["min_date"])
             self.assertIsNotNone(result["max_date"])
 
+    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
     def test_synthesize_admissions_from_oracle(self):
         oracle_csv = self.repo_root / "target-data" / "oracle-output.csv"
         if not oracle_csv.exists():
@@ -51,6 +58,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
             self.assertIn("value", df.columns)
             self.assertGreater(len(df), 0)
 
+    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
     def test_cache_manager_self_contained_surveillance(self):
         cm = ParquetCacheManager(self.repo_root)
         self.assertTrue(cm.surveillance_dir.exists())
@@ -68,6 +76,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
         self.assertIn("oracle_value", df.columns)
         self.assertGreater(len(df), 0)
 
+    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
     def test_cache_manager_initial_admissions(self):
         cm = ParquetCacheManager(self.repo_root)
         pq = cm.get_initial_admissions_parquet()
@@ -82,6 +91,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
         self.assertIn("oracle_value", df.columns)
         self.assertGreater(len(df), 0)
 
+    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
     def test_data_loader_surveillance_streams(self):
         dl = SandboxDataLoader(base_dir=self.repo_root)
         surv = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2024-01-13")
@@ -97,6 +107,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
         self.assertEqual(surv["unrevised"]["season"], "2023/24")
         self.assertTrue(all(d["date"] <= surv["reference_date"] for d in surv["unrevised"]["data"]))
 
+    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
     def test_data_loader_unrevised_stream_latest_season(self):
         dl = SandboxDataLoader(base_dir=self.repo_root)
         surv = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2026-05-30")
@@ -128,6 +139,7 @@ class TestSurveillanceRebuild(unittest.TestCase):
         if "2026-02-14" in unrev_map and "2026-02-14" in truth_map:
             self.assertLess(unrev_map["2026-02-14"], truth_map["2026-02-14"])
 
+    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
     def test_as_of_vintage_revisions_across_timepoints(self):
         """Verify that past observation points revise upward/downward as the forecast reference date advances."""
         dl = SandboxDataLoader(base_dir=self.repo_root)

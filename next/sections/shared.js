@@ -3,6 +3,7 @@
  * cancellation, the score color ramps, HHS regions, canvas sizing, and on-screen / DPR watching. */
 export { fitLabels } from "../lib/labels.js";
 import { h, on, cssColor, storage } from "../lib/dom.js";
+import { apiUrl } from "../lib/api.js";
 import { openMenu } from "../ui/floating.js";
 
 /* ---------------------------------------------------------------- styles */
@@ -117,14 +118,15 @@ const cache = new Map();
  * @returns {Promise<any>}
  */
 export function getJson(url, { slot } = {}) {
+  const reqUrl = apiUrl(url);
   if (slot?._ctl) slot._ctl.abort();
-  if (cache.has(url)) { const v = cache.get(url); cache.delete(url); cache.set(url, v); return Promise.resolve(v); }
+  if (cache.has(reqUrl)) { const v = cache.get(reqUrl); cache.delete(reqUrl); cache.set(reqUrl, v); return Promise.resolve(v); }
   const ctl = new AbortController();
   if (slot) slot._ctl = ctl;
-  return fetch(url, { signal: ctl.signal }).then(async (r) => {
+  return fetch(reqUrl, { signal: ctl.signal }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j?.error) throw new Error(j?.error || `HTTP ${r.status}`);
-    cache.set(url, j);
+    cache.set(reqUrl, j);
     while (cache.size > 32) cache.delete(cache.keys().next().value);
     return j;
   }).finally(() => { if (slot?._ctl === ctl) slot._ctl = null; });

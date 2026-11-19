@@ -19,9 +19,13 @@ import os
 from pathlib import Path
 import shutil
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from viz.remote.hubs import BUILTIN_HUBS, HubSpec
+
+_BUILTIN_DEFAULT_TARGETS: Dict[str, Set[str]] = {
+    "flusight": {"wk inc flu hosp", "wk flu hosp rate change", "wk inc flu prop ed visits"},
+}
 
 TRUTH_FILES = {
     "oracle": "oracle.parquet",
@@ -49,12 +53,13 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 class RemoteStore:
-    """Paths, registry, and manifests for hub copies under viz/.cache/remote."""
+    """Paths, registry, and manifests for hub copies under the shared remote cache root."""
 
-    def __init__(self, cache_dir: Path):
-        self.root = Path(cache_dir) / "remote"
+    def __init__(self, cache_dir: Path, root: Optional[Path] = None):
+        self.root = Path(root).resolve() if root is not None else (Path(cache_dir) / "remote")
         self.registry_path = self.root / "hubs.json"
         self._active_cache: Optional[tuple] = None
+        self._tasks_meta_cache: Dict[str, tuple] = {}
 
     # ---- registry -------------------------------------------------------------------------------------
 
@@ -148,8 +153,77 @@ class RemoteStore:
         self._active_cache = (stamp, active)
         return active
 
-    def active_truth_files(self, kind: str) -> List[Path]:
-        return [p for p in (self.truth_path(h, kind) for h in self.active_hub_ids()) if p.exists()]
+    def active_truth_files(self, kind: str, hub_ids: Optional[List[str]] = None) -> List[Path]:
+        ids = self.active_hub_ids() if hub_ids is None else hub_ids
+        return [p for p in (self.truth_path(h, kind) for h in ids) if p.exists()]
+
+    def _tasks_summary(self, hub_id: str) -> tuple[Set[str], Set[str]]:
+        stamp = self.state_mtime()
+        hit = self._tasks_meta_cache.get(hub_id)
+        if hit is not None and hit[0] == stamp:
+            return hit[1], hit[2]
+        targets: Set[str] = set()
+        locations: Set[str] = set()
+        tasks_path = self.hub_dir(hub_id) / "hub-config" / "tasks.json"
+        tasks = _read_json(tasks_path, {})
+        if isinstance(tasks, dict):
+            for rnd in tasks.get("rounds") or []:
+                if not isinstance(rnd, dict):
+                    continue
+                for mt in rnd.get("model_tasks") or []:
+                    if not isinstance(mt, dict):
+                        continue
+                    tids = mt.get("task_ids") or {}
+                    for bucket, col in ((targets, "target"), (locations, "location")):
+                        spec = tids.get(col) or {}
+                        if isinstance(spec, dict):
+                            for k in ("required", "optional"):
+                                v = spec.get(k)
+                                if isinstance(v, list):
+                                    bucket.update(str(x).strip() for x in v if x is not None and str(x).strip())
+                                elif isinstance(v, str) and v.strip():
+                                    bucket.add(v.strip())
+        if not targets:
+            man = self.load_manifest(hub_id)
+            for f in (man.get("files") or {}).values():
+                if isinstance(f, dict):
+                    targets.update(str(t).strip() for t in (f.get("targets") or []) if str(t).strip())
+        if not targets and hub_id in _BUILTIN_DEFAULT_TARGETS:
+            targets = set(_BUILTIN_DEFAULT_TARGETS[hub_id])
+        self._tasks_meta_cache[hub_id] = (stamp, targets, locations)
+        return targets, locations
+
+    def hub_targets(self, hub_id: str) -> Set[str]:
+        return set(self._tasks_summary(hub_id)[0])
+
+    def hub_locations(self, hub_id: str) -> Set[str]:
+        return set(self._tasks_summary(hub_id)[1])
+
+    def is_compatible(
+        self,
+        hub_id: str,
+        targets: Optional[Set[str]] = None,
+        locations: Optional[Set[str]] = None,
+    ) -> bool:
+        """True when a remote S3 hub shares targets (and locations, if known) with the active hub."""
+        h_targets, h_locs = self._tasks_summary(hub_id)
+        if targets and h_targets and not (targets & h_targets):
+            return False
+        if locations and h_locs:
+            overlap = locations & h_locs
+            if not overlap:
+                return False
+            if len(locations) > 3 and len(h_locs) > 3 and len(overlap) < min(len(locations), len(h_locs)) * 0.4:
+                return False
+        return True
+
+    def compatible_hub_ids(
+        self,
+        targets: Optional[Set[str]] = None,
+        locations: Optional[Set[str]] = None,
+    ) -> List[str]:
+        """Active synced S3 hubs compatible with `targets` and `locations`."""
+        return [h for h in self.active_hub_ids() if self.is_compatible(h, targets=targets, locations=locations)]
 
     # ---- manifest ---------------------------------------------------------------------------------------
 

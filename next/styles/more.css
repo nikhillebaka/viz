@@ -3,6 +3,7 @@
 
 /* ---------- panels ---------- */
 .mo-panel .c-float-body { padding: var(--space-6) var(--space-12) var(--space-12); }
+.mo-sources .c-float-body { max-height: calc(100svh - 2 * var(--inset) - var(--size-control) - var(--gap) - var(--space-56)); overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent; }
 .mo-tall { height: min(720px, calc(100vh - 2 * var(--inset) - var(--size-control) - var(--gap))); }
 .mo-note { padding: var(--space-4) 0; font-size: var(--text-small); color: var(--ink-tertiary); }
 .mo-field { flex: 1; height: var(--size-chip); margin: 0; padding: 0 var(--space-8); border: 0; border-radius: var(--radius-item); background: var(--fill-field); }
@@ -13,6 +14,7 @@
 .mo-remove { margin-left: auto; color: var(--ink-tertiary); }
 .mo-remove:hover, .mo-remove.armed { color: var(--status-error); }
 .mo-remove.armed { background-color: var(--fill-field); }
+.mo-section-gap { margin-top: var(--space-16); padding-top: var(--space-8); border-top: var(--stroke-hairline) solid var(--line-hairline); }
 
 /* the ⋯ bubble's dot: a hub sync running (accent) or failed */
 .mo-dot { position: absolute; top: var(--space-6); right: var(--space-6); width: 6px; height: 6px; border-radius: 50%; background: var(--accent); pointer-events: none; }
@@ -29,7 +31,56 @@
 .mo-src-state { font-size: var(--text-small); color: var(--ink-tertiary); }
 .mo-src-state.is-live { color: var(--status-good); }
 .mo-src-state.is-syncing { color: var(--accent); }
+.mo-src-state.is-missing { color: var(--status-error); }
 .mo-src-meta { font-size: var(--text-small); color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
+.mo-src-path {
+  margin-top: var(--space-2); font-family: var(--font-mono); font-size: var(--text-axis);
+  color: var(--ink-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mo-add { display: flex; align-items: center; gap: var(--space-6); margin-top: var(--space-12); }
+
+/* ---------- local folder browser inside Data sources ---------- */
+.mo-browser {
+  margin-top: var(--space-8); padding: var(--space-8);
+  border-radius: var(--radius-menu); background: var(--fill-field);
+  border: var(--stroke-hairline) solid var(--line-hairline);
+  display: flex; flex-direction: column; gap: var(--space-8);
+}
+.mo-roots { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.mo-browse-head { display: flex; align-items: center; gap: var(--space-8); }
+.mo-up { flex: none; padding: 0 var(--space-8); }
+.mo-browse-path {
+  flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--text-axis);
+  color: var(--ink-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mo-current-hub {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-8);
+  padding: var(--space-8); border-radius: var(--radius-item); background: var(--surface-raised);
+  border: var(--stroke-hairline) solid var(--accent);
+}
+.mo-current-hub-info { display: flex; flex-direction: column; min-width: 0; }
+.mo-dir-list {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  max-height: calc(var(--size-row) * 6); overflow: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
+}
+.mo-dir-row {
+  display: flex; align-items: center; gap: var(--space-6);
+  padding: var(--space-4) var(--space-6); border-radius: var(--radius-item);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.mo-dir-row:hover { background: var(--fill-hover); }
+.mo-dir-row.is-hub { background: var(--surface-raised); }
+.mo-dir-main {
+  flex: 1; min-width: 0; margin: 0; padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+  display: flex; flex-direction: column; gap: var(--space-2);
+}
+.mo-dir-name {
+  font-size: var(--text-control); font-weight: var(--weight-medium); color: var(--ink-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mo-dir-meta { font-size: var(--text-axis); color: var(--ink-tertiary); font-variant-numeric: tabular-nums; }
 .mo-toggle {
   display: inline-flex; align-items: center; gap: var(--space-6); margin: 0 0 0 auto; padding: 0; border: 0; background: none;
   font: inherit; font-size: var(--text-small); font-weight: var(--weight-medium); color: var(--ink-secondary); cursor: pointer;
@@ -44,7 +95,6 @@
 .mo-progress { margin-top: var(--space-8); font-size: var(--text-small); color: var(--ink-secondary); font-variant-numeric: tabular-nums; }
 .mo-bar { height: var(--space-2); margin-top: var(--space-4); border-radius: var(--radius-pill); background: var(--fill-field); overflow: hidden; }
 .mo-bar > i { display: block; height: 100%; background: var(--accent); transition: width var(--dur-move) var(--ease-out); }
-.mo-add { display: flex; align-items: center; gap: var(--space-6); margin-top: var(--space-12); }
 
 /* ---------- warnings ---------- */
 .mo-warnings .c-float-body, .mo-tall .c-float-body { display: flex; flex-direction: column; overflow: hidden; }

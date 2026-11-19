@@ -142,6 +142,19 @@ function cutoffFor(fan, ref) {
   return lo > 0 ? o[lo - 1].t : ref - WEEK;
 }
 
+// interpolate the cutoff across neighbouring rounds so scrolling beyond truth never jumps mid-animation
+function cutoffAt(fan, t, ref, whole) {
+  const D = fan.dates;
+  if (!D.length) return ref - WEEK;
+  if (whole) return cutoffFor(fan, ref);
+  const i0 = clamp(Math.floor(t), 0, D.length - 1);
+  const i1 = clamp(Math.ceil(t), 0, D.length - 1);
+  if (i0 === i1) return cutoffFor(fan, D[i0]);
+  const frac = clamp(t - i0, 0, 1);
+  const c0 = cutoffFor(fan, D[i0]), c1 = cutoffFor(fan, D[i1]);
+  return c0 + (c1 - c0) * frac;
+}
+
 // the horizon a week falls on, relative to timeline week di, or null outside the forecast window
 function horizonOf(fan, di, t) {
   if (!Number.isFinite(t) || !fan.dates.length) return null;
@@ -186,7 +199,8 @@ export function layoutFan(fan, opts, w, h) {
   const level = levels[0] ?? 0, outcome = opts.outcome !== false;
   // t: fractional timeline index. Integer t is an ordinary week; in between, everything interpolates.
   const t = opts.t ?? n - 1, di = clamp(Math.round(t), 0, Math.max(0, n - 1)), whole = Math.abs(t - di) < 1e-4;
-  const ref = whole ? D[di] : D[0] + t * WEEK;
+  const tc = clamp(t, 0, Math.max(0, n - 1));
+  const ref = whole ? D[di] : D[0] + tc * WEEK;
   const si = Number.isInteger(opts.settle) ? clamp(opts.settle, 0, Math.max(0, n - 1)) : di;
   const models = opts.models || [];
   const rulerStep = w < 600 ? 11 : 14;
@@ -197,7 +211,7 @@ export function layoutFan(fan, opts, w, h) {
   const ay = h - pad.b;
   const ymax = opts.ymax > 0 ? opts.ymax : fan.yMax(models.map((m) => m.id));
   const y = linear([0, ymax], [ay, pad.t]);
-  const cutoff = whole ? cutoffFor(fan, ref) : ref - WEEK;
+  const cutoff = cutoffAt(fan, t, ref, whole);
 
   // charted models: those with points here are the series; the rest keep their slot as a dimmed label
   const S = [], missing = [];

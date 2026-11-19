@@ -134,11 +134,37 @@ test("the view sections' settings round-trip through hm, mp and pk", () => {
   const views = {
     heatmap: { rows: "model", cols: "date", metric: "wis", sort: "score", scale: "row", horizon: 2, model: "truth" },
     map: { layer: "error", horizon: 3 },
-    peaks: { table: "skill", scope: "states", layer: "size" },
+    peaks: { sort: "high", rev: true, scope: "states", layer: "size" },
   };
   const d = defaults(manifest);
   const qs = writeUrl({ ...d, views }, manifest);
   assert.match(qs, /hm=model,date,wis,score,row,2,truth/);
+  assert.match(qs, /pk=-high,states,size/);
   assert.deepEqual(parseUrl(qs, manifest).views, views);
   assert.equal(writeUrl({ ...d, views: { heatmap: null } }, manifest), "");
+});
+
+test("hub URL parameter validates against workspace_hubs and stays omitted on single-hub defaults", () => {
+  const single = indexManifest({
+    ...manifest,
+    hub_id: "flusight",
+    workspace_hubs: [{ id: "flusight", label: "FluSight" }],
+  });
+  const multi = indexManifest({
+    ...manifest,
+    hub_id: "flusight",
+    workspace_hubs: [{ id: "flusight", label: "FluSight" }, { id: "covid", label: "COVID-19" }],
+  });
+
+  assert.equal(parseUrl("?hub=flusight", single).hub, "flusight");
+  assert.equal(parseUrl("?hub=unknown_hub", single).hub, undefined);
+  assert.equal(parseUrl("?hub=covid", multi).hub, "covid");
+
+  const dSingle = defaults(single);
+  assert.equal(writeUrl({ ...dSingle, hub: "flusight" }, single), "", "single-hub default stays clean");
+
+  const dMulti = defaults(multi);
+  const qMulti = writeUrl({ ...dMulti, hub: "covid" }, multi);
+  assert.equal(qMulti, "?hub=covid");
+  assert.equal(parseUrl(qMulti, multi).hub, "covid");
 });

@@ -10,26 +10,23 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
-import shutil
 import socket
 import socketserver
 import sys
 import threading
 import urllib.parse
-from typing import List, Optional, Any
+from typing import Any, List, Optional
 
-# The hub is the folder viz sits in. VIZ_HUB_DIR points a development copy of viz (a git worktree, say)
-# at a hub it does not sit in; see next/dev/serve.py.
-BASE_DIR = Path(os.environ.get("VIZ_HUB_DIR") or Path(__file__).resolve().parent.parent).resolve()
-sys.path.insert(0, str(BASE_DIR))
+import _bootstrap
+
+APP_DIR = _bootstrap.ensure_viz_package()
 
 from viz.core.config import VizConfig
-from viz.core.data_loader import SandboxDataLoader
-from viz.core.evaluation import EvaluationEngine, EvaluationParams
-from viz.core.next_api import NextData
+from viz.core.paths import is_hub_dir
 from viz.core.synthetic_ensemble import SyntheticEnsembleConfig
+from viz.core.workspace import HubContext, HubManager
 from viz.remote.s3 import S3Error
-from viz.remote.sync import RemoteManager, current_season
+from viz.remote.sync import current_season
 
 
 logging.basicConfig(
@@ -39,63 +36,89 @@ logging.basicConfig(
 )
 logger = logging.getLogger("viz.server")
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-NEXT_DIR = Path(__file__).resolve().parent / "next"  # the new frontend, served beside the old one at /next/
-DATA_LOADER = SandboxDataLoader(BASE_DIR)
-VIZ_CONFIG = VizConfig(BASE_DIR)
-EVAL_ENGINE = EvaluationEngine(BASE_DIR, DATA_LOADER)
+STATIC_DIR = APP_DIR / "static"
+NEXT_DIR = APP_DIR / "next"  # the new frontend, served beside classic at /next/
+_FALLBACK_SERVER_CFG = VizConfig(APP_DIR, app_dir=APP_DIR).get_server_config()
+MAX_JSON_BODY_BYTES = 1 * 1024 * 1024  # 1 MB cap on POST JSON payloads
+
+HUB_MANAGER: Optional[HubManager] = None
 
 
-def _local_as_of_max() -> Optional[str]:
-    """Latest vintage in the bundled as-of surveillance file; hub snapshots are only fetched beyond it."""
-    path = DATA_LOADER.cache_mgr.surveillance_dir / "as-of-hospital-admissions.parquet"
-    if not path.exists():
-        return None
-    try:
-        import polars as pl
-        return pl.scan_parquet(path).select(pl.col("as_of").max()).collect().item()
-    except Exception:
-        return None
+class _BodyTooLargeError(Exception):
+    """Raised when an incoming HTTP body exceeds MAX_JSON_BODY_BYTES."""
 
 
-def _on_hub_inventory_change(hub_id: str, changed_models: List[str]):
-    """Invalidate every in-memory cache that depends on the model inventory or truth, then pre-build tables."""
-    DATA_LOADER.invalidate_inventory()
-    DATA_LOADER.ensemble_mgr.clear_cached_forecasts()
-    with EVAL_ENGINE._eval_cache_lock:
-        EVAL_ENGINE._eval_cache.clear()
-    cache = DATA_LOADER.cache_mgr
-    if not DATA_LOADER.remote_store.has_data(hub_id):
-        shutil.rmtree(cache.hub_models_cache_dir / hub_id, ignore_errors=True)
-    for name in changed_models:
-        cache.get_model_parquet(f"{hub_id}:{name}")
-        cache.get_model_peak_parquet(f"{hub_id}:{name}")
-    cache.get_oracle_parquet()
-    cache.get_admissions_parquet()
-    cache.get_as_of_admissions_parquet()
-    DATA_LOADER.scan_models(force_refresh=True)
+def _build_default_hub_manager() -> HubManager:
+    mode = os.environ.get("VIZ_MODE", "local").strip().lower() or "local"
+    data_dir_env = os.environ.get("VIZ_DATA_DIR", "").strip()
+    data_dir = Path(data_dir_env).expanduser().resolve() if data_dir_env else None
+    env_hub = os.environ.get("VIZ_HUB_DIR", "").strip()
+    if env_hub:
+        hub_path = Path(env_hub).expanduser()
+        if is_hub_dir(hub_path):
+            return HubManager(data_dir=data_dir, mode=mode, cli_hubs=[hub_path], include_enclosing=False)
+        logger.warning("VIZ_HUB_DIR='%s' is not a valid hub directory; starting without it.", env_hub)
+        return HubManager(data_dir=data_dir, mode=mode, cli_hubs=None, include_enclosing=False)
+    return HubManager(data_dir=data_dir, mode=mode, cli_hubs=None, include_enclosing=True)
 
 
-REMOTE_MGR = RemoteManager(
-    DATA_LOADER.remote_store,
-    known_locations=lambda: set(DATA_LOADER.get_locations().keys()),
-    is_non_negative=VIZ_CONFIG.is_target_non_negative,
-    local_as_of_max=_local_as_of_max,
-    on_inventory_change=_on_hub_inventory_change,
-)
+def init_hub_manager(
+    data_dir: Optional[Path] = None,
+    mode: Optional[str] = None,
+    cli_hubs: Optional[List[Path]] = None,
+    include_enclosing: bool = True,
+) -> HubManager:
+    global HUB_MANAGER
+    resolved_mode = (mode or os.environ.get("VIZ_MODE", "local")).strip().lower() or "local"
+    if data_dir is None:
+        env_data = os.environ.get("VIZ_DATA_DIR", "").strip()
+        if env_data:
+            data_dir = Path(env_data).expanduser().resolve()
+    HUB_MANAGER = HubManager(
+        data_dir=data_dir,
+        mode=resolved_mode,
+        cli_hubs=cli_hubs,
+        include_enclosing=include_enclosing,
+    )
+    SandboxRequestHandler.hub_manager = HUB_MANAGER
+    return HUB_MANAGER
 
 
-NEXT_DATA = NextData(DATA_LOADER, VIZ_CONFIG, remote_mgr=REMOTE_MGR)
+HUB_MANAGER = _build_default_hub_manager()
 
 
 class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
-    """Custom request handler with REST API routing and static file delivery."""
+    """Custom request handler with multi-hub REST API routing and static file delivery."""
+
+    hub_manager: Optional[HubManager] = HUB_MANAGER
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
+    def setup(self):
+        try:
+            self.request.settimeout(30.0)
+        except Exception:
+            pass
+        super().setup()
+
+    def _mgr(self) -> HubManager:
+        mgr = self.hub_manager or HUB_MANAGER
+        if mgr is None:
+            mgr = init_hub_manager()
+        return mgr
+
+    def _server_config(self) -> dict:
+        try:
+            cfg = self._mgr().get_server_config()
+            if cfg is not None:
+                return cfg
+        except Exception:
+            pass
+        return _FALLBACK_SERVER_CFG
+
     def end_headers(self):
-        server_cfg = VIZ_CONFIG.get_server_config()
+        server_cfg = self._server_config()
         allowed = server_cfg.get("allowed_origins", ["*"])
         origin = self.headers.get("Origin")
         if "*" in allowed:
@@ -117,7 +140,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Viz-Hub")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         super().end_headers()
 
@@ -130,21 +153,77 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._route_get()
         except Exception as exc:
             logger.exception("Internal error processing GET %s: %s", self.path, exc)
-            self._send_json({"error": "Internal server error", "detail": "An internal error occurred while processing the request."}, status=500)
+            self._send_json(
+                {"error": "Internal server error", "detail": "An internal error occurred while processing the request."},
+                status=500,
+            )
 
     def do_POST(self):
         try:
             self._route_post()
+        except _BodyTooLargeError as exc:
+            self._send_json({"error": str(exc)}, status=413)
         except Exception as exc:
             logger.exception("Internal error processing POST %s: %s", self.path, exc)
-            self._send_json({"error": "Internal server error", "detail": "An internal error occurred while processing the POST request."}, status=500)
+            self._send_json(
+                {"error": "Internal server error", "detail": "An internal error occurred while processing the POST request."},
+                status=500,
+            )
+
+    def _require_local_mutation(self, action: str) -> bool:
+        """Gate persistent/server-mutating endpoints to local mode unless an authenticated session allows them."""
+        if self._mgr().mode != "local":
+            self._send_json({"error": f"{action} is disabled in web mode"}, status=403)
+            return False
+        return True
+
+    def _requested_hub_id(self, query: dict, allow_hub_param: bool = True) -> Optional[str]:
+        ws = query.get("workspace", [""])[0].strip()
+        if ws:
+            return ws
+        hdr = (self.headers.get("X-Viz-Hub") or "").strip()
+        if hdr:
+            return hdr
+        if allow_hub_param:
+            h = query.get("hub", [""])[0].strip()
+            if h:
+                return h
+        return None
+
+    def _require_ctx(self, query: dict, allow_hub_param: bool = True) -> Optional[HubContext]:
+        mgr = self._mgr()
+        req_id = self._requested_hub_id(query, allow_hub_param=allow_hub_param)
+        ctx = mgr.get_context(req_id)
+        if ctx is None:
+            msg = f"Unknown workspace hub '{req_id}'" if req_id else "No hub configured"
+            self._send_json({"error": msg}, status=404)
+            return None
+        return ctx
 
     def _read_json_body(self) -> dict:
-        """Safely parse JSON request body."""
+        """Safely parse JSON request body with strict byte-size cap."""
+        raw_len = self.headers.get("Content-Length", "0")
         try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length <= 0:
-                return {}
+            content_length = int(raw_len)
+        except ValueError:
+            return {}
+        if content_length <= 0:
+            return {}
+        if content_length > MAX_JSON_BODY_BYTES:
+            # Drain modest over-limit bodies in small chunks so HTTP clients receive the 413 cleanly
+            # rather than hitting a TCP RST; drop huge bodies immediately with Connection: close.
+            self.close_connection = True
+            if content_length <= 4 * MAX_JSON_BODY_BYTES:
+                remaining = content_length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            raise _BodyTooLargeError(
+                f"Request body too large ({content_length} bytes; limit is {MAX_JSON_BODY_BYTES} bytes)"
+            )
+        try:
             body_bytes = self.rfile.read(content_length)
             return json.loads(body_bytes.decode("utf-8"))
         except Exception as exc:
@@ -154,26 +233,56 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _route_post(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
         # Requiring a JSON content type forces a CORS preflight, so other sites open in the
         # browser cannot submit state-changing requests to this local server
-        if path.startswith(("/api/ensemble/", "/api/remote/")) and not self.headers.get("Content-Type", "").startswith("application/json"):
+        if path.startswith(("/api/ensemble/", "/api/remote/", "/api/workspace/", "/api/cache/")) and not self.headers.get("Content-Type", "").startswith("application/json"):
             self._send_json({"error": "This endpoint requires 'Content-Type: application/json'"}, status=415)
             return
+        if path.startswith("/api/workspace/"):
+            self._route_workspace_post(path)
+            return
         if path.startswith("/api/remote/"):
-            self._route_remote_post(path)
+            if not self._require_local_mutation("Remote hub actions"):
+                return
+            ctx = self._require_ctx(query, allow_hub_param=False)
+            if ctx is not None:
+                self._route_remote_post(ctx, path)
             return
         if path == "/api/cache/refresh":
-            self._handle_cache_refresh()
+            if not self._require_local_mutation("Cache refresh"):
+                return
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_cache_refresh(ctx)
         elif path == "/api/cache/clear":
-            self._handle_cache_refresh(clear=True)
+            if not self._require_local_mutation("Cache clear"):
+                return
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_cache_refresh(ctx, clear=True)
         elif path == "/api/ensemble/preview":
-            self._handle_ensemble_preview()
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_ensemble_preview(ctx)
         elif path == "/api/ensemble/create":
-            self._handle_ensemble_create()
+            if not self._require_local_mutation("Synthetic ensemble creation"):
+                return
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_ensemble_create(ctx)
         elif path == "/api/ensemble/save":
-            self._handle_ensemble_save()
+            if not self._require_local_mutation("Saving synthetic ensembles"):
+                return
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_ensemble_save(ctx)
         elif path in ("/api/ensemble/delete", "/api/ensemble/remove"):
-            self._handle_ensemble_delete()
+            if not self._require_local_mutation("Deleting synthetic ensembles"):
+                return
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_ensemble_delete(ctx)
         else:
             self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)
 
@@ -181,49 +290,101 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        mgr = self._mgr()
 
-        # API Routes
+        # Static frontends
         if path == "/next" or path.startswith("/next/"):
             self._serve_dir(path, "/next", NEXT_DIR)
         elif path == "/classic" or path.startswith("/classic/"):
             self._serve_dir(path, "/classic", STATIC_DIR)
+        # Workspace endpoints
+        elif path == "/api/workspace":
+            self._send_json(mgr.workspace_summary(requested_hub_id=self._requested_hub_id(query)))
+        elif path == "/api/workspace/browse":
+            if mgr.mode != "local":
+                self._send_json({"error": "Local workspace browsing is disabled in web mode"}, status=403)
+                return
+            try:
+                self._send_json(mgr.browse_directory(query.get("path", [""])[0]))
+            except FileNotFoundError as exc:
+                self._send_json({"error": str(exc)}, status=404)
+            except PermissionError as exc:
+                self._send_json({"error": str(exc)}, status=403)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+        # Next & core API routes
         elif path.startswith("/api/next/"):
             self._handle_next_api(path, query)
-        elif path == "/api/metadata":
-            self._handle_metadata()
-        elif path in ("/api/ensemble/list", "/api/ensembles"):
-            self._handle_ensemble_list()
-        elif path == "/api/forecast":
-            self._handle_forecast(query)
-        elif path == "/api/metrics":
-            self._handle_metrics(query)
-        elif path == "/api/spatial":
-            self._handle_spatial(query)
-        elif path == "/api/heatmap":
-            self._handle_heatmap(query)
         elif path == "/api/status":
-            self._handle_status()
+            self._handle_status(query)
+        elif path == "/api/metadata":
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_metadata(ctx)
+        elif path in ("/api/ensemble/list", "/api/ensembles"):
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_ensemble_list(ctx)
+        elif path == "/api/forecast":
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_forecast(ctx, query)
+        elif path == "/api/metrics":
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_metrics(ctx, query)
+        elif path == "/api/spatial":
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_spatial(ctx, query)
+        elif path == "/api/heatmap":
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_heatmap(ctx, query)
         elif path in ("/api/model-details", "/api/model_details", "/api/model_detail"):
-            self._handle_model_details(query)
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_model_details(ctx, query)
         elif path == "/api/surveillance":
-            self._handle_surveillance(query)
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_surveillance(ctx, query)
         elif path == "/api/season-curves":
-            self._handle_season_curves(query)
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_season_curves(ctx, query)
         elif path == "/api/peaks":
-            self._handle_peaks(query)
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_peaks(ctx, query)
         elif path == "/api/peak-map":
-            self._handle_peak_map(query)
+            ctx = self._require_ctx(query)
+            if ctx is not None:
+                self._handle_peak_map(ctx, query)
         elif path == "/api/remote/hubs":
-            self._send_json({"hubs": REMOTE_MGR.list_hubs(), "busy": REMOTE_MGR.is_busy(), "current_season": current_season()})
+            ctx = self._require_ctx(query, allow_hub_param=False)
+            if ctx is not None:
+                self._send_json({
+                    "hubs": ctx.remote_mgr.list_hubs(),
+                    "busy": ctx.remote_mgr.is_busy(),
+                    "current_season": current_season(),
+                })
         elif path == "/api/remote/job":
-            hub_id = query.get("hub", [""])[0]
-            self._send_json({"job": REMOTE_MGR.get_job(hub_id), "hub": next((h for h in REMOTE_MGR.list_hubs() if h["id"] == hub_id), None)})
+            ctx = self._require_ctx(query, allow_hub_param=False)
+            if ctx is not None:
+                hub_id = query.get("hub", [""])[0]
+                self._send_json({
+                    "job": ctx.remote_mgr.get_job(hub_id),
+                    "hub": next((h for h in ctx.remote_mgr.list_hubs() if h["id"] == hub_id), None),
+                })
         elif path == "/api/remote/warnings":
-            hub_id = query.get("hub", [""])[0]
-            if DATA_LOADER.remote_store.get_spec(hub_id) is None:
-                self._send_json({"error": f"Unknown hub '{hub_id}'"}, status=404)
-            else:
-                self._send_json({"hub": hub_id, "warnings": REMOTE_MGR.warnings(hub_id)})
+            ctx = self._require_ctx(query, allow_hub_param=False)
+            if ctx is not None:
+                hub_id = query.get("hub", [""])[0]
+                if ctx.loader.remote_store.get_spec(hub_id) is None:
+                    self._send_json({"error": f"Unknown hub '{hub_id}'"}, status=404)
+                else:
+                    self._send_json({"hub": hub_id, "warnings": ctx.remote_mgr.warnings(hub_id)})
         elif path in ("/api/cache/refresh", "/api/cache/clear"):
             self._send_json(
                 {"error": "Method Not Allowed", "detail": "Cache refresh and clear operations must use HTTP POST."},
@@ -258,18 +419,96 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             ctype += "; charset=utf-8"
         self._serve_file(target, ctype)
 
+    def _route_workspace_post(self, path: str):
+        mgr = self._mgr()
+        if mgr.mode != "local":
+            self._send_json({"error": "Local workspace actions are disabled in web mode"}, status=403)
+            return
+        body = self._read_json_body()
+        try:
+            if path == "/api/workspace/inspect":
+                self._send_json(mgr.inspect_path(str(body.get("path", ""))))
+            elif path == "/api/workspace/add":
+                res = mgr.add_local_hub(
+                    str(body.get("path", "")),
+                    label=body.get("label"),
+                    activate=bool(body.get("activate", True)),
+                )
+                self._send_json(res)
+            elif path == "/api/workspace/activate":
+                hub_id = str(body.get("id") or body.get("hub") or "").strip()
+                self._send_json(mgr.activate_hub(hub_id))
+            elif path == "/api/workspace/remove":
+                hub_id = str(body.get("id") or body.get("hub") or "").strip()
+                self._send_json(mgr.remove_local_hub(hub_id, clear_cache=bool(body.get("clear_cache", False))))
+            elif path == "/api/workspace/pick-dir":
+                self._send_json(mgr.pick_native_directory(initial_dir=body.get("initial_dir")))
+            else:
+                self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)
+        except KeyError as exc:
+            self._send_json({"error": str(exc).strip("'")}, status=404)
+        except PermissionError as exc:
+            self._send_json({"error": str(exc)}, status=403)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+
     def _handle_next_api(self, path: str, query: dict):
         name = path[len("/api/next/"):]
+        mgr = self._mgr()
         if name == "manifest":
-            self._send_json(NEXT_DATA.manifest())
-        elif name == "fan":
-            target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+            req_id = self._requested_hub_id(query)
+            ctx = mgr.get_context(req_id)
+            if req_id and ctx is None:
+                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                return
+            if ctx is None:
+                self._send_json({
+                    "empty": True,
+                    "mode": mgr.mode,
+                    "hub": None,
+                    "hub_id": None,
+                    "workspace": mgr.workspace_summary(),
+                    "workspace_hubs": [],
+                    "targets": [],
+                    "default_target": None,
+                    "baseline": None,
+                    "recommended": [],
+                    "locations": [],
+                    "seasons": [],
+                    "models": [],
+                    "hubs": [],
+                    "latest": {"date": None, "season": None},
+                    "truth": {},
+                })
+                return
+            man = ctx.next_data.manifest()
+            man["empty"] = False
+            man["mode"] = mgr.mode
+            man["hub_id"] = ctx.hub_id
+            man["hub"] = ctx.display_label
+            if ctx.description:
+                man["hub_description"] = ctx.description
+            else:
+                man.pop("hub_description", None)
+            if mgr.mode == "local":
+                man["hub_path"] = str(ctx.base_dir)
+            else:
+                man.pop("hub_path", None)
+            man["workspace_hubs"] = mgr.workspace_hubs_brief()
+            self._send_json(man)
+            return
+
+        ctx = self._require_ctx(query)
+        if ctx is None:
+            return
+        if name == "fan":
+            target = query.get("target", [ctx.config.get_default_target()])[0]
             season = query.get("season", [""])[0]
             location = query.get("location", ["US"])[0]
             if not season:
                 self._send_json({"error": "Missing 'season' parameter"}, status=400)
                 return
-            payload = NEXT_DATA.fan(target, season, location)
+            payload = ctx.next_data.fan(target, season, location)
             if payload is None:
                 self._send_json({"error": f"No forecast rounds in season '{season}'"}, status=404)
                 return
@@ -284,16 +523,17 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             if not season:
                 self._send_json({"error": "Missing 'season' parameter"}, status=400)
                 return
-            self._send_json(NEXT_DATA.asof(query.get("target", [VIZ_CONFIG.get_default_target()])[0], season, query.get("location", ["US"])[0]))
+            target = query.get("target", [ctx.config.get_default_target()])[0]
+            self._send_json(ctx.next_data.asof(target, season, query.get("location", ["US"])[0]))
         elif name == "heatmap":
             # /api/heatmap, plus the evaluation window: horizons=0,1 and dates=<rounds in scope>
-            self._handle_heatmap(query, next_api=True)
+            self._handle_heatmap(ctx, query, next_api=True)
         elif name == "spatial":
             # /api/spatial with values unrounded (proportions would round to 0.0)
-            self._handle_spatial(query, precise=True)
+            self._handle_spatial(ctx, query, precise=True)
         elif name == "surveillance":
             # /api/surveillance with the as-of series unrounded
-            self._handle_surveillance(query, precise=True)
+            self._handle_surveillance(ctx, query, precise=True)
         elif name == "metrics":
             # /api/metrics, plus horizons=0,1 to score only those horizons (relative WIS computed on them)
             raw = query.get("horizons", [""])[0].strip()
@@ -304,7 +544,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 except ValueError:
                     self._send_json({"error": f"Invalid horizons '{raw}' (expected e.g. '0,1')"}, status=400)
                     return
-            self._handle_metrics(query, horizons=horizons)
+            self._handle_metrics(ctx, query, horizons=horizons)
         else:
             self._send_json({"error": f"Unknown endpoint '{path}'"}, status=404)
 
@@ -328,12 +568,34 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def _handle_status(self):
-        models = DATA_LOADER.scan_models()
-        warnings = DATA_LOADER.get_validation_warnings()
+    def _handle_status(self, query: dict):
+        mgr = self._mgr()
+        req_id = self._requested_hub_id(query)
+        ctx = mgr.get_context(req_id)
+        if req_id and ctx is None:
+            self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+            return
+        if ctx is None:
+            self._send_json({
+                "status": "ok",
+                "mode": mgr.mode,
+                "hub": None,
+                "hub_id": None,
+                "models_count": 0,
+                "production_models": [],
+                "local_test_models": [],
+                "hub_models": [],
+                "validation_warnings": [],
+            })
+            return
+        models = ctx.loader.scan_models()
+        warnings = ctx.loader.get_validation_warnings()
         self._send_json({
             "status": "ok",
-            "hub": BASE_DIR.name,
+            "mode": mgr.mode,
+            "hub": ctx.base_dir.name,
+            "hub_id": ctx.hub_id,
+            "hub_label": ctx.display_label,
             "models_count": len(models),
             "production_models": [m for m, v in models.items() if not v["is_local"] and v.get("source") != "hub"],
             "local_test_models": [m for m, v in models.items() if v["is_local"]],
@@ -341,35 +603,41 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             "validation_warnings": warnings,
         })
 
-    def _handle_cache_refresh(self, clear: bool = False):
+    def _handle_cache_refresh(self, ctx: HubContext, clear: bool = False):
         if clear:
-            DATA_LOADER.cache_mgr.clear_cache()
-        DATA_LOADER.ensemble_mgr.clear_cached_forecasts()
-        with EVAL_ENGINE._eval_cache_lock:
-            EVAL_ENGINE._eval_cache.clear()
-        count = DATA_LOADER.cache_mgr.warmup_cache()
+            ctx.loader.cache_mgr.clear_cache()
+        ctx.invalidate_all()
+        if clear:
+            count = ctx.loader.cache_mgr.warmup_cache(include_remote_models=False)
+            rebuilt = count
+        else:
+            stats = ctx.loader.cache_mgr.refresh_local_cache()
+            count = stats["models_total"]
+            rebuilt = stats["rebuilt"]
+        ctx.loader.scan_models(force_refresh=True)
         self._send_json({
             "status": "ok",
             "message": "Parquet cache successfully cleared and rebuilt" if clear else "Parquet cache successfully refreshed",
             "models_cached": count,
+            "rebuilt": rebuilt,
         })
 
-    def _handle_model_details(self, query: dict):
+    def _handle_model_details(self, ctx: HubContext, query: dict):
         model_id = query.get("model", query.get("model_id", [""]))[0].strip()
         if not model_id:
             self._send_json({"error": "Missing 'model' or 'model_id' parameter"}, status=400)
             return
 
-        details = DATA_LOADER.get_model_details(model_id)
+        details = ctx.loader.get_model_details(model_id)
         if details is None:
             self._send_json({"error": f"Model '{model_id}' not found"}, status=404)
             return
 
         self._send_json(details)
 
-    def _handle_metadata(self):
-        models = DATA_LOADER.scan_models()
-        locations = DATA_LOADER.get_locations()
+    def _handle_metadata(self, ctx: HubContext):
+        models = ctx.loader.scan_models()
+        locations = ctx.loader.get_locations()
 
         # Model forecast dates
         model_dates_set = set()
@@ -377,13 +645,13 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             model_dates_set.update(m_info.get("dates", []))
 
         # Official Hub round dates
-        hub_seasons = DATA_LOADER.get_hub_seasons()
+        hub_seasons = ctx.loader.get_hub_seasons()
         hub_dates_set = set()
         for h_dates in hub_seasons.values():
             hub_dates_set.update(h_dates)
 
         # Historical surveillance dates
-        adm_df = DATA_LOADER.get_admissions_ground_truth(as_polars=True)
+        adm_df = ctx.loader.get_admissions_ground_truth(as_polars=True)
         surv_dates_set = set()
         if adm_df is not None and not adm_df.is_empty():
             surv_dates_set.update(adm_df["target_end_date"].to_list())
@@ -395,7 +663,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         model_dates_sets = {m: set(m_info.get("dates", [])) for m, m_info in models.items()}
         date_info = {}
         for d in sorted_dates:
-            s = DATA_LOADER.get_flu_season_for_date(d)
+            s = ctx.loader.get_flu_season_for_date(d)
             m_count = sum(1 for m_set in model_dates_sets.values() if d in m_set)
             date_info[d] = {
                 "date": d,
@@ -407,28 +675,36 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             }
 
         # Dynamic recommended models and targets from config / hub
-        recommended = VIZ_CONFIG.get_recommended_models([m for m, v in models.items() if v.get("source") != "hub"])
+        recommended = ctx.config.get_recommended_models([m for m, v in models.items() if v.get("source") != "hub"])
         # Season peak targets are not selectable weekly targets; they are offered through `peak_targets`
-        targets = VIZ_CONFIG.get_weekly_targets()
+        targets = ctx.config.get_weekly_targets()
         peak_targets = {}
         for t in targets:
-            companions = DATA_LOADER.peaks.targets(t)
-            if companions and DATA_LOADER.peaks.is_available(t):
+            companions = ctx.loader.peaks.targets(t)
+            if companions and ctx.loader.peaks.is_available(t):
                 peak_targets[t] = companions
 
-        sorted_seasons = DATA_LOADER.get_all_seasons()
-        forecast_seasons = DATA_LOADER.get_forecast_seasons()
-        season_summaries = DATA_LOADER.get_season_summaries()
-        sorted_families = DATA_LOADER.get_all_families()
-        latest_date = DATA_LOADER.get_latest_reference_date()
-        latest_season = DATA_LOADER.get_latest_season()
-        targets_meta = {t: VIZ_CONFIG.get_target_metadata(t) for t in targets}
+        sorted_seasons = ctx.loader.get_all_seasons()
+        forecast_seasons = ctx.loader.get_forecast_seasons()
+        season_summaries = ctx.loader.get_season_summaries()
+        sorted_families = ctx.loader.get_all_families()
+        latest_date = ctx.loader.get_latest_reference_date()
+        latest_season = ctx.loader.get_latest_season()
+        targets_meta = {t: ctx.config.get_target_metadata(t) for t in targets}
         for companions in peak_targets.values():
             for t in companions.values():
-                targets_meta[t] = {**VIZ_CONFIG.get_target_metadata(t), "is_peak": True}
+                targets_meta[t] = {**ctx.config.get_target_metadata(t), "is_peak": True}
+
+        if self._mgr().mode != "local":
+            exposed_models = {
+                mid: {k: v for k, v in m_info.items() if k != "path"}
+                for mid, m_info in models.items()
+            }
+        else:
+            exposed_models = models
 
         self._send_json({
-            "models": models,
+            "models": exposed_models,
             "recommended_models": recommended,
             "locations": list(locations.values()),
             "dates": sorted_dates,
@@ -443,21 +719,20 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             "peak_targets": peak_targets,
             "latest_date": latest_date,
             "latest_season": latest_season,
-            "default_target": VIZ_CONFIG.get_default_target(),
-            "default_baseline": VIZ_CONFIG.get_default_baseline(
+            "default_target": ctx.config.get_default_target(),
+            "default_baseline": ctx.config.get_default_baseline(
                 [m for m, v in models.items() if v.get("source") != "hub"] or list(models.keys())
             ),
             "remote_hubs": [
                 {k: h.get(k) for k in ("id", "label", "short_label", "synced", "enabled", "latest_round",
                                        "latest_round_models", "last_sync", "models", "pending", "peak_outdated")}
-                for h in REMOTE_MGR.list_hubs()
+                for h in ctx.remote_mgr.list_hubs()
             ],
-            "truth_info": DATA_LOADER.get_truth_info(),
+            "truth_info": ctx.loader.get_truth_info(),
         })
 
-
-    def _handle_forecast(self, query: dict):
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+    def _handle_forecast(self, ctx: HubContext, query: dict):
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         location = query.get("location", ["US"])[0]
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
@@ -467,12 +742,12 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": "Missing 'date' parameter"}, status=400)
             return
 
-        truth = DATA_LOADER.get_ground_truth_series(target, location, ref_date)
-        surveillance = DATA_LOADER.get_surveillance_streams(target, location, ref_date)
+        truth = ctx.loader.get_ground_truth_series(target, location, ref_date)
+        surveillance = ctx.loader.get_surveillance_streams(target, location, ref_date)
 
         model_results = []
         for mid in model_ids:
-            fan_data = DATA_LOADER.get_model_fan_data(mid, target, location, ref_date)
+            fan_data = ctx.loader.get_model_fan_data(mid, target, location, ref_date)
             if fan_data:
                 model_results.append(fan_data)
 
@@ -480,7 +755,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         peaks = None
         if location not in ("states", "all"):
             try:
-                peaks = DATA_LOADER.peaks.round_overlay(target, location, ref_date, model_ids)
+                peaks = ctx.loader.peaks.round_overlay(target, location, ref_date, model_ids)
             except Exception as exc:
                 logger.warning("Peak overlay failed: %s", exc)
 
@@ -494,18 +769,17 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             "peaks": peaks,
         })
 
-    def _handle_peaks(self, query: dict):
+    def _handle_peaks(self, ctx: HubContext, query: dict):
         """Season Peak view: one round's peak forecasts, their evolution over the season, and peak skill."""
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         location = query.get("location", ["US"])[0] or "US"
         if location in ("states", "all"):
             location = "US"
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
         if models_param.strip().lower() == "all":
-            # every known model (what /next/ asks for when no selected model forecasts peaks); added for
-            # /next/, so a model list behaves as before
-            model_ids = list(DATA_LOADER.scan_models().keys())
+            # every known model (what /next/ asks for when no selected model forecasts peaks)
+            model_ids = list(ctx.loader.scan_models().keys())
         else:
             model_ids = [m.strip() for m in models_param.split(",") if m.strip()]
         scope = query.get("skill_scope", ["location"])[0]
@@ -516,57 +790,57 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         if scope not in ("location", "states"):
             self._send_json({"error": "skill_scope must be 'location' or 'states'"}, status=400)
             return
-        view = DATA_LOADER.peaks.season_view(target, location, ref_date, model_ids, scope, common)
+        view = ctx.loader.peaks.season_view(target, location, ref_date, model_ids, scope, common)
         # fallback=all (added for /next/): when none of the listed models forecast this round's peak, answer
         # for every known model instead, in the same request; the response says so with "fallback": true
         if (query.get("fallback", [""])[0] == "all" and model_ids and view.get("available")
                 and not any(m.get("has_round") and (m.get("timing") or m.get("size")) for m in view.get("models", []))):
-            view = DATA_LOADER.peaks.season_view(target, location, ref_date, list(DATA_LOADER.scan_models().keys()), scope, common)
+            view = ctx.loader.peaks.season_view(target, location, ref_date, list(ctx.loader.scan_models().keys()), scope, common)
             view["fallback"] = True
         self._send_json(view)
 
-    def _handle_peak_map(self, query: dict):
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+    def _handle_peak_map(self, ctx: HubContext, query: dict):
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         ref_date = query.get("date", [""])[0]
         model_id = query.get("model", [""])[0].strip()
         if not ref_date or not model_id:
             self._send_json({"error": "Missing 'date' or 'model' parameter"}, status=400)
             return
-        self._send_json(DATA_LOADER.peaks.map_layer(target, ref_date, model_id))
+        self._send_json(ctx.loader.peaks.map_layer(target, ref_date, model_id))
 
-    def _handle_surveillance(self, query: dict, precise: bool = False):
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+    def _handle_surveillance(self, ctx: HubContext, query: dict, precise: bool = False):
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         location = query.get("location", ["US"])[0]
-        models = DATA_LOADER.scan_models()
+        models = ctx.loader.scan_models()
         dates = [m.get("max_date") for m in models.values() if m.get("max_date")]
         fallback_date = max(dates) if dates else "2024-01-13"
         ref_date = query.get("date", [fallback_date])[0]
-        surv = DATA_LOADER.get_surveillance_streams(target, location, ref_date, precise=precise)
+        surv = ctx.loader.get_surveillance_streams(target, location, ref_date, precise=precise)
         self._send_json(surv)
 
-    def _handle_spatial(self, query: dict, precise: bool = False):
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+    def _handle_spatial(self, ctx: HubContext, query: dict, precise: bool = False):
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         ref_date = query.get("date", [""])[0]
         models_param = query.get("models", [""])[0]
         horizon_param = query.get("horizon", ["all"])[0]
 
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()]
         if not model_ids:
-            model_ids = list(DATA_LOADER.scan_models().keys())
+            model_ids = list(ctx.loader.scan_models().keys())
 
         if not ref_date:
             self._send_json({"error": "Missing 'date' parameter"}, status=400)
             return
 
-        spatial_data = DATA_LOADER.get_spatial_data(target, ref_date, model_ids, horizon=horizon_param, precise=precise)
+        spatial_data = ctx.loader.get_spatial_data(target, ref_date, model_ids, horizon=horizon_param, precise=precise)
         self._send_json(spatial_data)
 
-    def _handle_heatmap(self, query: dict, next_api: bool = False):
+    def _handle_heatmap(self, ctx: HubContext, query: dict, next_api: bool = False):
         mode = query.get("mode", [""])[0].strip() or None
         rows = query.get("rows", [""])[0].strip() or None
         cols = query.get("cols", [""])[0].strip() or None
         location = query.get("location", query.get("loc", ["states"]))[0].strip() or "states"
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0].strip()
+        target = query.get("target", [ctx.config.get_default_target()])[0].strip()
         metric = query.get("metric", ["rate"])[0].strip()
         ref_date = query.get("date", [""])[0].strip() or None
         season = query.get("season", [""])[0].strip() or None
@@ -581,7 +855,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()] if models_param else None
 
         try:
-            heatmap_data = DATA_LOADER.get_heatmap_data(
+            heatmap_data = ctx.loader.get_heatmap_data(
                 mode=mode,
                 rows=rows,
                 cols=cols,
@@ -615,18 +889,20 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             out["dates"] = [d.strip() for d in raw_d.split(",") if d.strip()] or None
         return out
 
-    def _handle_season_curves(self, query: dict):
+    def _handle_season_curves(self, ctx: HubContext, query: dict):
         """Truth curves per season for one location, aligned by season week, with peak/pre/post phases."""
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         location = query.get("location", ["US"])[0] or "US"
         if location in ("states", "all"):
             location = "US"
         seasons_param = query.get("seasons", [""])[0]
-        seasons = [s.strip() for s in seasons_param.split(",") if s.strip()] or DATA_LOADER.get_forecast_seasons()
-        self._send_json(DATA_LOADER.get_season_curves(target, location, seasons))
+        seasons = [s.strip() for s in seasons_param.split(",") if s.strip()] or ctx.loader.get_forecast_seasons()
+        self._send_json(ctx.loader.get_season_curves(target, location, seasons))
 
-    def _handle_metrics(self, query: dict, horizons: Optional[List[int]] = None):
-        target = query.get("target", [VIZ_CONFIG.get_default_target()])[0]
+    def _handle_metrics(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
+        from viz.core.evaluation import EvaluationParams
+
+        target = query.get("target", [ctx.config.get_default_target()])[0]
         loc_param = query.get("location", ["all"])[0]
         date_param = query.get("date", ["all"])[0]
         season_param = query.get("season", [""])[0].strip()
@@ -652,7 +928,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         )
 
         try:
-            result = EVAL_ENGINE.evaluate(params)
+            result = ctx.eval_engine.evaluate(params)
             self._send_json(result.to_dict())
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
@@ -660,27 +936,27 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             logger.warning("Metrics evaluation error: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
 
-    def _route_remote_post(self, path: str):
+    def _route_remote_post(self, ctx: HubContext, path: str):
         """Hub sync endpoints. Only these (user-initiated) calls ever reach the network."""
         body = self._read_json_body()
         hub_id = str(body.get("hub", "")).strip()
         try:
             if path == "/api/remote/add":
-                result = REMOTE_MGR.add_hub(str(body.get("bucket", "")), body.get("label"))
+                result = ctx.remote_mgr.add_hub(str(body.get("bucket", "")), body.get("label"))
                 self._send_json(result, status=200 if result.get("ok") else 422)
             elif path == "/api/remote/check":
-                self._send_json(REMOTE_MGR.check(hub_id))
+                self._send_json(ctx.remote_mgr.check(hub_id))
             elif path == "/api/remote/sync":
                 seasons = body.get("seasons")
                 seasons = [str(x) for x in seasons] if isinstance(seasons, list) else None
-                self._send_json({"job": REMOTE_MGR.start_sync(hub_id, seasons)})
+                self._send_json({"job": ctx.remote_mgr.start_sync(hub_id, seasons)})
             elif path == "/api/remote/cancel":
-                self._send_json({"cancelled": REMOTE_MGR.cancel(hub_id)})
+                self._send_json({"cancelled": ctx.remote_mgr.cancel(hub_id)})
             elif path == "/api/remote/remove":
-                REMOTE_MGR.remove(hub_id)
+                ctx.remote_mgr.remove(hub_id)
                 self._send_json({"status": "ok", "removed": hub_id})
             elif path == "/api/remote/toggle":
-                REMOTE_MGR.set_enabled(hub_id, bool(body.get("enabled", True)))
+                ctx.remote_mgr.set_enabled(hub_id, bool(body.get("enabled", True)))
                 self._send_json({"status": "ok", "hub": hub_id, "enabled": bool(body.get("enabled", True))})
             else:
                 self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)
@@ -693,23 +969,23 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         except S3Error as exc:
             self._send_json({"error": str(exc)}, status=502)
 
-    def _handle_ensemble_list(self):
+    def _handle_ensemble_list(self, ctx: HubContext):
         """List all registered session and persisted synthetic ensembles."""
-        ensembles = DATA_LOADER.ensemble_mgr.list_ensembles()
+        ensembles = ctx.loader.ensemble_mgr.list_ensembles()
         self._send_json({"status": "ok", "ensembles": ensembles})
 
-    def _handle_ensemble_preview(self):
+    def _handle_ensemble_preview(self, ctx: HubContext):
         """Compute pre-flight task overlap and date alignment for candidate ensemble."""
         body = self._read_json_body()
         try:
             cfg = SyntheticEnsembleConfig.from_dict(body)
-            preview = DATA_LOADER.ensemble_mgr.preview_ensemble(cfg)
+            preview = ctx.loader.ensemble_mgr.preview_ensemble(cfg)
             self._send_json(preview)
         except Exception as exc:
             logger.exception("Error during ensemble preview: %s", exc)
             self._send_json({"valid": False, "error": str(exc)}, status=400)
 
-    def _handle_ensemble_create(self):
+    def _handle_ensemble_create(self, ctx: HubContext):
         """Register a new session synthetic ensemble."""
         body = self._read_json_body()
         name = str(body.get("name", "")).strip()
@@ -755,12 +1031,12 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         )
 
         try:
-            registered = DATA_LOADER.register_synthetic_ensemble(cfg)
-            with EVAL_ENGINE._eval_cache_lock:
-                EVAL_ENGINE._eval_cache.clear()
+            registered = ctx.loader.register_synthetic_ensemble(cfg)
+            with ctx.eval_engine._eval_cache_lock:
+                ctx.eval_engine._eval_cache.clear()
 
             if body.get("save_to_disk"):
-                DATA_LOADER.save_synthetic_ensemble(registered.id)
+                ctx.loader.save_synthetic_ensemble(registered.id)
 
             self._send_json({
                 "status": "ok",
@@ -772,7 +1048,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             logger.exception("Error creating synthetic ensemble: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
 
-    def _handle_ensemble_save(self):
+    def _handle_ensemble_save(self, ctx: HubContext):
         """Persist a registered synthetic ensemble to local-output/synthetic/<id>/."""
         body = self._read_json_body()
         ensemble_id = str(body.get("ensemble_id", "")).strip()
@@ -781,15 +1057,15 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         try:
-            res = DATA_LOADER.save_synthetic_ensemble(ensemble_id)
-            with EVAL_ENGINE._eval_cache_lock:
-                EVAL_ENGINE._eval_cache.clear()
+            res = ctx.loader.save_synthetic_ensemble(ensemble_id)
+            with ctx.eval_engine._eval_cache_lock:
+                ctx.eval_engine._eval_cache.clear()
             self._send_json(res)
         except Exception as exc:
             logger.exception("Error persisting synthetic ensemble: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
 
-    def _handle_ensemble_delete(self):
+    def _handle_ensemble_delete(self, ctx: HubContext):
         """Remove a synthetic ensemble from active registry and disk."""
         body = self._read_json_body()
         ensemble_id = str(body.get("ensemble_id", "")).strip()
@@ -798,9 +1074,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         try:
-            removed = DATA_LOADER.remove_synthetic_ensemble(ensemble_id)
-            with EVAL_ENGINE._eval_cache_lock:
-                EVAL_ENGINE._eval_cache.clear()
+            removed = ctx.loader.remove_synthetic_ensemble(ensemble_id)
+            with ctx.eval_engine._eval_cache_lock:
+                ctx.eval_engine._eval_cache.clear()
             if removed:
                 self._send_json({"status": "ok", "ensemble_id": ensemble_id})
             else:
@@ -808,7 +1084,6 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as exc:
             logger.exception("Error deleting synthetic ensemble: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
-
 
 
 def _port_is_free(host: str, port: int) -> bool:
@@ -827,13 +1102,39 @@ def _next_free_port(host: str, start: int) -> Optional[int]:
     return None
 
 
-def run_server(port: Optional[int] = None, host: Optional[str] = None):
+def run_server(
+    port: Optional[int] = None,
+    host: Optional[str] = None,
+    hubs: Optional[List[str]] = None,
+    mode: Optional[str] = None,
+    data_dir: Optional[str] = None,
+    no_auto_hub: bool = False,
+):
     """Launch the threaded HTTP server with transparent cache warmup."""
+    if hubs or mode is not None or data_dir is not None or no_auto_hub or HUB_MANAGER is None:
+        try:
+            cli_paths = [Path(h) for h in hubs] if hubs else None
+            d_dir = Path(data_dir).expanduser().resolve() if data_dir else None
+            init_hub_manager(
+                data_dir=d_dir,
+                mode=mode,
+                cli_hubs=cli_paths,
+                include_enclosing=not no_auto_hub,
+            )
+        except ValueError as exc:
+            sys.stderr.write(f"\nERROR: {exc}\n\n")
+            sys.exit(1)
+
+    mgr = HUB_MANAGER
+    assert mgr is not None
+    active_ctx = mgr.get_context(None)
+
     # SO_REUSEADDR lets a restart reuse a port stuck in TIME_WAIT on macOS/Linux. On Windows it
     # would instead let a second server bind a port that is already in use, so it stays off there.
     socketserver.ThreadingTCPServer.allow_reuse_address = sys.platform != "win32"
+    socketserver.ThreadingTCPServer.daemon_threads = True
 
-    server_cfg = VIZ_CONFIG.get_server_config()
+    server_cfg = active_ctx.config.get_server_config() if active_ctx else _FALLBACK_SERVER_CFG
     final_port = port if port is not None else server_cfg["port"]
     final_host = host if host is not None else server_cfg["host"]
 
@@ -843,32 +1144,42 @@ def run_server(port: Optional[int] = None, host: Optional[str] = None):
         if exc.errno not in (errno.EADDRINUSE, 10048):  # 10048 = WSAEADDRINUSE
             raise
         suggestion = _next_free_port(final_host, final_port + 1)
-        launcher = "viz\\run.bat" if sys.platform == "win32" else "./viz/run.sh"
+        launcher = "run.bat" if sys.platform == "win32" else "./run.sh"
+        hub_desc = str(active_ctx.base_dir) if active_ctx else "standalone workspace"
         sys.stderr.write(
             f"\nERROR: port {final_port} on {final_host} is already in use, probably by another viz server.\n"
             f"Nothing was started. Anything answering at http://{final_host}:{final_port} is that other server,\n"
-            f"not this hub ({BASE_DIR}).\n"
+            f"not this hub ({hub_desc}).\n"
         )
         if suggestion:
             sys.stderr.write(f"Start on a free port instead:  {launcher} {suggestion}\n\n")
         sys.exit(1)
 
-    # Warm up Parquet cache in background thread
-    def _warmup_background():
-        try:
-            DATA_LOADER.cache_mgr.warmup_cache()
-        except Exception as exc:
-            logger.warning("Background cache warmup error: %s", exc)
+    # Warm up Parquet cache in background thread when an active hub is present
+    if active_ctx is not None:
+        def _warmup_background(ctx_to_warm: HubContext):
+            try:
+                ctx_to_warm.loader.cache_mgr.warmup_cache()
+            except Exception as exc:
+                logger.warning("Background cache warmup error: %s", exc)
 
-    threading.Thread(target=_warmup_background, daemon=True).start()
+        threading.Thread(target=_warmup_background, args=(active_ctx,), daemon=True).start()
+
+    hub_banner = (
+        f"{active_ctx.display_label} ({active_ctx.base_dir})"
+        if active_ctx is not None
+        else "None (open UI to connect a local hub)"
+    )
 
     with httpd:
         print(f"\n========================================================")
-        print(f"  Sandbox Visualization & Evaluation Server Online")
-        print(f"  URL: http://{final_host}:{final_port}")
-        print(f"  Hub: {BASE_DIR}")
-        print(f"  Engine: Polars (Vectorized SIMD) + Parquet Acceleration")
-        print(f"  Serving: {STATIC_DIR}")
+        print(f"  viz — Hubverse Visualization & Evaluation Server")
+        print(f"  Mode:    {mgr.mode}")
+        print(f"  URL:     http://{final_host}:{final_port}")
+        print(f"  Hub:     {hub_banner}")
+        print(f"  Data:    {mgr.data_dir}")
+        print(f"  Engine:  Polars (Vectorized SIMD) + Parquet Acceleration")
+        print(f"  Serving: {NEXT_DIR}  (classic: {STATIC_DIR})")
         print(f"  Press Ctrl+C to terminate.")
         print(f"========================================================\n", flush=True)
         try:
@@ -880,8 +1191,20 @@ def run_server(port: Optional[int] = None, host: Optional[str] = None):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Forecast Sandbox Visualizer & Evaluator")
+
+    parser = argparse.ArgumentParser(description="viz — Hubverse Forecast Visualizer & Evaluator")
+    parser.add_argument("--hub", action="append", default=None, help="Path to a local Hubverse hub (repeatable)")
     parser.add_argument("--port", type=int, default=None, help="Port to bind (default from config or 8501)")
     parser.add_argument("--host", type=str, default=None, help="Host interface (default: 127.0.0.1)")
+    parser.add_argument("--mode", choices=["local", "web"], default=None, help="Runtime mode: local (default) or web")
+    parser.add_argument("--data-dir", type=str, default=None, help="Override directory for workspace & caches")
+    parser.add_argument("--no-auto-hub", action="store_true", help="Do not auto-register an enclosing parent hub")
     args = parser.parse_args()
-    run_server(port=args.port, host=args.host)
+    run_server(
+        port=args.port,
+        host=args.host,
+        hubs=args.hub,
+        mode=args.mode,
+        data_dir=args.data_dir,
+        no_auto_hub=args.no_auto_hub,
+    )

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodeFan, indexManifest, loadFan, loadManifest } from "../../lib/api.js";
+import { decodeFan, indexManifest, loadFan, loadManifest, apiUrl, getActiveHub, setActiveHub } from "../../lib/api.js";
 import { parseIso, WEEK } from "../../lib/scale.js";
 import { buildFan, spread, weeks, isoAdd } from "./fixtures/synthetic.mjs";
 
@@ -210,4 +210,59 @@ test("decodes the live payload shape (real US 2025–26 header layout)", () => {
   assert.equal(f.dates.length, 33);
   assert.equal(f.roundAt.filter((r) => r >= 0).length, 29);
   assert.equal(f.window[1], parseIso(isoAdd("2025-08-02", 52 * 7)));
+});
+
+test("apiUrl appends workspace query parameter safely without colliding with remote hub=", () => {
+  try {
+    setActiveHub(null);
+    assert.equal(getActiveHub(), null);
+    assert.equal(apiUrl("/api/next/metrics?target=wk+inc+flu+hosp"), "/api/next/metrics?target=wk+inc+flu+hosp");
+
+    setActiveHub("covid_hub");
+    assert.equal(getActiveHub(), "covid_hub");
+    assert.equal(apiUrl("/api/next/manifest"), "/api/next/manifest?workspace=covid_hub");
+    assert.equal(
+      apiUrl("/api/remote/job?hub=flusight"),
+      "/api/remote/job?hub=flusight&workspace=covid_hub",
+      "preserves remote S3 hub= parameter",
+    );
+    assert.equal(
+      apiUrl("/api/next/manifest?workspace=flu_hub"),
+      "/api/next/manifest?workspace=flu_hub",
+      "does not duplicate an explicit workspace= param",
+    );
+    assert.equal(apiUrl("/api/workspace"), "/api/workspace");
+    assert.equal(apiUrl("/api/workspace/add"), "/api/workspace/add");
+    assert.equal(apiUrl("/next/index.html"), "/next/index.html");
+  } finally {
+    setActiveHub(null);
+  }
+});
+
+test("indexManifest resolves per-target and per-season baselines with fallback", () => {
+  const m = indexManifest({
+    ...MANIFEST,
+    baseline: "FluSight-baseline",
+    baselines: {
+      default: "FluSight-baseline",
+      by_target: {
+        "wk inc flu hosp": "FluSight-baseline",
+        "wk inc flu prop ed visits": "ed-baseline",
+      },
+      by_target_season: {
+        "wk inc flu hosp": {
+          "2023-2024": "flusight:FluSight-baseline",
+          "2026-2027": "FluSight-baseline",
+        },
+      },
+      candidates: ["FluSight-baseline", "flusight:FluSight-baseline", "ed-baseline"],
+    },
+  });
+  assert.equal(m.baselineFor("wk inc flu hosp", "2023-2024"), "flusight:FluSight-baseline");
+  assert.equal(m.baselineFor("wk inc flu hosp", "2025-2026"), "FluSight-baseline");
+  assert.equal(m.baselineFor("wk inc flu prop ed visits", "2026-2027"), "ed-baseline");
+  assert.equal(m.baselineFor("unknown-target", "2026-2027"), "FluSight-baseline");
+
+  const legacy = indexManifest({ ...MANIFEST, baseline: "Legacy-baseline" });
+  assert.equal(legacy.baselineFor("wk inc flu hosp", "2026-2027"), "Legacy-baseline");
 });

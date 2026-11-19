@@ -4,6 +4,7 @@ Serves as the single source of truth for both the headless CLI (score_cli.py)
 and the interactive web dashboard (server.py).
 """
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import hashlib
@@ -15,6 +16,7 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 
 import polars as pl
 
+from viz.core.baselines import resolve_baseline, target_baseline_override
 from viz.core.peaks import is_peak_target
 from viz.core.config import VizConfig
 from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
@@ -235,9 +237,11 @@ class EvaluationEngine:
     def __init__(self, base_dir: Path, data_loader: Optional[SandboxDataLoader] = None):
         self.base_dir = Path(base_dir).resolve()
         self.loader = data_loader or SandboxDataLoader(self.base_dir)
-        self.config = VizConfig(self.base_dir)
-        self._eval_cache: Dict[str, EvaluationResult] = {}
+        self.config = self.loader.config
+        self._eval_cache: "OrderedDict[str, EvaluationResult]" = OrderedDict()
+        self._eval_cache_size = 64
         self._eval_cache_lock = threading.Lock()
+        self._eval_inflight: Dict[str, threading.Event] = {}
 
     def _compute_cache_key(self, params: EvaluationParams) -> str:
         """Compute SHA256 cache key based on evaluation parameters and file mtimes."""
@@ -264,6 +268,28 @@ class EvaluationEngine:
         if params.horizons is not None:
             raw += f"|horizons={sorted(set(int(h) for h in params.horizons))}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _baseline_meta(
+        self,
+        all_models: Dict[str, Dict[str, Any]],
+        extra_ids: Tuple[Optional[str], ...] = (),
+    ) -> Dict[str, Dict[str, Any]]:
+        """Load lightweight YAML metadata for baseline candidates and explicitly configured defaults."""
+        if not hasattr(self.loader, "get_model_metadata"):
+            return {}
+        watch = {mid for mid in extra_ids if mid}
+        meta_map: Dict[str, Dict[str, Any]] = {}
+        for mid, info in all_models.items():
+            fam = str(info.get("family") or "").lower()
+            mlow = mid.lower()
+            if "baseline" in mlow or "null" in mlow or "persist" in mlow or fam == "baseline" or mid in watch:
+                try:
+                    m = self.loader.get_model_metadata(mid)
+                    if isinstance(m, dict):
+                        meta_map[mid] = m
+                except Exception:
+                    pass
+        return meta_map
 
     def _build_window_filter(self, target: str, weeks: Optional[str], phase: Optional[str]) -> Optional[WindowFilter]:
         week_range = parse_week_range(weeks)
@@ -320,10 +346,34 @@ class EvaluationEngine:
     def evaluate(self, params: EvaluationParams, force_refresh: bool = False) -> EvaluationResult:
         """Execute evaluation across requested models according to the given parameters."""
         cache_key = self._compute_cache_key(params)
-        with self._eval_cache_lock:
-            if not force_refresh and cache_key in self._eval_cache:
-                return self._eval_cache[cache_key]
+        while True:
+            with self._eval_cache_lock:
+                if not force_refresh and cache_key in self._eval_cache:
+                    self._eval_cache.move_to_end(cache_key)
+                    return self._eval_cache[cache_key]
+                event = self._eval_inflight.get(cache_key)
+                if event is None or force_refresh:
+                    event = threading.Event()
+                    self._eval_inflight[cache_key] = event
+                    break
+            event.wait()
 
+        try:
+            result = self._evaluate_uncached(params)
+            with self._eval_cache_lock:
+                self._eval_cache[cache_key] = result
+                self._eval_cache.move_to_end(cache_key)
+                while len(self._eval_cache) > self._eval_cache_size:
+                    self._eval_cache.popitem(last=False)
+            return result
+        finally:
+            with self._eval_cache_lock:
+                if self._eval_inflight.get(cache_key) is event:
+                    self._eval_inflight.pop(cache_key, None)
+            event.set()
+
+    def _evaluate_uncached(self, params: EvaluationParams) -> EvaluationResult:
+        """Compute evaluation metrics without reading or mutating `_eval_cache`."""
         target = params.target or self.config.get_default_target()
         if is_peak_target(target):
             raise ValueError(
@@ -411,10 +461,24 @@ class EvaluationEngine:
             if "all" in [m.lower() for m in requested_model_ids]:
                 requested_model_ids = list(all_models.keys())
 
-        # Determine baseline model dynamically (returns None if no genuine baseline exists)
+        # Determine baseline model dynamically for this target and temporal scope
+        season_hint = selected_seasons[0] if len(selected_seasons) == 1 else None
+        raw_cfg_default = getattr(self.config, "_user_config", {}).get("default_baseline")
+        cfg_default = str(raw_cfg_default).strip() if raw_cfg_default else None
+        tgt_default = target_baseline_override(self.config, target)
+        baseline_meta = self._baseline_meta(all_models, (cfg_default, tgt_default))
+
         baseline_id = params.baseline.strip() if params.baseline else None
         if not baseline_id or baseline_id not in all_models:
-            baseline_id = self.config.get_default_baseline(list(all_models.keys()))
+            baseline_id = resolve_baseline(
+                all_models,
+                model_meta=baseline_meta,
+                target=target,
+                dates=dates_filter,
+                season=season_hint,
+                config_default=cfg_default,
+                target_config_default=tgt_default,
+            ) or self.config.get_default_baseline(list(all_models.keys()), target=target, model_meta=baseline_meta)
 
         # If baseline is valid and not in requested models, load it in background for pairwise comparisons
         models_to_load = list(requested_model_ids)
@@ -564,10 +628,16 @@ class EvaluationEngine:
         validation_warnings: List[str] = []
         effective_baseline = baseline_id if (baseline_id and baseline_id in task_scores_by_model) else None
         if not effective_baseline and task_scores_by_model:
-            for candidate in task_scores_by_model:
-                if "baseline" in candidate.lower():
-                    effective_baseline = candidate
-                    break
+            effective_baseline = resolve_baseline(
+                all_models,
+                model_meta=baseline_meta,
+                target=target,
+                dates=dates_filter,
+                season=season_hint,
+                config_default=cfg_default,
+                target_config_default=tgt_default,
+                eligible_ids=set(task_scores_by_model.keys()),
+            )
             if not effective_baseline:
                 for candidate in task_scores_by_model:
                     if "ensemble" in candidate.lower():
@@ -818,13 +888,6 @@ class EvaluationEngine:
             common_task_set=common_task_set,
             window_filter=window_filter,
         )
-
-        with self._eval_cache_lock:
-            # Maintain cache size within bounds
-            if len(self._eval_cache) > 64:
-                self._eval_cache.clear()
-            self._eval_cache[cache_key] = result
-
         return result
 
     def _population_map(self, target: str) -> Optional[Dict[str, int]]:

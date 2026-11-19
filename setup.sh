@@ -1,53 +1,22 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# One-time setup for viz. Run from anywhere:  ./viz/setup.sh
-#   1. Creates viz/.venv (skipped if a virtual environment is already active)
-#   2. Installs the Python dependencies
-#   3. Builds the surveillance data (NHSN admissions, as-of snapshots)
-#   4. Creates the hub's local-output/ folder for uncommitted model runs
-#   5. Hides viz/ and local-output/ from the hub's git status via .git/info/exclude
-# Safe to re-run. Stops if the parent folder isn't a hub (override with --force).
+# One-time setup for viz. Works either cloned anywhere (standalone) or inside
+# a Hubverse hub folder. Safe to re-run.
+#   1. Creates .venv inside this checkout (skipped if VIRTUAL_ENV is active)
+#   2. Installs Python dependencies from requirements.txt
+#   3. When inside a Hubverse hub, builds surveillance data, creates
+#      local-output/, and updates the hub's .git/info/exclude
 # ==============================================================================
 
 set -e
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
+DIRNAME="$(basename "$DIR")"
 ROOT_DIR="$(dirname "$DIR")"
 
-if [ "$(basename "$DIR")" != "viz" ]; then
-    echo "ERROR: this folder must be named 'viz' (it is '$(basename "$DIR")')."
-    echo "Clone it with:  git clone https://github.com/nikhillebaka/viz.git viz"
-    exit 1
-fi
-
-# viz reads hub data from its parent folder, so it must be cloned directly inside the hub.
-# Pass --force to skip this check (e.g. for a hub whose model-output/ doesn't exist yet).
-is_hub() { [ -d "$1/model-output" ] || [ -d "$1/target-data" ]; }
-if ! is_hub "$ROOT_DIR" && [ "$1" != "--force" ]; then
-    echo "ERROR: viz must be inside a Hubverse hub, but $ROOT_DIR"
-    echo "       has no model-output/ or target-data/ folder."
-    HUBS=()
-    for d in "$ROOT_DIR"/*/; do
-        d="${d%/}"
-        [ "$d" != "$DIR" ] && is_hub "$d" && HUBS+=("$d")
-    done
-    if [ ${#HUBS[@]} -eq 1 ]; then
-        echo
-        echo "Found a hub next to it. Move viz into that hub and re-run setup:"
-        echo "  mv \"$DIR\" \"${HUBS[0]}/viz\" && \"${HUBS[0]}/viz/setup.sh\""
-    elif [ ${#HUBS[@]} -gt 1 ]; then
-        echo
-        echo "Found several hubs next to it. Move viz into the one you want, then re-run setup:"
-        for h in "${HUBS[@]}"; do echo "  mv \"$DIR\" \"$h/viz\""; done
-    else
-        echo
-        echo "Clone it from inside your hub instead:"
-        echo "  cd path/to/your-hub && git clone https://github.com/nikhillebaka/viz.git viz"
-    fi
-    echo
-    echo "(To set up here anyway, run: $DIR/setup.sh --force)"
-    exit 1
-fi
+is_hub() {
+    [ -f "$1/hub-config/tasks.json" ] || [ -d "$1/model-output" ] || [ -d "$1/target-data" ]
+}
 
 # 1. Python environment
 if [ -n "$VIRTUAL_ENV" ] && [ -f "$VIRTUAL_ENV/bin/python" ]; then
@@ -59,7 +28,7 @@ else
         exit 1
     fi
     if [ ! -f "$DIR/.venv/bin/python" ]; then
-        echo "==> Creating virtual environment in viz/.venv"
+        echo "==> Creating virtual environment in $DIR/.venv"
         python3 -m venv "$DIR/.venv"
     fi
     PYTHON_BIN="$DIR/.venv/bin/python"
@@ -75,28 +44,38 @@ echo "==> Installing dependencies"
 "$PYTHON_BIN" -m pip install --quiet --upgrade pip
 "$PYTHON_BIN" -m pip install --quiet -r "$DIR/requirements.txt"
 
-# 3. Surveillance data
-echo "==> Building surveillance data (falls back to local target-data/ if offline)"
-"$PYTHON_BIN" "$DIR/rebuild_surveillance.py" --force || \
-    echo "WARNING: surveillance rebuild failed; the dashboard still runs without those streams."
-
-# 4. Staging folder for uncommitted model runs (shown as [LOCAL] in the dashboard)
-if [ ! -d "$ROOT_DIR/local-output" ]; then
-    mkdir -p "$ROOT_DIR/local-output"
-    echo "==> Created local-output/ (put uncommitted runs in local-output/<model_id>/)"
-fi
-
-# 5. Keep viz/ and local-output/ out of the hub's git status
-if [ -d "$ROOT_DIR/.git" ]; then
-    EXCLUDE="$ROOT_DIR/.git/info/exclude"
-    mkdir -p "$(dirname "$EXCLUDE")"
-    for entry in "viz/" "local-output/"; do
-        if ! grep -qxF "$entry" "$EXCLUDE" 2>/dev/null; then
-            echo "$entry" >> "$EXCLUDE"
-            echo "==> Added $entry to .git/info/exclude"
-        fi
-    done
-fi
-
 echo
-echo "Setup complete. Start the dashboard with:  ./viz/run.sh"
+if is_hub "$ROOT_DIR"; then
+    # 3. Surveillance data (inside enclosing hub)
+    echo "==> Enclosing Hubverse hub detected: $ROOT_DIR"
+    echo "==> Building surveillance data (falls back to local target-data/ if offline)"
+    "$PYTHON_BIN" "$DIR/rebuild_surveillance.py" --hub "$ROOT_DIR" --force || \
+        echo "WARNING: surveillance rebuild failed; the dashboard still runs without those streams."
+
+    # 4. Staging folder for uncommitted model runs (shown as [LOCAL] in the dashboard)
+    if [ ! -d "$ROOT_DIR/local-output" ]; then
+        mkdir -p "$ROOT_DIR/local-output"
+        echo "==> Created local-output/ (put uncommitted runs in local-output/<model_id>/)"
+    fi
+
+    # 5. Keep this tool folder and local-output/ out of the hub's git status
+    if [ -d "$ROOT_DIR/.git" ]; then
+        EXCLUDE="$ROOT_DIR/.git/info/exclude"
+        mkdir -p "$(dirname "$EXCLUDE")"
+        for entry in "${DIRNAME}/" "local-output/"; do
+            if ! grep -qxF "$entry" "$EXCLUDE" 2>/dev/null; then
+                echo "$entry" >> "$EXCLUDE"
+                echo "==> Added $entry to .git/info/exclude"
+            fi
+        done
+    fi
+
+    echo
+    echo "Setup complete. Start the dashboard with:  \"$DIR/run.sh\""
+else
+    echo "Setup complete (standalone mode)."
+    echo "Start the dashboard and connect any local Hubverse hub in the UI:"
+    echo "  \"$DIR/run.sh\""
+    echo "Or launch directly against a local hub folder:"
+    echo "  \"$DIR/run.sh\" --hub /path/to/your-hub"
+fi

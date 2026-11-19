@@ -97,6 +97,12 @@ function freePort() {
 
 function findPython() {
   if (process.env.VIZ_PYTHON) return process.env.VIZ_PYTHON;
+  for (const cand of [
+    join(REPO, ".venv", "bin", "python"),
+    join(REPO, ".venv", "Scripts", "python.exe"),
+  ]) {
+    if (existsSync(cand)) return cand;
+  }
   for (let p = REPO; ; p = dirname(p)) {
     if (existsSync(join(p, "model-output"))) {
       const py = join(p, "viz", ".venv", "bin", "python");
@@ -112,7 +118,9 @@ async function startServer() {
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
   const python = findPython();
-  const child = spawn(python, [join(REPO, "next", "dev", "serve.py"), "--port", String(port)], {
+  const serveArgs = [join(REPO, "next", "dev", "serve.py"), "--port", String(port)];
+  if (process.env.VIZ_HUB_DIR) serveArgs.push("--hub", process.env.VIZ_HUB_DIR);
+  const child = spawn(python, serveArgs, {
     cwd: REPO, detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
   cleanups.push(() => killTree(child));

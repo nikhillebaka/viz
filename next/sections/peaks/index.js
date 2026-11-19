@@ -4,6 +4,7 @@
  * shows the hovered row's box. Below: season skill and the peak map.
  * Only for targets with peak forecasts; otherwise one quiet line. */
 import { onThemeChange, cssColor, tokenNum } from "../../lib/dom.js";
+import { apiUrl } from "../../lib/api.js";
 import { scopeOf, setScope } from "../scope.js";
 import { valueFormat, fmtDay, fmtLong, fmtMonth } from "../../lib/format.js";
 import { parseIso, linear, niceStep, niceMax, ticks, monthStarts, DAY, WEEK } from "../../lib/scale.js";
@@ -148,7 +149,7 @@ export function mount(el, ctx) {
   const outdatedHubs = () => {
     if (hubsInfo === null) {
       hubsInfo = [];
-      fetch("/api/remote/hubs").then((r) => (r.ok ? r.json() : null)).then((j) => {
+      fetch(apiUrl("/api/remote/hubs")).then((r) => (r.ok ? r.json() : null)).then((j) => {
         hubsInfo = (j?.hubs || []).filter((x) => x.synced && x.enabled !== false && x.peak_outdated > 0);
         if (hubsInfo.length && resp) renderNote();
       }).catch(() => {});

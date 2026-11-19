@@ -116,6 +116,7 @@ export class FanChart {
     this._rect = null;
     this._saved = null;
     this._ft = -1;
+    this._weekListeners = new Set();
 
     const ro = new ResizeObserver(() => this.#resize());
     ro.observe(view);
@@ -140,6 +141,12 @@ export class FanChart {
 
   /** @returns {number} the round the chart is on or heading to, ms */
   week() { return this.fan && this.nav ? this.fan.dates[this.nav.week] : parseIso(this.ctx.store.get().date); }
+
+  /** Subscribe to settled round index/date changes without per-frame polling. */
+  onWeekChange(fn) {
+    this._weekListeners.add(fn);
+    return () => this._weekListeners.delete(fn);
+  }
 
   /**
    * Any round in any season. Within the season on screen the date glides; another season is a cut.
@@ -212,7 +219,8 @@ export class FanChart {
    */
   activate(id, ctx) {
     const { store, manifest } = this.ctx, s = store.get();
-    if (ctx || (id !== manifest.baseline && !isCharted(s.sel, id))) store.set({ sel: chartModel(s.sel, id), focus: id });
+    const base = this.fan ? manifest.baselineFor?.(this.fan.target, this.fan.season) ?? manifest.baseline : manifest.baseline;
+    if (ctx || (id !== base && !isCharted(s.sel, id))) store.set({ sel: chartModel(s.sel, id), focus: id });
     else store.set({ focus: s.focus === id ? null : id });
     this.interact.clear();
     this.request();
@@ -367,6 +375,8 @@ export class FanChart {
         this.nav.setHeight(1);
         this.layers.sync();
         this.draw(true);
+        const settledIso = this.#isoAt(index);
+        for (const fn of this._weekListeners) fn(settledIso, index);
       });
     }
     this.hooks.onError?.(null);
@@ -411,11 +421,14 @@ export class FanChart {
   /* Everything that depends on the fan and the selection, not on time: the models drawn, their labels,
    * the grey lines, the "not in" line, the value format and the axis maximum. */
   #prepare(ease) {
-    const { manifest: M, store } = this.ctx, s = store.get(), sel = s.sel, fan = this.fan, base = M.baseline;
-    const among = [...sel.selected, base];
+    const { manifest: M, store } = this.ctx, s = store.get(), sel = s.sel, fan = this.fan;
+    const base = M.baselineFor?.(fan.target, fan.season) ?? M.baseline;
+    const among = [...sel.selected, ...(base ? [base] : [])];
     const charted = [...sel.charted].sort((a, b) => a.slot - b.slot);
     const models = charted.filter((c) => fan.present.has(c.id)).map((c) => ({ id: c.id, slot: c.slot, label: M.label(c.id, among) }));
-    if (sel.baseline && base && fan.present.has(base)) models.push({ id: base, slot: "baseline", label: M.label(base, among) });
+    if (sel.baseline && base && fan.present.has(base) && !models.some((m) => m.id === base)) {
+      models.push({ id: base, slot: "baseline", label: M.label(base, among) });
+    }
     const o = this.opts;
     o.models = models;
     const ctxIds = contextOf(sel);
@@ -471,17 +484,19 @@ export class FanChart {
     this.bubbles?.show(i);
     const iso = this.#isoAt(i);
     if (iso !== this.ctx.store.get().date) this.ctx.store.set({ date: iso });
+    for (const fn of this._weekListeners) fn(iso, i);
   }
 
   #onStore(s, prev, changed) {
+    const navDateOnly = changed.size === 1 && changed.has("date") && this.nav && s.date === this.#isoAt(this.nav.week);
     if (changed.has("target") || changed.has("location")) this.#show(this.#want(null));
     else if (changed.has("date") && this.nav && s.date !== this.#isoAt(this.nav.week)) this.goTo(s.date);
     if (changed.has("sel") && this.fan) this.#prepare(true);
     if (changed.has("rulers")) this.rk.set(s.rulers ? 1 : 0, RULER_MS);
     if (changed.has("sel") || changed.has("levels")) this.bubbles?.sync(s);
-    if (["layers", "date", "sel"].some((k) => changed.has(k))) this.layers?.sync();
+    if (["layers", "sel"].some((k) => changed.has(k)) || (changed.has("date") && this.layers?.on?.size)) this.layers?.sync();
     if (changed.has("layers") && !changed.has("sel") && this.fan) this.#axis(true);
-    this.request();
+    if (!navDateOnly) this.request();
   }
 
   /* ================================================================ frame */
@@ -510,6 +525,7 @@ export class FanChart {
     const vb = this.view.getBoundingClientRect().bottom;
     const b = Math.max(...[z.bl, z.bc, z.br].map((el) => vb - el.getBoundingClientRect().top));
     if (b > 0) this.bottom = b;
+    this.bubbles?.measureNote?.();
   }
 
   /**

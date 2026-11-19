@@ -2,6 +2,7 @@
  * copy link and the Guide (which ends with the shortcuts). Each panel is its own module, loaded on first use.
  * Also the small helpers those panels share (JSON requests, sizes, relative times). */
 import { h, on } from "../lib/dom.js";
+import { apiUrl } from "../lib/api.js";
 import { glass } from "../ui/glass.js";
 import { activeLayer, openMenu, tooltip } from "../ui/floating.js";
 import { pill, icon, toast } from "../ui/controls.js";
@@ -16,21 +17,21 @@ const TEXT_FIELD = "input, textarea, select, [contenteditable]:not([contentedita
  * @returns {Promise<any>} the body; rejects with the server's `error` text, else "HTTP n"
  */
 export async function getJSON(url) {
-  const r = await fetch(url);
+  const r = await fetch(apiUrl(url));
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
 }
 
 /**
- * POST JSON (the server requires the JSON content type on /api/remote/* and /api/ensemble/*).
+ * POST JSON (the server requires the JSON content type on /api/remote/*, /api/ensemble/*, /api/workspace/*).
  * @param {string} url
  * @param {object} body
  * @param {{ okStatuses?: number[] }} [opts] statuses that carry a normal answer (e.g. 422 from /api/remote/add)
  * @returns {Promise<any>}
  */
 export async function postJSON(url, body = {}, { okStatuses = [] } = {}) {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(apiUrl(url), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok && !okStatuses.includes(r.status)) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
@@ -89,13 +90,14 @@ const guideHash = () => (/^#guide(\/|$)/.test(location.hash) ? decodeURIComponen
  * @returns {{ destroy(): void }}
  */
 export function mountMore(zone, ctx) {
+  const hubless = Boolean(ctx.hubless || ctx.manifest?.empty);
   const btn = pill({ icon: icon.more, ariaLabel: "More", className: "app-more" });
   btn.setAttribute("aria-haspopup", "menu");
   zone.append(btn);
   const g = glass(btn);
   const tip = tooltip(btn, "More", { placement: "bottom" });
   let warnings = { count: 0 };
-  const refreshWarnings = () => loadWarningSummary().then((w) => { warnings = w; }).catch(() => {});
+  const refreshWarnings = () => (hubless ? Promise.resolve() : loadWarningSummary().then((w) => { warnings = w; }).catch(() => {}));
   // a quiet dot while a hub sync runs, or after one failed (until Data sources is opened)
   const dot = h("span", { class: "mo-dot", hidden: true, "aria-hidden": "true" });
   btn.append(dot);
@@ -108,29 +110,40 @@ export function mountMore(zone, ctx) {
     btn.setAttribute("aria-label", say ? `More · ${say}` : "More");
     tip.set(say ? `More · ${say}` : "More");
   };
-  (window.requestIdleCallback ?? setTimeout)(() => {
-    if (gone) return;
-    refreshWarnings();
-    import("./Hubs.js").then((m) => { if (gone) return; offSync = m.watchSync(showSync); return m.resumeSync(ctx); }).catch(() => {});
-  });
+  if (!hubless) {
+    (window.requestIdleCallback ?? setTimeout)(() => {
+      if (gone) return;
+      refreshWarnings();
+      import("./Hubs.js").then((m) => { if (gone) return; offSync = m.watchSync(showSync); return m.resumeSync(ctx); }).catch(() => {});
+    });
+  }
 
   const open = (name) => panels[name]().then((fn) => fn(btn, ctx)).catch((err) => console.error(`viz: ${name} could not open`, err));
 
   btn.addEventListener("click", () => {
-    const items = [
-      { label: "Data sources", onSelect: () => open("hubs") },
-      warnings.count ? { label: "Warnings", shortcut: warnings.count.toLocaleString(), onSelect: () => open("warnings") } : null,
-      "-",
-      { label: "Refresh data", onSelect: () => refresh(ctx) },
-      { label: "Copy link", onSelect: copyLink },
-      "-",
-      { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
-      { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
-      "-",
-      { label: "Classic viz", onSelect: () => location.assign("/classic/") },
-    ].filter(Boolean);
+    const wsCount = ctx.manifest?.workspace_hubs?.length || 0;
+    const dataShortcut = hubless ? "Add" : wsCount > 1 ? `${wsCount} hubs` : undefined;
+    const items = hubless
+      ? [
+        { label: "Data sources", shortcut: dataShortcut, onSelect: () => open("hubs") },
+        "-",
+        { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
+        { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
+      ]
+      : [
+        { label: "Data sources", shortcut: dataShortcut, onSelect: () => open("hubs") },
+        warnings.count ? { label: "Warnings", shortcut: warnings.count.toLocaleString(), onSelect: () => open("warnings") } : null,
+        "-",
+        { label: "Refresh data", onSelect: () => refresh(ctx) },
+        { label: "Copy link", onSelect: copyLink },
+        "-",
+        { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },
+        { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
+        "-",
+        { label: "Classic viz", onSelect: () => location.assign("/classic/") },
+      ].filter(Boolean);
     openMenu(btn, { items, placement: "bottom-end", label: "More" });
-    refreshWarnings();
+    if (!hubless) refreshWarnings();
   });
 
   const offKeys = on(document, "keydown", (e) => {
@@ -153,7 +166,7 @@ async function refresh(ctx) {
   const t = toast("Refreshing data…", { duration: 60000, tone: "info" });
   try {
     const r = await postJSON("/api/cache/refresh");
-    const fresh = await fetch("/api/next/manifest", { cache: "no-store" }).then((x) => x.json());
+    const fresh = await fetch(apiUrl("/api/next/manifest"), { cache: "no-store" }).then((x) => x.json());
     if (fresh.stamp && fresh.stamp === ctx.manifest.stamp) { t.dismiss(); toast("Up to date"); return; }
     try { sessionStorage.setItem("viz.refreshed", String(r.models_cached ?? "")); } catch {}
     location.reload();

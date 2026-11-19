@@ -7,16 +7,23 @@ import http.client
 import json
 from pathlib import Path
 import socketserver
+import sys
 import threading
 import time
 import unittest
 import urllib.parse
 
-from viz.server import SandboxRequestHandler
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+from conftest import resolve_sandbox_hub  # noqa: E402
+from viz.server import SandboxRequestHandler  # noqa: E402
+
+BASE_DIR = resolve_sandbox_hub()
 
 
+@unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
 class TestServerAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

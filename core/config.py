@@ -24,22 +24,31 @@ class VizConfig:
     Reads hub-config/tasks.json and optional viz/config.json or viz/config.toml with graceful fallbacks.
     """
 
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, app_dir: Optional[Path] = None):
         self.base_dir = Path(base_dir).resolve()
         self.hub_config_dir = self.base_dir / "hub-config"
-        self.viz_dir = self.base_dir / "viz"
+        self.app_dir = Path(app_dir).resolve() if app_dir is not None else None
+        self.viz_dir = self.app_dir if self.app_dir is not None else (self.base_dir / "viz")
 
         self._user_config: Dict[str, Any] = self._load_user_config()
         self._tasks_config: Optional[Dict[str, Any]] = self._load_tasks_config()
 
     def _load_user_config(self) -> Dict[str, Any]:
         """Load user-defined configuration from viz/config.json, viz/config.toml, etc."""
+        in_hub_viz = (self.base_dir / "viz").resolve()
         candidates = [
-            (self.viz_dir / "config.json", False),
-            (self.viz_dir / "config.toml", False),
+            (in_hub_viz / "config.json", False),
+            (in_hub_viz / "config.toml", False),
+        ]
+        if self.app_dir is not None and self.app_dir != in_hub_viz:
+            candidates.extend([
+                (self.app_dir / "config.json", False),
+                (self.app_dir / "config.toml", False),
+            ])
+        candidates.extend([
             (self.base_dir / "config.json", True),
             (self.base_dir / "config.toml", True),
-        ]
+        ])
         for path, require_viz_key in candidates:
             if not path.exists():
                 continue
@@ -206,44 +215,40 @@ class VizConfig:
             "is_non_negative": target_overrides.get("non_negative", is_nn),
         }
 
-    def get_default_baseline(self, available_models: Optional[List[str]] = None) -> Optional[str]:
+    def get_default_baseline(
+        self,
+        available_models: Optional[List[str]] = None,
+        *,
+        target: Optional[str] = None,
+        model_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Optional[str]:
         """
         Dynamically determine the default baseline model for relative scoring.
         Returns None if no legitimate baseline model is found or configured.
-        Priority:
-        1. User config: `default_baseline`
-        2. Recognized hub baseline conventions:
-           - Models ending in '-baseline' or named 'baseline'
-           - Models containing 'flusight-baseline' or 'covidhub-baseline'
-           - Models containing 'baseline' (case-insensitive)
         """
-        if available_models is None:
-            available_models = []
+        from viz.core.baselines import baseline_tier, target_baseline_override
 
         cfg_baseline = self._user_config.get("default_baseline")
-        if cfg_baseline and (not available_models or cfg_baseline in available_models):
-            return str(cfg_baseline)
-
+        target_cfg = target_baseline_override(self, target)
         if not available_models:
-            return None
+            return str(target_cfg or cfg_baseline) if (target_cfg or cfg_baseline) else None
 
-        # Look for explicit baseline models
-        for m in available_models:
-            m_lower = m.lower()
-            if (
-                m_lower.endswith("-baseline")
-                or m_lower == "baseline"
-                or "flusight-baseline" in m_lower
-                or "covidhub-baseline" in m_lower
-            ):
-                return m
-
-        for m in available_models:
-            if "baseline" in m.lower():
-                return m
-
-        # If no baseline exists, return None rather than an arbitrary non-baseline model
-        return None
+        meta_map = model_meta or {}
+        best: Optional[str] = None
+        best_score = (0, 0)
+        for idx, m in enumerate(available_models):
+            tier = baseline_tier(
+                m,
+                meta_map.get(m),
+                config_default=str(cfg_baseline) if cfg_baseline else None,
+                target_config_default=target_cfg,
+            )
+            if tier > 0:
+                score = (tier, -idx)
+                if score > best_score:
+                    best_score = score
+                    best = m
+        return best
 
     def get_recommended_models(self, available_models: Optional[List[str]] = None) -> List[str]:
         """

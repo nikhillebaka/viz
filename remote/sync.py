@@ -137,6 +137,7 @@ class RemoteManager:
         local_as_of_max: Callable[[], Optional[str]],
         on_inventory_change: Callable[[str, List[str]], None],
         client_factory: Callable[..., S3Client] = S3Client,
+        is_compatible: Optional[Callable[[str], bool]] = None,
     ):
         self.store = store
         self._known_locations = known_locations
@@ -144,6 +145,7 @@ class RemoteManager:
         self._local_as_of_max = local_as_of_max
         self._on_inventory_change = on_inventory_change
         self._client_factory = client_factory
+        self._is_compatible = is_compatible
         self._jobs: Dict[str, SyncJob] = {}
         self._lock = threading.Lock()
         self._listing_cache: Dict[str, Tuple[float, List[S3Object]]] = {}
@@ -152,7 +154,12 @@ class RemoteManager:
 
     def hub_status(self, spec: HubSpec) -> Dict[str, Any]:
         man = self.store.load_manifest(spec.id) if self.store.has_data(spec.id) else None
-        out: Dict[str, Any] = {**spec.to_dict(), "synced": man is not None, "enabled": self.store.is_enabled(spec.id)}
+        out: Dict[str, Any] = {
+            **spec.to_dict(),
+            "synced": man is not None,
+            "enabled": self.store.is_enabled(spec.id),
+            "compatible": bool(self._is_compatible(spec.id)) if self._is_compatible is not None else True,
+        }
         job = self._jobs.get(spec.id)
         if job is not None:
             out["job"] = job.to_dict()
@@ -265,6 +272,27 @@ class RemoteManager:
             if season_for_date(f["reference_date"]) in synced_seasons and k not in listed_keys
         )
 
+        truth_changed = False
+        truth_last_modified: Optional[str] = None
+        if self.store.has_data(hub_id):
+            try:
+                t_objs = {o.key: o for o in client.list("target-data/")}
+            except S3Error:
+                t_objs = {}
+            man_truth = man.get("truth", {})
+            oracle_obj = t_objs.get("target-data/oracle-output.parquet") or t_objs.get("target-data/oracle-output.csv")
+            adm_obj = t_objs.get("target-data/target-hospital-admissions.csv")
+            for kind, obj in (("oracle", oracle_obj), ("admissions", adm_obj)):
+                if obj is None:
+                    continue
+                if obj.last_modified and (truth_last_modified is None or obj.last_modified > truth_last_modified):
+                    truth_last_modified = obj.last_modified
+                prev_t = man_truth.get(kind, {})
+                if prev_t and prev_t.get("etag") != obj.etag:
+                    truth_changed = True
+                elif not prev_t and obj is not None and kind == "oracle":
+                    truth_changed = True
+
         season_list = []
         for s in sorted(seasons, reverse=True):
             e = seasons[s]
@@ -278,8 +306,16 @@ class RemoteManager:
                 "synced": s in synced_seasons,
             })
         latest = max((FORECAST_KEY_RE.match(o.key).group(2) for o in objs), default=None)
-        pending = {"new": new, "changed": changed, "removed": removed, "outdated": outdated,
-                   "checked_at": _utcnow(), "latest_round": latest}
+        pending = {
+            "new": new,
+            "changed": changed,
+            "removed": removed,
+            "outdated": outdated,
+            "truth_changed": truth_changed,
+            "truth_last_modified": truth_last_modified,
+            "checked_at": _utcnow(),
+            "latest_round": latest,
+        }
         if self.store.has_data(hub_id):
             man["last_check"] = pending["checked_at"]
             man["pending"] = pending
@@ -486,7 +522,7 @@ class RemoteManager:
         self._sync_truth(client, spec, man, job)
 
         man["last_sync"] = _utcnow()
-        man["pending"] = {"new": 0, "changed": 0, "removed": 0, "checked_at": man["last_sync"],
+        man["pending"] = {"new": 0, "changed": 0, "removed": 0, "truth_changed": False, "checked_at": man["last_sync"],
                           "latest_round": max((f["reference_date"] for f in man["files"].values()), default=None)}
         job.summary = {
             "added": added, "updated": updated, "removed": len(removed), "failed": failed,

@@ -63,5 +63,10 @@ export default async function browser(page, t) {
   });
 
   await t.step("no console errors", async () => { t.eq(page.errors, [], "uncaught exceptions and console errors"); });
-  await page.eval(() => { localStorage.removeItem("viz.selection"); });
+  await page.eval(() => {
+    localStorage.removeItem("viz.selection");
+    for (const k of Object.keys(localStorage)) {
+      if (/^viz\.h\..+\.selection$/.test(k)) localStorage.removeItem(k);
+    }
+  });
 }

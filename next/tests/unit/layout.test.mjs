@@ -242,3 +242,32 @@ test("labels skip off-screen and fit the room with an ellipsis", () => {
   assert.ok(lab.text.endsWith("…") && lab.full === "a very long model name that cannot fit");
   assert.ok(lab.x + 10 + lab.len <= 600 - 8 + 1e-9);
 });
+
+test("cutoff interpolates smoothly when rounds extend past latest truth", () => {
+  // Observed truth stops 3 weeks before the final round, with a mid-round transition beyond truth
+  const lateRounds = weeks("2025-10-18", 12);
+  const shortObs = weeks("2025-08-02", 20).map((d, i) => [d, 500 + i * 20]); // ends Dec 13, rounds run to Jan 3
+  const lastObsT = parseIso("2025-12-13");
+  const tailFan = decodeFan(buildFan({
+    rounds: lateRounds, observed: shortObs, models: [spread("m0", () => 900)],
+  }));
+  const k = tailFan.indexOf("2025-12-20"); // observed < ref: cutoff clamped to Dec 13 on both k and k+1
+  const s0 = layoutFan(tailFan, base({ t: k, models: [{ id: "m0", slot: 0, label: "m0" }] }), W, H);
+  const sMid = layoutFan(tailFan, base({ t: k + 0.5, models: [{ id: "m0", slot: 0, label: "m0" }] }), W, H);
+  const s1 = layoutFan(tailFan, base({ t: k + 1, models: [{ id: "m0", slot: 0, label: "m0" }] }), W, H);
+  assert.equal(s0.cutoff, lastObsT);
+  assert.equal(sMid.cutoff, lastObsT, "fractional scroll past truth stays pinned to last observed week");
+  assert.equal(s1.cutoff, lastObsT);
+
+  // Transition across the edge where truth runs out: Dec 13 (cutoff Dec 6) → Dec 20 (cutoff Dec 13)
+  const kPrev = tailFan.indexOf("2025-12-13");
+  const edge = layoutFan(tailFan, base({ t: kPrev + 0.5, models: [{ id: "m0", slot: 0, label: "m0" }] }), W, H);
+  assert.equal(edge.cutoff, (parseIso("2025-12-06") + lastObsT) / 2);
+});
+
+test("layoutFan clamps scene.ref at the last round even when pulling past the end", () => {
+  const lastIdx = fan.dates.length - 1;
+  const s = layoutFan(fan, base({ t: lastIdx + 0.8 }), W, H);
+  assert.equal(s.ref, fan.dates[lastIdx]);
+  assert.equal(s.di, lastIdx);
+});

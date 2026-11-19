@@ -5,7 +5,7 @@
  *   scores' scope: ss (seasons) wk (a-b) ph (pre|peak|post) hz (horizons) pl (US|current) fair=1 bl (baseline)
  *   rk=sel sc=log; the leaderboard: sort ("-" prefix reverses) cols (optional columns) open (expanded rows)
  *   the view sections (state.views; each section validates its own): hm (heatmap: rows,cols,metric,sort,
- *   scale,horizon,model) mp (map: layer,horizon) pk (peaks: table,scope,layer)
+ *   scale,horizon,model) mp (map: layer,horizon) pk (peaks: sort,scope,layer)
  *
  * Values that equal the defaults are left out, so a default view has a clean URL. Parameters this page
  * doesn't know (old viz's view, scale, indicators…) are kept as they are. Invalid values are dropped:
@@ -17,7 +17,7 @@ import { create, fromLists, chartedBySlot } from "./selection.js";
 import { parseLayers } from "./chart/layers.js";
 
 /** The parameters this module owns, in the order they are written. */
-export const KEYS = Object.freeze(["target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus", "lay",
+export const KEYS = Object.freeze(["hub", "target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus", "lay",
   "ss", "wk", "ph", "hz", "pl", "fair", "bl", "rk", "sc", "sort", "cols", "open", "hm", "mp", "pk"]);
 export const LEVELS = Object.freeze([0.95, 0.8, 0.5]);
 const DEFAULT_LEVELS = Object.freeze([0.95]);
@@ -100,6 +100,14 @@ const isModel = (manifest, id) => !!id && id !== manifest.baseline && manifest.m
 export function parseUrl(search, manifest) {
   const q = search instanceof URLSearchParams ? search : new URLSearchParams(search);
   const out = {};
+  const hub = q.get("hub")?.trim();
+  if (hub) {
+    if (Array.isArray(manifest.workspace_hubs)) {
+      if (manifest.workspace_hubs.some((h) => h.id === hub)) out.hub = hub;
+    } else if (!manifest.hub_id || manifest.hub_id === hub) {
+      out.hub = hub;
+    }
+  }
   const target = q.get("target");
   if (target && manifest.targetById.has(target)) out.target = target;
   const loc = q.get("loc");
@@ -157,7 +165,12 @@ function parseViews(q, manifest) {
     v.heatmap = { rows, cols, metric, sort, scale, horizon: +hz, model: model === "truth" || manifest.modelById.has(model) ? model : "truth" };
   }
   if (q.get("mp")) { const [layer, hz] = parts("mp"); v.map = { layer, horizon: +hz }; }
-  if (q.get("pk")) { const [table, scope, layer] = parts("pk"); v.peaks = { table, scope, layer }; }
+  if (q.get("pk")) {
+    const [rawSort = "", scope = "", layer = ""] = parts("pk");
+    const rev = rawSort.startsWith("-");
+    const sort = rawSort.replace(/^-/, "") || "when";
+    v.peaks = { sort, rev, scope, layer };
+  }
   return Object.keys(v).length ? v : null;
 }
 
@@ -166,7 +179,7 @@ function writeViews(p, v) {
   const hm = v.heatmap, mp = v.map, pk = v.peaks;
   if (hm) p.push(["hm", [hm.rows, hm.cols, hm.metric, hm.sort, hm.scale, hm.horizon, hm.model].join(",")]);
   if (mp) p.push(["mp", [mp.layer, mp.horizon].join(",")]);
-  if (pk) p.push(["pk", [pk.table, pk.scope, pk.layer].join(",")]);
+  if (pk) p.push(["pk", [`${pk.rev ? "-" : ""}${pk.sort || pk.table || "when"}`, pk.scope || "location", pk.layer || "week"].join(",")]);
 }
 
 const list = (q, k) => (q.get(k) || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -235,6 +248,8 @@ const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]
  */
 export function writeUrl(state, manifest, search = "") {
   const d = defaults(manifest, state.sel), p = [];
+  const hubCount = manifest.workspace_hubs?.length || 0;
+  if (state.hub && (hubCount > 1 || (manifest.hub_id && state.hub !== manifest.hub_id))) p.push(["hub", state.hub]);
   if (state.target && state.target !== d.target) p.push(["target", state.target]);
   if (state.location && state.location !== d.location) p.push(["loc", state.location]);
   if (state.date && state.date !== d.date) p.push(["date", state.date]);
@@ -271,7 +286,7 @@ export function readUrl(manifest) {
   return parseUrl(location.search, manifest);
 }
 
-const WATCHED = ["target", "location", "date", "sel", "levels", "rulers", "focus", "layers", "scope", "scores", "views"];
+const WATCHED = ["hub", "target", "location", "date", "sel", "levels", "rulers", "focus", "layers", "scope", "scores", "views"];
 
 /**
  * Keeps the URL in step with the store: written with history.replaceState (no history entries),

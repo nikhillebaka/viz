@@ -4,25 +4,30 @@ Command-line evaluation utility for quick model scoring against oracle truth.
 Useful for headless runs and instant feedback during model development.
 
 Example:
-    python3 viz/score_cli.py --models UMass-AR6_pooled,UMass-flusion_spatial2_prod --location states
+    python3 score_cli.py --hub /path/to/hub --models all --location states
 """
 
 import argparse
+import csv
+import io
+import json
 import os
 import sys
 from pathlib import Path
 
-# Auto-detect repository virtual environment if polars is not installed in current interpreter
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Auto-detect virtual environment if polars is not installed in current interpreter
 try:
     import polars as pl
 except ModuleNotFoundError:
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = _SCRIPT_DIR.parent
     candidate_pythons = []
     if "VIRTUAL_ENV" in os.environ:
         candidate_pythons.append(Path(os.environ["VIRTUAL_ENV"]) / "bin" / "python")
     candidate_pythons.extend([
-        Path(__file__).resolve().parent / ".venv" / "bin" / "python",
-        Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe",
+        _SCRIPT_DIR / ".venv" / "bin" / "python",
+        _SCRIPT_DIR / ".venv" / "Scripts" / "python.exe",
         repo_root / ".venv" / "bin" / "python",
         repo_root / "venv" / "bin" / "python",
         repo_root / ".venv" / "Scripts" / "python.exe",
@@ -35,30 +40,69 @@ except ModuleNotFoundError:
             os.execv(str(py_bin), [str(py_bin)] + sys.argv)
 
     sys.stderr.write(
-        "\n[FluSight Scorer CLI] ERROR: Dependency 'polars' is required but not found in:\n"
+        "\n[viz Scorer CLI] ERROR: Dependency 'polars' is required but not found in:\n"
         f"  {sys.executable}\n\n"
         "To run the CLI evaluation tool, please either:\n"
         "  1. Run the one-time setup script:\n"
-        "       ./viz/setup.sh   (Windows: viz\\setup.bat)\n"
+        "       ./setup.sh   (Windows: setup.bat)\n"
         "  2. Or install dependencies via requirements file:\n"
-        "       pip install -r viz/requirements.txt\n\n"
+        "       pip install -r requirements.txt\n\n"
     )
     sys.exit(1)
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BASE_DIR))
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+import _bootstrap
+
+APP_DIR = _bootstrap.ensure_viz_package()
 
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams
+from viz.core.paths import detect_enclosing_hub, get_data_dir, is_hub_dir
+from viz.core.workspace import WorkspaceRegistry, resolve_hub_storage
 
 
-import csv
-import io
-import json
+def _resolve_cli_hub(hub_arg: str | None, data_dir: Path) -> Path:
+    """Resolve target Hubverse directory from --hub, VIZ_HUB_DIR, enclosing repo, or active workspace."""
+    if hub_arg:
+        p = Path(hub_arg).expanduser().resolve()
+        if not p.is_dir():
+            raise ValueError(f"Hub folder does not exist: {p}")
+        if not is_hub_dir(p):
+            raise ValueError(
+                f"'{p}' does not look like a Hubverse hub (expected hub-config/tasks.json, model-output/, or target-data/)."
+            )
+        return p
+
+    env_hub = os.environ.get("VIZ_HUB_DIR", "").strip()
+    if env_hub:
+        p = Path(env_hub).expanduser().resolve()
+        if not p.is_dir() or not is_hub_dir(p):
+            raise ValueError(f"VIZ_HUB_DIR '{p}' is not a valid Hubverse hub folder.")
+        return p
+
+    enclosing = detect_enclosing_hub()
+    if enclosing is not None:
+        return enclosing
+
+    registry = WorkspaceRegistry(data_dir)
+    active_id = registry.get_active_id()
+    if active_id:
+        rec = registry.get_hub(active_id)
+        if rec is not None:
+            p = Path(rec.path).expanduser().resolve()
+            if p.is_dir() and is_hub_dir(p):
+                return p
+
+    raise ValueError(
+        "No Hubverse hub found. Pass --hub /path/to/hub, set VIZ_HUB_DIR, or connect a hub in the UI."
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Forecast Sandbox Scorer CLI")
+    parser = argparse.ArgumentParser(description="Hubverse Forecast Scorer CLI")
+    parser.add_argument("--hub", type=str, default=None, help="Path to local Hubverse hub repository (defaults to VIZ_HUB_DIR, enclosing hub, or active workspace hub)")
+    parser.add_argument("--data-dir", type=str, default=None, help="Override directory for workspace registry & caches")
     parser.add_argument("--models", type=str, required=True, help="Comma-separated list of model IDs to evaluate, or 'all'")
     parser.add_argument("--target", type=str, default="", help="Forecast target (defaults to hub config)")
     parser.add_argument("--location", type=str, default="all", help="'all', 'states', 'US', or specific FIPS code (default: all)")
@@ -73,8 +117,32 @@ def main():
     parser.add_argument("--export-tasks", type=str, default=None, help="Optional file path (.csv or .parquet) to export disaggregated task-level scores")
     args = parser.parse_args()
 
+    data_dir = Path(args.data_dir).expanduser().resolve() if args.data_dir else get_data_dir()
+    try:
+        hub_dir = _resolve_cli_hub(args.hub, data_dir)
+    except ValueError as exc:
+        sys.stderr.write(f"\nERROR: {exc}\n\n")
+        sys.exit(1)
+
+    rec = WorkspaceRegistry(data_dir).find_by_path(hub_dir)
+    storage = resolve_hub_storage(
+        hub_dir,
+        data_dir,
+        hub_id=rec.id if rec is not None else None,
+        cli_fallback=True,
+    )
+
     # The CLI scores repository and local-output models only; hub data synced into the dashboard is ignored
-    engine = EvaluationEngine(BASE_DIR, SandboxDataLoader(BASE_DIR, include_remote=False))
+    loader = SandboxDataLoader(
+        hub_dir,
+        include_remote=False,
+        cache_dir=storage["cache_dir"],
+        surveillance_dir=storage["surveillance_dir"],
+        seed_dir=storage["seed_dir"],
+        app_dir=APP_DIR,
+        synthetic_dir=storage["synthetic_dir"],
+    )
+    engine = EvaluationEngine(hub_dir, loader)
 
     if args.models.strip().lower() == "all":
         model_ids = list(engine.loader.scan_models().keys())

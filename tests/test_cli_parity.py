@@ -8,18 +8,25 @@ import http.client
 import json
 from pathlib import Path
 import socketserver
+import sys
 import threading
 import time
 import unittest
 import urllib.parse
 
-from viz.core.data_loader import SandboxDataLoader
-from viz.core.evaluation import EvaluationEngine, EvaluationParams
-from viz.server import SandboxRequestHandler
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+from conftest import APP_DIR, resolve_sandbox_hub  # noqa: E402
+from viz.core.data_loader import SandboxDataLoader  # noqa: E402
+from viz.core.evaluation import EvaluationEngine, EvaluationParams  # noqa: E402
+from viz.server import SandboxRequestHandler  # noqa: E402
+
+BASE_DIR = resolve_sandbox_hub()
 
 
+@unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
 class TestCliApiParity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -82,7 +89,7 @@ class TestCliApiParity(unittest.TestCase):
         import subprocess
         import sys
         models = "UMass-flusion_spatial2_prod,UMass-AR6_pooled,FluSight-baseline"
-        cmd = [sys.executable, str(BASE_DIR / "viz" / "score_cli.py"), "--models", models,
+        cmd = [sys.executable, str(APP_DIR / "score_cli.py"), "--hub", str(BASE_DIR), "--models", models,
                "--season", "2023-2024,2024-2025", "--location", "states", "--weeks", "14-30",
                "--phase", "peak", "--format", "json"]
         out = subprocess.run(cmd, capture_output=True, text=True, cwd=BASE_DIR, check=True)
@@ -136,7 +143,8 @@ class TestCliApiParity(unittest.TestCase):
             # 1. Test JSON format and file output
             cmd_json = [
                 sys.executable,
-                str(BASE_DIR / "viz" / "score_cli.py"),
+                str(APP_DIR / "score_cli.py"),
+                "--hub", str(BASE_DIR),
                 "--models", "UMass-AR6_pooled",
                 "--date", "2024-01-13",
                 "--location", "US",
@@ -156,7 +164,8 @@ class TestCliApiParity(unittest.TestCase):
             # 2. Test CSV format and file output
             cmd_csv = [
                 sys.executable,
-                str(BASE_DIR / "viz" / "score_cli.py"),
+                str(APP_DIR / "score_cli.py"),
+                "--hub", str(BASE_DIR),
                 "--models", "UMass-AR6_pooled",
                 "--date", "2024-01-13",
                 "--location", "US",
@@ -183,7 +192,8 @@ class TestCliApiParity(unittest.TestCase):
             # Test task export to CSV
             cmd_csv = [
                 sys.executable,
-                str(BASE_DIR / "viz" / "score_cli.py"),
+                str(APP_DIR / "score_cli.py"),
+                "--hub", str(BASE_DIR),
                 "--models", "UMass-AR6_pooled",
                 "--date", "2024-01-13",
                 "--location", "US",
@@ -205,7 +215,8 @@ class TestCliApiParity(unittest.TestCase):
             # Test task export to Parquet
             cmd_parquet = [
                 sys.executable,
-                str(BASE_DIR / "viz" / "score_cli.py"),
+                str(APP_DIR / "score_cli.py"),
+                "--hub", str(BASE_DIR),
                 "--models", "UMass-AR6_pooled",
                 "--date", "2024-01-13",
                 "--location", "US",

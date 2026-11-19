@@ -184,12 +184,12 @@ export function glass(el, { panel = false, canvas = null } = {}) {
 
 export const Glass = {
   /** Re-render every compositor now. Call after redrawing a canvas that glass sits over. */
-  frame() { Compositor.all.forEach((c) => c.render()); },
+  frame() { Compositor.all.forEach((c) => c.render({ fromCanvas: true })); },
   /** Re-read tokens and rebuild filters. Call after a theme change (also runs on its own when data-theme changes). */
   refresh() {
     clearTokens();
     instances.forEach((g) => { g.lastKey = ""; g.update(); });
-    Compositor.all.forEach((c) => c.watch());
+    Compositor.all.forEach((c) => { c._uni = null; c.watch(); });
   },
 };
 
@@ -214,6 +214,7 @@ class Compositor {
     this.container = source.parentElement;
     this.glass = new Set();
     this.raf = 0; this.still = 0; this.lastKey = "";
+    this.dirty = true; this._geom = null; this._texW = 0; this._texH = 0; this._drawnFt = -1; this._uni = null;
     this.quad = new Float32Array(12);
     const cv = document.createElement("canvas");
     cv.className = "c-glass-compositor";
@@ -263,64 +264,104 @@ class Compositor {
     Compositor.all.delete(this);
   }
   /* render every frame until nothing has moved for 20 frames */
-  watch() { this.still = 0; if (!this.raf) this.raf = requestAnimationFrame(() => this.tick()); }
+  watch() { this.dirty = true; this.still = 0; if (!this.raf) this.raf = requestAnimationFrame(() => this.tick()); }
   tick() {
     this.raf = 0;
-    const key = this.render();
+    this.dirty = true;
+    const ft = globalThis.document?.timeline?.currentTime ?? performance.now();
+    const key = ft === this._drawnFt && this._geom ? this._geom.key : this.render({ fromCanvas: false });
     this.still = key === this.lastKey ? this.still + 1 : 0;
     this.lastKey = key;
     if (this.still < 20) this.raf = requestAnimationFrame(() => this.tick());
   }
-  render() {
+  render({ fromCanvas = false } = {}) {
     const { gl, cv, source, u } = this;
-    const dpr = window.devicePixelRatio || 1, cr = this.container.getBoundingClientRect();
-    const W = Math.round(cr.width * dpr), H = Math.round(cr.height * dpr);
+    const dpr = window.devicePixelRatio || 1;
+    if (!source.width || !source.height) return "";
+    if (fromCanvas) this._drawnFt = globalThis.document?.timeline?.currentTime ?? performance.now();
+
+    let geom = this._geom;
+    const measure = this.dirty || this.raf || !geom || source.width !== this._texW || source.height !== this._texH;
+    if (measure) {
+      const cr = this.container.getBoundingClientRect();
+      if (cr.bottom <= 0 || cr.top >= innerHeight) {
+        this._geom = { crW: cr.width, crH: cr.height, offScreen: true, texBox: null, items: [], key: "off" };
+        this.dirty = false;
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        return "off";
+      }
+      const sr = source.getBoundingClientRect();
+      const items = [];
+      let key = "";
+      for (const g of this.glass) {
+        const el = g.el;
+        if (!el.isConnected) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) continue;
+        if (r.right <= sr.left || r.left >= sr.right || r.bottom <= sr.top || r.top >= sr.bottom) continue;
+        const cs = getComputedStyle(el);
+        if (cs.visibility === "hidden") continue;
+        // its own opacity and its ancestors' up to the container (fades, a pill morphing into a panel)
+        let a = parseFloat(cs.opacity);
+        for (let n = el.parentElement; n && n !== this.container && a >= 0.003; n = n.parentElement) a *= parseFloat(getComputedStyle(n).opacity);
+        if (a < 0.003) continue;
+        const x = r.left - cr.left, y = r.top - cr.top;
+        // radius, rim and size in the element's own (untransformed) pixels; the press scale shrinks them all
+        const w0 = el.offsetWidth || r.width, h0 = el.offsetHeight || r.height, k = r.width / w0;
+        const rad = Math.min(parseFloat(cs.borderTopLeftRadius) || 0, h0 / 2, w0 / 2) * k;
+        items.push({ x, y, w: r.width, h: r.height, rad, rim: rimFor(w0, h0) * k, a });
+        key += `${x.toFixed(1)},${y.toFixed(1)},${r.width.toFixed(1)},${a.toFixed(3)};`;
+      }
+      geom = this._geom = {
+        crW: cr.width, crH: cr.height, offScreen: false,
+        texBox: [sr.left - cr.left, sr.top - cr.top, sr.width, sr.height],
+        items, key,
+      };
+      this.dirty = false;
+    }
+
+    const W = Math.round(geom.crW * dpr), H = Math.round(geom.crH * dpr);
     if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
     gl.viewport(0, 0, W, H);
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
-    if (!source.width || !source.height) return "";
-    // scrolled off screen: nothing to show, and no canvas upload
-    if (cr.bottom <= 0 || cr.top >= innerHeight) return "off";
-    const sr = source.getBoundingClientRect();
-    let key = "", uploaded = false;
-    for (const g of this.glass) {
-      const el = g.el;
-      if (!el.isConnected) continue;
-      const r = el.getBoundingClientRect();
-      if (r.width < 1 || r.height < 1) continue;
-      if (r.right <= sr.left || r.left >= sr.right || r.bottom <= sr.top || r.top >= sr.bottom) continue;
-      const cs = getComputedStyle(el);
-      if (cs.visibility === "hidden") continue;
-      // its own opacity and its ancestors' up to the container (fades, a pill morphing into a panel)
-      let a = parseFloat(cs.opacity);
-      for (let n = el.parentElement; n && n !== this.container && a >= 0.003; n = n.parentElement) a *= parseFloat(getComputedStyle(n).opacity);
-      if (a < 0.003) continue;
-      if (!uploaded) {
-        uploaded = true;
-        gl.bindTexture(gl.TEXTURE_2D, this.tex);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-        gl.uniform2f(u.uView, cr.width, cr.height); gl.uniform1f(u.uDpr, dpr);
-        gl.uniform1i(u.uTex, 0);
-        // the source's box within the container, in CSS px (the texture covers it)
-        gl.uniform4f(u.uTexSize, sr.left - cr.left, sr.top - cr.top, sr.width, sr.height);
-        gl.uniform1f(u.uPow, tokenNum("--glass-rim-power", 2)); gl.uniform1f(u.uMag, tokenNum("--glass-magnify", 0.1));
-        gl.uniform1f(u.uScale, tokenNum("--glass-refraction", 28)); gl.uniform1f(u.uDisp, tokenNum("--glass-dispersion", 0.025));
-        gl.uniform1f(u.uBlur, tokenNum("--glass-blur", 0.6)); gl.uniform1f(u.uSat, tokenNum("--glass-saturate", 1.35)); gl.uniform1f(u.uBright, tokenNum("--glass-brightness", 1.06));
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
-        gl.enableVertexAttribArray(this.aPos); gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
-      }
-      const x = r.left - cr.left, y = r.top - cr.top;
-      // radius, rim and size in the element's own (untransformed) pixels; the press scale shrinks them all
-      const w0 = el.offsetWidth || r.width, h0 = el.offsetHeight || r.height, k = r.width / w0;
-      const rad = Math.min(parseFloat(cs.borderTopLeftRadius) || 0, h0 / 2, w0 / 2) * k;
-      gl.uniform4f(u.uRect, x, y, r.width, r.height); gl.uniform1f(u.uRadius, rad); gl.uniform1f(u.uRim, rimFor(w0, h0) * k); gl.uniform1f(u.uAlpha, a);
-      const x0 = x - 1, y0 = y - 1, x1 = x + r.width + 1, y1 = y + r.height + 1, q = this.quad;
+    if (geom.offScreen || !geom.items.length) return geom.key;
+
+    const uni = (this._uni ||= [
+      tokenNum("--glass-rim-power", 2),
+      tokenNum("--glass-magnify", 0.1),
+      tokenNum("--glass-refraction", 28),
+      tokenNum("--glass-dispersion", 0.025),
+      tokenNum("--glass-blur", 0.6),
+      tokenNum("--glass-saturate", 1.35),
+      tokenNum("--glass-brightness", 1.06),
+    ]);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    if (source.width === this._texW && source.height === this._texH) {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      this._texW = source.width;
+      this._texH = source.height;
+    }
+    gl.uniform2f(u.uView, geom.crW, geom.crH); gl.uniform1f(u.uDpr, dpr);
+    gl.uniform1i(u.uTex, 0);
+    // the source's box within the container, in CSS px (the texture covers it)
+    gl.uniform4f(u.uTexSize, geom.texBox[0], geom.texBox[1], geom.texBox[2], geom.texBox[3]);
+    gl.uniform1f(u.uPow, uni[0]); gl.uniform1f(u.uMag, uni[1]);
+    gl.uniform1f(u.uScale, uni[2]); gl.uniform1f(u.uDisp, uni[3]);
+    gl.uniform1f(u.uBlur, uni[4]); gl.uniform1f(u.uSat, uni[5]); gl.uniform1f(u.uBright, uni[6]);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+    gl.enableVertexAttribArray(this.aPos); gl.vertexAttribPointer(this.aPos, 2, gl.FLOAT, false, 0, 0);
+
+    for (const it of geom.items) {
+      gl.uniform4f(u.uRect, it.x, it.y, it.w, it.h);
+      gl.uniform1f(u.uRadius, it.rad); gl.uniform1f(u.uRim, it.rim); gl.uniform1f(u.uAlpha, it.a);
+      const x0 = it.x - 1, y0 = it.y - 1, x1 = it.x + it.w + 1, y1 = it.y + it.h + 1, q = this.quad;
       q[0] = x0; q[1] = y0; q[2] = x1; q[3] = y0; q[4] = x0; q[5] = y1; q[6] = x0; q[7] = y1; q[8] = x1; q[9] = y0; q[10] = x1; q[11] = y1;
       gl.bufferData(gl.ARRAY_BUFFER, q, gl.DYNAMIC_DRAW);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
-      key += `${x.toFixed(1)},${y.toFixed(1)},${r.width.toFixed(1)},${a.toFixed(3)};`;
     }
-    return key;
+    return geom.key;
   }
 }
 

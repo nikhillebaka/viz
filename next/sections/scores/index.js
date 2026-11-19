@@ -7,6 +7,7 @@
  * a quick selected-only one fills the table first (relative WIS waits for the pool) and is also the pool
  * "Wins" counts in. */
 import { h } from "../../lib/dom.js";
+import { apiUrl } from "../../lib/api.js";
 import { openMenu, openPopover, tooltip } from "../../ui/floating.js";
 import { icon, toast, slideText } from "../../ui/controls.js";
 import { seriesColor } from "../../chart/layout.js";
@@ -136,8 +137,18 @@ export function mount(el, ctx) {
   }
 
   /* ---------------- helpers ---------------- */
-  const isDrawn = (st, id) => (id === manifest.baseline ? st.sel.baseline : isCharted(st.sel, id));
-  const dotOf = (st, id) => (!isDrawn(st, id) ? null : id === manifest.baseline ? seriesColor("baseline") : seriesColor(slotOf(st.sel, id)));
+  const defaultBase = (st, sc) => (
+    typeof manifest.baselineFor === "function"
+      ? manifest.baselineFor(st.target, sc.seasons.length === 1 ? sc.seasons[0] : null)
+      : manifest.baseline
+  );
+  const chartBase = (st) => (
+    typeof manifest.baselineFor === "function"
+      ? manifest.baselineFor(st.target, manifest.seasonOf?.(st.date) ?? null)
+      : manifest.baseline
+  );
+  const isDrawn = (st, id) => (id === chartBase(st) ? st.sel.baseline : isCharted(st.sel, id));
+  const dotOf = (st, id) => (!isDrawn(st, id) ? null : id === chartBase(st) ? seriesColor("baseline") : seriesColor(slotOf(st.sel, id)));
   const sourceOf = (id) => { const m = manifest.modelById.get(id); return !m ? "repo" : m.source === "hub" ? `hub:${m.hub}` : m.source; };
 
   /* light a hovered row's model on the chart: FanChart's hoverModel when it has one, else its keyed label */
@@ -162,14 +173,14 @@ export function mount(el, ctx) {
   }
   function focusModel(id) {
     const st = store.get();
-    if (id === manifest.baseline) {
+    if (id === chartBase(st)) {
       store.set({ sel: setBaseline(st.sel, true), focus: st.focus === id && st.sel.baseline ? null : id });
     } else if (!isCharted(st.sel, id)) store.set({ sel: chartModel(st.sel, id), focus: id });
     else store.set({ focus: st.focus === id ? null : id });
   }
   function toggleDot(id) {
     const st = store.get();
-    if (id === manifest.baseline) store.set({ sel: setBaseline(st.sel, !st.sel.baseline) });
+    if (id === chartBase(st)) store.set({ sel: setBaseline(st.sel, !st.sel.baseline) });
     else store.set({ sel: isCharted(st.sel, id) ? unchart(st.sel, id) : chartModel(st.sel, id) });
   }
   /* a model's page: the model sheet (features/ModelSheet.js, loaded on first use) */
@@ -214,10 +225,13 @@ export function mount(el, ctx) {
     fDates.className = ["sc-frag", def(!sc.following || sc.weeks || sc.phase), noneScored && "is-warn"].filter(Boolean).join(" ");
     fHz.textContent = horizonsLabel(sc.horizons);
     fHz.className = ["sc-frag", def(!!sc.horizons)].filter(Boolean).join(" ");
+    const defBase = defaultBase(st, sc);
     const eff = shown?.baseline_model;
     const fellBack = eff && eff !== sc.baseline;
-    fBase.textContent = `vs ${manifest.label(fellBack ? eff : sc.baseline) || "baseline"}`;
-    fBase.className = ["sc-frag", def(sc.baseline !== manifest.baseline || fellBack), fellBack && "is-warn"].filter(Boolean).join(" ");
+    const baseId = fellBack ? eff : sc.baseline;
+    const baseName = manifest.label(baseId, manifest.baselines?.candidates || [defBase, sc.baseline, eff].filter(Boolean));
+    fBase.textContent = `vs ${baseName || "baseline"}`;
+    fBase.className = ["sc-frag", def(sc.baseline !== defBase || fellBack), fellBack && "is-warn"].filter(Boolean).join(" ");
   }
 
   function renderNotice(sc) {
@@ -451,11 +465,20 @@ export function mount(el, ctx) {
     });
   }
   function baselineMenu(a) {
-    const st = store.get(), sc = scope();
-    const cands = [manifest.baseline, ...manifest.models.map((m) => m.id).filter((id) => /baseline/i.test(id) && id !== manifest.baseline)];
+    const st = store.get(), sc = scope(), defBase = defaultBase(st, sc);
+    const cands = [...new Set([
+      defBase,
+      ...(manifest.baselines?.candidates || []),
+      ...manifest.models.filter((m) => m.kind === "baseline" || /baseline/i.test(m.id)).map((m) => m.id),
+    ].filter(Boolean))];
     const sel = st.sel.selected.filter((id) => !cands.includes(id));
-    const item = (id) => ({ label: manifest.label(id), checked: sc.baseline === id, onSelect: () => setScope(store, { baseline: id === manifest.baseline ? null : id }) });
-    openMenu(a, { label: "Baseline", items: [{ header: "Baseline" }, ...cands.filter(Boolean).map(item), ...(sel.length ? [{ header: "Selected" }, ...sel.map(item)] : [])] });
+    const among = [...cands, ...sel];
+    const item = (id) => ({
+      label: manifest.label(id, among),
+      checked: sc.baseline === id,
+      onSelect: () => setScope(store, { baseline: id === defBase ? null : id }),
+    });
+    openMenu(a, { label: "Baseline", items: [{ header: "Baseline" }, ...cands.map(item), ...(sel.length ? [{ header: "Selected" }, ...sel.map(item)] : [])] });
   }
   function columnsMenu(a) {
     const ui = uiOf(store.get());
@@ -509,7 +532,11 @@ export function mount(el, ctx) {
   }
 
   /* ---------------- wiring ---------------- */
-  offs.push(store.select(["scope", "sel", "date", "location", "target"], request));
+  offs.push(store.on((st, prev, changed) => {
+    if (!["scope", "sel", "date", "location", "target"].some((k) => changed.has(k))) return;
+    if (changed.size === 1 && changed.has("date") && manifest.seasonOf(st.date) === manifest.seasonOf(prev.date)) return;
+    request();
+  }));
   offs.push(store.select(["scores", "focus"], render));
   const ro = new ResizeObserver(() => drawFigures());
   ro.observe(figs);
@@ -519,7 +546,11 @@ export function mount(el, ctx) {
   /* What the model sheet reads: the leaderboard's order, a model's row in this scope (from the response
    * shown when it has the model, else one request of the sheet's own), and the scope line's words. */
   const sheetCache = new Map();
-  const getJ = (q) => { if (!sheetCache.has(q)) sheetCache.set(q, fetch(`/api/next/metrics?${q}`).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })); return sheetCache.get(q); };
+  const getJ = (q) => {
+    const reqUrl = apiUrl(`/api/next/metrics?${q}`);
+    if (!sheetCache.has(reqUrl)) sheetCache.set(reqUrl, fetch(reqUrl).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); }));
+    return sheetCache.get(reqUrl);
+  };
   ctx.scores = {
     order: () => [...order.ranked, ...order.unranked].map((r) => r.id),
     async rowFor(id) {

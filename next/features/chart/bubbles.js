@@ -47,6 +47,7 @@ export class ChartBubbles {
     this.noteText = h("span");
     this.noteLink = h("button", { type: "button", class: "c-link", onclick: () => this.#toggleAll() });
     this.note = h("div", { class: "c-note fc-note", inert: true }, this.noteText, this.noteLink);
+    this.noteClear = -Infinity;
 
     // ← Dec 27 forecast  /  Dec 27 forecast →: the arrow points at where the forecast is
     this.recenter = pill({ label: " ", size: "sm", className: "fc-recenter", onClick: () => chart.nav?.recenter() });
@@ -95,7 +96,14 @@ export class ChartBubbles {
     if (this.note.classList.contains("is-shown") !== show) {
       this.note.classList.toggle("is-shown", show);
       this.note.inert = !show;
+      this.glass[2]?.update();
     }
+    this.measureNote();
+  }
+
+  /** Cache the note pill's bottom offset outside animation frames (no DOM reads during draw). */
+  measureNote() {
+    this.noteClear = this.note.classList.contains("is-shown") ? this.note.offsetTop + this.note.offsetHeight : -Infinity;
   }
 
   /** After every frame: the recenter pill, when the forecast is panned off-screen; the crossing hint. */
@@ -111,10 +119,15 @@ export class ChartBubbles {
         this.recenter.classList.toggle("left", side === "left"); this.recenter.classList.toggle("right", side === "right");
         this.recenterIcons[0].hidden = side !== "left"; this.recenterIcons[1].hidden = side !== "right";
         this.recenter.setAttribute("aria-label", `Back to the ${day} forecast`);
+        this.glass[3]?.update();
       }
     }
     const shown = !!side;
-    if (shown !== !!this.recenterSide) { this.recenter.classList.toggle("is-shown", shown); this.recenter.inert = !shown; }
+    if (shown !== !!this.recenterSide) {
+      this.recenter.classList.toggle("is-shown", shown);
+      this.recenter.inert = !shown;
+      this.glass[3]?.update();
+    }
     this.recenterSide = side;
   }
 

@@ -32,10 +32,12 @@ const plural = (n, w) => `${n.toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
 
 /* forecast files added, changed or removed upstream since a shown hub's last sync */
 const upstreamOf = (x) => { const p = x.pending || {}; return (p.new || 0) + Math.max(0, (p.changed || 0) - (p.outdated || 0)) + (p.removed || 0); };
+const hasTruthUpdate = (x) => !!x.pending?.truth_changed;
+const needsUpdateOf = (x) => upstreamOf(x) > 0 || hasTruthUpdate(x);
 
 /** "running" while a sync runs, "failed" after one failed (until the panel is opened), "new" when a shown
- * hub has new forecasts upstream, else "". */
-export const syncStatus = () => (hubs.some(running) ? "running" : failed ? "failed" : hubs.some((x) => x.synced && x.enabled !== false && upstreamOf(x) > 0) ? "new" : "");
+ * hub has new forecasts or truth upstream, else "". */
+export const syncStatus = () => (hubs.some(running) ? "running" : failed ? "failed" : hubs.some((x) => x.synced && x.enabled !== false && needsUpdateOf(x)) ? "new" : "");
 
 /**
  * Follow the sync status (called now, then on each change).
@@ -115,14 +117,45 @@ function finished(x) {
   }
 }
 
+let workspace = null;            // /api/workspace state
+let browse = null;               // /api/workspace/browse snapshot
+let browserOpen = false;
+const wsArmed = new Map();       // local hub id → timer while Remove waits for its second click
+
+async function loadWorkspace() {
+  workspace = await getJSON("/api/workspace");
+}
+
+async function loadBrowse(path = "") {
+  browse = await getJSON(path ? `/api/workspace/browse?path=${encodeURIComponent(path)}` : "/api/workspace/browse");
+}
+
+async function openLocalHub(id) {
+  try { await postJSON("/api/workspace/activate", { id }); } catch { /* same-tab ?hub= works directly */ }
+  location.assign(`/next/?hub=${encodeURIComponent(id)}`);
+}
+
 /**
- * The Data sources panel.
+ * The Data sources panel: local Hubverse folders plus synced S3 live hubs.
  * @param {HTMLElement} anchor the ⋯ bubble
- * @param {{ manifest: object }} ctx
+ * @param {{ manifest?: object, hubless?: boolean }} [ctx]
  * @returns {Promise<object | null>} the layer
  */
-export async function openHubs(anchor, { manifest }) {
-  const repoCount = manifest.models.filter((m) => m.source !== "hub").length;
+export async function openHubs(anchor, ctx = {}) {
+  const manifest = ctx.manifest || {};
+  const hubless = Boolean(ctx.hubless || manifest.empty);
+  const currentHubId = manifest.hub_id || null;
+
+  const localBox = h("div", { class: "mo-local-wrap" }, h("div", { class: "mo-note" }, "Loading local hubs…"));
+  const remoteBox = h("div", { class: "mo-remote-wrap" });
+
+  let localPathVal = "";
+  let localNoteText = "";
+  let remoteNoteText = "";
+  let localBusy = true;
+  let remoteBusy = false;
+  browserOpen = false;
+
   const list = h("div", { class: "mo-hubs" });
   const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "S3 bucket · S3 hubs only", "aria-label": "Hub S3 bucket" });
   const addBtn = h("button", { type: "button", class: "c-btn filled sm" }, "Add hub");
@@ -130,44 +163,326 @@ export async function openHubs(anchor, { manifest }) {
   const add = async () => {
     const bucket = input.value.trim();
     if (!bucket) { input.focus(); return; }
-    addBtn.disabled = true; addNote.textContent = `Checking ${bucket}…`;
+    addBtn.disabled = true; remoteNoteText = `Checking ${bucket}…`; addNote.textContent = remoteNoteText;
     try {
       const r = await postJSON("/api/remote/add", { bucket }, { okStatuses: [422] });
-      if (!r.ok) addNote.textContent = `Not supported · ${r.reason || "not a flu hub"}`;
+      if (!r.ok) remoteNoteText = `Not supported · ${r.reason || "not a flu hub"}`;
       else {
         input.value = "";
-        addNote.textContent = r.already_registered ? `${r.hub.label} · already connected` : `${r.hub.label} · added`;
+        remoteNoteText = r.already_registered ? `${r.hub.label} · already connected` : `${r.hub.label} · added`;
         await loadHubs();
         render?.();
         if (!r.already_registered) check(r.hub);
       }
-    } catch (err) { addNote.textContent = `Couldn't add · ${err.message}`; }
+    } catch (err) { remoteNoteText = `Couldn't add · ${err.message}`; }
+    addNote.textContent = remoteNoteText;
     addBtn.disabled = false;
   };
   addBtn.addEventListener("click", add);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
 
   const layer = openPopover(anchor, {
-    title: "Data sources", placement: "bottom-end", width: 440, className: "mo-panel",
+    title: "Data sources", placement: "bottom-end", width: 480, className: "mo-panel mo-sources",
     onClose() { render = null; },
     content(body) {
-      body.append(
-        h("div", { class: "mo-src" },
-          h("div", { class: "mo-src-head" }, h("span", { class: "mo-src-name" }, "This repository"), h("span", { class: "mo-src-state" }, plural(repoCount, "model"))),
-          h("div", { class: "mo-src-meta" }, "model-output · local-output · synthetic")),
-        list,
-        h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
-        addNote);
-      list.append(h("div", { class: "mo-note" }, "Loading…"));
+      body.append(localBox, remoteBox);
     },
   });
   if (!layer) return null;
   failed = false; // seen
   emit();
-  render = () => { list.replaceChildren(...hubs.map(hubBlock)); layer.place(); };
-  try { await loadHubs(); render?.(); if (hubs.some(running)) startPoll(); }
-  catch (err) { list.replaceChildren(h("div", { class: "mo-note" }, `Couldn't load hubs · ${err.message}`)); }
+
+  const connectLocalPath = async (rawPath, noteEl) => {
+    const clean = (rawPath || "").trim();
+    if (!clean) return;
+    if (noteEl) noteEl.textContent = "Connecting hub…";
+    try {
+      const r = await postJSON("/api/workspace/add", { path: clean, activate: true });
+      const hub = r.hub;
+      localPathVal = "";
+      if (hub?.id && hub.id === currentHubId && r.already_registered) {
+        localNoteText = `${hub.label} · already active`;
+        await loadWorkspace();
+        render?.();
+        return;
+      }
+      toast(`${hub?.label || "Hub"} · connected`);
+      location.assign(`/next/?hub=${encodeURIComponent(hub.id)}`);
+    } catch (err) {
+      localNoteText = err.message || "Could not add local hub";
+      if (noteEl) noteEl.textContent = localNoteText;
+    }
+  };
+
+  const forgetLocalHub = async (lh, noteEl) => {
+    if (!wsArmed.has(lh.id)) {
+      wsArmed.set(lh.id, setTimeout(() => { wsArmed.delete(lh.id); render?.(); }, ARM_MS));
+      render?.();
+      return;
+    }
+    clearTimeout(wsArmed.get(lh.id));
+    wsArmed.delete(lh.id);
+    try {
+      await postJSON("/api/workspace/remove", { id: lh.id });
+      toast(`Removed ${lh.label}`);
+      if (lh.id === currentHubId) {
+        location.assign("/next/");
+        return;
+      }
+      await loadWorkspace();
+      if (workspace?.mode === "local" && browserOpen) await loadBrowse(browse?.path || "").catch(() => {});
+      render?.();
+    } catch (err) {
+      localNoteText = `Couldn't remove · ${err.message}`;
+      if (noteEl) noteEl.textContent = localNoteText;
+    }
+  };
+
+  const renderLocal = () => {
+    if (!workspace) {
+      localBox.replaceChildren(h("div", { class: "mo-note" }, localBusy ? "Loading local hubs…" : (localNoteText || "Could not inspect workspace")));
+      return;
+    }
+    const localHubs = workspace.hubs || [];
+    const isLocalMode = workspace.mode === "local";
+    const sectionHead = h("div", { class: "c-section" },
+      h("span", { class: "c-section-title" },
+        h("span", null, "Local hubs"),
+        h("span", { class: "c-section-count" }, plural(localHubs.length, "hub"))));
+
+    const cards = localHubs.map((lh) => {
+      const isActive = currentHubId ? lh.id === currentHubId : Boolean(lh.active);
+      const badgeText = !lh.exists ? "Missing" : isActive ? "Active" : "Saved";
+      const badgeCls = !lh.exists ? "is-missing" : isActive ? "is-live" : "";
+      const meta = [plural(lh.model_count || 0, "model"), plural(lh.targets_count || 0, "target")].join(" · ");
+      const armedRemove = wsArmed.has(lh.id);
+      const actions = [];
+      if (!isActive && lh.exists) {
+        actions.push(h("button", { type: "button", class: "c-btn sm mo-primary", onclick: () => openLocalHub(lh.id) }, "Open"));
+      }
+      if (isLocalMode) {
+        actions.push(h("button", {
+          type: "button",
+          class: ["c-btn sm mo-remove", armedRemove && "armed"],
+          onclick: () => forgetLocalHub(lh, localNoteEl),
+        }, armedRemove ? "Forget?" : "Remove"));
+      }
+      return h("div", { class: "mo-src", "data-local-hub": lh.id },
+        h("div", { class: "mo-src-head" },
+          h("span", { class: "mo-src-name", title: lh.description || undefined }, lh.repo_url ? h("a", { href: lh.repo_url, target: "_blank", rel: "noopener" }, lh.label) : lh.label),
+          h("span", { class: ["mo-src-state", badgeCls] }, badgeText)),
+        h("div", { class: "mo-src-meta" }, meta),
+        lh.path ? h("div", { class: "mo-src-path", title: lh.path }, lh.path) : null,
+        actions.length ? h("div", { class: "mo-actions" }, actions) : null);
+    });
+
+    const localNoteEl = h("div", { class: "mo-note", "aria-live": "polite" }, localNoteText);
+    const pieces = [sectionHead];
+    if (cards.length) pieces.push(...cards);
+    else pieces.push(h("div", { class: "mo-note" }, "No local Hubverse repositories connected yet."));
+
+    if (isLocalMode) {
+      const pathInput = h("input", {
+        type: "text", autocomplete: "off", spellcheck: "false",
+        value: localPathVal, placeholder: "/path/to/hub", "aria-label": "Local hub folder path",
+      });
+      pathInput.addEventListener("input", () => { localPathVal = pathInput.value; });
+      const addPathBtn = h("button", {
+        type: "button", class: "c-btn filled sm",
+        onclick: async () => {
+          const val = pathInput.value.trim();
+          if (!val) { pathInput.focus(); return; }
+          addPathBtn.disabled = true;
+          await connectLocalPath(val, localNoteEl);
+          addPathBtn.disabled = false;
+        },
+      }, "Add");
+      pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addPathBtn.click(); } });
+
+      const browseBtn = h("button", {
+        type: "button", class: "c-btn filled sm",
+        "aria-expanded": String(browserOpen),
+        onclick: async () => {
+          browserOpen = !browserOpen;
+          if (browserOpen && !browse) {
+            await loadBrowse("").catch((err) => { localNoteText = `Couldn't browse · ${err.message}`; });
+          }
+          render?.();
+        },
+      }, "Browse");
+
+      const pickBtn = workspace.native_picker_available
+        ? h("button", {
+          type: "button", class: "c-btn filled sm",
+          onclick: async () => {
+            pickBtn.disabled = true;
+            localNoteText = "Opening folder picker…";
+            localNoteEl.textContent = localNoteText;
+            try {
+              const r = await postJSON("/api/workspace/pick-dir", { initial_dir: browse?.path || undefined });
+              if (r.cancelled) {
+                localNoteText = "";
+              } else if (r.error) {
+                localNoteText = r.error;
+              } else if (r.path) {
+                localPathVal = r.path;
+                if (r.inspection?.valid) {
+                  await connectLocalPath(r.path, localNoteEl);
+                  return;
+                }
+                browserOpen = true;
+                await loadBrowse(r.path).catch(() => {});
+                localNoteText = "Folder is not a Hubverse hub (expected hub-config/tasks.json, model-output/, or target-data/)";
+              }
+            } catch (err) {
+              localNoteText = `Couldn't pick folder · ${err.message}`;
+            }
+            pickBtn.disabled = false;
+            render?.();
+          },
+        }, "Choose…")
+        : null;
+
+      pieces.push(h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, pathInput), addPathBtn, browseBtn, pickBtn));
+      pieces.push(localNoteEl);
+
+      if (browserOpen) {
+        pieces.push(renderBrowser(browse, {
+          onNavigate: async (targetPath) => {
+            try { await loadBrowse(targetPath); localNoteText = ""; }
+            catch (err) { localNoteText = `Couldn't browse · ${err.message}`; }
+            render?.();
+          },
+          onConnect: (targetPath) => connectLocalPath(targetPath, localNoteEl),
+          currentHubId,
+        }));
+      }
+    }
+
+    localBox.replaceChildren(...pieces);
+  };
+
+  const renderRemote = () => {
+    if (hubless) {
+      remoteBox.replaceChildren();
+      return;
+    }
+    const visible = hubs.filter((x) => x.compatible !== false || x.synced || !x.builtin);
+    const remoteHead = h("div", { class: "c-section mo-section-gap" },
+      h("span", { class: "c-section-title" },
+        h("span", null, "Live hubs · S3"),
+        h("span", { class: "c-section-count" }, plural(visible.length, "hub"))));
+    if (!hubs.length && remoteBusy) {
+      list.replaceChildren(h("div", { class: "mo-note" }, "Loading…"));
+    } else if (!visible.length) {
+      list.replaceChildren(h("div", { class: "mo-note" }, "No compatible S3 hubs configured for this hub."));
+    } else {
+      list.replaceChildren(...visible.map(hubBlock));
+    }
+    remoteBox.replaceChildren(
+      remoteHead,
+      list,
+      h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
+      addNote);
+  };
+
+  render = () => {
+    renderLocal();
+    renderRemote();
+    layer.place();
+  };
+
+  localBusy = true;
+  remoteBusy = !hubless;
+  render();
+
+  const tasks = [
+    loadWorkspace()
+      .catch((err) => { localNoteText = `Couldn't load workspace · ${err.message}`; })
+      .finally(() => { localBusy = false; render?.(); }),
+  ];
+  if (!hubless) {
+    tasks.push(
+      loadHubs()
+        .catch((err) => { remoteNoteText = `Couldn't load hubs · ${err.message}`; })
+        .finally(() => { remoteBusy = false; render?.(); }),
+    );
+  }
+  await Promise.all(tasks);
+
+  if (workspace?.mode === "local" && (workspace.hubs || []).length === 0) {
+    browserOpen = true;
+    await loadBrowse("").catch(() => {});
+  }
+
+  render?.();
+  if (!hubless && hubs.some(running)) startPoll();
   return layer;
+}
+
+function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
+  if (!snap) {
+    return h("div", { class: "mo-browser" }, h("div", { class: "mo-note" }, "Loading folders…"));
+  }
+  const roots = (snap.roots || []).map((r) => h("button", {
+    type: "button", class: "c-chip",
+    "aria-pressed": String(r.path === snap.path),
+    onclick: () => onNavigate(r.path),
+  }, r.label));
+
+  const head = h("div", { class: "mo-browse-head" },
+    h("button", {
+      type: "button", class: "c-btn filled sm mo-up",
+      disabled: !snap.parent, title: "Parent folder",
+      onclick: () => snap.parent && onNavigate(snap.parent),
+    }, "↑"),
+    h("span", { class: "mo-browse-path", title: snap.path }, snap.path));
+
+  const cur = snap.current_hub;
+  const curRegistered = cur?.registered_id;
+  const curBanner = cur?.valid
+    ? h("div", { class: "mo-current-hub" },
+      h("div", { class: "mo-current-hub-info" },
+        h("span", { class: "mo-dir-name" }, cur.name || snap.name),
+        h("span", { class: "mo-dir-meta" }, [plural(cur.model_count || 0, "model"), plural((cur.targets || []).length, "target")].join(" · "))),
+      curRegistered === currentHubId && currentHubId
+        ? h("span", { class: "mo-src-state is-live" }, "Active")
+        : h("button", {
+          type: "button", class: "c-btn sm mo-primary",
+          onclick: () => (curRegistered ? openLocalHub(curRegistered) : onConnect(snap.path)),
+        }, curRegistered ? "Open" : "Connect"))
+    : null;
+
+  const entries = (snap.entries || []).map((ent) => {
+    const meta = ent.is_hub
+      ? [ent.hub_name && ent.hub_name !== ent.name ? ent.hub_name : null, plural(ent.model_count || 0, "model"), plural(ent.targets_count || 0, "target")].filter(Boolean).join(" · ")
+      : null;
+    return h("div", { class: ["mo-dir-row", ent.is_hub && "is-hub"] },
+      h("button", {
+        type: "button", class: "mo-dir-main",
+        onclick: () => onNavigate(ent.path),
+      },
+      h("span", { class: "mo-dir-name" }, ent.name),
+      meta ? h("span", { class: "mo-dir-meta" }, meta) : null),
+      ent.is_hub
+        ? (ent.registered_id === currentHubId && currentHubId
+          ? h("span", { class: "mo-src-state is-live" }, "Active")
+          : h("button", {
+            type: "button", class: "c-btn filled sm",
+            onclick: () => (ent.registered_id ? openLocalHub(ent.registered_id) : onConnect(ent.path)),
+          }, ent.registered_id ? "Open" : "Connect"))
+        : null);
+  });
+
+  const dirList = h("div", { class: "mo-dir-list" },
+    ...(entries.length ? entries : [h("div", { class: "mo-note" }, "No subfolders")]));
+
+  return h("div", { class: "mo-browser" },
+    roots.length ? h("div", { class: "mo-roots" }, roots) : null,
+    head,
+    curBanner,
+    dirList,
+    snap.truncated ? h("div", { class: "mo-note" }, "Showing first entries · type a full path above to jump directly") : null);
 }
 
 function hubBlock(x) {
@@ -182,7 +497,15 @@ function hubBlock(x) {
     ? [plural(x.models || 0, "model"), plural(x.files || 0, "file"), fmtBytes(x.bytes), `synced ${fmtAgo(x.last_sync)}`].join(" · ")
     : "Nothing downloaded";
   const upstream = upstreamOf(x);
-  const meta2 = x.synced ? [`latest ${day(x.latest_round)}`, x.latest_round_models ? plural(x.latest_round_models, "model") : null, x.truth?.oracle?.as_of ? `truth ${day(x.truth.oracle.as_of)}` : null, upstream ? `${upstream} changed upstream` : null].filter(Boolean).join(" · ") : null;
+  const truthUp = hasTruthUpdate(x);
+  const needsUp = needsUpdateOf(x);
+  const meta2 = x.synced ? [
+    `latest ${day(x.latest_round)}`,
+    x.latest_round_models ? plural(x.latest_round_models, "model") : null,
+    x.truth?.oracle?.as_of ? `truth ${day(x.truth.oracle.as_of)}` : null,
+    upstream ? `${upstream} changed upstream` : null,
+    truthUp ? "new truth upstream" : null,
+  ].filter(Boolean).join(" · ") : null;
 
   // seasons: those stored, the current one, and whatever a check listed
   const listed = checks.get(x.id)?.seasons || [];
@@ -206,13 +529,27 @@ function hubBlock(x) {
   const fresh = [...sel].filter((s) => !(x.seasons || []).includes(s));
   const syncLabel = fresh.length ? `Sync ${plural(fresh.length, "season")}` : x.synced ? "Update" : "Sync";
   const isArmed = armed.has(x.id);
+  const removeBtn = (x.synced || !x.builtin)
+    ? h("button", { type: "button", class: ["c-btn sm mo-remove", isArmed && "armed"], disabled: anyBusy, onclick: () => remove(x) }, isArmed ? "Remove local copy?" : "Remove")
+    : null;
   const actions = busy
     ? [h("button", { type: "button", class: "c-btn filled sm", onclick: () => cancel(x) }, "Cancel")]
-    : [
-      h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
-      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
-      x.synced || !x.builtin ? h("button", { type: "button", class: ["c-btn sm mo-remove", isArmed && "armed"], disabled: anyBusy, onclick: () => remove(x) }, isArmed ? "Remove local copy?" : "Remove") : null,
-    ];
+    : !x.synced
+      ? [
+        h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
+        h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
+        removeBtn,
+      ]
+      : (fresh.length > 0 || needsUp)
+        ? [
+          h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
+          h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
+          removeBtn,
+        ]
+        : [
+          h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check for updates"),
+          removeBtn,
+        ];
 
   return h("div", { class: "mo-src", "data-hub": x.id },
     h("div", { class: "mo-src-head" },
@@ -243,8 +580,16 @@ async function check(x) {
     const r = await postJSON("/api/remote/check", { hub: x.id });
     checks.set(x.id, r);
     const p = r.pending || {};
-    const changes = [p.new && `${p.new} new`, p.changed && `${p.changed} updated`, p.removed && `${p.removed} removed`].filter(Boolean).join(" · ");
-    notes.set(x.id, `${changes ? `${changes} upstream` : "Up to date"} · latest ${day(p.latest_round)}`);
+    hubs = hubs.map((y) => (y.id === x.id ? { ...y, pending: p } : y));
+    emit();
+    const changes = [
+      p.new && `${p.new} new`,
+      p.changed && `${p.changed} updated`,
+      p.removed && `${p.removed} removed`,
+      p.truth_changed && "new truth",
+    ].filter(Boolean).join(" · ");
+    const latestPart = p.latest_round ? ` · latest ${day(p.latest_round)}` : "";
+    notes.set(x.id, `${changes ? `${changes} upstream` : "Up to date"}${latestPart}`);
     if (!x.synced && !(x.seasons || []).length) {
       const newest = (r.seasons || []).map((s) => s.season).sort().at(-1);
       if (!picked.get(x.id)?.size && newest) picked.set(x.id, new Set([newest]));

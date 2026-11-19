@@ -15,6 +15,7 @@
  * list what exists here); responses are cached. Everything that doesn't depend on the view is prepared
  * once per response; a frame only maps prepared points through the scene's scales into reused buffers. */
 import { h, on, tokenNum } from "../../lib/dom.js";
+import { apiUrl } from "../../lib/api.js";
 import { WEEK, DAY, parseIso, niceStep } from "../../lib/scale.js";
 import { glass } from "../../ui/glass.js";
 import { openMenu, activeLayer } from "../../ui/floating.js";
@@ -76,7 +77,7 @@ const seasonLabel = (id) => { const y = +String(id).slice(0, 4); return Number.i
 /* ---------------- data: cached JSON, in-flight requests shared ---------------- */
 const cache = new Map();
 function getJson(path, params) {
-  const url = `${path}?${new URLSearchParams(params)}`;
+  const url = apiUrl(`${path}?${new URLSearchParams(params)}`);
   let p = cache.get(url);
   if (!p) {
     p = fetch(url).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); });
@@ -466,8 +467,7 @@ export class Layers {
    * edge, above their lines. Hidden under the "Showing 5 of 9" note and where a model label sits. */
   #rightAxis(scene) {
     const l = this.right, ticks = this.axisTicks, x = scene.w - scene.tickX;
-    const note = this.chart.bubbles?.note;
-    const clear = note?.classList.contains("is-shown") ? note.offsetTop + note.offsetHeight : -Infinity;
+    const clear = this.chart.bubbles?.noteClear ?? -Infinity;
     ticks.length = 0;
     for (const d of scene.ticks) {
       if (d.text == null) continue;

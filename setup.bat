@@ -1,12 +1,10 @@
 @echo off
 rem ==============================================================================
-rem One-time setup for viz (Windows). Run from anywhere:  viz\setup.bat
-rem   1. Creates viz\.venv (skipped if a virtual environment is already active)
-rem   2. Installs the Python dependencies
-rem   3. Builds the surveillance data (NHSN admissions, as-of snapshots)
-rem   4. Creates the hub's local-output\ folder for uncommitted model runs
-rem   5. Hides viz/ and local-output/ from the hub's git status via .git\info\exclude
-rem Safe to re-run. Stops if the parent folder isn't a hub (override with --force).
+rem One-time setup for viz (Windows). Works standalone or inside a Hubverse hub.
+rem   1. Creates .venv inside this checkout (skipped if VIRTUAL_ENV is active)
+rem   2. Installs Python dependencies from requirements.txt
+rem   3. When inside a Hubverse hub, builds surveillance data, creates
+rem      local-output\, and updates .git\info\exclude
 rem ==============================================================================
 
 setlocal enabledelayedexpansion
@@ -16,46 +14,10 @@ set "DIR=%DIR:~0,-1%"
 for %%I in ("%DIR%") do set "DIRNAME=%%~nxI"
 for %%I in ("%DIR%\..") do set "ROOT_DIR=%%~fI"
 
-if /I not "%DIRNAME%"=="viz" (
-    echo ERROR: this folder must be named 'viz' ^(it is '%DIRNAME%'^).
-    echo Clone it with:  git clone https://github.com/nikhillebaka/viz.git viz
-    exit /b 1
-)
-
-rem viz reads hub data from its parent folder, so it must be cloned directly inside the hub.
-rem Pass --force to skip this check (e.g. for a hub whose model-output\ doesn't exist yet).
-if /I "%~1"=="--force" goto :hub_ok
-if exist "%ROOT_DIR%\model-output" goto :hub_ok
-if exist "%ROOT_DIR%\target-data" goto :hub_ok
-echo ERROR: viz must be inside a Hubverse hub, but %ROOT_DIR%
-echo        has no model-output\ or target-data\ folder.
-set "HUB_COUNT=0"
-for /d %%H in ("%ROOT_DIR%\*") do (
-    if /I not "%%~fH"=="%DIR%" (
-        set "IS_HUB="
-        if exist "%%~fH\model-output" set "IS_HUB=1"
-        if exist "%%~fH\target-data" set "IS_HUB=1"
-        if defined IS_HUB (
-            set /a HUB_COUNT+=1
-            if !HUB_COUNT!==1 (
-                echo.
-                echo Found a hub next to it. Move viz into it ^(pick one if several are listed^), then re-run setup:
-            )
-            echo   move "%DIR%" "%%~fH\viz"
-        )
-    )
-)
-if %HUB_COUNT%==0 (
-    echo.
-    echo Clone it from inside your hub instead:
-    echo   cd path\to\your-hub
-    echo   git clone https://github.com/nikhillebaka/viz.git viz
-)
-echo.
-echo ^(To set up here anyway, run: "%DIR%\setup.bat" --force^)
-exit /b 1
-
-:hub_ok
+set "IS_HUB="
+if exist "%ROOT_DIR%\hub-config\tasks.json" set "IS_HUB=1"
+if exist "%ROOT_DIR%\model-output" set "IS_HUB=1"
+if exist "%ROOT_DIR%\target-data" set "IS_HUB=1"
 
 rem 1. Python environment
 if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\python.exe" (
@@ -71,7 +33,7 @@ if not exist "%DIR%\.venv\Scripts\python.exe" (
         echo ERROR: Python not found. Install Python 3.10 or newer from python.org.
         exit /b 1
     )
-    echo ==^> Creating virtual environment in viz\.venv
+    echo ==^> Creating virtual environment in %DIR%\.venv
     !BASE_PY! -m venv "%DIR%\.venv" || exit /b 1
 )
 set "PYTHON_BIN=%DIR%\.venv\Scripts\python.exe"
@@ -88,27 +50,37 @@ echo ==^> Installing dependencies
 "%PYTHON_BIN%" -m pip install --quiet --upgrade pip
 "%PYTHON_BIN%" -m pip install --quiet -r "%DIR%\requirements.txt" || exit /b 1
 
-rem 3. Surveillance data
-echo ==^> Building surveillance data ^(falls back to local target-data\ if offline^)
-"%PYTHON_BIN%" "%DIR%\rebuild_surveillance.py" --force
-if errorlevel 1 echo WARNING: surveillance rebuild failed; the dashboard still runs without those streams.
+echo.
+if defined IS_HUB (
+    rem 3. Surveillance data (inside enclosing hub)
+    echo ==^> Enclosing Hubverse hub detected: %ROOT_DIR%
+    echo ==^> Building surveillance data ^(falls back to local target-data\ if offline^)
+    "%PYTHON_BIN%" "%DIR%\rebuild_surveillance.py" --hub "%ROOT_DIR%" --force
+    if errorlevel 1 echo WARNING: surveillance rebuild failed; the dashboard still runs without those streams.
 
-rem 4. Staging folder for uncommitted model runs (shown as [LOCAL] in the dashboard)
-if not exist "%ROOT_DIR%\local-output" (
-    mkdir "%ROOT_DIR%\local-output"
-    echo ==^> Created local-output\ ^(put uncommitted runs in local-output\^<model_id^>\^)
-)
+    rem 4. Staging folder for uncommitted model runs ^(shown as [LOCAL] in the dashboard^)
+    if not exist "%ROOT_DIR%\local-output" (
+        mkdir "%ROOT_DIR%\local-output"
+        echo ==^> Created local-output\ ^(put uncommitted runs in local-output\^<model_id^>\^)
+    )
 
-rem 5. Keep viz/ and local-output/ out of the hub's git status
-if exist "%ROOT_DIR%\.git\info" (
-    for %%E in (viz/ local-output/) do (
-        findstr /x /c:"%%E" "%ROOT_DIR%\.git\info\exclude" >nul 2>nul
-        if errorlevel 1 (
-            echo %%E>> "%ROOT_DIR%\.git\info\exclude"
-            echo ==^> Added %%E to .git\info\exclude
+    rem 5. Keep this tool folder and local-output\ out of the hub's git status
+    if exist "%ROOT_DIR%\.git\info" (
+        for %%E in ("%DIRNAME%/" "local-output/") do (
+            findstr /x /c:%%E "%ROOT_DIR%\.git\info\exclude" >nul 2>nul
+            if errorlevel 1 (
+                echo %%~E>> "%ROOT_DIR%\.git\info\exclude"
+                echo ==^> Added %%~E to .git\info\exclude
+            )
         )
     )
-)
 
-echo.
-echo Setup complete. Start the dashboard with:  viz\run.bat
+    echo.
+    echo Setup complete. Start the dashboard with:  "%DIR%\run.bat"
+) else (
+    echo Setup complete ^(standalone mode^).
+    echo Start the dashboard and connect any local Hubverse hub in the UI:
+    echo   "%DIR%\run.bat"
+    echo Or launch directly against a local hub folder:
+    echo   "%DIR%\run.bat" --hub C:\path\to\your-hub
+)
