@@ -109,40 +109,45 @@ export function arcsToUnitSphere(decodedArcs) {
   });
 }
 
-function resolveRing(arcIndices, unitArcs) {
+function resolveRingStride(arcIndices, srcArcs, stride, getArray) {
   let totalPts = 0;
   for (let i = 0; i < arcIndices.length; i++) {
     const idx = arcIndices[i];
-    const arc = unitArcs[idx < 0 ? ~idx : idx];
-    if (!arc) continue;
-    const n = arc.xyz.length / 3;
+    const arr = getArray(srcArcs[idx < 0 ? ~idx : idx]);
+    if (!arr) continue;
+    const n = arr.length / stride;
     totalPts += i === 0 ? n : Math.max(0, n - 1);
   }
-  const xyz = new Float32Array(totalPts * 3);
+  const OutCtor = stride === 2 ? Float64Array : Float32Array;
+  const out = new OutCtor(totalPts * stride);
   let cursor = 0;
   for (let i = 0; i < arcIndices.length; i++) {
     const rawIdx = arcIndices[i];
     const rev = rawIdx < 0;
-    const arc = unitArcs[rev ? ~rawIdx : rawIdx];
-    if (!arc) continue;
-    const n = arc.xyz.length / 3;
+    const arr = getArray(srcArcs[rev ? ~rawIdx : rawIdx]);
+    if (!arr) continue;
+    const n = arr.length / stride;
     if (n === 0) continue;
     const start = i === 0 ? 0 : 1;
     if (!rev) {
       for (let k = start; k < n; k++) {
-        xyz[cursor++] = arc.xyz[k * 3];
-        xyz[cursor++] = arc.xyz[k * 3 + 1];
-        xyz[cursor++] = arc.xyz[k * 3 + 2];
+        for (let s = 0; s < stride; s++) out[cursor++] = arr[k * stride + s];
       }
     } else {
       for (let k = n - 1 - start; k >= 0; k--) {
-        xyz[cursor++] = arc.xyz[k * 3];
-        xyz[cursor++] = arc.xyz[k * 3 + 1];
-        xyz[cursor++] = arc.xyz[k * 3 + 2];
+        for (let s = 0; s < stride; s++) out[cursor++] = arr[k * stride + s];
       }
     }
   }
-  return xyz;
+  return out;
+}
+
+function resolveRing(arcIndices, unitArcs) {
+  return resolveRingStride(arcIndices, unitArcs, 3, (a) => a?.xyz);
+}
+
+function resolveLonLatRing(arcIndices, decodedArcs) {
+  return resolveRingStride(arcIndices, decodedArcs, 2, (a) => a);
 }
 
 /**
@@ -247,6 +252,234 @@ export function extractMesh(topology, objectName, unitArcs = null, filterFn = nu
     }
   }
   return selected;
+}
+
+/**
+ * Extract 2D `[lon, lat]` rings from a named TopoJSON object for crisp planar SVG maps.
+ * @returns {Map<string, Float64Array[]>}
+ */
+export function extractLonLatFeatures(topology, objectName, decodedArcs = null) {
+  const obj = topology?.objects?.[objectName];
+  if (!obj) return new Map();
+  const decoded = decodedArcs || decodeArcs(topology);
+  const geoms = obj.type === "GeometryCollection" ? obj.geometries : [obj];
+  const byId = new Map();
+  for (const g of geoms) {
+    if (!g) continue;
+    const rawPolys = g.type === "Polygon" ? [g.arcs] : g.type === "MultiPolygon" ? g.arcs : [];
+    const rings = [];
+    for (const polyArcs of rawPolys) {
+      if (!polyArcs?.length) continue;
+      for (const ringArcs of polyArcs) {
+        const ll = resolveLonLatRing(ringArcs, decoded);
+        if (ll.length >= 6) rings.push(ll);
+      }
+    }
+    if (rings.length && g.id != null) byId.set(String(g.id), rings);
+  }
+  return byId;
+}
+
+function stitchExteriorBoundaryArcs(geoms, arcEndPts) {
+  const net = new Map();
+  for (const g of geoms) {
+    const polys = g.type === "Polygon" ? [g.arcs] : g.type === "MultiPolygon" ? g.arcs : [];
+    for (const poly of polys) {
+      for (const ring of poly) {
+        for (const aIdx of ring) {
+          const rev = aIdx < 0;
+          const u = rev ? ~aIdx : aIdx;
+          let rec = net.get(u);
+          if (!rec) { rec = { pos: 0, neg: 0 }; net.set(u, rec); }
+          if (rev) rec.neg++; else rec.pos++;
+        }
+      }
+    }
+  }
+  const boundary = [];
+  for (const [u, { pos, neg }] of net.entries()) {
+    const diff = pos - neg;
+    if (diff > 0) for (let k = 0; k < diff; k++) boundary.push(u);
+    else if (diff < 0) for (let k = 0; k < -diff; k++) boundary.push(~u);
+  }
+
+  const startOf = (a) => (a < 0 ? arcEndPts[~a][1] : arcEndPts[a][0]);
+  const endOf = (a) => (a < 0 ? arcEndPts[~a][0] : arcEndPts[a][1]);
+  const byStart = new Map();
+  boundary.forEach((a, i) => {
+    const k = startOf(a);
+    let list = byStart.get(k);
+    if (!list) { list = []; byStart.set(k, list); }
+    list.push(i);
+  });
+
+  const used = new Uint8Array(boundary.length);
+  const closedRings = [];
+  for (let i = 0; i < boundary.length; i++) {
+    if (used[i]) continue;
+    const s0 = startOf(boundary[i]);
+    const ring = [];
+    let cur = i;
+    let guard = 0;
+    while (guard++ <= 5000) {
+      used[cur] = 1;
+      ring.push(boundary[cur]);
+      const e = endOf(boundary[cur]);
+      if (e === s0) {
+        closedRings.push(ring);
+        break;
+      }
+      const cands = byStart.get(e);
+      let nextIdx = -1;
+      if (cands) {
+        for (let c = 0; c < cands.length; c++) {
+          if (!used[cands[c]]) { nextIdx = cands[c]; break; }
+        }
+      }
+      if (nextIdx < 0) break;
+      cur = nextIdx;
+    }
+  }
+  return closedRings;
+}
+
+/**
+ * Build MetroCast-only boundary mesh & true dissolved exterior HSA polygon features
+ * from `usTopo.objects.counties` and `metrocast_hsas.json`: cancels internal sub-county arcs
+ * inside every HSA, stitches closed exterior rings for both 3D globe and 2D SVG pickers,
+ * and excludes all uncovered U.S. counties cleanly.
+ */
+export function buildMetroOverlays(usTopo, unitArcs, hsasData, decodedArcs = null) {
+  const hsas = hsasData?.hsas || [];
+  const fipsOf = (g) => (g?.id != null ? String(g.id).padStart(5, "0") : "");
+  const countyToHsaId = new Map();
+  for (const h of hsas) {
+    for (const c of h.counties || []) countyToHsaId.set(c, h.id);
+  }
+
+  const decoded = decodedArcs || decodeArcs(usTopo);
+  const arcEndPts = (usTopo?.arcs || []).map((raw) => {
+    if (!raw?.length) return ["", ""];
+    let x = raw[0][0], y = raw[0][1];
+    const s = `${x},${y}`;
+    for (let i = 1; i < raw.length; i++) { x += raw[i][0]; y += raw[i][1]; }
+    return [s, `${x},${y}`];
+  });
+
+  const geomsByHsa = new Map();
+  for (const g of usTopo?.objects?.counties?.geometries || []) {
+    const hsaId = countyToHsaId.get(fipsOf(g));
+    if (!hsaId) continue;
+    let list = geomsByHsa.get(hsaId);
+    if (!list) { list = []; geomsByHsa.set(hsaId, list); }
+    list.push(g);
+  }
+
+  const exteriorArcIndices = new Set();
+  const metroFeatures = [];
+  for (const h of hsas) {
+    const geoms = geomsByHsa.get(h.id);
+    if (!geoms?.length) continue;
+    const stitchedArcRings = stitchExteriorBoundaryArcs(geoms, arcEndPts);
+    const rings = [];
+    const lonLatRings = [];
+    for (const ringArcs of stitchedArcRings) {
+      for (const aIdx of ringArcs) exteriorArcIndices.add(aIdx < 0 ? ~aIdx : aIdx);
+      const r3 = resolveRing(ringArcs, unitArcs);
+      const r2 = resolveLonLatRing(ringArcs, decoded);
+      if (r3.length >= 9) rings.push(r3);
+      if (r2.length >= 6) lonLatRings.push(r2);
+    }
+    if (!rings.length) continue;
+    let total = 0;
+    for (const r of rings) total += r.length;
+    const all = new Float32Array(total);
+    let p = 0;
+    for (const r of rings) { all.set(r, p); p += r.length; }
+    const cone = computeBoundingCone(all);
+    const [x, y, z] = lonLatToXYZ(h.lon, h.lat);
+    metroFeatures.push({
+      ...h,
+      x, y, z,
+      rings,
+      lonLatRings,
+      cx: cone.cx,
+      cy: cone.cy,
+      cz: cone.cz,
+      alpha: cone.alpha,
+      cosAlpha: cone.cosAlpha,
+      sinAlpha: cone.sinAlpha,
+    });
+  }
+
+  const metroMesh = [];
+  for (const u of exteriorArcIndices) {
+    const seg = unitArcs[u];
+    if (seg && seg.xyz.length >= 6) metroMesh.push(seg);
+  }
+  return { metroMesh, metroFeatures, coveredStates: new Set(hsasData?.states || []) };
+}
+
+/**
+ * Split distant overseas territories (e.g. French Guiana on FR, Svalbard on NO) into
+ * neutral background land features so mainland shading, centroids, and interactions stay clean.
+ */
+export function splitDetachedTerritories(countries, boundsByIso) {
+  const out = [];
+  for (const co of countries) {
+    const box = co.iso2 ? boundsByIso?.[co.iso2] : null;
+    if (!box) { out.push(co); continue; }
+    const keep = [];
+    const detached = [];
+    for (const ring of co.rings) {
+      const c = computeBoundingCone(ring);
+      const [lon, lat] = xyzToLonLat(c.cx, c.cy, c.cz);
+      const inside = lon >= box.minLon && lon <= box.maxLon && lat >= box.minLat && lat <= box.maxLat;
+      if (inside) keep.push({ ring, cone: c });
+      else detached.push({ ring, cone: c });
+    }
+    if (!detached.length || !keep.length) {
+      out.push(co);
+      continue;
+    }
+    let total = 0;
+    for (const k of keep) total += k.ring.length;
+    const all = new Float32Array(total);
+    let p = 0;
+    for (const k of keep) { all.set(k.ring, p); p += k.ring.length; }
+    const mainCone = computeBoundingCone(all);
+    let bestKeep = keep[0];
+    for (const k of keep) if (k.ring.length > bestKeep.ring.length) bestKeep = k;
+    out.push({
+      ...co,
+      rings: keep.map((k) => k.ring),
+      cx: mainCone.cx,
+      cy: mainCone.cy,
+      cz: mainCone.cz,
+      alpha: mainCone.alpha,
+      cosAlpha: mainCone.cosAlpha,
+      sinAlpha: mainCone.sinAlpha,
+      centroidLonLat: xyzToLonLat(bestKeep.cone.cx, bestKeep.cone.cy, bestKeep.cone.cz),
+    });
+    detached.forEach((d, idx) => {
+      out.push({
+        id: `${co.id}-detached-${idx}`,
+        iso2: null,
+        detached: true,
+        name: "",
+        properties: {},
+        rings: [d.ring],
+        cx: d.cone.cx,
+        cy: d.cone.cy,
+        cz: d.cone.cz,
+        alpha: d.cone.alpha,
+        cosAlpha: d.cone.cosAlpha,
+        sinAlpha: d.cone.sinAlpha,
+        centroidLonLat: xyzToLonLat(d.cone.cx, d.cone.cy, d.cone.cz),
+      });
+    });
+  }
+  return out;
 }
 
 /**
@@ -495,4 +728,59 @@ export function pointInFlatRing(x, y, pts) {
     }
   }
   return inside;
+}
+
+/** Even-odd containment across multiple rings (exterior rings + holes). */
+export function pointInRingsEvenOdd(x, y, screenRings) {
+  let inside = false;
+  for (let i = 0; i < screenRings.length; i++) {
+    if (pointInFlatRing(x, y, screenRings[i])) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Analytical cursor-anchored zoom solver: computes `[camLon, camLat]` so that world point
+ * `[lonDeg, latDeg]` remains projected at exact screen pixel `(sx, sy)` under `newRadiusPx`.
+ */
+export function solveCameraForAnchor(lonDeg, latDeg, sx, sy, cx, cy, newRadiusPx, prevLonDeg, prevLatDeg) {
+  if (!(newRadiusPx > 1)) return null;
+  const tx = (sx - cx) / newRadiusPx;
+  const ty = (cy - sy) / newRadiusPx;
+  if (tx * tx + ty * ty >= 0.992) return null;
+
+  const lam0 = lonDeg * DEG2RAD;
+  const phi0 = latDeg * DEG2RAD;
+  const cPhi0 = Math.cos(phi0);
+  const sPhi0 = Math.sin(phi0);
+  if (cPhi0 < 1e-4) return null;
+  const sinRatio = tx / cPhi0;
+  if (Math.abs(sinRatio) >= 0.998) return null;
+
+  const dLam0 = Math.asin(sinRatio);
+  let prevDelta = lam0 - prevLonDeg * DEG2RAD;
+  while (prevDelta > Math.PI) prevDelta -= EARTH_TAU;
+  while (prevDelta < -Math.PI) prevDelta += EARTH_TAU;
+  const dLam = Math.cos(prevDelta) < 0 ? (dLam0 >= 0 ? Math.PI - dLam0 : -Math.PI - dLam0) : dLam0;
+
+  let camLon = (lam0 - dLam) * RAD2DEG;
+  camLon = ((((camLon + 180) % 360) + 360) % 360) - 180;
+
+  const a = sPhi0;
+  const b = cPhi0 * Math.cos(dLam);
+  const r = Math.hypot(a, b);
+  if (r < 1e-6 || Math.abs(ty) >= r * 0.998) return null;
+
+  const phiRef = Math.atan2(a, b);
+  let camLat = (phiRef - Math.asin(ty / r)) * RAD2DEG;
+  // Pick closer branch around prevLatDeg if clamped near poles
+  if (camLat < -82 || camLat > 82) {
+    const altLat = (phiRef - (Math.PI - Math.asin(ty / r))) * RAD2DEG;
+    if (altLat >= -82 && altLat <= 82 && Math.abs(altLat - prevLatDeg) < Math.abs(camLat - prevLatDeg)) {
+      camLat = altLat;
+    } else {
+      camLat = Math.max(-82, Math.min(82, camLat));
+    }
+  }
+  return [camLon, camLat];
 }

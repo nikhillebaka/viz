@@ -1,16 +1,9 @@
-/* Tab 4: Sample Trajectories Explorer Prototype (Flu MetroCast 100-trajectory 28-32wk showcase).
- * Features:
- * - HiDPI Canvas 2D spaghetti trajectories + aligned Peak Timing/Size cloud strip
- * - End-to-end nearest-trajectory hover illumination + click-to-pin + solid .c-readout
- * - Interactive Exceedance Threshold Filter ("P(peak ≥ threshold)")
- * - Derived 50/80/95% Quantile Ribbon & Median overlays, Dual-model comparison
- * - Exact O(M log M) CRPS & Multivariate Energy Score readouts + Live API /api/next/trajectories bridge */
+/* Tab 4: Sample Trajectories (/next/ print-on-paper aesthetic + direct-manipulation conditioning gate).
+ * Borderless HiDPI Canvas 2D fan on paper with aligned Peak Timing × Peak Size cloud,
+ * nearest-trajectory hover illumination, click-to-pin, and drag-vertical canvas conditioning brush. */
 import { h, on, cssColor } from "../lib/dom.js";
-import { pill } from "../ui/controls.js";
-import { glass } from "../ui/glass.js";
-import { fitCanvas, perFrame, resetColors } from "../sections/shared.js";
+import { fragment, action, setLine, fitCanvas, perFrame, resetColors } from "../sections/shared.js";
 import { buildTrajectoriesFixture } from "./fixtures.js";
-import { fetchLiveTrajectories, probeLiveBackend } from "./liveBridge.js";
 
 function parseRgb(str) {
   const m = str.match(/[\d.]+/g);
@@ -18,209 +11,194 @@ function parseRgb(str) {
 }
 
 export function mount(root, ctx) {
-  const showcaseData = buildTrajectoriesFixture();
+  const dataset = buildTrajectoriesFixture();
   const offs = [];
-  let dataset = showcaseData;
+
   let primaryModel = dataset.modelOrder[0];
   let showCompare = false;
   let showRibbon = true;
-  let showMedian = true;
   let showPeakCloud = true;
-  let filterOn = false;
-  let thresholdVal = 75;
   let hoverSampleId = null;
   let pinnedSampleId = null;
-  let pointerPos = null; // { x, y, weekIdx }
-  let liveNote = null;
-  let hitGeom = null; // saved mapping from last draw
+  let pointerPos = null;
+  let gate = null; // { h: number, lo: number, hi: number } | null
+  let dragBrush = null; // { h: number, y0: number, y1: number, moved: boolean }
+  let hitGeom = null;
 
   const paper = h("div", { class: "lab-paper" });
   const sec = h("section", { class: "v-section" });
   const line = h("div", { class: "v-line" });
-  const head = h("header", { class: "v-head" },
-    h("h2", { class: "v-title" }, "Sample Trajectories"),
-    line,
-  );
-  const body = h("div", { class: "v-body" });
-  sec.append(head, body);
+  const head = h("header", { class: "v-head" }, h("h2", { class: "v-title" }, "Trajectories"), line);
+  const progress = h("div", { class: "v-progress", "aria-hidden": "true" });
+  const nums = h("div", { class: "tr-nums" });
+  const fig = h("div", { class: "tr-fig" });
+  const canvas = h("canvas", { class: "tr-canvas", "aria-label": "Sample trajectories chart" });
+  const readout = h("div", { class: "c-readout v-readout", role: "status", hidden: true });
+  const foot = h("p", { class: "v-note" }, "Drag vertically over a week to condition · Click a path to pin");
+
+  fig.append(canvas, readout);
+  sec.append(head, progress, nums, fig, foot);
   paper.append(sec);
   root.replaceChildren(paper);
 
-  const metricsGrid = h("div", { class: "tr-top-metrics" });
-  const controlsBar = h("div", { style: { display: "flex", alignItems: "center", gap: "var(--space-8)", flexWrap: "wrap", marginBottom: "var(--space-12)" } });
-  const stage = h("div", { class: "tr-stage" });
-  const canvas = h("canvas", { class: "tr-canvas", "aria-label": "Sample trajectories and peak distribution chart" });
-  const readout = h("div", { class: "c-readout v-readout", role: "status", hidden: true });
-  stage.append(canvas, readout);
+  const F = {
+    place: fragment({
+      label: "Place", title: "Place",
+      items: () => [{ value: dataset.locationId, label: dataset.locationName }],
+      value: () => dataset.locationId, isDefault: () => true,
+      onSelect: () => {},
+    }),
+    model: fragment({
+      label: "Model", title: "Model",
+      items: () => dataset.modelOrder.map((id) => ({ value: id, label: id })),
+      value: () => primaryModel, isDefault: () => primaryModel === dataset.modelOrder[0],
+      onSelect: (v) => { primaryModel = v; pinnedSampleId = null; hoverSampleId = null; renderAll(); },
+    }),
+    compare: fragment({
+      label: "Compare", title: "Compare",
+      items: () => [{ value: false, label: "Single model" }, { value: true, label: "Compare 2nd" }],
+      value: () => showCompare, isDefault: () => !showCompare,
+      onSelect: (v) => { showCompare = v; renderAll(); },
+    }),
+    ribbon: fragment({
+      label: "Band", title: "Derived quantile band",
+      items: () => [{ value: true, label: "50/80/95% ribbon" }, { value: false, label: "Paths only" }],
+      value: () => showRibbon, isDefault: () => showRibbon,
+      onSelect: (v) => { showRibbon = v; renderAll(); },
+    }),
+    cloud: fragment({
+      label: "Cloud", title: "Peak cloud",
+      items: () => [{ value: true, label: "Peak cloud on" }, { value: false, label: "Peak cloud off" }],
+      value: () => showPeakCloud, isDefault: () => showPeakCloud,
+      onSelect: (v) => { showPeakCloud = v; renderAll(); },
+    }),
+  };
 
-  const filterBar = h("div", { class: "tr-filter-bar" });
-  body.append(metricsGrid, controlsBar, stage, filterBar);
+  const clearGateBtn = action("Clear gate ×", "Clear conditioning gate", () => { gate = null; renderAll(); });
+  const clearPinBtn = action("Unpin ×", "Unpin trajectory", () => { pinnedSampleId = null; readout.hidden = true; renderAll(); });
 
-  function updateHeaderLine() {
-    line.replaceChildren(...[
-      h("span", { class: "v-frag is-set" }, dataset.locationName),
-      h("span", { class: "v-sep" }, "·"),
-      h("span", { class: "v-frag" }, `${dataset.target}`),
-      h("span", { class: "v-sep" }, "·"),
-      h("span", { class: "v-frag" }, `Round ${dataset.roundDate}`),
-      liveNote ? h("span", { class: "lab-tag", style: { marginLeft: "auto" } }, liveNote) : null,
-    ].filter(Boolean));
+  function syncLine() {
+    Object.values(F).forEach((b) => b.sync());
+    setLine(line, [F.place, F.model, F.compare, F.ribbon, F.cloud, gate && clearGateBtn, pinnedSampleId && clearPinBtn]);
   }
 
-  function renderControls() {
-    const modelChips = dataset.modelOrder.map((id, i) =>
-      h("button", {
-        type: "button",
-        class: ["c-chip", id === primaryModel && "on"],
-        onclick: () => {
-          primaryModel = id;
-          pinnedSampleId = null;
-          hoverSampleId = null;
-          renderAll();
-        },
-      }, h("i", { class: "c-dot", style: { background: `var(--series-${(i % 8) + 1})` } }), id));
-
-    const toggleChip = (label, active, fn) =>
-      h("button", {
-        type: "button",
-        class: ["c-chip", active && "on"],
-        "aria-pressed": String(active),
-        onclick: fn,
-      }, label);
-
-    const hasSecond = dataset.modelOrder.length > 1;
-    controlsBar.replaceChildren(...[
-      ...modelChips,
-      hasSecond ? toggleChip("Compare 2nd model", showCompare, () => { showCompare = !showCompare; renderAll(); }) : null,
-      toggleChip("50 / 80 / 95% Ribbon", showRibbon, () => { showRibbon = !showRibbon; renderAll(); }),
-      toggleChip("Median", showMedian, () => { showMedian = !showMedian; renderAll(); }),
-      toggleChip("Peak Cloud", showPeakCloud, () => { showPeakCloud = !showPeakCloud; renderAll(); }),
-      pinnedSampleId ? toggleChip(`Clear pin (${pinnedSampleId}) ×`, true, () => { pinnedSampleId = null; readout.hidden = true; renderAll(); }) : null,
-    ].filter(Boolean));
-
-    const m = dataset.models[primaryModel];
-    const maxPeak = Math.max(20, ...m.samples.map((s) => s.peakValue));
-    if (thresholdVal > maxPeak) thresholdVal = Math.round(maxPeak * 0.65);
-
-    const slider = h("input", {
-      type: "range",
-      class: "tr-slider",
-      min: "10",
-      max: String(Math.ceil(maxPeak * 0.95)),
-      step: "1",
-      value: String(thresholdVal),
-      "aria-label": "Peak threshold filter",
-    });
-    slider.addEventListener("input", () => {
-      thresholdVal = Number(slider.value);
-      if (!filterOn) filterOn = true;
-      renderMetricsAndFilterLabel();
-      scheduleDraw();
-    });
-
-    const filterBtn = pill({
-      label: filterOn ? "Filter active" : "Exceedance gate",
-      size: "sm",
-      pressed: filterOn,
-      onClick: () => {
-        filterOn = !filterOn;
-        renderAll();
-      },
-    });
-    filterBar.replaceChildren(
-      filterBtn,
-      h("span", null, "Highlight paths peaking ≥ "),
-      slider,
-      h("strong", { class: "mono", id: "tr-thresh-readout" }, `${thresholdVal} ${dataset.unit}`),
-      h("span", { id: "tr-thresh-pct", class: "lab-tag is-accent mono", style: { marginLeft: "auto" } }),
-    );
-    glass(filterBtn);
-    renderMetricsAndFilterLabel();
+  function passesGate(s) {
+    if (!gate) return true;
+    const v = s.values[gate.h];
+    return v >= gate.lo && v <= gate.hi;
   }
 
-  function renderMetricsAndFilterLabel() {
+  function renderNums() {
     const m = dataset.models[primaryModel];
     if (!m) return;
-    const peakWeeks = m.samples.map((s) => s.peakWeek).sort((a, b) => a - b);
-    const peakVals = m.samples.map((s) => s.peakValue).sort((a, b) => a - b);
-    const q = (arr, p) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(p * (arr.length - 1))))];
+    const activeSamples = m.samples.filter(passesGate);
+    const peakWeeks = activeSamples.map((s) => s.peakWeek).sort((a, b) => a - b);
+    const peakVals = activeSamples.map((s) => s.peakValue).sort((a, b) => a - b);
+    const q = (arr, p) => (arr.length ? arr[Math.min(arr.length - 1, Math.max(0, Math.floor(p * (arr.length - 1))))] : NaN);
 
     const medPeakW = q(peakWeeks, 0.5);
     const iqrLoW = q(peakWeeks, 0.25);
     const iqrHiW = q(peakWeeks, 0.75);
     const medPeakV = q(peakVals, 0.5);
     const p90PeakV = q(peakVals, 0.9);
-    const passing = m.samples.filter((s) => s.peakValue >= thresholdVal).length;
-    const passPct = Math.round((passing / m.samples.length) * 100);
+    const condPct = Math.round((activeSamples.length / m.samples.length) * 100);
 
-    const thrOut = filterBar.querySelector("#tr-thresh-readout");
-    if (thrOut) thrOut.textContent = `${thresholdVal} ${dataset.unit}`;
-    const thrPct = filterBar.querySelector("#tr-thresh-pct");
-    if (thrPct) thrPct.textContent = `${passing} / ${m.samples.length} paths (${passPct}%)`;
-
-    metricsGrid.replaceChildren(
-      h("div", { class: "tr-metric" },
-        h("div", { class: "tr-metric-k" }, "CRPS / Energy Score"),
-        h("div", { class: "tr-metric-v" }, Number.isFinite(m.scores.crps) ? `${m.scores.crps}` : "–", " ",
-          h("span", { style: { fontSize: "var(--text-small)", color: "var(--ink-tertiary)", fontWeight: 400 } },
-            Number.isFinite(m.scores.energyScore) ? `/ ${m.scores.energyScore}` : "")),
-        h("div", { class: "tr-metric-s" }, m.scores.evaluatedWeeks ? `Exact O(M log M) over ${m.scores.evaluatedWeeks} realized wks` : "Pending truth realizations"),
-      ),
-      h("div", { class: "tr-metric" },
-        h("div", { class: "tr-metric-k" }, "Peak Timing (Median / IQR)"),
-        h("div", { class: "tr-metric-v" }, `+${medPeakW} wk`),
-        h("div", { class: "tr-metric-s mono" }, `IQR +${iqrLoW} to +${iqrHiW} wks · ${m.samples[medPeakW]?.peakDate?.slice(5) || ""}`),
-      ),
-      h("div", { class: "tr-metric" },
-        h("div", { class: "tr-metric-k" }, "Peak Intensity (Med / 90th)"),
-        h("div", { class: "tr-metric-v" }, `${medPeakV}`),
-        h("div", { class: "tr-metric-s mono" }, `90th percentile ${p90PeakV} ${dataset.unit}`),
-      ),
-      h("div", { class: "tr-metric" },
-        h("div", { class: "tr-metric-k" }, `Exceedance P(Peak ≥ ${thresholdVal})`),
-        h("div", { class: "tr-metric-v", style: { color: "var(--accent)" } }, `${passPct}%`),
-        h("div", { class: "tr-metric-s mono" }, `${passing} of ${m.samples.length} ensemble paths`),
+    nums.replaceChildren(
+      h("div", { class: "ms-num-row" },
+        h("div", { class: "ms-num" },
+          h("span", { class: "ms-num-k" }, "CRPS · Energy"),
+          h("span", { class: "ms-num-v mono" }, `${m.scores.crps} · ${m.scores.energyScore}`),
+          h("span", { class: "ms-num-s" }, `${m.scores.evaluatedWeeks} realized wks`),
+        ),
+        h("div", { class: "ms-num" },
+          h("span", { class: "ms-num-k" }, "Peak timing"),
+          h("span", { class: "ms-num-v mono" }, Number.isFinite(medPeakW) ? `+${medPeakW} wk` : "–"),
+          h("span", { class: "ms-num-s mono" }, Number.isFinite(iqrLoW) ? `IQR +${iqrLoW}..+${iqrHiW}w` : "0 paths"),
+        ),
+        h("div", { class: "ms-num" },
+          h("span", { class: "ms-num-k" }, "Peak height"),
+          h("span", { class: "ms-num-v mono" }, Number.isFinite(medPeakV) ? `${medPeakV}` : "–"),
+          h("span", { class: "ms-num-s mono" }, Number.isFinite(p90PeakV) ? `90th ${p90PeakV} ${dataset.unit}` : "–"),
+        ),
+        gate ? h("div", { class: "ms-num" },
+          h("span", { class: "ms-num-k" }, `Gate at +${gate.h} wk`),
+          h("span", { class: "ms-num-v mono", style: { color: "var(--accent)" } }, `${condPct}%`),
+          h("span", { class: "ms-num-s mono" }, `${activeSamples.length} / ${m.samples.length} in [${Math.round(gate.lo)}, ${Math.round(gate.hi)}]`),
+        ) : null,
       ),
     );
   }
 
   function renderAll() {
-    updateHeaderLine();
-    renderControls();
+    syncLine();
+    renderNums();
     scheduleDraw();
   }
 
-  // ---------------- Pointer Hit-Testing ----------------
+  /* ---------------- Pointer & Canvas Conditioning Gate ---------------- */
+  function nearestFutureH(sx) {
+    if (!hitGeom) return 0;
+    const { xAt, histLen, futLen } = hitGeom;
+    let bestH = 0, bestDx = Infinity;
+    for (let h = 0; h < futLen; h++) {
+      const dx = Math.abs(sx - xAt(histLen + h));
+      if (dx < bestDx) { bestDx = dx; bestH = h; }
+    }
+    return bestH;
+  }
+
+  offs.push(on(canvas, "pointerdown", (e) => {
+    if (!hitGeom) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const { padL, padR, W, plotTop, plotBot, xAt, histLen } = hitGeom;
+    if (sx < xAt(histLen) - 10 || sx > W - padR || sy < plotTop || sy > plotBot) return;
+    canvas.setPointerCapture?.(e.pointerId);
+    const hIdx = nearestFutureH(sx);
+    dragBrush = { h: hIdx, y0: sy, y1: sy, moved: false };
+    void padL;
+  }));
+
   offs.push(on(canvas, "pointermove", (e) => {
     if (!hitGeom) return;
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    const { xAt, yAt, histLen, futLen, padL, padR, W, plotTop, plotBot } = hitGeom;
+    const { xAt, yAt, vAt, histLen, futLen, padL, padR, W, plotTop, plotBot } = hitGeom;
+
+    if (dragBrush) {
+      dragBrush.y1 = Math.max(plotTop, Math.min(plotBot, sy));
+      if (Math.abs(dragBrush.y1 - dragBrush.y0) > 8) dragBrush.moved = true;
+      if (dragBrush.moved) {
+        const va = vAt(dragBrush.y0);
+        const vb = vAt(dragBrush.y1);
+        gate = { h: dragBrush.h, lo: Math.min(va, vb), hi: Math.max(va, vb) };
+        renderNums();
+        scheduleDraw();
+      }
+      return;
+    }
+
     if (sx < padL || sx > W - padR || sy < plotTop - 60 || sy > plotBot + 20) {
       hoverSampleId = null;
       pointerPos = null;
-      readout.hidden = true;
+      if (!pinnedSampleId) readout.hidden = true;
       scheduleDraw();
       return;
     }
 
-    // Map sx to nearest integer future horizon week [0..futLen-1]
-    let bestH = 0;
-    let bestDx = Infinity;
+    let bestH = 0, bestDx = Infinity;
     for (let h = 0; h < futLen; h++) {
       const dx = Math.abs(sx - xAt(histLen + h));
       if (dx < bestDx) { bestDx = dx; bestH = h; }
     }
 
-    // Find closest trajectory of primaryModel near bestH
     const m = dataset.models[primaryModel];
-    let bestSample = null;
-    let bestDy = Infinity;
+    let bestSample = null, bestDy = Infinity;
     for (const s of m.samples) {
-      if (filterOn && s.peakValue < thresholdVal) continue;
-      const py = yAt(s.values[bestH]);
-      const dy = Math.abs(sy - py);
+      if (!passesGate(s)) continue;
+      const dy = Math.abs(sy - yAt(s.values[bestH]));
       if (dy < bestDy) { bestDy = dy; bestSample = s; }
     }
     hoverSampleId = bestDy < 42 && bestSample ? bestSample.id : null;
@@ -233,25 +211,46 @@ export function mount(root, ctx) {
       readout.replaceChildren(
         h("div", { class: "c-readout-head" },
           h("span", { style: { fontWeight: "600", color: "var(--ink-primary)" } }, `Trajectory ${activeSample.id}`),
-          h("span", { class: "quiet" }, `h = +${bestH} wk`),
+          h("span", { class: "quiet" }, `+${bestH} wk`),
         ),
         h("table", null,
           h("tbody", null,
-            h("tr", null, h("td", { class: "c-readout-name" }, primaryModel), h("td", { class: "num" }, `${valAtH.toFixed(1)}`)),
-            h("tr", null, h("td", { class: "c-readout-name" }, "Path peak"), h("td", { class: "num" }, `${activeSample.peakValue} @ +${activeSample.peakWeek}w`)),
-            Number.isFinite(obsVal) ? h("tr", null, h("td", { class: "c-readout-name" }, "Realized"), h("td", { class: "num" }, `${obsVal}`)) : null,
+            ...[
+              h("tr", null, h("td", { class: "c-readout-name" }, primaryModel), h("td", { class: "num" }, `${valAtH.toFixed(1)}`)),
+              h("tr", null, h("td", { class: "c-readout-name" }, "Peak"), h("td", { class: "num" }, `${activeSample.peakValue} @ +${activeSample.peakWeek}w`)),
+              Number.isFinite(obsVal) ? h("tr", null, h("td", { class: "c-readout-name" }, "Realized"), h("td", { class: "num" }, `${obsVal}`)) : null,
+            ].filter(Boolean),
           ),
-        ),
-        h("div", { class: "c-readout-foot" },
-          h("span", null, pinnedSampleId ? "Pinned · click to unpin" : "Click to pin path"),
         ),
       );
       readout.hidden = false;
-      readout.style.transform = `translate(${Math.min(Math.max(12, sx + 14), rect.width - 250)}px, ${Math.max(12, sy - 64)}px)`;
+      readout.style.transform = `translate(${Math.min(Math.max(10, sx + 14), rect.width - 230)}px, ${Math.max(12, sy - 58)}px)`;
     } else {
       readout.hidden = true;
     }
     scheduleDraw();
+  }));
+
+  offs.push(on(canvas, "pointerup", () => {
+    if (dragBrush) {
+      const wasMoved = dragBrush.moved;
+      dragBrush = null;
+      if (wasMoved) {
+        renderAll();
+        return;
+      }
+    }
+    if (hoverSampleId) {
+      pinnedSampleId = pinnedSampleId === hoverSampleId ? null : hoverSampleId;
+      renderAll();
+    } else if (gate) {
+      gate = null;
+      renderAll();
+    } else if (pinnedSampleId) {
+      pinnedSampleId = null;
+      readout.hidden = true;
+      renderAll();
+    }
   }));
 
   offs.push(on(canvas, "pointerleave", () => {
@@ -261,23 +260,19 @@ export function mount(root, ctx) {
     scheduleDraw();
   }));
 
-  offs.push(on(canvas, "click", () => {
-    if (hoverSampleId) {
-      pinnedSampleId = pinnedSampleId === hoverSampleId ? null : hoverSampleId;
-      renderControls();
-      scheduleDraw();
-    } else if (pinnedSampleId) {
+  offs.push(on(document, "keydown", (e) => {
+    if (e.key === "Escape" && (gate || pinnedSampleId)) {
+      gate = null;
       pinnedSampleId = null;
       readout.hidden = true;
-      renderControls();
-      scheduleDraw();
+      renderAll();
     }
   }));
 
-  // ---------------- Canvas Renderer ----------------
+  /* ---------------- Canvas 2D ---------------- */
   const scheduleDraw = perFrame(draw);
   function draw() {
-    const W = stage.clientWidth;
+    const W = fig.clientWidth;
     const H = 470;
     if (W < 60) return;
     const g = fitCanvas(canvas, W, H);
@@ -292,11 +287,9 @@ export function mount(root, ctx) {
     const fontMono = getComputedStyle(document.documentElement).getPropertyValue("--font-mono");
     const fontSans = getComputedStyle(document.documentElement).getPropertyValue("--font-sans");
 
-    const pIdx = dataset.modelOrder.indexOf(primaryModel);
-    const rgb1 = parseRgb(cssColor(`var(--series-${(Math.max(0, pIdx) % 8) + 1})`));
+    const rgb1 = parseRgb(cssColor(`var(--series-${dataset.modelOrder.indexOf(primaryModel) + 1})`));
     const otherModel = showCompare ? dataset.modelOrder.find((id) => id !== primaryModel) : null;
-    const oIdx = otherModel ? dataset.modelOrder.indexOf(otherModel) : -1;
-    const rgb2 = parseRgb(cssColor(`var(--series-${(Math.max(1, oIdx) % 8) + 1})`));
+    const rgb2 = parseRgb(cssColor(`var(--series-${(otherModel ? dataset.modelOrder.indexOf(otherModel) : 1) + 1})`));
 
     const m = dataset.models[primaryModel];
     const m2 = otherModel ? dataset.models[otherModel] : null;
@@ -306,11 +299,10 @@ export function mount(root, ctx) {
     const futLen = m.quantiles.length;
     const totalX = histLen + futLen;
 
-    const padL = 52;
-    const padR = 24;
-    const cloudH = showPeakCloud ? 86 : 16;
-    const plotTop = cloudH + 14;
-    const plotBot = H - 34;
+    const padL = 46, padR = 16;
+    const cloudH = showPeakCloud ? 82 : 12;
+    const plotTop = cloudH + 16;
+    const plotBot = H - 30;
 
     let yMax = 20;
     for (const p of dataset.observedHistory) yMax = Math.max(yMax, p.value);
@@ -320,20 +312,18 @@ export function mount(root, ctx) {
 
     const xAt = (idx) => padL + (idx / Math.max(1, totalX - 1)) * (W - padL - padR);
     const yAt = (val) => plotBot - (val / yMax) * (plotBot - plotTop);
-    hitGeom = { xAt, yAt, histLen, futLen, padL, padR, W, plotTop, plotBot };
+    const vAt = (sy) => Math.max(0, ((plotBot - sy) / (plotBot - plotTop)) * yMax);
+    hitGeom = { xAt, yAt, vAt, histLen, futLen, padL, padR, W, plotTop, plotBot };
 
-    // Shaded forecast half-plane (from anchor cutoff right)
     const xCutoff = xAt(Math.max(0, histLen - 0.5));
     g.fillStyle = shadeForecast;
     g.fillRect(xCutoff, showPeakCloud ? 16 : plotTop, W - padR - xCutoff, plotBot - (showPeakCloud ? 16 : plotTop));
 
-    // Horizontal grid lines & Y axis labels
     g.font = `400 10.5px ${fontMono}`;
     g.textAlign = "right";
     g.textBaseline = "middle";
-    const steps = 4;
-    for (let k = 0; k <= steps; k++) {
-      const val = (yMax * k) / steps;
+    for (let k = 0; k <= 4; k++) {
+      const val = (yMax * k) / 4;
       const y = yAt(val);
       g.beginPath();
       g.moveTo(padL, y);
@@ -345,15 +335,14 @@ export function mount(root, ctx) {
       g.fillText(String(Math.round(val)), padL - 8, y);
     }
 
-    // X axis labels & cutoff rule
     g.textAlign = "center";
     g.textBaseline = "top";
     for (let idx = 0; idx < totalX; idx += 4) {
-      const x = xAt(idx);
       const label = idx < histLen ? `${idx - histLen}w` : `+${idx - histLen}w`;
       g.fillStyle = idx < histLen ? inkTertiary : inkSecondary;
-      g.fillText(label, x, plotBot + 10);
+      g.fillText(label, xAt(idx), plotBot + 10);
     }
+
     g.beginPath();
     g.setLineDash([4, 4]);
     g.moveTo(xCutoff, 16);
@@ -362,51 +351,46 @@ export function mount(root, ctx) {
     g.stroke();
     g.setLineDash([]);
 
-    // Aligned Peak Cloud Strip above chart
     if (showPeakCloud) {
       g.fillStyle = inkTertiary;
       g.font = `500 10.5px ${fontSans}`;
       g.textAlign = "left";
       g.textBaseline = "top";
-      g.fillText("PEAK TIMING × PEAK SIZE CLOUD", padL, 10);
+      g.fillText("PEAK CLOUD", padL, 8);
       g.beginPath();
       g.moveTo(padL, cloudH);
       g.lineTo(W - padR, cloudH);
       g.strokeStyle = hairline;
       g.stroke();
 
-      const yPeak = (v) => cloudH - 6 - (v / yMax) * (cloudH - 30);
+      const yPeak = (v) => cloudH - 6 - (v / yMax) * (cloudH - 28);
       if (m2) {
-        g.fillStyle = `rgba(${rgb2.join(",")}, 0.42)`;
+        g.fillStyle = `rgba(${rgb2.join(",")}, 0.35)`;
         for (const p of m2.peakCloud) {
           g.beginPath();
-          g.arc(xAt(histLen + p.week), yPeak(p.value), 2.2, 0, Math.PI * 2);
+          g.arc(xAt(histLen + p.week), yPeak(p.value), 2.1, 0, Math.PI * 2);
           g.fill();
         }
       }
-      for (const p of m.peakCloud) {
-        const pass = !filterOn || p.value >= thresholdVal;
-        const active = p.id === hoverSampleId || p.id === pinnedSampleId;
+      for (const s of m.samples) {
+        const pass = passesGate(s);
+        const active = s.id === hoverSampleId || s.id === pinnedSampleId;
         g.beginPath();
-        g.arc(xAt(histLen + p.week), yPeak(p.value), active ? 4.2 : 2.5, 0, Math.PI * 2);
-        g.fillStyle = active ? accent : `rgba(${rgb1.join(",")}, ${pass ? 0.72 : 0.14})`;
+        g.arc(xAt(histLen + s.peakWeek), yPeak(s.peakValue), active ? 4 : 2.3, 0, Math.PI * 2);
+        g.fillStyle = active ? accent : `rgba(${rgb1.join(",")}, ${pass ? 0.72 : 0.12})`;
         g.fill();
       }
     }
 
-    const drawQuantileRibbon = (modelData, rgb) => {
+    const drawRibbon = (modelData, rgb) => {
       const qs = modelData.quantiles;
-      if (!qs.length) return;
       for (const [loKey, hiKey, alpha] of [["q05", "q95", 0.08], ["q25", "q75", 0.14]]) {
         g.beginPath();
         qs.forEach((pt, i) => {
-          const x = xAt(histLen + pt.h);
-          const y = yAt(pt[hiKey]);
+          const x = xAt(histLen + pt.h), y = yAt(pt[hiKey]);
           if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
         });
-        for (let i = qs.length - 1; i >= 0; i--) {
-          g.lineTo(xAt(histLen + qs[i].h), yAt(qs[i][loKey]));
-        }
+        for (let i = qs.length - 1; i >= 0; i--) g.lineTo(xAt(histLen + qs[i].h), yAt(qs[i][loKey]));
         g.closePath();
         g.fillStyle = `rgba(${rgb.join(",")}, ${alpha})`;
         g.fill();
@@ -414,30 +398,26 @@ export function mount(root, ctx) {
     };
 
     if (showRibbon) {
-      if (m2) drawQuantileRibbon(m2, rgb2);
-      drawQuantileRibbon(m, rgb1);
+      if (m2) drawRibbon(m2, rgb2);
+      drawRibbon(m, rgb1);
     }
 
-    // Secondary comparison model trajectories (soft background)
-    const anchorY = histLen ? yAt(dataset.observedHistory[histLen - 1].value) : null;
     const anchorX = histLen ? xAt(histLen - 1) : null;
+    const anchorY = histLen ? yAt(dataset.observedHistory[histLen - 1].value) : null;
 
     const strokePaths = (modelData, rgb, isPrimary) => {
       for (const s of modelData.samples) {
-        const isFocus = isPrimary && (s.id === hoverSampleId || s.id === pinnedSampleId);
-        if (isFocus) continue; // draw last on top!
-        const pass = !isPrimary || !filterOn || s.peakValue >= thresholdVal;
+        if (isPrimary && (s.id === hoverSampleId || s.id === pinnedSampleId)) continue;
+        const pass = !isPrimary || passesGate(s);
         g.beginPath();
-        if (anchorX != null) { g.moveTo(anchorX, anchorY); }
+        if (anchorX != null) g.moveTo(anchorX, anchorY);
         s.values.forEach((v, i) => {
-          const x = xAt(histLen + i);
-          const y = yAt(v);
-          if (anchorX == null && i === 0) g.moveTo(x, y);
-          else g.lineTo(x, y);
+          const x = xAt(histLen + i), y = yAt(v);
+          if (anchorX == null && i === 0) g.moveTo(x, y); else g.lineTo(x, y);
         });
-        const alpha = !isPrimary ? 0.12 : filterOn ? (pass ? 0.42 : 0.055) : 0.24;
+        const alpha = !isPrimary ? 0.12 : gate ? (pass ? 0.44 : 0.05) : 0.24;
         g.strokeStyle = `rgba(${rgb.join(",")}, ${alpha})`;
-        g.lineWidth = filterOn && pass && isPrimary ? 1.2 : 0.95;
+        g.lineWidth = gate && pass && isPrimary ? 1.2 : 0.95;
         g.stroke();
       }
     };
@@ -445,36 +425,38 @@ export function mount(root, ctx) {
     if (m2) strokePaths(m2, rgb2, false);
     strokePaths(m, rgb1, true);
 
-    // Threshold line when gate active
-    if (filterOn) {
-      const yThr = yAt(thresholdVal);
+    // Median line
+    for (const [mod, rgb] of m2 ? [[m2, rgb2], [m, rgb1]] : [[m, rgb1]]) {
       g.beginPath();
-      g.setLineDash([5, 4]);
-      g.moveTo(padL, yThr);
-      g.lineTo(W - padR, yThr);
-      g.strokeStyle = accent;
-      g.lineWidth = 1.25;
+      if (anchorX != null) g.moveTo(anchorX, anchorY);
+      mod.quantiles.forEach((pt, i) => {
+        const x = xAt(histLen + pt.h), y = yAt(pt.q50);
+        if (anchorX == null && i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+      });
+      g.strokeStyle = `rgb(${rgb.join(",")})`;
+      g.lineWidth = 2.0;
       g.stroke();
-      g.setLineDash([]);
     }
 
-    // Derived Medians
-    if (showMedian) {
-      for (const [mod, rgb] of m2 ? [[m2, rgb2], [m, rgb1]] : [[m, rgb1]]) {
-        g.beginPath();
-        if (anchorX != null) g.moveTo(anchorX, anchorY);
-        mod.quantiles.forEach((pt, i) => {
-          const x = xAt(histLen + pt.h);
-          const y = yAt(pt.q50);
-          if (anchorX == null && i === 0) g.moveTo(x, y); else g.lineTo(x, y);
-        });
-        g.strokeStyle = `rgb(${rgb.join(",")})`;
-        g.lineWidth = 2.1;
-        g.stroke();
-      }
+    // Conditioning gate bracket rendered crisply on the week column
+    if (gate) {
+      const gx = xAt(histLen + gate.h);
+      const yTop = yAt(gate.hi);
+      const yBot = yAt(gate.lo);
+      g.save();
+      g.strokeStyle = accent;
+      g.lineWidth = 2.2;
+      g.beginPath();
+      g.moveTo(gx - 5, yTop);
+      g.lineTo(gx + 5, yTop);
+      g.moveTo(gx, yTop);
+      g.lineTo(gx, yBot);
+      g.moveTo(gx - 5, yBot);
+      g.lineTo(gx + 5, yBot);
+      g.stroke();
+      g.restore();
     }
 
-    // Highlighted hovered / pinned single trajectory
     const focusId = pinnedSampleId || hoverSampleId;
     if (focusId) {
       const fs = m.samples.find((s) => s.id === focusId);
@@ -482,36 +464,32 @@ export function mount(root, ctx) {
         g.beginPath();
         if (anchorX != null) g.moveTo(anchorX, anchorY);
         fs.values.forEach((v, i) => {
-          const x = xAt(histLen + i);
-          const y = yAt(v);
+          const x = xAt(histLen + i), y = yAt(v);
           if (anchorX == null && i === 0) g.moveTo(x, y); else g.lineTo(x, y);
         });
         g.strokeStyle = inkPrimary;
-        g.lineWidth = 2.4;
+        g.lineWidth = 2.25;
         g.stroke();
 
-        // Peak marker dot
         g.beginPath();
-        g.arc(xAt(histLen + fs.peakWeek), yAt(fs.peakValue), 4.5, 0, Math.PI * 2);
+        g.arc(xAt(histLen + fs.peakWeek), yAt(fs.peakValue), 4.2, 0, Math.PI * 2);
         g.fillStyle = accent;
         g.fill();
       }
     }
 
-    // Observed history & realized truth markers
     if (histLen) {
       g.beginPath();
       dataset.observedHistory.forEach((p, i) => {
-        const x = xAt(i);
-        const y = yAt(p.value);
+        const x = xAt(i), y = yAt(p.value);
         if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
       });
       g.strokeStyle = inkPrimary;
       g.lineWidth = 2;
       g.stroke();
-      for (let i = 0; i < histLen; i++) {
+      for (const p of dataset.observedHistory) {
         g.beginPath();
-        g.arc(xAt(i), yAt(dataset.observedHistory[i].value), 2.5, 0, Math.PI * 2);
+        g.arc(xAt(dataset.observedHistory.indexOf(p)), yAt(p.value), 2.4, 0, Math.PI * 2);
         g.fillStyle = inkPrimary;
         g.fill();
       }
@@ -522,7 +500,7 @@ export function mount(root, ctx) {
         const v = dataset.realizedFuture[h];
         if (!Number.isFinite(v)) continue;
         g.beginPath();
-        g.arc(xAt(histLen + h), yAt(v), 3.3, 0, Math.PI * 2);
+        g.arc(xAt(histLen + h), yAt(v), 3.1, 0, Math.PI * 2);
         g.fillStyle = cssColor("var(--surface-paper)");
         g.fill();
         g.strokeStyle = inkPrimary;
@@ -531,8 +509,7 @@ export function mount(root, ctx) {
       }
     }
 
-    // Subtle hover vertical crosshair
-    if (pointerPos) {
+    if (pointerPos && !dragBrush) {
       const hx = xAt(histLen + pointerPos.h);
       g.beginPath();
       g.moveTo(hx, plotTop);
@@ -544,30 +521,10 @@ export function mount(root, ctx) {
   }
 
   const ro = new ResizeObserver(() => scheduleDraw());
-  ro.observe(stage);
+  ro.observe(fig);
+  offs.push(ctx.onThemeChange(() => { resetColors(); renderAll(); }));
 
-  async function refreshMode() {
-    dataset = showcaseData;
-    liveNote = null;
-    if (ctx.state.dataMode === "live") {
-      const info = await probeLiveBackend();
-      const res = await fetchLiveTrajectories(info, ctx.state.primaryLocation || "US");
-      if (res.live) {
-        dataset = res.dataset;
-        liveNote = `Live VZT1: ${info.hubName}`;
-      } else {
-        liveNote = res.reason;
-      }
-    }
-    primaryModel = dataset.modelOrder[0];
-    pinnedSampleId = null;
-    hoverSampleId = null;
-    renderAll();
-  }
-
-  offs.push(ctx.onThemeChange(() => { resetColors(); scheduleDraw(); }));
-  offs.push(ctx.onModeChange(refreshMode));
-  refreshMode();
+  renderAll();
 
   return {
     resize: scheduleDraw,
