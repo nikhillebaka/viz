@@ -12,7 +12,8 @@ import { openMenu, openPopover, tooltip } from "../../ui/floating.js";
 import { icon, toast, slideText } from "../../ui/controls.js";
 import { seriesColor } from "../../chart/layout.js";
 import { isCharted, slotOf, chart as chartModel, unchart, setBaseline } from "../../features/selection.js";
-import { scopeOf, setScope, HORIZONS } from "../scope.js";
+import { classifyHubGeo } from "../../geo/picker_geo.js";
+import { scopeOf, setScope, targetHorizons } from "../scope.js";
 import { guideLink } from "../shared.js";
 import {
   metricsRequest, rowsFrom, sortRows, SORTS, DEFAULT_SORT, relLevel, coverageLevel, SMALL, DASH,
@@ -62,6 +63,12 @@ export function mount(el, ctx) {
   const { manifest, store } = ctx;
   const allSeasons = manifest.seasons.map((x) => x.id);
   const seasonLabel = (id) => manifest.seasonById.get(id)?.label || id;
+  const geoCls = classifyHubGeo(manifest);
+  const allPlaceLabel = geoCls.kind === "eu-countries"
+    ? "All countries"
+    : geoCls.kind === "us-states"
+      ? "All states"
+      : "All locations";
   const offs = [];
 
   /* ---------------- DOM ---------------- */
@@ -218,7 +225,11 @@ export function mount(el, ctx) {
     fMetric.textContent = metric;
     fMetric.className = ["sc-frag", def(sc.scale === "log" || sc.fair || sc.rank === "selected"), shown?.common_task_status === "empty_disjoint" && "is-warn"].filter(Boolean).join(" ");
     const loc = manifest.locationById.get(st.location);
-    fPlace.textContent = sc.place === "US" ? "US" : sc.place === "current" ? (loc?.name || st.location) : "All states";
+    fPlace.textContent = (sc.place === "US" && geoCls.aggregateId === "US")
+      ? "US"
+      : sc.place === "current"
+        ? (loc?.name || st.location)
+        : allPlaceLabel;
     fPlace.className = ["sc-frag", def(sc.place !== "all")].filter(Boolean).join(" ");
     fDates.textContent = datesLabel(sc, seasonLabel, allSeasons.length);
     const noneScored = shown && rows.length && rows.every((r) => !r.active);
@@ -435,25 +446,30 @@ export function mount(el, ctx) {
     const st = store.get(), sc = scope();
     const loc = manifest.locationById.get(st.location);
     const items = [
-      { label: "All states", checked: sc.place === "all", onSelect: () => setScope(store, { place: "all" }) },
-      { label: "US", checked: sc.place === "US", onSelect: () => setScope(store, { place: "US" }) },
+      { label: allPlaceLabel, checked: sc.place === "all", onSelect: () => setScope(store, { place: "all" }) },
     ];
-    if (st.location !== "US") items.push({ label: loc?.name || st.location, shortcut: "chart", checked: sc.place === "current", onSelect: () => setScope(store, { place: "current" }) });
+    if (geoCls.aggregateId === "US") {
+      items.push({ label: "US", checked: sc.place === "US", onSelect: () => setScope(store, { place: "US" }) });
+    }
+    if (st.location && st.location !== geoCls.aggregateId) {
+      items.push({ label: loc?.name || st.location, shortcut: "chart", checked: sc.place === "current", onSelect: () => setScope(store, { place: "current" }) });
+    }
     openMenu(a, { label: "Locations", items });
   }
   function horizonsPopover(a) {
+    const avail = targetHorizons(manifest, store.get().target);
     openPopover(a, {
       title: "Horizons", width: 280,
       content(body, layer) {
         const wrap = h("div", { class: "sc-chips" });
         const draw = () => {
-          const on = scope().horizons || HORIZONS;
-          wrap.replaceChildren(...HORIZONS.map((k) => h("button", {
+          const on = scope().horizons || avail;
+          wrap.replaceChildren(...avail.map((k) => h("button", {
             type: "button", class: "c-chip", "aria-pressed": String(on.includes(k)),
             onclick: () => {
-              const next = on.includes(k) ? on.filter((x) => x !== k) : [...on, k].sort();
+              const next = on.includes(k) ? on.filter((x) => x !== k) : [...on, k].sort((x, y) => x - y);
               if (!next.length) return; // one always stays on
-              setScope(store, { horizons: next.length === HORIZONS.length ? null : next });
+              setScope(store, { horizons: next.length === avail.length ? null : next });
               draw();
             },
           }, `${k} wk`)));

@@ -16,6 +16,19 @@
 }
 .mp-tile:hover { box-shadow: 0 0 0 var(--stroke-hairline) var(--ink-secondary); }
 .mp-tile.is-here { box-shadow: 0 0 0 var(--stroke-focus) var(--ink-primary); }
+.mp-tile.is-compact { padding: var(--space-4); }
+.mp-tile.is-compact .mp-val { font-size: 9.5px; }
+.mp-tile.is-muted { opacity: 0.25; cursor: default; }
+.mp-tile.is-muted:hover { box-shadow: none; }
+.mp-hsa-box { width: 580px; max-width: calc(100vw - 48px); }
+.mp-hsa-svg { width: 100%; height: 340px; display: block; overflow: visible; }
+.mp-hsa-bg { fill: var(--fill-field); stroke: var(--line-hairline); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.mp-hsa-poly {
+  fill: var(--fill-field); stroke: var(--surface-paper); stroke-width: 1.2; vector-effect: non-scaling-stroke;
+  cursor: pointer; transition: fill var(--dur) var(--ease-out), stroke var(--dur-fast) var(--ease-out);
+}
+.mp-hsa-poly:hover, .mp-hsa-poly:focus-visible { stroke: var(--ink-primary); stroke-width: 2; outline: none; }
+.mp-hsa-poly.is-on { stroke: var(--ink-primary); stroke-width: 2.25; }
 .mp-abbr { font-size: var(--text-micro); font-weight: var(--weight-medium); line-height: 1; }
 .mp-val { font-family: var(--font-mono); font-size: var(--text-axis); font-variant-numeric: tabular-nums; line-height: 1; opacity: 0.9; }
 

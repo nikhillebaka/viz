@@ -86,6 +86,35 @@
 .lp-map > .lp-chips { padding: var(--space-12) 0 0; }
 .lp-us { width: 100%; margin-bottom: var(--space-8); }
 .lp-tiles { grid-template-columns: repeat(11, 1fr); }
+.lp-results { max-height: 280px; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
+.lp-eu-tiles {
+  --eu-tile: 27px;
+  display: grid; gap: 3px; justify-content: center;
+  grid-template-columns: repeat(12, var(--eu-tile));
+  grid-template-rows: repeat(11, var(--eu-tile));
+}
+.lp-eu-tiles .c-tile { height: auto; min-width: 0; padding: 0 2px; font-size: 10px; border-radius: var(--radius-tile); }
+.lp-ctx-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-8);
+  padding: 0 0 var(--space-8); font-size: var(--text-small); color: var(--ink-secondary);
+}
+.lp-ctx-title { font-weight: var(--weight-medium); color: var(--ink-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-tile.is-muted { opacity: 0.28; cursor: default; }
+.c-tile.is-mc-avail { color: var(--ink-primary); box-shadow: inset 0 0 0 var(--stroke-hairline) var(--line-axis); }
+.lp-hsa-wrap { padding: var(--space-4) 0 var(--space-8); }
+.lp-hsa-svg { width: 100%; height: 196px; display: block; overflow: visible; }
+.lp-hsa-state-bg { fill: var(--fill-field); stroke: var(--line-hairline); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.lp-hsa-poly {
+  fill: var(--fill-selected); stroke: var(--ink-tertiary); stroke-width: 1; vector-effect: non-scaling-stroke;
+  cursor: pointer; transition: fill var(--dur-fast) var(--ease-out), stroke var(--dur-fast) var(--ease-out);
+}
+.lp-hsa-poly:hover, .lp-hsa-poly:focus-visible { fill: var(--fill-hover); stroke: var(--ink-primary); stroke-width: 1.5; outline: none; }
+.lp-hsa-poly.is-on { fill: var(--accent); fill-opacity: 0.85; stroke: var(--ink-primary); stroke-width: 1.5; }
+.lp-hsa-cap {
+  margin: var(--space-4) 0 var(--space-8); min-height: 1.3em;
+  font-size: var(--text-small); color: var(--ink-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lp-globe-foot { padding: var(--space-6) var(--space-8) var(--space-4); border-top: var(--stroke-hairline) solid var(--fill-selected); }
 /* searching: everything else dims, matches get a ring, the best (what Enter picks) a stronger one */
 .lp-panel.filtering .lp-map [data-loc]:not(.match) { opacity: var(--opacity-disabled); }
 .lp-panel.filtering .lp-map .match:not(.on) { color: var(--ink-primary); box-shadow: inset 0 0 0 var(--stroke-hairline) var(--accent); }

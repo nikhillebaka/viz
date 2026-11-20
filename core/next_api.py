@@ -273,12 +273,20 @@ class NextData:
         locations = []
         for lid, l in loader.get_locations().items():
             node = geo.nodes.get(lid)
+            canonical_id = node.canonical_id if node else l.get("canonical_id", lid)
+            c_parts = str(canonical_id or "").split(":")
+            state_fips = (
+                c_parts[1]
+                if len(c_parts) >= 2 and c_parts[0] == "US" and len(c_parts[1]) == 2 and c_parts[1].isdigit()
+                else None
+            )
             locations.append({
                 "id": lid,
                 "abbr": l.get("abbreviation") or lid,
                 "name": "United States" if lid == "US" else (l.get("name") or lid),
                 "population": l.get("population"),
-                "canonical_id": node.canonical_id if node else l.get("canonical_id", lid),
+                "canonical_id": canonical_id,
+                "state_fips": state_fips,
                 "level": node.level if node else l.get("level", "unknown"),
                 "parent_id": node.parent_id if node else l.get("parent_id"),
                 "region": node.region if node else l.get("region"),
@@ -311,7 +319,13 @@ class NextData:
                 logger.debug("hub list: %s", exc)
 
         repo_ids = [m for m, v in models.items() if v.get("source") != "hub"]
-        meta_by_id = {m["id"]: {"baseline_model": m["kind"] == "baseline"} for m in model_list}
+        meta_by_id = {
+            m["id"]: {
+                "baseline_model": m["kind"] == "baseline",
+                "ensemble": m["kind"] == "ensemble",
+            }
+            for m in model_list
+        }
         seasons_map = {s["id"]: s["rounds"] for s in seasons}
         baselines_info = build_manifest_baselines(
             models,
@@ -340,7 +354,7 @@ class NextData:
             "default_target": config.get_default_target(),
             "baseline": default_baseline,
             "baselines": baselines_info,
-            "recommended": config.get_recommended_models(repo_ids),
+            "recommended": config.get_recommended_models(repo_ids or list(models.keys()), model_meta=meta_by_id),
             "locations": locations,
             "seasons": seasons,
             "models": model_list,
@@ -689,8 +703,6 @@ class NextData:
 
         collected = pl.collect_all(frames) if frames else []
         present = [(mid, df) for mid, df in zip(ids, collected) if not df.is_empty()]
-        if not present:
-            return None
 
         global_h = sorted({int(h) for _, df in present for h in df.get_column("horizon").unique().to_list() if h is not None})
         body: List[np.ndarray] = []

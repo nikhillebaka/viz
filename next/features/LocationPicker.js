@@ -1,24 +1,17 @@
-/* The location picker: search, recent places, the United States, and a US tile map.
- * Any of 53 places is two keystrokes ("ma" Enter) or one click away. Arrow keys move across the map by its geometry (this layer keeps its
- * arrows: no time keys). Hovering or focusing a place prefetches its fan.
+/* The location picker: search, recent places, and the contextual geography map of the loaded hub
+ * (U.S. tile grid, proportioned Europe squircles, MetroCast 15-state grid + interactive state HSA SVG,
+ * or grouped list), plus a quiet link to open the interactive Globe.
  *
- * TILES, matchLocations() and tileNeighbor() are pure, for node tests. */
+ * TILES, COLUMNS, matchLocations(), tileNeighbor() and nextRecent() are pure, for node tests. */
 import { h, on, storage } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { icon } from "../ui/controls.js";
 import { prefetchFan } from "../lib/api.js";
+import { EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT, US_STATE_META } from "../geo/eu_tiles.js";
+import { TILES, COLUMNS, classifyHubGeo, loadUsGeoCache, renderHsaStateSvg } from "../geo/picker_geo.js";
 
-/** The standard US tile grid: abbreviation → [column, row], 11 × 8, DC and PR included. */
-export const TILES = Object.freeze({
-  AK: [0, 0], ME: [10, 0], VT: [9, 1], NH: [10, 1],
-  WA: [0, 2], ID: [1, 2], MT: [2, 2], ND: [3, 2], MN: [4, 2], IL: [5, 2], WI: [6, 2], MI: [7, 2], NY: [8, 2], RI: [9, 2], MA: [10, 2],
-  OR: [0, 3], NV: [1, 3], WY: [2, 3], SD: [3, 3], IA: [4, 3], IN: [5, 3], OH: [6, 3], PA: [7, 3], NJ: [8, 3], CT: [9, 3],
-  CA: [0, 4], UT: [1, 4], CO: [2, 4], NE: [3, 4], MO: [4, 4], KY: [5, 4], WV: [6, 4], VA: [7, 4], MD: [8, 4], DE: [9, 4],
-  AZ: [1, 5], NM: [2, 5], KS: [3, 5], AR: [4, 5], TN: [5, 5], NC: [6, 5], SC: [7, 5], DC: [8, 5],
-  OK: [3, 6], LA: [4, 6], MS: [5, 6], AL: [6, 6], GA: [7, 6],
-  HI: [0, 7], TX: [3, 7], FL: [8, 7], PR: [10, 7],
-});
-export const COLUMNS = 11;
+export { TILES, COLUMNS };
+
 const RECENT = 4;
 const PLACES_KEY = "viz.places";
 
@@ -47,9 +40,8 @@ export function matchLocations(locations, query) {
 
 /**
  * The nearest tile from `from` in a direction: among tiles that way and within 45° of it, the one with
- * the least distance along the direction plus twice the distance across it (so moving stays in its row
- * or column when it can, and never jumps sideways across the map).
- * @param {Record<string, [number, number]>} tiles key → [column, row]
+ * the least distance along the direction plus twice the distance across it.
+ * @param {Record<string, [number, number]>} tiles key -> [column, row]
  * @param {[number, number]} from [column, row]
  * @param {[number, number]} dir [-1|0|1, -1|0|1], one of them zero
  * @returns {string | null} the key, or null when there is nothing that way
@@ -81,125 +73,314 @@ export function nextRecent(recent, id, from) {
 
 /**
  * Open the location picker from the Location bubble (or close it, if it is open from there).
- * Writes only store.set({ location }); app.js keeps storage "viz.places" (with nextRecent's rule).
- * @param {HTMLElement} anchor
- * @param {{ manifest: object, store: object, chart?: object | null }} ctx chart is not used
- * @returns {object | null} the layer, or null when this call closed it
+ * Renders only the geography belonging to the loaded hub while search indexes all manifest locations.
  */
-export function openLocationPicker(anchor, { manifest, store }) {
+export function openLocationPicker(anchor, ctx) {
+  const { manifest, store } = ctx;
   const locs = manifest.locations || [];
   const current = store.get().location;
   const nameOf = (id) => manifest.locationById.get(id)?.name || id;
+  const geoCls = classifyHubGeo(manifest);
   const offs = [];
 
   return openPopover(anchor, {
     morph: true, width: 420, className: "lp-panel",
     onClose: () => offs.forEach((off) => off()),
     content(body, layer) {
-      const input = h("input", { type: "search", placeholder: `Search ${locs.length} locations`, "aria-label": "Search locations", autocomplete: "off", spellcheck: "false" });
+      const input = h("input", {
+        type: "search",
+        placeholder: `Search ${locs.length} locations`,
+        "aria-label": "Search locations",
+        autocomplete: "off",
+        spellcheck: "false",
+      });
       const storedPlaces = (manifest.hub_id ? storage.get(`viz.h.${manifest.hub_id}.places`) : null) ?? storage.get(PLACES_KEY, []);
       const recent = (Array.isArray(storedPlaces) ? storedPlaces : []).filter((id) => id !== current && manifest.locationById.has(id)).slice(0, RECENT);
+      const chips = recent.length ? h("div", { class: "lp-chips lp-recent", role: "group", "aria-label": "Recent" },
+        recent.map((id) => h("button", {
+          type: "button", class: "c-chip", "data-loc": id, title: nameOf(id), "aria-label": nameOf(id),
+        }, nameOf(id)))) : null;
+
       const place = (l, cls, label) => h("button", {
         type: "button", class: cls, "data-loc": l.id, title: l.name || l.id, "aria-label": l.name || l.id,
         "aria-current": l.id === current ? "true" : null,
       }, label);
-
-      const us = locs.find((l) => l.id === "US");
-      const onMap = locs.filter((l) => l.id !== "US" && TILES[l.abbr]);
-      const offMap = locs.filter((l) => l.id !== "US" && !TILES[l.abbr]);
-      const tiles = onMap.map((l) => {
-        const [x, y] = TILES[l.abbr];
-        const b = place(l, ["c-tile", l.id === current && "on"], l.abbr);
-        b.style.gridColumn = String(x + 1);
-        b.style.gridRow = String(y + 1);
-        return b;
-      });
-      const usTile = us ? place(us, ["c-tile lp-us", us.id === current && "on"], us.name || "United States") : null;
-      const map = h("div", { class: "lp-map", role: "group", "aria-label": "Map" },
-        usTile,
-        h("div", { class: "c-tile-grid lp-tiles" }, tiles),
-        offMap.length ? h("div", { class: "lp-chips" }, offMap.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.id))) : null);
-      const chips = recent.length ? h("div", { class: "lp-chips lp-recent", role: "group", "aria-label": "Recent" },
-        recent.map((id) => place(manifest.locationById.get(id), "c-chip", nameOf(id)))) : null;
-      body.append(...[h("label", { class: "c-search", html: icon.search }, input), chips, map].filter(Boolean));
-
-      const byAbbr = new Map(onMap.map((l, i) => [l.abbr, tiles[i]]));
-      const mapItems = () => [...map.querySelectorAll("[data-loc]")];
-      let col = 5; // the column ↓ from the United States lands in: the one last left
-
-      // roving tabindex: the map is one tab stop (the current place, or the last focused)
-      const rove = (el) => { for (const b of mapItems()) b.tabIndex = b === el ? 0 : -1; };
-      rove(map.querySelector(".on") || usTile || tiles[0]);
-      const focus = (el) => { if (!el) return; if (map.contains(el)) rove(el); el.focus({ preventScroll: true }); };
 
       const pick = (id) => {
         if (!manifest.locationById.has(id)) return;
         store.set({ location: id });
         layer.close(true);
       };
-      let best = null;
-      const filter = () => {
-        const ms = matchLocations(locs, input.value), set = new Set(ms.map((l) => l.id));
-        best = ms[0]?.id ?? null;
-        layer.panel.classList.toggle("filtering", !!input.value.trim());
-        for (const b of mapItems()) {
-          b.classList.toggle("match", set.has(b.dataset.loc));
-          b.classList.toggle("best", b.dataset.loc === best);
-        }
-      };
 
-      input.addEventListener("input", filter);
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); if (best) pick(best); }
-        else if (e.key === "ArrowDown") {
-          e.preventDefault();
-          focus((best && map.querySelector(`[data-loc="${CSS.escape(best)}"]`)) || chips?.firstElementChild || map.querySelector("[tabindex='0']"));
-        }
-      });
-      body.addEventListener("click", (e) => { const b = e.target.closest("[data-loc]"); if (b) pick(b.dataset.loc); });
+      const globeFoot = typeof ctx.openGlobe === "function"
+        ? h("div", { class: "lp-globe-foot" },
+          h("button", {
+            type: "button", class: "c-row",
+            onclick: () => { layer.close(true); ctx.openGlobe(); },
+          },
+          h("span", { class: "c-row-text" },
+            h("span", { class: "c-row-label" }, "Globe"),
+            h("span", { class: "c-row-sub" }, "Open interactive sphere"),
+          ),
+          h("span", { class: "c-row-sub" }, "→")))
+        : null;
+
       const season = manifest.seasonOf(store.get().date);
-      const prefetch = (e) => { const b = e.target.closest?.("[data-loc]"); if (b && season) prefetchFan(store.get().target, season, b.dataset.loc); };
+      const prefetch = (e) => { const b = e.target.closest?.("[data-loc]"); if (b?.dataset.loc && season) prefetchFan(store.get().target, season, b.dataset.loc); };
       body.addEventListener("pointerover", prefetch);
       body.addEventListener("focusin", prefetch);
-      map.addEventListener("focusin", (e) => { if (e.target.matches("[data-loc]")) rove(e.target); });
 
-      // arrows: across the chips in a row; across the map by geometry; between search, chips and map
-      body.addEventListener("keydown", (e) => {
-        const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
-        const el = e.target;
-        if (!d || !el.dataset?.loc) return;
-        e.preventDefault();
-        const up = () => { if (chips) focus(chips.querySelector("[data-loc]")); else input.focus(); };
-        if (chips?.contains(el)) {
-          if (d[0]) focus((d[0] > 0 ? el.nextElementSibling : el.previousElementSibling) || el);
-          else if (d[1] < 0) input.focus();
-          else focus(map.querySelector("[tabindex='0']"));
+      if (geoCls.kind === "us-states") {
+        // Classic 11x8 US tile map with full keyboard arrow navigation
+        const us = locs.find((l) => l.id === "US");
+        const onMap = locs.filter((l) => l.id !== "US" && TILES[l.abbr]);
+        const offMap = locs.filter((l) => l.id !== "US" && !TILES[l.abbr]);
+        const tiles = onMap.map((l) => {
+          const [x, y] = TILES[l.abbr];
+          const b = place(l, ["c-tile", l.id === current && "on"], l.abbr);
+          b.style.gridColumn = String(x + 1);
+          b.style.gridRow = String(y + 1);
+          return b;
+        });
+        const usTile = us ? place(us, ["c-tile lp-us", us.id === current && "on"], us.name || "United States") : null;
+        const map = h("div", { class: "lp-map", role: "group", "aria-label": "Map" },
+          ...[
+            usTile,
+            h("div", { class: "c-tile-grid lp-tiles" }, tiles),
+            offMap.length ? h("div", { class: "lp-chips" }, offMap.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.id))) : null,
+          ].filter(Boolean));
+        body.append(...[h("label", { class: "c-search", html: icon.search }, input), chips, map, globeFoot].filter(Boolean));
+
+        const byAbbr = new Map(onMap.map((l, i) => [l.abbr, tiles[i]]));
+        const mapItems = () => [...map.querySelectorAll("[data-loc]")];
+        let col = 5;
+        const rove = (el) => { for (const b of mapItems()) b.tabIndex = b === el ? 0 : -1; };
+        rove(map.querySelector(".on") || usTile || tiles[0]);
+        const focus = (el) => { if (!el) return; if (map.contains(el)) rove(el); el.focus({ preventScroll: true }); };
+
+        let best = null;
+        const filter = () => {
+          const ms = matchLocations(locs, input.value), set = new Set(ms.map((l) => l.id));
+          best = ms[0]?.id ?? null;
+          layer.panel.classList.toggle("filtering", !!input.value.trim());
+          for (const b of mapItems()) {
+            b.classList.toggle("match", set.has(b.dataset.loc));
+            b.classList.toggle("best", b.dataset.loc === best);
+          }
+        };
+        input.addEventListener("input", filter);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); if (best) pick(best); }
+          else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            focus((best && map.querySelector(`[data-loc="${CSS.escape(best)}"]`)) || chips?.firstElementChild || map.querySelector("[tabindex='0']"));
+          }
+        });
+        body.addEventListener("click", (e) => { const b = e.target.closest("[data-loc]"); if (b) pick(b.dataset.loc); });
+        map.addEventListener("focusin", (e) => { if (e.target.matches("[data-loc]")) rove(e.target); });
+
+        body.addEventListener("keydown", (e) => {
+          const d = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+          const el = e.target;
+          if (!d || !el.dataset?.loc) return;
+          e.preventDefault();
+          const up = () => { if (chips) focus(chips.querySelector("[data-loc]")); else input.focus(); };
+          if (chips?.contains(el)) {
+            if (d[0]) focus((d[0] > 0 ? el.nextElementSibling : el.previousElementSibling) || el);
+            else if (d[1] < 0) input.focus();
+            else focus(map.querySelector("[tabindex='0']"));
+            return;
+          }
+          if (el === usTile) {
+            if (d[1] < 0) up();
+            else if (d[1] > 0) focus(byAbbr.get(tileNeighbor(TILES, [col, -1], [0, 1])));
+            return;
+          }
+          const ab = manifest.locationById.get(el.dataset.loc)?.abbr, at = TILES[ab];
+          if (!at) {
+            if (d[0]) focus((d[0] > 0 ? el.nextElementSibling : el.previousElementSibling) || el);
+            else if (d[1] < 0) focus(tiles.at(-1));
+            return;
+          }
+          const next = tileNeighbor(TILES, at, d);
+          if (next && byAbbr.has(next)) { col = TILES[next][0]; focus(byAbbr.get(next)); }
+          else if (d[1] < 0) { col = at[0]; usTile ? focus(usTile) : up(); }
+          else if (d[1] > 0 && offMap.length) focus(map.querySelector(".lp-chips [data-loc]"));
+        });
+        offs.push(on(layer.panel, "keydown", (e) => {
+          if (e.key !== "Tab" || e.defaultPrevented) return;
+          const stops = [input, ...(chips ? [...chips.children] : []), map.querySelector("[tabindex='0']")].filter(Boolean);
+          const i = stops.indexOf(document.activeElement);
+          e.preventDefault();
+          stops[(i + (e.shiftKey ? -1 : 1) + stops.length) % stops.length]?.focus();
+        }));
+        queueMicrotask(() => input.focus({ preventScroll: true }));
+        return;
+      }
+
+      // Contextual non-US-states modes (Europe squircles, MetroCast 15-state + SVG HSAs, or generic list)
+      const resultsBox = h("div", { class: "lp-results", hidden: true });
+      const map = h("div", { class: "lp-map", role: "group", "aria-label": "Locations" });
+      body.append(...[h("label", { class: "c-search", html: icon.search }, input), chips, resultsBox, map, globeFoot].filter(Boolean));
+
+      let mcStateFips = geoCls.kind === "us-metrocast"
+        ? (geoCls.stateFipsOf(current) || (geoCls.coveredStateFips.size === 1 ? [...geoCls.coveredStateFips][0] : null))
+        : null;
+      let topHit = null;
+
+      function renderContextual() {
+        if (geoCls.kind === "eu-countries") {
+          const tileSpec = geoCls.ukSplitAvailable ? EU_TILES_PROPORTIONED_UK_SPLIT : EU_TILES_PROPORTIONED;
+          const onGrid = new Set();
+          const euTiles = [];
+          for (const [id, [col, row, cs = 1, rs = 1]] of Object.entries(tileSpec)) {
+            const loc = manifest.locationById.get(id);
+            if (!loc) continue;
+            onGrid.add(id);
+            const btn = place(loc, ["c-tile", loc.id === current && "on"], loc.abbr || id);
+            btn.style.gridColumn = `${col} / span ${cs}`;
+            btn.style.gridRow = `${row} / span ${rs}`;
+            euTiles.push(btn);
+          }
+          const offEu = locs.filter((l) => !onGrid.has(l.id));
+          map.replaceChildren(...[
+            h("div", { class: "lp-eu-tiles" }, ...euTiles),
+            offEu.length ? h("div", { class: "lp-chips" }, offEu.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.id))) : null,
+          ].filter(Boolean));
           return;
         }
-        if (el === usTile) {
-          if (d[1] < 0) up();
-          else if (d[1] > 0) focus(byAbbr.get(tileNeighbor(TILES, [col, -1], [0, 1])));
+
+        if (geoCls.kind === "us-metrocast") {
+          if (!mcStateFips) {
+            const mcTiles = Object.entries(TILES).map(([abbr, [x, y]]) => {
+              const stateLoc = geoCls.stateByAbbr.get(abbr);
+              const fips = Object.entries(US_STATE_META).find(([, v]) => v.abbr === abbr)?.[0];
+              const isAvail = fips && geoCls.coveredStateFips.has(fips);
+              const hsas = isAvail ? (geoCls.hsasByStateFips.get(fips) || []) : [];
+              const btn = h("button", {
+                type: "button",
+                class: ["c-tile", isAvail ? "is-mc-avail" : "is-muted", stateLoc?.id === current && "on"],
+                disabled: !isAvail,
+                title: isAvail ? `${US_STATE_META[fips]?.name || abbr} (${hsas.length} HSAs)` : `${abbr} (not covered)`,
+                style: { gridColumn: String(x + 1), gridRow: String(y + 1) },
+                onclick: () => {
+                  if (!isAvail) return;
+                  if (hsas.length) {
+                    mcStateFips = fips;
+                    renderContextual();
+                  } else if (stateLoc) {
+                    pick(stateLoc.id);
+                  }
+                },
+              }, abbr);
+              return btn;
+            });
+            map.replaceChildren(
+              h("div", { class: "lp-ctx-bar" },
+                h("span", { class: "lp-ctx-title" }, `Covered states · ${geoCls.coveredStateFips.size}`)),
+              h("div", { class: "c-tile-grid lp-tiles" }, ...mcTiles),
+            );
+            return;
+          }
+
+          const stateLoc = geoCls.stateByFips.get(mcStateFips);
+          const stateName = stateLoc?.name || US_STATE_META[mcStateFips]?.name || mcStateFips;
+          const hsas = geoCls.hsasByStateFips.get(mcStateFips) || [];
+          const curHsa = hsas.find((m) => m.id === current);
+          const caption = h("p", { class: "lp-hsa-cap" }, curHsa ? curHsa.name : `${hsas.length} MetroCast regions in ${stateName}`);
+          const svgWrap = h("div", { class: "lp-hsa-wrap" });
+
+          map.replaceChildren(
+            h("div", { class: "lp-ctx-bar" },
+              ...[
+                geoCls.coveredStateFips.size > 1 ? h("button", {
+                  type: "button", class: "c-link",
+                  onclick: () => { mcStateFips = null; renderContextual(); },
+                }, `← ${geoCls.coveredStateFips.size} states`) : null,
+                h("span", { class: "lp-ctx-title" }, stateName),
+                stateLoc ? h("button", {
+                  type: "button", class: "c-link",
+                  onclick: () => pick(stateLoc.id),
+                }, "Whole state") : null,
+              ].filter(Boolean)),
+            svgWrap,
+            caption,
+            h("div", { class: "lp-chips", style: { padding: "0" } },
+              ...hsas.map((m) => place(m, ["c-chip", m.id === current && "on"], m.abbr || m.name))),
+          );
+
+          svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Loading boundaries…"));
+          loadUsGeoCache().then((usGeo) => {
+            if (!svgWrap.isConnected) return;
+            const svg = renderHsaStateSvg(usGeo, mcStateFips, hsas, {
+              activeId: current,
+              onHover: (_id, label) => { caption.textContent = label; },
+              onPick: (id) => pick(id),
+            });
+            svgWrap.replaceChildren(svg || h("p", { class: "pk-empty" }, "Select region below"));
+          }).catch(() => {
+            if (svgWrap.isConnected) svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Select region below"));
+          });
           return;
         }
-        const ab = manifest.locationById.get(el.dataset.loc)?.abbr, at = TILES[ab];
-        if (!at) { // a chip under the map
-          if (d[0]) focus((d[0] > 0 ? el.nextElementSibling : el.previousElementSibling) || el);
-          else if (d[1] < 0) focus(tiles.at(-1));
+
+        // Generic hub fallback (grouped by region)
+        const byReg = new Map();
+        for (const l of locs) {
+          const r = l.region || "Locations";
+          if (!byReg.has(r)) byReg.set(r, []);
+          byReg.get(r).push(l);
+        }
+        const nodes = [];
+        for (const [reg, items] of byReg.entries()) {
+          if (byReg.size > 1) nodes.push(h("div", { class: "c-section" }, h("span", { class: "c-section-title" }, reg)));
+          nodes.push(h("div", { class: "lp-chips" }, items.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.id))));
+        }
+        map.replaceChildren(...nodes);
+      }
+
+      const drawSearch = () => {
+        const q = input.value.trim();
+        if (!q) {
+          topHit = null;
+          resultsBox.hidden = true;
+          map.hidden = false;
+          renderContextual();
+          layer.place?.();
           return;
         }
-        const next = tileNeighbor(TILES, at, d);
-        if (next && byAbbr.has(next)) { col = TILES[next][0]; focus(byAbbr.get(next)); }
-        else if (d[1] < 0) { col = at[0]; usTile ? focus(usTile) : up(); }
-        else if (d[1] > 0 && offMap.length) focus(map.querySelector(".lp-chips [data-loc]"));
+        const hits = matchLocations(locs, q).slice(0, 12);
+        topHit = hits[0]?.id ?? null;
+        map.hidden = true;
+        resultsBox.hidden = false;
+        if (!hits.length) {
+          resultsBox.replaceChildren(h("p", { class: "pk-empty" }, `No match for “${q}”`));
+          return;
+        }
+        resultsBox.replaceChildren(...hits.map((item, idx) =>
+          h("button", {
+            type: "button",
+            class: ["c-row two", idx === 0 && "on"],
+            "data-loc": item.id,
+          },
+          h("span", { class: "c-row-text" },
+            h("span", { class: "c-row-label" }, item.name || item.id),
+            h("span", { class: "c-row-sub" }, [item.region, item.level].filter(Boolean).join(" · ")),
+          ),
+          h("span", { class: "c-row-sub mono" }, item.abbr || item.id))));
+      };
+
+      input.addEventListener("input", drawSearch);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && topHit) { e.preventDefault(); pick(topHit); }
       });
-      // Tab: search → recent chips → the map (one stop) → search
-      offs.push(on(layer.panel, "keydown", (e) => {
-        if (e.key !== "Tab" || e.defaultPrevented) return;
-        const stops = [input, ...(chips ? [...chips.children] : []), map.querySelector("[tabindex='0']")].filter(Boolean);
-        const i = stops.indexOf(document.activeElement);
-        e.preventDefault();
-        stops[(i + (e.shiftKey ? -1 : 1) + stops.length) % stops.length]?.focus();
-      }));
+      body.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-loc]");
+        if (b?.dataset.loc) pick(b.dataset.loc);
+      });
+
+      drawSearch();
+      queueMicrotask(() => input.focus({ preventScroll: true }));
     },
   });
 }

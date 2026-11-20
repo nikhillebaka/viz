@@ -31,5 +31,5 @@ export function mountSections(root, ctx) {
     wrap.append(el);
     io.observe(el);
   }
-  return { destroy() { io.disconnect(); live.forEach((l) => l?.destroy?.()); wrap.remove(); } };
+  return { el: wrap, destroy() { io.disconnect(); live.forEach((l) => l?.destroy?.()); wrap.remove(); } };
 }

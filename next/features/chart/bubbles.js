@@ -148,6 +148,18 @@ export class ChartBubbles {
         "-",
         { label: "Width rulers", toggle: true, checked: s.rulers, onSelect: () => store.set({ rulers: !store.get().rulers }) },
         { label: "Outcome", toggle: true, checked: s.outcome, onSelect: () => store.set({ outcome: !store.get().outcome }) },
+        ...(() => {
+          const { manifest } = this.chart.ctx;
+          const targetMeta = manifest.targetById.get(s.target);
+          const anyMarkedSample = manifest.models.some((m) => m.has_samples);
+          const anyChartedSample = s.sel.charted.some((c) => manifest.modelById.get(c.id)?.has_samples)
+            || !!(s.sel.baseline && manifest.baseline && manifest.modelById.get(manifest.baseline)?.has_samples);
+          const hasSamples = anyMarkedSample ? anyChartedSample : !!targetMeta?.output_types?.includes("sample");
+          const sampleOnly = !!targetMeta?.output_types?.includes("sample") && !targetMeta?.output_types?.includes("quantile");
+          return hasSamples && !sampleOnly
+            ? [{ label: "Sample trajectories", toggle: true, checked: !!s.trajectories, onSelect: () => store.set({ trajectories: !store.get().trajectories }) }]
+            : [];
+        })(),
         "-",
         { label: "About intervals", onSelect: () => guide("intervals") },
       ],

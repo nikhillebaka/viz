@@ -17,8 +17,51 @@ import { create, fromLists, chartedBySlot } from "./selection.js";
 import { parseLayers } from "./chart/layers.js";
 
 /** The parameters this module owns, in the order they are written. */
-export const KEYS = Object.freeze(["hub", "target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus", "lay",
+export const KEYS = Object.freeze(["hub", "target", "loc", "date", "models", "chart", "all", "base", "pi", "rulers", "focus", "lay", "traj",
   "ss", "wk", "ph", "hz", "pl", "fair", "bl", "rk", "sc", "sort", "cols", "open", "hm", "mp", "pk"]);
+
+/** Normalizes `targetMeta.dimensions` (server dict or array) to `{ name, values, default }[]`. */
+export function targetDimSpecs(targetMeta) {
+  const raw = targetMeta?.dimensions;
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((d) => {
+        const values = (d?.values || []).map(String);
+        const def = d?.default != null ? String(d.default) : values[0] ?? null;
+        return { name: String(d?.name || ""), label: d?.label || d?.name || "", values, default: def };
+      })
+      .filter((d) => d.name && d.values.length);
+  }
+  if (typeof raw === "object") {
+    return Object.entries(raw)
+      .map(([name, info]) => {
+        const vals = Array.isArray(info) ? info : (info?.values || []);
+        const values = vals.map(String);
+        const def = info && !Array.isArray(info) && info.default != null ? String(info.default) : values[0] ?? null;
+        const label = (info && !Array.isArray(info) && info.label) || name.replace(/_/g, " ");
+        return { name, label, values, default: def };
+      })
+      .filter((d) => d.name && d.values.length);
+  }
+  return [];
+}
+
+/** Default dimension values map `{ [col]: value }` for `targetId` (empty object when none). */
+export function defaultDims(manifest, targetId) {
+  const specs = targetDimSpecs(manifest?.targetById?.get(targetId));
+  const out = {};
+  for (const d of specs) if (d.default != null) out[d.name] = d.default;
+  return out;
+}
+
+/** True when a target produces categorical PMFs without quantile/sample intervals. */
+export function isCategoricalTarget(targetMeta) {
+  if (!targetMeta) return false;
+  if (targetMeta.is_categorical) return true;
+  const ot = targetMeta.output_types;
+  return Array.isArray(ot) && ot.length > 0 && ot.includes("pmf") && !ot.includes("quantile") && !ot.includes("sample");
+}
 export const LEVELS = Object.freeze([0.95, 0.8, 0.5]);
 const DEFAULT_LEVELS = Object.freeze([0.95]);
 
@@ -154,6 +197,19 @@ export function parseUrl(search, manifest) {
     const ids = q.get("indicators").split(",").map((k) => OLD[k.trim()] ?? (k.trim().startsWith("season_") ? "seasons" : ""));
     if (ids.some(Boolean)) out.layers = parseLayers(ids);
   }
+  if (q.has("traj")) out.trajectories = q.get("traj") === "1";
+  const effectiveTarget = out.target ?? defaults(manifest).target;
+  const dimSpecs = targetDimSpecs(manifest.targetById.get(effectiveTarget));
+  if (dimSpecs.length) {
+    const parsedDims = {};
+    for (const spec of dimSpecs) {
+      const pk = `dim_${spec.name}`;
+      if (!q.has(pk)) continue;
+      const val = q.get(pk);
+      if (spec.values.includes(val)) parsedDims[spec.name] = val;
+    }
+    if (Object.keys(parsedDims).length) out.dims = { ...defaultDims(manifest, effectiveTarget), ...parsedDims };
+  }
   const scope = parseScope(q, manifest);
   if (scope) out.scope = scope;
   const scores = parseScores(q, manifest);
@@ -274,11 +330,25 @@ export function writeUrl(state, manifest, search = "") {
   if (state.rulers) p.push(["rulers", "1"]);
   if (state.focus) p.push(["focus", state.focus]);
   if (state.layers?.length) p.push(["lay", state.layers.join(",")]);
+  if (state.trajectories) p.push(["traj", "1"]);
+  const effectiveTarget = state.target || d.target;
+  const dimSpecs = targetDimSpecs(manifest.targetById.get(effectiveTarget));
+  if (dimSpecs.length) {
+    const defDims = defaultDims(manifest, effectiveTarget);
+    for (const spec of dimSpecs) {
+      const val = state.dims?.[spec.name];
+      if (val != null && spec.values.includes(String(val)) && String(val) !== String(defDims[spec.name] ?? "")) {
+        p.push([`dim_${spec.name}`, String(val)]);
+      }
+    }
+  }
   writeScope(p, state.scope, manifest);
   writeScores(p, state.scores);
   writeViews(p, state.views);
+  const allDimKeys = new Set();
+  for (const t of manifest.targets || []) for (const s of targetDimSpecs(t)) allDimKeys.add(`dim_${s.name}`);
   const q = search instanceof URLSearchParams ? search : new URLSearchParams(search);
-  for (const [k, v] of q) if (!KEYS.includes(k)) p.push([k, v]);
+  for (const [k, v] of q) if (!KEYS.includes(k) && !allDimKeys.has(k)) p.push([k, v]);
   const enc = (s) => encodeURIComponent(s).replace(/%2C/gi, ",");
   return p.length ? `?${p.map(([k, v]) => `${enc(k)}=${enc(v)}`).join("&")}` : "";
 }
@@ -292,7 +362,7 @@ export function readUrl(manifest) {
   return parseUrl(location.search, manifest);
 }
 
-const WATCHED = ["hub", "target", "location", "date", "sel", "levels", "rulers", "focus", "layers", "scope", "scores", "views"];
+const WATCHED = ["hub", "target", "location", "date", "sel", "levels", "rulers", "focus", "layers", "trajectories", "dims", "scope", "scores", "views"];
 
 /**
  * Keeps the URL in step with the store: written with history.replaceState (no history entries),

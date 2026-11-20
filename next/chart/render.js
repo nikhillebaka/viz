@@ -116,6 +116,9 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
     }
     path(b.lo); stroke(c, edge, b.edgeAlpha); path(b.hi); stroke(c, edge, b.edgeAlpha);
   }
+  if (S.trajectories) {
+    for (const tr of S.trajectories) { path(tr.xy); stroke(cssColor(tr.c), tr.w, tr.alpha); }
+  }
   if (S.hoverX != null) { vline(S.hoverX, 0, ay); stroke(cssColor("var(--ink-faint)"), 1); }
   const hotId = S.hot?.id;
   for (const c of S.context) if (c.id !== hotId) { path(c.line); stroke(ink3, series, S.contextAlpha); }

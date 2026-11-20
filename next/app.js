@@ -4,7 +4,7 @@ import { loadManifest, getActiveHub, setActiveHub } from "./lib/api.js";
 import { createStore } from "./lib/store.js";
 import { h, storage } from "./lib/dom.js";
 import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted } from "./features/selection.js";
-import { defaults, defaultDate, readUrl, syncUrl, parseLevels } from "./features/url.js";
+import { defaults, defaultDate, defaultDims, readUrl, syncUrl, parseLevels } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
 
@@ -145,14 +145,19 @@ async function boot() {
   }
 
   const { selFlags, ...url } = readUrl(manifest);
+  const def = defaults(manifest);
+  const resolvedTarget = url.target ?? def.target;
+  const initDims = defaultDims(manifest, resolvedTarget);
   const state = {
     ...(manifest.hub_id ? { hub: manifest.hub_id } : {}),
-    ...defaults(manifest),
+    ...def,
     outcome: true,
     layers: [],
+    trajectories: false,
     theme: storedTheme(),
     ...fromStorage(manifest),
     ...url,
+    dims: { ...initDims, ...(url.dims || {}) },
   };
   if (selFlags) {
     if (selFlags.showAll !== undefined) state.sel = setShowAll(state.sel, selFlags.showAll);

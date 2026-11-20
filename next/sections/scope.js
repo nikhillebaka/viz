@@ -21,6 +21,24 @@ export const HORIZONS = Object.freeze([0, 1, 2, 3]);
 const DAY = 864e5, WEEK = 7 * DAY;
 
 /**
+ * Available non-negative weekly horizons for `targetId` from manifest metadata (fallback `[0, 1, 2, 3]`).
+ * @param {object} manifest
+ * @param {string} [targetId]
+ * @returns {number[]}
+ */
+export function targetHorizons(manifest, targetId) {
+  const id = targetId || manifest?.default_target || manifest?.targets?.[0]?.id;
+  const hMeta = manifest?.targetById?.get?.(id)?.horizons || manifest?.targets?.find?.((t) => t.id === id)?.horizons;
+  if (!hMeta) return HORIZONS;
+  const set = new Set(
+    [...(hMeta.required || []), ...(hMeta.optional || [])]
+      .map(Number)
+      .filter((n) => Number.isInteger(n) && n >= -4),
+  );
+  return set.size ? [...set].sort((a, b) => a - b) : HORIZONS;
+}
+
+/**
  * The Saturday ending a season week. Season week 1 is MMWR week 31 of the season's first year (the
  * backend's rule, core/data_loader.py), so week 1 of 2025–26 ends Aug 2, 2025.
  * @param {number} startYear the season's first year (2025 for "2025-2026")
@@ -64,10 +82,13 @@ export function scopeOf(state, manifest) {
   const weeks = Array.isArray(sc.weeks) && sc.weeks.length === 2 && !(sc.weeks[0] <= 1 && sc.weeks[1] >= 53)
     ? [Math.max(1, Math.min(sc.weeks[0], sc.weeks[1])), Math.min(53, Math.max(sc.weeks[0], sc.weeks[1]))] : null;
   const y = startYearOf(seasons[0]);
-  const hs = Array.isArray(sc.horizons) ? HORIZONS.filter((h) => sc.horizons.includes(h)) : [];
-  const place = ["US", "current"].includes(sc.place) ? sc.place : "all";
-  const location = place === "US" ? "US" : place === "current" ? state.location || "US" : "states";
   const target = state.target || manifest.default_target || manifest.targets?.[0]?.id || "";
+  const availH = targetHorizons(manifest, target);
+  const availSet = new Set(availH);
+  const hs = Array.isArray(sc.horizons) ? sc.horizons.filter((h) => availSet.has(h)).sort((a, b) => a - b) : [];
+  const place = ["US", "current"].includes(sc.place) ? sc.place : "all";
+  const defaultLoc = manifest.geo?.default_location ?? manifest.default_location ?? "US";
+  const location = place === "US" ? "US" : place === "current" ? state.location || defaultLoc : "states";
   const defaultBaseline = typeof manifest.baselineFor === "function"
     ? manifest.baselineFor(target, seasons.length === 1 ? seasons[0] : null)
     : manifest.baseline;
@@ -76,7 +97,7 @@ export function scopeOf(state, manifest) {
     from: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[0])) : null,
     to: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[1])) : null,
     phase: PHASES.includes(sc.phase) ? sc.phase : null,
-    horizons: hs.length && hs.length < HORIZONS.length ? hs : null,
+    horizons: hs.length && hs.length < availH.length ? hs : null,
     place, location,
     fair: !!sc.fair,
     baseline: sc.baseline || defaultBaseline || "",

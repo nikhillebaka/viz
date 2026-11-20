@@ -6,11 +6,12 @@
  * own bubbles belong to the view (FanChart). The pickers are loaded on first use. */
 import { h, on, storage } from "../lib/dom.js";
 import { glass } from "../ui/glass.js";
-import { activeLayer, tooltip } from "../ui/floating.js";
+import { activeLayer, openMenu, tooltip } from "../ui/floating.js";
 import { pill, icon, timeKeys } from "../ui/controls.js";
 import { seriesColor } from "../chart/layout.js";
 import { FanChart } from "./FanChart.js";
 import { openTargetMenu } from "./TargetMenu.js";
+import { targetDimSpecs, defaultDims, isCategoricalTarget } from "./url.js";
 import { mountSections } from "../sections/index.js";
 
 const pickers = {
@@ -31,19 +32,21 @@ export function mountShell(root, ctx) {
   const doc = document.documentElement;
   root.classList.add("app");
   const view = h("section", { id: "view", class: "app-view", "aria-label": "Forecast chart" });
+  const pmfHost = h("section", { class: "app-pmf", hidden: true, "aria-label": "Categorical forecast" });
   const zone = (z) => h("div", { class: "c-zone", "data-zone": z });
   const tl = zone("tl"), tr = zone("tr");
   const fixed = h("div", { class: "c-chrome app-fixed" }, tl, tr);
-  root.append(view, fixed);
+  root.append(view, pmfHost, fixed);
 
   /* ---------- fixed bubbles ---------- */
   // labels are filled in below (a pill only gets a label element when it starts with text)
+  const backBtn = pill({ label: "← Chart", className: "app-globe-back" });
   const modelsBtn = pill({ label: "Models", dots: [], chevron: true, className: "app-models" });
   const placeBtn = pill({ label: "Location", chevron: true, className: "app-place" });
   const targetBtn = manifest.targets.length > 1 ? pill({ label: "Target", chevron: true, className: "app-target" }) : null;
   const themeBtn = pill({ icon: icon.theme, ariaLabel: "Light or dark", className: "app-theme" });
   for (const b of [modelsBtn, placeBtn, targetBtn]) b?.setAttribute("aria-haspopup", b === targetBtn ? "menu" : "dialog");
-  tl.append(...[modelsBtn, placeBtn, targetBtn].filter(Boolean));
+  tl.append(...[backBtn, modelsBtn, placeBtn, targetBtn].filter(Boolean));
   tr.append(themeBtn);
   tooltip(themeBtn, "Light or dark", { placement: "bottom" });
 
@@ -76,10 +79,62 @@ export function mountShell(root, ctx) {
   renderModels(); renderPlace(); renderTarget();
   const glasses = [modelsBtn, placeBtn, targetBtn, themeBtn].filter(Boolean).map((b) => glass(b));
   const [gModels, gPlace, gTarget] = glasses;
+  const gBack = glass(backBtn);
+  glasses.push(gBack);
+
+  const dimPills = [];
+  const dimGlasses = [];
+  function syncDimLabels() {
+    const s = store.get();
+    const specs = targetDimSpecs(manifest.targetById.get(s.target));
+    const defD = defaultDims(manifest, s.target);
+    specs.forEach((spec, idx) => {
+      const btn = dimPills[idx];
+      if (!btn) return;
+      const cur = s.dims?.[spec.name] ?? defD[spec.name] ?? spec.values[0];
+      const lbl = btn.querySelector(".c-pill-label");
+      if (lbl && lbl.textContent !== String(cur)) lbl.textContent = String(cur);
+      btn.setAttribute("aria-label", `${spec.label}: ${cur}`);
+      dimGlasses[idx]?.update();
+    });
+  }
+  function renderDims() {
+    dimGlasses.splice(0).forEach((g) => g.destroy());
+    dimPills.splice(0).forEach((b) => b.remove());
+    const s = store.get();
+    const specs = targetDimSpecs(manifest.targetById.get(s.target));
+    if (!specs.length) return;
+    const defD = defaultDims(manifest, s.target);
+    for (const spec of specs) {
+      const cur = s.dims?.[spec.name] ?? defD[spec.name] ?? spec.values[0];
+      const btn = pill({ label: String(cur), chevron: true, className: "app-dim" });
+      btn.setAttribute("aria-haspopup", "menu");
+      btn.setAttribute("aria-label", `${spec.label}: ${cur}`);
+      btn.addEventListener("click", () => {
+        const nowCur = String(store.get().dims?.[spec.name] ?? defD[spec.name] ?? cur);
+        openMenu(btn, {
+          label: spec.label,
+          placement: "bottom-start",
+          items: spec.values.map((val) => ({
+            label: val,
+            value: val,
+            checked: val === nowCur,
+            onSelect: (v) => store.set({ dims: { ...(store.get().dims || {}), [spec.name]: v } }),
+          })),
+        });
+      });
+      tl.append(btn);
+      dimPills.push(btn);
+      dimGlasses.push(glass(btn));
+    }
+  }
+  renderDims();
+
   const offs = [
     store.select(["sel"], () => { renderModels(); gModels.update(); }),
     store.select(["location"], () => { renderPlace(); gPlace.update(); }),
-    store.select(["target"], () => { renderTarget(); if (targetBtn) gTarget.update(); }),
+    store.select(["target"], () => { renderTarget(); if (targetBtn) gTarget.update(); renderDims(); syncTargetMode(); }),
+    store.select(["dims"], () => syncDimLabels()),
     store.select(["theme"], (s) => { doc.dataset.theme = s.theme; }),
   ];
   doc.dataset.theme = store.get().theme;
@@ -98,15 +153,20 @@ export function mountShell(root, ctx) {
     view.append(error);
   };
 
-  /* ---------- the chart ---------- */
+  /* ---------- the chart, categorical PMF, & Globe ---------- */
+  let readyDone = false;
+  function markReady() {
+    if (readyDone) return;
+    readyDone = true;
+    root.classList.add("is-ready");
+    progress.classList.add("is-done");
+    setTimeout(() => progress.remove(), 600);
+    // the pickers are needed on first click: fetch them while nothing else is happening
+    (window.requestIdleCallback ?? setTimeout)(() => { pickers.models().catch(() => {}); pickers.location().catch(() => {}); });
+  }
+
   const chart = new FanChart(view, ctx, {
-    onReady: () => {
-      root.classList.add("is-ready");
-      progress.classList.add("is-done");
-      setTimeout(() => progress.remove(), 600);
-      // the pickers are needed on first click: fetch them while nothing else is happening
-      (window.requestIdleCallback ?? setTimeout)(() => { pickers.models().catch(() => {}); pickers.location().catch(() => {}); });
-    },
+    onReady: markReady,
     onError: showError,
     onInset: (px) => {
       root.classList.toggle("is-inset", px > 0);
@@ -118,9 +178,80 @@ export function mountShell(root, ctx) {
   const sheet = () => import("./ModelSheet.js");
   sheet().then((m) => { m.installModelLinks(ctx); const id = m.modelHash(); if (id) m.openModel(id, ctx); }).catch(() => {});
   const sections = mountSections(root, ctx);
+
+  let pmfInst = null;
+  let pmfLoadToken = 0;
+  function syncTargetMode() {
+    const cat = isCategoricalTarget(manifest.targetById.get(store.get().target));
+    view.hidden = cat;
+    pmfHost.hidden = !cat;
+    if (sections?.el) sections.el.hidden = cat;
+    if (cat) {
+      if (pmfInst) return;
+      const tok = ++pmfLoadToken;
+      import("./PmfView.js").then((m) => {
+        if (gone || tok !== pmfLoadToken || !isCategoricalTarget(manifest.targetById.get(store.get().target))) return;
+        pmfInst = m.mountPmfView(pmfHost, { manifest, store, onReady: markReady });
+      }).catch((err) => console.error("viz: PMF view could not load", err));
+    } else {
+      pmfLoadToken++;
+      pmfInst?.destroy();
+      pmfInst = null;
+      chart.request();
+    }
+  }
+
+  let globeOpen = false;
+  let globeHost = null;
+  let globeInst = null;
+  let globeToken = 0;
+  let prevBodyOverflow = "";
+  function setGlobeOpen(open, updateHash = true) {
+    const want = !!open;
+    if (want === globeOpen) return;
+    globeOpen = want;
+    root.classList.toggle("is-globe-open", want);
+    if (want) {
+      prevBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      markReady();
+      gBack.update();
+      globeHost = h("section", { class: "app-globe", "aria-label": "Interactive monochrome globe" });
+      root.append(globeHost);
+      const tok = ++globeToken;
+      import("./GlobeView.js").then((m) => {
+        if (gone || !globeOpen || tok !== globeToken || !globeHost) return;
+        globeInst = m.mountGlobeView(globeHost, { manifest, store, onClose: () => setGlobeOpen(false) });
+      }).catch((err) => {
+        console.error("viz: Globe could not load", err);
+        setGlobeOpen(false);
+      });
+      if (updateHash && location.hash !== "#globe") {
+        history.replaceState(history.state, "", `${location.pathname}${location.search}#globe`);
+      }
+    } else {
+      globeToken++;
+      globeInst?.destroy();
+      globeInst = null;
+      globeHost?.remove();
+      globeHost = null;
+      document.body.style.overflow = prevBodyOverflow;
+      gModels.update(); gPlace.update(); gTarget?.update();
+      dimGlasses.forEach((g) => g.update());
+      if (updateHash && location.hash === "#globe") {
+        history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+      }
+      chart.request();
+    }
+  }
+  backBtn.addEventListener("click", () => setGlobeOpen(false));
+  ctx.openGlobe = () => setGlobeOpen(true);
+  ctx.closeGlobe = () => setGlobeOpen(false);
+
   // ⋯ bubble (hubs, warnings, the Guide): loaded when idle; the page works without it
   let more = null, gone = false;
   import("./More.js").then((m) => { if (!gone) more = m.mountMore(tr, ctx); }).catch(() => {});
+  syncTargetMode();
 
   // The chart's own bubbles (bottom row, note, recenter) scroll with the chart; once that bottom row
   // reaches the fixed top bubbles they fade out instead of piling onto them. An observer, not a scroll
@@ -143,19 +274,24 @@ export function mountShell(root, ctx) {
   function toggleTheme() { store.set({ theme: store.get().theme === "light" ? "dark" : "light" }); }
 
   const stopTime = timeKeys((dir) => chart.step(dir), {
-    active: () => { const l = activeLayer(); return !l || l.panel.hasAttribute("data-time-keys"); },
+    active: () => { if (globeOpen) return false; const l = activeLayer(); return !l || l.panel.hasAttribute("data-time-keys"); },
   });
-  offs.push(on(window, "hashchange", () => sheet().then((m) => { const id = m.modelHash(); if (id) m.openModel(id, ctx); })));
+  offs.push(on(window, "hashchange", () => {
+    if (location.hash === "#globe") { setGlobeOpen(true, false); return; }
+    if (globeOpen && !location.hash) setGlobeOpen(false, false);
+    sheet().then((m) => { const id = m.modelHash(); if (id) m.openModel(id, ctx); });
+  }));
+  if (location.hash === "#globe") setGlobeOpen(true, false);
   offs.push(stopTime, on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const layer = activeLayer();
-    // Escape: an open layer closes itself first (it stops the event), then the focus clears. Text
-    // fields keep theirs.
+    // Escape: an open layer closes itself first (it stops the event), then Globe, then focus.
     if (e.key === "Escape") {
+      if (!layer && globeOpen) { e.preventDefault(); setGlobeOpen(false); return; }
       if (!layer && store.get().focus && !e.target.closest?.(TEXT_FIELD)) { e.preventDefault(); chart.clearFocus(); }
       return;
     }
-    if (layer || e.target.closest?.(TEXT_FIELD)) return;
+    if (globeOpen || layer || e.target.closest?.(TEXT_FIELD)) return;
     switch (e.key) {
       case "=": case "+": chart.zoom(1); break;
       case "-": chart.zoom(-1); break;
@@ -168,7 +304,24 @@ export function mountShell(root, ctx) {
 
   return {
     view,
-    destroy() { gone = true; more?.destroy(); offs.forEach((off) => off()); sections.destroy(); chart.destroy(); glasses.forEach((g) => g.destroy()); view.remove(); fixed.remove(); },
+    destroy() {
+      gone = true;
+      pmfLoadToken++;
+      pmfInst?.destroy();
+      if (globeOpen) document.body.style.overflow = prevBodyOverflow;
+      globeToken++;
+      globeInst?.destroy();
+      more?.destroy();
+      offs.forEach((off) => off());
+      sections.destroy();
+      chart.destroy();
+      dimGlasses.forEach((g) => g.destroy());
+      glasses.forEach((g) => g.destroy());
+      pmfHost.remove();
+      globeHost?.remove();
+      view.remove();
+      fixed.remove();
+    },
   };
 }
 

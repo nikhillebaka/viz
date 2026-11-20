@@ -24,6 +24,8 @@ import { Interaction } from "./chart/interact.js";
 import { Readout } from "./chart/readout.js";
 import { ChartBubbles } from "./chart/bubbles.js";
 import { Layers } from "./chart/layers.js";
+import { ChartTrajectories } from "./chart/trajectories.js";
+import { isCategoricalTarget } from "./url.js";
 
 const PREVIEW_WEEKS = 14;   // the model picker's preview: the four forecast weeks stay distinct
 const RULER_MS = 180;       // width rulers fade and slide in or out
@@ -132,9 +134,12 @@ export class FanChart {
       () => ro.disconnect(),
       () => this._dprOff?.(),
     ];
+    this.trajectories = new ChartTrajectories(this);
     this.#watchDpr();
     document.fonts?.ready.then(() => { this.#measure(); this.request(); });
-    this.#show(this.#want(s.date));
+    if (!isCategoricalTarget(ctx.manifest.targetById.get(s.target))) {
+      this.#show(this.#want(s.date));
+    }
   }
 
   /* ================================================================ public */
@@ -291,6 +296,7 @@ export class FanChart {
     this.nav?.destroy();
     this.interact.destroy();
     this.layers?.destroy();
+    this.trajectories?.destroy();
     this.bubbles?.destroy();
     this.canvas.remove(); this.empty.remove(); this.readout.el.remove();
     this.fan = this.nav = null; // late callbacks (fonts loading, the idle prefetch) find nothing to do
@@ -306,7 +312,7 @@ export class FanChart {
   // what to load: the store's target and place, the season of `date` (null: keep the live date on apply)
   #want(date) {
     const s = this.ctx.store.get();
-    return { target: s.target, location: s.location, season: this.#seasonOf(date ?? s.date), date };
+    return { target: s.target, location: s.location, season: this.#seasonOf(date ?? s.date), date, dims: s.dims };
   }
 
   #cancel() { this._token++; this.#endLoad(); }
@@ -326,7 +332,7 @@ export class FanChart {
     if (this.fan) this._dim = setTimeout(() => this.view.classList.add("is-loading"), DIM_AFTER);
     let fan;
     try {
-      fan = await loadFan(want.target, want.season, want.location);
+      fan = await loadFan(want.target, want.season, want.location, { dims: want.dims });
     } catch {
       if (token !== this._token) return;
       this.#endLoad();
@@ -356,6 +362,7 @@ export class FanChart {
       });
       this.bubbles = new ChartBubbles(this, index);
       this.layers = new Layers(this);
+      this.trajectories.sync();
       this.#resize();
       this.#onWeek(index);
       this.view.classList.add("is-ready");
@@ -374,6 +381,7 @@ export class FanChart {
         this.nav.setTimeline({ dates: fan.dates, season: fan.window, index });
         this.nav.setHeight(1);
         this.layers.sync();
+        this.trajectories.sync();
         this.draw(true);
         const settledIso = this.#isoAt(index);
         for (const fn of this._weekListeners) fn(settledIso, index);
@@ -482,19 +490,26 @@ export class FanChart {
   // the chart heads to week i: the stepper follows and the store learns the date
   #onWeek(i) {
     this.bubbles?.show(i);
+    this.trajectories?.sync();
     const iso = this.#isoAt(i);
     if (iso !== this.ctx.store.get().date) this.ctx.store.set({ date: iso });
     for (const fn of this._weekListeners) fn(iso, i);
   }
 
   #onStore(s, prev, changed) {
+    if (isCategoricalTarget(this.ctx.manifest.targetById.get(s.target))) {
+      if (this.loading) this.#cancel();
+      this.trajectories?.destroy();
+      return;
+    }
     const navDateOnly = changed.size === 1 && changed.has("date") && this.nav && s.date === this.#isoAt(this.nav.week);
-    if (changed.has("target") || changed.has("location")) this.#show(this.#want(null));
+    if (!this.fan || changed.has("target") || changed.has("location") || changed.has("dims")) this.#show(this.#want(null));
     else if (changed.has("date") && this.nav && s.date !== this.#isoAt(this.nav.week)) this.goTo(s.date);
     if (changed.has("sel") && this.fan) this.#prepare(true);
     if (changed.has("rulers")) this.rk.set(s.rulers ? 1 : 0, RULER_MS);
-    if (changed.has("sel") || changed.has("levels")) this.bubbles?.sync(s);
+    if (changed.has("sel") || changed.has("levels") || changed.has("target")) this.bubbles?.sync(s);
     if (["layers", "sel"].some((k) => changed.has(k)) || (changed.has("date") && this.layers?.on?.size)) this.layers?.sync();
+    if (["trajectories", "sel", "date", "dims", "target", "location"].some((k) => changed.has(k))) this.trajectories?.sync();
     if (changed.has("layers") && !changed.has("sel") && this.fan) this.#axis(true);
     if (!navDateOnly) this.request();
   }
@@ -563,6 +578,7 @@ export class FanChart {
     o.fonts = chartFonts();
     const scene = (this.scene = layoutFan(fan, o, w, h));
     scene.layers = this.layers?.layout(scene) ?? null;
+    scene.trajectories = this.trajectories?.layout(scene) ?? null;
     drawFan(this.canvas, scene);
     Glass.frame();
 

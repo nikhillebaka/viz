@@ -1,26 +1,35 @@
-/* The map section: one model's forecast against what was observed, state by state, for the chart's
- * round and one horizon. A US tile grid (the location picker's) on the paper; the inspected state
- * (hovered, else the chart's location, else the highest) is read out beside it. Clicking a state makes
- * it the chart's location.
+/* The map section: one model's forecast against what was observed across the hub's native geography:
+ *   - us-states: 11x8 US state tile map
+ *   - eu-countries: proportioned (or uniform 1x1) Europe squircle tile map
+ *   - us-metrocast: 15-state overview + interactive SVG state HSA polygon choropleth
+ * Clicking a jurisdiction or HSA updates the chart's location.
  *
- * Data: /api/next/spatial (/api/spatial unrounded, so proportion targets keep their values). Per-100k
- * layers are offered for count targets only. */
+ * Data: /api/next/spatial (/api/spatial unrounded with `locations` keyed by unique loc_id). */
 import { onThemeChange } from "../../lib/dom.js";
 import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
-import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { slotOf, COLORS } from "../../features/selection.js";
 import {
+  EU_GRID_PROPORTIONED,
+  EU_GRID_UNIFORM,
+  EU_TILES_PROPORTIONED,
+  EU_TILES_PROPORTIONED_UK_SPLIT,
+  EU_TILES_UNIFORM,
+  EU_TILES_UNIFORM_UK_SPLIT,
+  US_STATE_META,
+} from "../../geo/eu_tiles.js";
+import { TILES, COLUMNS, classifyHubGeo, loadUsGeoCache, renderHsaStateSvg } from "../../geo/picker_geo.js";
+import { targetHorizons } from "../scope.js";
+import {
   h, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
-  resetColors, places, onScreen, viewState,
+  resetColors, onScreen, viewState,
 } from "../shared.js";
 
 const KEY = "viz.map";
 const PLAY_MS = 1200;
-const ROWS = 8;
+const US_ROWS = 8;
 const fin = (x) => typeof x === "number" && Number.isFinite(x);
 
-/** The layers, in menu order. `counts`: only for count targets (per 100k means nothing for a share). */
 const LAYERS = [
   { id: "f_rate", label: "Forecast / 100k", counts: true, kind: "seq" },
   { id: "f_count", label: "Forecast", kind: "seq" },
@@ -35,41 +44,111 @@ const LAYERS = [
 export function mount(el, ctx) {
   linkStyle("map");
   const { manifest, store } = ctx;
-  const P = places(manifest);
+  const geoCls = classifyHubGeo(manifest);
   const f = frame(el, "Map", "map");
   const vs = viewState(store, "map", KEY);
   const saved = vs.initial;
-  let layer = saved.layer || "f_rate", horizon = [0, 1, 2, 3].includes(saved.horizon) ? saved.horizon : 1, model = null;
-  let data = null, reqKey = "", hoverAbbr = null, timer = 0;
+  let layer = saved.layer || "f_rate";
+  let horizon = Number.isInteger(saved.horizon) && saved.horizon >= 0 ? saved.horizon : 1;
+  let euShape = "proportioned";
+  let mcFips = geoCls.kind === "us-metrocast"
+    ? (geoCls.stateFipsOf(store.get().location) || (geoCls.coveredStateFips.size === 1 ? [...geoCls.coveredStateFips][0] : [...geoCls.coveredStateFips][0] || null))
+    : null;
+  let mcView = geoCls.kind === "us-metrocast" && mcFips ? "state" : "states";
+  let model = null;
+  let data = null, usGeo = null, reqKey = "", hoverId = null, timer = 0;
   const slot = {};
 
   const target = () => manifest.targetById.get(store.get().target);
-  const counts = () => target()?.scale !== "proportion";
+  const isCategorical = () => {
+    const t = target();
+    return Boolean(t?.is_categorical || (t?.output_types?.length && !t.output_types.includes("quantile")));
+  };
+  const counts = () => {
+    const t = target();
+    return !t?.is_rate && t?.scale !== "proportion";
+  };
   const vf = () => valueFormat(target());
   const layers = () => LAYERS.filter((l) => counts() || !l.counts);
   const layerOf = () => layers().find((l) => l.id === layer) || layers()[0];
-  const minH = () => layerOf().minHorizon || 0;  // change vs. nowcast has no 0 wk
+  const minH = () => layerOf().minHorizon || 0;
+  const availHorizons = () => (
+    data?.available_horizons?.length
+      ? data.available_horizons
+      : targetHorizons(manifest, store.get().target)
+  );
   const save = () => vs.write({ layer, horizon }, layer === LAYERS[0].id && horizon === 1);
 
-  // ---------------------------------------------------------------- the control line
   const candidates = () => {
     const s = store.get(), ids = [...s.sel.selected];
     if (manifest.baseline && !ids.includes(manifest.baseline)) ids.push(manifest.baseline);
     return ids;
   };
-  const withData = () => candidates().filter((id) => data && Object.values(data.states).some((st) => st.models?.[id]));
-  const F = {
-    model: fragment({ label: "Model", title: "Model", items: () => withData().map((id) => ({ value: id, label: manifest.label(id, candidates()) })),
-      value: () => model, onSelect: (v) => { model = v; render(); } }),
-    layer: fragment({ label: "Layer", title: "Layer", items: () => layers().map((l) => ({ value: l.id, label: l.label, disabled: horizon < (l.minHorizon || 0) })),
-      value: () => layerOf().id, isDefault: () => layerOf().id === layers()[0].id, onSelect: (v) => { layer = v; save(); render(); } }),
-    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => [0, 1, 2, 3].map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk ahead`, disabled: x < minH() })),
-      value: () => horizon, isDefault: () => horizon === 1, onSelect: (v) => { stop(); horizon = v; save(); render(); } }),
+  const locRecord = (id) => {
+    if (!id || !data) return null;
+    if (data.locations?.[id]) return data.locations[id];
+    const abbr = manifest.locationById.get(id)?.abbr;
+    return abbr ? data.states?.[abbr] ?? null : null;
   };
+  const withData = () => candidates().filter((id) => {
+    const recs = Object.values(data?.locations || data?.states || {});
+    return recs.some((st) => st.models?.[id]);
+  });
+
+  const mcStateItems = () => [
+    { value: "states", label: `All states (${geoCls.coveredStateFips.size})` },
+    "-",
+    ...[...geoCls.coveredStateFips]
+      .sort((a, b) => (US_STATE_META[a]?.name || a).localeCompare(US_STATE_META[b]?.name || b))
+      .map((fips) => ({ value: fips, label: geoCls.stateByFips.get(fips)?.name || US_STATE_META[fips]?.name || fips })),
+  ];
+
+  const F = {
+    mcState: fragment({
+      label: "State", title: "MetroCast state",
+      items: mcStateItems,
+      value: () => (mcView === "states" ? "states" : mcFips),
+      isDefault: () => false,
+      onSelect: (v) => {
+        if (v === "states") { mcView = "states"; hoverId = null; buildView(); render(); }
+        else { mcView = "state"; mcFips = v; hoverId = null; buildView(); render(); }
+      },
+    }),
+    shape: fragment({
+      label: "Tiles", title: "Tile shape",
+      items: () => [{ value: "proportioned", label: "Proportioned" }, { value: "uniform", label: "Uniform 1×1" }],
+      value: () => euShape, isDefault: () => euShape === "proportioned",
+      onSelect: (v) => { euShape = v; hoverId = null; buildView(); render(); },
+    }),
+    model: fragment({
+      label: "Model", title: "Model",
+      items: () => withData().map((id) => ({ value: id, label: manifest.label(id, candidates()) })),
+      value: () => model, onSelect: (v) => { model = v; render(); },
+    }),
+    layer: fragment({
+      label: "Layer", title: "Layer",
+      items: () => layers().map((l) => ({ value: l.id, label: l.label, disabled: horizon < (l.minHorizon || 0) })),
+      value: () => layerOf().id, isDefault: () => layerOf().id === layers()[0].id,
+      onSelect: (v) => { layer = v; save(); render(); },
+    }),
+    horizon: fragment({
+      label: "Horizon", title: "Horizon",
+      items: () => availHorizons().map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk ahead`, disabled: x < minH() })),
+      value: () => horizon, isDefault: () => horizon === 1,
+      onSelect: (v) => { stop(); horizon = v; save(); render(); },
+    }),
+  };
+
   const play = action("▶", "Play horizons", () => (timer ? stop() : start()));
   function start() {
     play.textContent = "❚❚"; play.classList.add("is-on"); play.setAttribute("aria-label", "Pause");
-    timer = setInterval(() => { const lo = minH(); horizon = horizon >= 3 ? lo : Math.max(lo, horizon + 1); render(); }, PLAY_MS);
+    const hs = availHorizons().filter((x) => x >= minH());
+    timer = setInterval(() => {
+      if (!hs.length) return;
+      const idx = hs.indexOf(horizon);
+      horizon = idx >= 0 && idx + 1 < hs.length ? hs[idx + 1] : hs[0];
+      render();
+    }, PLAY_MS);
   }
   function stop() {
     if (!timer) return;
@@ -78,45 +157,150 @@ export function mount(el, ctx) {
   }
   function syncLine() {
     Object.values(F).forEach((b) => b.sync());
-    setLine(f.line, [F.model, F.layer, F.horizon]);
+    const parts = [
+      geoCls.kind === "us-metrocast" && F.mcState,
+      geoCls.kind === "eu-countries" && F.shape,
+      F.model,
+      F.layer,
+      F.horizon,
+    ].filter(Boolean);
+    setLine(f.line, parts);
     F.horizon.after(play);
     play.classList.add("v-tight");
   }
 
-  // ---------------------------------------------------------------- the figure
-  const grid = h("div", { class: "mp-grid", role: "group", "aria-label": "States", style: { "--cols": COLUMNS, "--rows": ROWS } });
-  const tiles = new Map();
-  for (const [abbr, [c, r]] of Object.entries(TILES)) {
-    const loc = P.byAbbr.get(abbr);
-    if (!loc) continue;
-    const b = h("button", { type: "button", class: "mp-tile", style: { gridColumn: c + 1, gridRow: r + 1 }, "aria-label": loc.name },
-      h("span", { class: "mp-abbr" }, abbr), h("span", { class: "mp-val" }));
-    b.addEventListener("pointerenter", () => { hoverAbbr = abbr; inspect(); });
-    b.addEventListener("focus", () => { hoverAbbr = abbr; inspect(); });
-    // click a state to make it the chart's place; click it again to go back to the whole country
-    b.addEventListener("click", () => {
-      const back = store.get().location === loc.id && manifest.locationById.has("US");
-      store.set({ location: back ? "US" : loc.id });
-      if (back) { hoverAbbr = null; inspect(); }
-    });
-    tiles.set(abbr, b);
-    grid.append(b);
-  }
-  grid.addEventListener("pointerleave", () => { hoverAbbr = null; inspect(); });
-  grid.addEventListener("focusout", (e) => { if (!grid.contains(e.relatedTarget)) { hoverAbbr = null; inspect(); } });
+  // ---------------------------------------------------------------- DOM skeleton
+  const mapHost = h("div", { class: "mp-host" });
   const legend = h("div", { class: "mp-legend" });
   const summary = h("p", { class: "v-note mp-summary" });
   const aside = h("div", { class: "mp-aside" });
-  f.body.append(h("div", { class: "mp-wrap" }, h("div", { class: "mp-map" }, grid, legend, summary), aside));
+  f.body.append(h("div", { class: "mp-wrap" }, h("div", { class: "mp-map" }, mapHost, legend, summary), aside));
+
+  const tileButtons = new Map(); // id -> HTMLButtonElement (either locId or stateFips wrapper)
+  let activeLocIds = [];         // ids contributing to scale/summary in the visible view
+
+  function buildView() {
+    tileButtons.clear();
+    activeLocIds = [];
+    hoverId = null;
+
+    if (geoCls.kind === "eu-countries") {
+      const tilesSpec = euShape === "uniform"
+        ? (geoCls.ukSplitAvailable ? EU_TILES_UNIFORM_UK_SPLIT : EU_TILES_UNIFORM)
+        : (geoCls.ukSplitAvailable ? EU_TILES_PROPORTIONED_UK_SPLIT : EU_TILES_PROPORTIONED);
+      const gridDims = euShape === "uniform" ? EU_GRID_UNIFORM : EU_GRID_PROPORTIONED;
+      const tilePx = euShape === "uniform" ? 50 : 42;
+      const grid = h("div", {
+        class: "mp-grid", role: "group", "aria-label": "Countries",
+        style: { "--cols": gridDims.cols, "--rows": gridDims.rows, "--tile": `${tilePx}px` },
+      });
+      for (const [id, [c, r, w = 1, hs = 1]] of Object.entries(tilesSpec)) {
+        const loc = manifest.locationById.get(id);
+        if (!loc) continue;
+        const btn = h("button", {
+          type: "button",
+          class: ["mp-tile", w * hs === 1 && "is-compact"],
+          style: { gridColumn: `${c} / span ${w}`, gridRow: `${r} / span ${hs}` },
+          "aria-label": loc.name || id,
+        }, h("span", { class: "mp-abbr" }, loc.abbr || id), h("span", { class: "mp-val" }));
+        btn.addEventListener("pointerenter", () => { hoverId = id; inspect(); });
+        btn.addEventListener("focus", () => { hoverId = id; inspect(); });
+        btn.addEventListener("click", () => { store.set({ location: id }); });
+        tileButtons.set(id, btn);
+        activeLocIds.push(id);
+        grid.append(btn);
+      }
+      grid.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+      grid.addEventListener("focusout", (e) => { if (!grid.contains(e.relatedTarget)) { hoverId = null; inspect(); } });
+      mapHost.replaceChildren(grid);
+      return;
+    }
+
+    if (geoCls.kind === "us-metrocast") {
+      if (mcView === "state" && mcFips) {
+        const hsas = geoCls.hsasByStateFips.get(mcFips) || [];
+        activeLocIds = hsas.map((x) => x.id);
+        const box = h("div", { class: "mp-hsa-box" });
+        mapHost.replaceChildren(box);
+        if (!usGeo) {
+          box.replaceChildren(h("p", { class: "v-empty" }, "Loading boundaries…"));
+          loadUsGeoCache().then((g) => {
+            usGeo = g;
+            if (box.isConnected) render();
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      // 15-state MetroCast US overview grid
+      const grid = h("div", { class: "mp-grid", role: "group", "aria-label": "Covered states", style: { "--cols": COLUMNS, "--rows": US_ROWS } });
+      for (const [abbr, [c, r]] of Object.entries(TILES)) {
+        const fips = Object.entries(US_STATE_META).find(([, v]) => v.abbr === abbr)?.[0];
+        const isCovered = fips && geoCls.coveredStateFips.has(fips);
+        const loc = isCovered ? geoCls.stateByFips.get(fips) : null;
+        const btn = h("button", {
+          type: "button",
+          class: ["mp-tile", !isCovered && "is-muted"],
+          disabled: !isCovered,
+          style: { gridColumn: c + 1, gridRow: r + 1 },
+          "aria-label": loc?.name || US_STATE_META[fips]?.name || abbr,
+        }, h("span", { class: "mp-abbr" }, abbr), h("span", { class: "mp-val" }));
+        if (loc) {
+          tileButtons.set(loc.id, btn);
+          activeLocIds.push(loc.id);
+          btn.addEventListener("pointerenter", () => { hoverId = loc.id; inspect(); });
+          btn.addEventListener("focus", () => { hoverId = loc.id; inspect(); });
+          btn.addEventListener("click", () => {
+            mcFips = fips;
+            mcView = "state";
+            store.set({ location: loc.id });
+            buildView();
+            render();
+          });
+        } else if (isCovered && fips) {
+          btn.addEventListener("click", () => { mcFips = fips; mcView = "state"; buildView(); render(); });
+        }
+        grid.append(btn);
+      }
+      grid.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+      grid.addEventListener("focusout", (e) => { if (!grid.contains(e.relatedTarget)) { hoverId = null; inspect(); } });
+      mapHost.replaceChildren(grid);
+      return;
+    }
+
+    // Standard US states 11x8 tile grid
+    const grid = h("div", { class: "mp-grid", role: "group", "aria-label": "States", style: { "--cols": COLUMNS, "--rows": US_ROWS } });
+    for (const [abbr, [c, r]] of Object.entries(TILES)) {
+      const loc = geoCls.stateByAbbr.get(abbr);
+      if (!loc) continue;
+      const b = h("button", {
+        type: "button", class: "mp-tile", style: { gridColumn: c + 1, gridRow: r + 1 },
+        "aria-label": loc.name || abbr,
+      }, h("span", { class: "mp-abbr" }, abbr), h("span", { class: "mp-val" }));
+      b.addEventListener("pointerenter", () => { hoverId = loc.id; inspect(); });
+      b.addEventListener("focus", () => { hoverId = loc.id; inspect(); });
+      b.addEventListener("click", () => {
+        const back = store.get().location === loc.id && geoCls.aggregateId;
+        store.set({ location: back ? geoCls.aggregateId : loc.id });
+        if (back) { hoverId = null; inspect(); }
+      });
+      tileButtons.set(loc.id, b);
+      activeLocIds.push(loc.id);
+      grid.append(b);
+    }
+    grid.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+    grid.addEventListener("focusout", (e) => { if (!grid.contains(e.relatedTarget)) { hoverId = null; inspect(); } });
+    mapHost.replaceChildren(grid);
+  }
 
   // ---------------------------------------------------------------- values
-  const stateOf = (abbr) => data?.states?.[abbr];
-  const entry = (abbr, hz = horizon) => stateOf(abbr)?.models?.[model]?.[hz] ?? null;
+  const stateOf = (id) => locRecord(id);
+  const entry = (id, hz = horizon) => stateOf(id)?.models?.[model]?.[hz] ?? null;
   const tedOf = (hz = horizon) => data?.dates_by_horizon?.[hz];
-  function valueAt(abbr, id, hz = horizon) {
-    const st = stateOf(abbr), e = entry(abbr, hz);
+  function valueAt(id, lId, hz = horizon) {
+    const st = stateOf(id), e = entry(id, hz);
     const truth = st?.truth?.[tedOf(hz)];
-    switch (id) {
+    switch (lId) {
       case "f_rate": return e?.rate_per_100k;
       case "f_count": return e?.median;
       case "o_rate": return fin(truth) && st.population > 1 ? (truth / st.population) * 1e5 : NaN;
@@ -127,17 +311,18 @@ export function mount(el, ctx) {
       default: return NaN;
     }
   }
-  // one scale for all four horizons, so playing through them never rescales
-  function domain(id) {
+  function domain(lId) {
+    if (lId === "trend") return 50;
     let m = 0;
-    for (const abbr of tiles.keys()) for (let hz = 0; hz < 4; hz++) { const v = valueAt(abbr, id, hz); if (fin(v)) m = Math.max(m, Math.abs(v)); }
-    return id === "trend" ? 50 : m;
+    const hs = availHorizons();
+    for (const id of activeLocIds) for (const hz of hs) { const v = valueAt(id, lId, hz); if (fin(v)) m = Math.max(m, Math.abs(v)); }
+    return m;
   }
-  function fmt(id, v) {
+  function fmt(lId, v) {
     if (!fin(v)) return "–";
-    if (id === "f_rate" || id === "o_rate") return v.toFixed(v < 10 ? 2 : 1);
-    if (id === "trend") return `${v > 0 ? "+" : ""}${Math.round(v)}%`;
-    if (id === "error") return `${v > 0 ? "+" : v < 0 ? "−" : ""}${vf().compact(Math.abs(v))}`;
+    if (lId === "f_rate" || lId === "o_rate") return v.toFixed(v < 10 ? 2 : 1);
+    if (lId === "trend") return `${v > 0 ? "+" : ""}${Math.round(v)}%`;
+    if (lId === "error") return `${v > 0 ? "+" : v < 0 ? "−" : ""}${vf().compact(Math.abs(v))}`;
     return vf().compact(v);
   }
   const colorFor = (L, v, max) => (L.kind === "div" ? diverging(max ? v / max : 0) : sequential(max ? Math.sqrt(Math.max(0, v) / max) : 0));
@@ -146,6 +331,14 @@ export function mount(el, ctx) {
   function load(force) {
     force = force === true;
     const s = store.get();
+    if (isCategorical()) {
+      slot._ctl?.abort();
+      reqKey = ""; data = null;
+      f.loading(false);
+      syncLine();
+      f.empty("Categorical target — inspect rate-change probabilities above");
+      return;
+    }
     const p = { target: s.target, date: s.date, models: candidates().join(",") };
     const key = query(p);
     if (key === reqKey && data && !force) { render(); return; }
@@ -172,25 +365,56 @@ export function mount(el, ctx) {
 
   // ---------------------------------------------------------------- drawing
   function render() {
-    if (horizon < minH()) horizon = minH();  // a stored 0 wk with change vs. nowcast
+    if (isCategorical()) return;
+    const hs = availHorizons();
+    if (!hs.includes(horizon)) horizon = hs.find((x) => x >= minH()) ?? hs[0] ?? 0;
+    if (horizon < minH()) horizon = hs.find((x) => x >= minH()) ?? minH();
     syncLine();
     const s = store.get();
     if (!data) return;
     if (!model) { f.empty(`No forecasts · ${fmtLong(parseIso(s.date))}`); return; }
     f.empty(null);
+
     const L = layerOf(), max = domain(L.id);
-    const here = P.abbrOf(s.location);
-    for (const [abbr, b] of tiles) {
-      const v = valueAt(abbr, L.id);
-      const has = fin(v);
-      b.classList.toggle("has-value", has);
-      b.classList.toggle("is-here", abbr === here);
-      const fill = has ? colorFor(L, v, max) : "";
-      b.style.background = fill;
-      b.style.color = has ? inkOn(fill) : "";
-      b.lastChild.textContent = has ? fmt(L.id, v) : "";
-      b.setAttribute("aria-pressed", String(abbr === here));
+    const hereId = s.location;
+
+    if (geoCls.kind === "us-metrocast" && mcView === "state" && mcFips) {
+      const box = mapHost.querySelector(".mp-hsa-box");
+      if (box && usGeo) {
+        const hsas = geoCls.hsasByStateFips.get(mcFips) || [];
+        const svg = renderHsaStateSvg(usGeo, mcFips, hsas, {
+          width: 580,
+          height: 340,
+          className: "mp-hsa-svg",
+          bgClass: "mp-hsa-bg",
+          polyClass: "mp-hsa-poly",
+          activeId: hereId,
+          fillFor: (id) => {
+            const v = valueAt(id, L.id);
+            return fin(v) ? colorFor(L, v, max) : "";
+          },
+          onHover: (id) => { hoverId = id; inspect(); },
+          onPick: (id) => { if (manifest.locationById.has(id)) store.set({ location: id }); },
+        });
+        if (svg) {
+          svg.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+          box.replaceChildren(svg);
+        }
+      }
+    } else {
+      for (const [id, b] of tileButtons) {
+        const v = valueAt(id, L.id);
+        const has = fin(v);
+        b.classList.toggle("has-value", has);
+        b.classList.toggle("is-here", id === hereId);
+        const fill = has ? colorFor(L, v, max) : "";
+        b.style.background = fill;
+        b.style.color = has ? inkOn(fill) : "";
+        b.lastChild.textContent = has ? fmt(L.id, v) : "";
+        b.setAttribute("aria-pressed", String(id === hereId));
+      }
     }
+
     drawLegend(L, max);
     drawSummary();
     inspect();
@@ -208,13 +432,17 @@ export function mount(el, ctx) {
     );
   }
 
-  // the map at a glance, beside it while no state is hovered (and the chart is on the whole country)
   let glance = [];
   function overview() {
     const s = store.get(), sl = slotOf(s.sel, model);
     const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
+    const scopeTitle = geoCls.kind === "eu-countries"
+      ? "All countries"
+      : geoCls.kind === "us-metrocast"
+        ? (mcView === "state" && mcFips ? `${US_STATE_META[mcFips]?.name || mcFips} HSAs` : `Covered states (${geoCls.coveredStateFips.size})`)
+        : "All states";
     aside.replaceChildren(
-      h("p", { class: "mp-place" }, "All states"),
+      h("p", { class: "mp-place" }, scopeTitle),
       h("p", { class: "mp-meta" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, `${horizon} wk ahead`].filter(Boolean).join(" · ")),
       h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null, "data-model-sheet": model, title: "Details" }, h("i"), manifest.label(model, candidates()))),
       h("dl", { class: "mp-rows" }, glance.map(([k, v, sub]) => h("div", { class: "mp-row" }, h("dt", null, k), h("dd", null, v, sub ? h("small", null, sub) : null)))),
@@ -224,29 +452,29 @@ export function mount(el, ctx) {
   function drawSummary() {
     let top = null, rising = 0, falling = 0, steady = 0, total = 0, n = 0;
     const rateId = counts() ? "f_rate" : "f_count";
-    for (const abbr of tiles.keys()) {
-      const e = entry(abbr);
+    const unitPlural = geoCls.kind === "eu-countries" ? "countries" : geoCls.kind === "us-metrocast" && mcView === "state" ? "HSAs" : "states";
+    for (const id of activeLocIds) {
+      const e = entry(id);
       if (!e) continue;
-      { const r = valueAt(abbr, rateId); if (fin(r) && (!top || r > top.v)) top = { abbr, v: r }; }
+      { const r = valueAt(id, rateId); if (fin(r) && (!top || r > top.v)) top = { id, v: r }; }
       if (horizon > 0 && fin(e.trend_pct)) { if (e.trend_pct > 5) rising++; else if (e.trend_pct < -5) falling++; else steady++; }
-      if (counts() && fin(e.median)) { total += e.median; n++; }
+      if (fin(e.median)) { total += e.median; n++; }
     }
     glance = [];
-    if (n) glance.push(["Total forecast", vf().value(total), `sum of ${n} states`]);
-    if (top) glance.push(["Highest", `${P.byAbbr.get(top.abbr)?.name ?? top.abbr}`, `${fmt(rateId, top.v)}${counts() ? " per 100k" : ""}`]);
+    if (counts() && n) glance.push(["Total forecast", vf().value(total), `sum of ${n} ${unitPlural}`]);
+    if (top) glance.push(["Highest", `${manifest.locationById.get(top.id)?.name ?? top.id}`, `${fmt(rateId, top.v)}${counts() ? " per 100k" : ""}`]);
     if (horizon > 0 && rising + falling + steady) {
       glance.push(["Rising", String(rising), "more than 5% above now"], ["Falling", String(falling), "more than 5% below now"], ["Steady", String(steady)]);
     }
     summary.replaceChildren();
   }
 
-  /* The readout beside the map: the hovered state, else the chart's location, else the highest. */
   function inspect() {
     if (!data || !model) { aside.replaceChildren(); return; }
-    const s = store.get(), here = P.abbrOf(s.location);
-    const abbr = hoverAbbr || (tiles.has(here) ? here : null);
-    if (!abbr) { overview(); return; }
-    const st = stateOf(abbr), loc = P.byAbbr.get(abbr), e = entry(abbr), V = vf();
+    const s = store.get();
+    const inspectId = hoverId || (activeLocIds.includes(s.location) ? s.location : null);
+    if (!inspectId) { overview(); return; }
+    const st = stateOf(inspectId), loc = manifest.locationById.get(inspectId), e = entry(inspectId), V = vf();
     const truth = st?.truth?.[tedOf()];
     const rows = [];
     const row = (k, v, sub, cls) => rows.push(h("div", { class: ["mp-row", cls] }, h("dt", null, k), h("dd", null, v, sub ? h("small", null, sub) : null)));
@@ -265,7 +493,7 @@ export function mount(el, ctx) {
     const sl = slotOf(s.sel, model);
     const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
     aside.replaceChildren(
-      h("p", { class: "mp-place" }, loc?.name ?? abbr),
+      h("p", { class: "mp-place" }, loc?.name ?? inspectId),
       h("p", { class: "mp-meta" }, [
         loc?.population ? `${valueFormat(null).value(loc.population)} residents` : null,
         tedOf() ? fmtDay(parseIso(tedOf())) : null,
@@ -277,16 +505,23 @@ export function mount(el, ctx) {
   }
 
   // ---------------------------------------------------------------- reacting
-  // off screen: nothing loads, and playing stops
   const screen = onScreen(el, (visible) => { if (!visible) stop(); });
   const offs = [
     () => screen.off(),
     onThemeChange(() => { resetColors(); screen.run(load); }),
-    // load() re-renders when the request is unchanged, so it covers a new place too
     store.on((s, prev, changed) => {
+      if (changed.has("location") && geoCls.kind === "us-metrocast") {
+        const nextFips = geoCls.stateFipsOf(s.location);
+        if (nextFips && nextFips !== mcFips) {
+          mcFips = nextFips;
+          mcView = "state";
+          buildView();
+        }
+      }
       if (["target", "date", "sel", "location"].some((k) => changed.has(k))) screen.run(load);
     }),
   ];
+  buildView();
   syncLine();
   load();
   return { destroy() { stop(); slot._ctl?.abort(); offs.forEach((off) => off()); } };

@@ -1532,12 +1532,16 @@ class SandboxDataLoader:
         # Per-100k rates only make sense for counts; rate/proportion targets are already normalized
         per_100k = not self.config.get_target_metadata(target)["is_rate"]
 
-        # Oracle truth
+        # Oracle truth (include -14d window so negative horizon_offset_days such as RespiCast h=0 are retained)
+        try:
+            obs_since = (date.fromisoformat(str(reference_date)[:10]) - timedelta(days=14)).isoformat()
+        except ValueError:
+            obs_since = reference_date
         lf_o = self.cache_mgr.scan_oracle()
         o_sub = pl.DataFrame()
         if lf_o is not None:
             o_sub = (
-                lf_o.filter((pl.col("target") == target) & (pl.col("target_end_date") >= reference_date))
+                lf_o.filter((pl.col("target") == target) & (pl.col("target_end_date") >= obs_since))
                 .collect()
             )
             if not o_sub.is_empty():
@@ -1547,32 +1551,40 @@ class SandboxDataLoader:
 
         geo = self.get_geo_graph()
         primary_ids = set(geo.resolve_pool("all") or [l for l in locations if l != "US"])
+        agg_ids = set(geo.aggregate_locations_in_scope()) - {"US"}
+        spatial_ids = primary_ids | agg_ids
+
         states_data = {}
+        locations_data = {}
         for loc_id, loc_info in locations.items():
-            if loc_id not in primary_ids:
+            if loc_id not in spatial_ids:
                 continue
             abbr = loc_info["abbreviation"]
             pop = loc_info.get("population")
-            states_data[abbr] = {
+            rec = {
+                "id": loc_id,
                 "fips": loc_id,
+                "abbr": abbr,
                 "name": loc_info["name"],
                 "population": pop,
                 "truth": {},
                 "truth_rate": {},
                 "models": {},
             }
+            locations_data[loc_id] = rec
+            if loc_id in primary_ids and abbr not in states_data:
+                states_data[abbr] = rec
 
         if not o_sub.is_empty():
             for row in o_sub.iter_rows(named=True):
                 loc = str(row["location"])
-                if loc in locations and loc in primary_ids:
-                    abbr = locations[loc]["abbreviation"]
+                if loc in locations and loc in spatial_ids:
                     val = float(row["oracle_value"]) if row["oracle_value"] is not None and not np.isnan(row["oracle_value"]) else None
                     ted = str(row["target_end_date"])
                     pop = locations[loc].get("population") or 1
                     rate = round((val / pop) * 100000, 2) if per_100k and val is not None and pop > 1 else None
-                    states_data[abbr]["truth"][ted] = val
-                    states_data[abbr]["truth_rate"][ted] = rate
+                    locations_data[loc]["truth"][ted] = val
+                    locations_data[loc]["truth_rate"][ted] = rate
 
         available_horizons = set()
         dates_by_horizon = {}
@@ -1621,18 +1633,22 @@ class SandboxDataLoader:
             c_025 = find_quantile_column(piv_cols, 0.25)
             c_075 = find_quantile_column(piv_cols, 0.75)
 
+            base_h = 0
+            h_vals = [int(x) for x in piv.get_column("horizon").to_list() if x is not None]
+            if h_vals:
+                base_h = 0 if 0 in h_vals else min(h_vals)
+
             h0_medians = {}
             if c_05 is not None:
-                h0_rows = piv.filter(pl.col("horizon") == 0).select(["location", c_05]).iter_rows()
+                h0_rows = piv.filter(pl.col("horizon") == base_h).select(["location", c_05]).iter_rows()
                 for loc, med in h0_rows:
                     if med is not None and not np.isnan(med):
                         h0_medians[str(loc)] = float(med)
 
             for row in piv.iter_rows(named=True):
                 loc = str(row["location"])
-                if loc not in locations or loc not in primary_ids:
+                if loc not in locations or loc not in spatial_ids:
                     continue
-                abbr = locations[loc]["abbreviation"]
                 h = int(row["horizon"])
                 ted = str(row["target_end_date"])
                 available_horizons.add(h)
@@ -1653,13 +1669,14 @@ class SandboxDataLoader:
                 if med is not None and h0_val is not None and h0_val > 0:
                     trend_pct = round(((med - h0_val) / h0_val) * 100, 1)
 
-                truth_val = states_data[abbr]["truth"].get(ted)
+                loc_rec = locations_data[loc]
+                truth_val = loc_rec["truth"].get(ted)
                 error = rnd(med - truth_val, 1) if med is not None and truth_val is not None else None
 
-                if mid not in states_data[abbr]["models"]:
-                    states_data[abbr]["models"][mid] = {}
+                if mid not in loc_rec["models"]:
+                    loc_rec["models"][mid] = {}
 
-                states_data[abbr]["models"][mid][h] = {
+                loc_rec["models"][mid][h] = {
                     "median": rnd(med, 1),
                     "rate_per_100k": rate,
                     "q025": rnd(q025, 1),
@@ -1677,8 +1694,10 @@ class SandboxDataLoader:
             "target": target,
             "reference_date": reference_date,
             "horizons": sorted_horizons,
+            "available_horizons": sorted_horizons,
             "dates_by_horizon": dates_by_horizon,
             "states": states_data,
+            "locations": locations_data,
             "selected_horizon": horizon if horizon is not None and horizon != "all" else None,
         }
 

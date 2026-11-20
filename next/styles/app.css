@@ -7,6 +7,12 @@
 /* ---------- the chart view ---------- */
 /* not clipped: the bubbles' shadows fall onto the page below */
 .app-view { position: relative; height: max(480px, calc(100svh - var(--peek))); }
+.app-view[hidden] { display: none; }
+.app:not(.is-globe-open) .app-globe-back { display: none; }
+.app.is-globe-open .app-fixed [data-zone="tl"] > :not(.app-globe-back) { display: none; }
+.app.is-globe-open .app-view,
+.app.is-globe-open .app-pmf,
+.app.is-globe-open .app-sections { display: none; }
 .fc-canvas {
   position: absolute; inset: 0; display: block; width: 100%; height: 100%;
   touch-action: pan-y; user-select: none; -webkit-user-select: none; outline: none;

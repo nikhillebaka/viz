@@ -542,13 +542,17 @@ class VizConfig:
                     best = m
         return best
 
-    def get_recommended_models(self, available_models: Optional[List[str]] = None) -> List[str]:
+    def get_recommended_models(
+        self,
+        available_models: Optional[List[str]] = None,
+        model_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> List[str]:
         """
-        Get list of recommended models to pre-select in the dashboard.
+        Determine recommended starting models without hardcoded team bias.
         Priority:
-        1. User config: `priority_models` or `recommended_models`
-        2. Standard reference ensembles, baselines, and production models
-        3. First 5 available models
+        1. Explicit `priority_models` or `recommended_models` in user config
+        2. Official ensemble models (metadata `ensemble=True` or generic `"ensemble"` in id, excluding baselines), up to 2
+        3. Empty list when neither exists (caller falls back transparently or lets user pick)
         """
         if available_models is None:
             available_models = []
@@ -559,15 +563,18 @@ class VizConfig:
             if res:
                 return res
 
-        rec = []
+        meta_map = model_meta or {}
+        ensembles: List[str] = []
         for m in available_models:
-            m_lower = m.lower()
-            if any(k in m_lower for k in ["baseline", "prod", "flusion", "ensemble"]):
-                rec.append(m)
+            meta = meta_map.get(m) or {}
+            if meta.get("baseline_model") or "baseline" in m.lower():
+                continue
+            if meta.get("ensemble") or "ensemble" in m.lower():
+                ensembles.append(m)
 
-        if rec:
-            return rec[:7]
-        return available_models[:5]
+        # Prefer canonical hub ensembles (e.g. shorter hub-level name) stably without team favoritism
+        ensembles.sort(key=lambda mid: (0 if "-ensemble" in mid.lower() or mid.lower().endswith("ensemble") else 1, len(mid), mid))
+        return ensembles[:2]
 
     def get_server_config(self) -> Dict[str, Any]:
         """Get default server host, port, and allowed origins."""

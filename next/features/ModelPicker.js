@@ -399,10 +399,12 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   }
 
   function renderRail() {
+    if (state0.set === "recommended" && !g.sets.recommended) state0.set = "all";
     const any = RAIL.some((f) => rail0[f.key].size) || state0.set !== "all";
+    const setEntries = Object.entries(SETS).filter(([k]) => k !== "recommended" || g.sets[k] > 0 || state0.set === k);
     const blocks = [h("div", { class: "mb-rail-block" },
       h("div", { class: "mb-rail-title" }, h("span", null, "Sets"), any ? h("button", { type: "button", class: "c-link", "data-clear": "" }, "Clear") : null),
-      ...Object.entries(SETS).map(([k, t]) => opt({ "data-set": k }, t, g.sets[k], state0.set === k)))];
+      ...setEntries.map(([k, t]) => opt({ "data-set": k }, t, g.sets[k], state0.set === k)))];
     for (const f of RAIL) {
       const set = rail0[f.key], n = g.counts[f.key];
       const vals = g.values[f.key].filter((v) => n.get(v) || set.has(v));

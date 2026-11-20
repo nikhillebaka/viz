@@ -11,7 +11,8 @@ import { parseIso, linear, niceStep, niceMax, ticks, monthStarts, DAY, WEEK } fr
 import { chartFonts } from "../../chart/render.js";
 import { seriesColor } from "../../chart/layout.js";
 import { slotOf, isCharted } from "../../features/selection.js";
-import { TILES, COLUMNS } from "../../features/LocationPicker.js";
+import { TILES, COLUMNS, classifyHubGeo } from "../../geo/picker_geo.js";
+import { EU_GRID_PROPORTIONED, EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT } from "../../geo/eu_tiles.js";
 import { poolWeeks, poolSize } from "./pool.js";
 import { slideText } from "../../ui/controls.js";
 import {
@@ -79,19 +80,37 @@ export function mount(el, ctx) {
   fig.append(stripRow, headRow, rowsEl, none);
   const readout = pointerReadout(fig);
   const skillWrap = h("div", { class: "pe-skill pe-skill-scroll" });
-  const mapGrid = h("div", { class: "mp-grid pe-map", style: { "--cols": COLUMNS, "--rows": 8 } });
+  const geoCls = classifyHubGeo(manifest);
+  const hasPeakGrid = geoCls.kind === "us-states" || geoCls.kind === "eu-countries";
+  const gridCols = geoCls.kind === "eu-countries" ? EU_GRID_PROPORTIONED.cols : COLUMNS;
+  const gridRows = geoCls.kind === "eu-countries" ? EU_GRID_PROPORTIONED.rows : 8;
+  const mapGrid = h("div", { class: "mp-grid pe-map", style: { "--cols": gridCols, "--rows": gridRows } });
   const mapNote = h("p", { class: "v-note pe-key" });
+  const mapCol = hasPeakGrid ? h("div", { class: "pe-map-col" }, mapHead.el, mapGrid, mapNote) : null;
   f.body.append(note, fig,
     h("div", { class: "pe-lower" },
-      h("div", { class: "pe-skill-col" }, skillHead.el, skillWrap),
-      h("div", { class: "pe-map-col" }, mapHead.el, mapGrid, mapNote)));
+      ...[h("div", { class: "pe-skill-col" }, skillHead.el, skillWrap), mapCol].filter(Boolean)));
   const tiles = new Map();
-  for (const [abbr, [c, r]] of Object.entries(TILES)) {
-    const loc = P.byAbbr.get(abbr);
-    if (!loc) continue;
-    const b = h("button", { type: "button", class: "mp-tile", style: { gridColumn: c + 1, gridRow: r + 1 }, "aria-label": loc.name, onclick: () => store.set({ location: loc.id }) },
-      h("span", { class: "mp-abbr" }, abbr), h("span", { class: "mp-val" }));
-    tiles.set(abbr, b); mapGrid.append(b);
+  if (geoCls.kind === "eu-countries") {
+    const spec = geoCls.ukSplitAvailable ? EU_TILES_PROPORTIONED_UK_SPLIT : EU_TILES_PROPORTIONED;
+    for (const [id, [c, r, w = 1, hs = 1]] of Object.entries(spec)) {
+      const loc = manifest.locationById.get(id);
+      if (!loc) continue;
+      const b = h("button", {
+        type: "button", class: ["mp-tile", w * hs === 1 && "is-compact"],
+        style: { gridColumn: `${c} / span ${w}`, gridRow: `${r} / span ${hs}` },
+        "aria-label": loc.name || id, onclick: () => store.set({ location: loc.id }),
+      }, h("span", { class: "mp-abbr" }, loc.abbr || id), h("span", { class: "mp-val" }));
+      tiles.set(loc.abbr || id, b); mapGrid.append(b);
+    }
+  } else if (geoCls.kind === "us-states") {
+    for (const [abbr, [c, r]] of Object.entries(TILES)) {
+      const loc = P.byAbbr.get(abbr);
+      if (!loc) continue;
+      const b = h("button", { type: "button", class: "mp-tile", style: { gridColumn: c + 1, gridRow: r + 1 }, "aria-label": loc.name, onclick: () => store.set({ location: loc.id }) },
+        h("span", { class: "mp-abbr" }, abbr), h("span", { class: "mp-val" }));
+      tiles.set(abbr, b); mapGrid.append(b);
+    }
   }
 
   // ---------------------------------------------------------------- loading
@@ -103,6 +122,14 @@ export function mount(el, ctx) {
   function load(force) {
     force = force === true;
     const s = store.get();
+    const t = target();
+    if (t?.is_categorical || (t?.output_types?.length && !t.output_types.includes("quantile") && !t.output_types.includes("sample"))) {
+      Object.values(slots).forEach((x) => x._ctl?.abort());
+      reqKey = ""; resp = null;
+      f.loading(false);
+      f.empty(`No peak forecasts · ${t?.short ?? s.target}`);
+      return;
+    }
     const base = { target: s.target, location: s.location, date: s.date, skill_scope: opt.scope, common: fair() ? "1" : null };
     const ids = mine();
     const urlFor = (models, fallback) => `/api/peaks?${query({ ...base, models, fallback })}`;
@@ -651,6 +678,7 @@ export function mount(el, ctx) {
 
   // ---------------------------------------------------------------- peak map
   function renderMap() {
+    if (!hasPeakGrid) { mapHead.el.hidden = true; return; }
     const id = opt.model;
     mapHead.el.hidden = !id;
     const locs = pmap?.locations || {}, here = P.abbrOf(store.get().location);

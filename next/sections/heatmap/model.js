@@ -193,8 +193,14 @@ export function buildGrid(resp, v, o = {}) {
     relBase = { onRows, b, has };
   }
 
+  const cmpReg = (a, b) => {
+    const ra = o.region(a), rb = o.region(b);
+    if (typeof ra === "number" || typeof rb === "number") return (Number(ra) || 99) - (Number(rb) || 99);
+    return String(ra ?? "zzz").localeCompare(String(rb ?? "zzz"));
+  };
+
   // columns: locations by region, then abbreviation; others as the server orders them
-  if (v.cols === "location" && o.region) colKeys.sort((a, b) => (o.region(a) || 99) - (o.region(b) || 99) || a.localeCompare(b));
+  if (v.cols === "location" && o.region) colKeys.sort((a, b) => cmpReg(a, b) || a.localeCompare(b));
   if (v.cols === "date") colKeys.sort();
   if (v.cols === "horizon") colKeys.sort((a, b) => a - b);
 
@@ -219,7 +225,7 @@ export function buildGrid(resp, v, o = {}) {
   else if (v.sort === "peak") {
     const peak = (rk) => { let best = -Infinity, j = Infinity; rowVals(rk).forEach((x, i) => { if (fin(x) && x > best) { best = x; j = i; } }); return j; };
     rowKeys.sort((a, b) => peak(a) - peak(b) || byKey(a, b));
-  } else if (v.sort === "region" && o.region) rowKeys.sort((a, b) => (o.region(a) || 99) - (o.region(b) || 99) || byKey(a, b));
+  } else if (v.sort === "region" && o.region) rowKeys.sort((a, b) => cmpReg(a, b) || byKey(a, b));
 
   const nR = rowKeys.length;
   const values = new Float64Array(nR * nC);

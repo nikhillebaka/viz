@@ -1,10 +1,11 @@
 /* The heatmap section: rows × columns × metric over the shared scope, drawn on one canvas in the score
  * colors. Hover a cell for its numbers; click it to show that forecast on the chart (location, date and
  * model), then the page scrolls up to the chart. Pure logic is in model.js. */
-import { scopeOf, seasonWeekOf, startYearOf } from "../scope.js";
+import { scopeOf, seasonWeekOf, startYearOf, targetHorizons } from "../scope.js";
 import { onThemeChange, cssColor, reducedMotion } from "../../lib/dom.js";
 import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
+import { US_STATE_META } from "../../geo/eu_tiles.js";
 import { chartFonts, canvasMeasure } from "../../chart/render.js";
 import { chart as chartModel, setBaseline, slotOf, COLORS } from "../../features/selection.js";
 import { nearestRound } from "../../features/url.js";
@@ -16,8 +17,9 @@ import { AXES, AXIS_LABEL, METRICS, modelAxis, waveView, metricsFor, sortsFor, n
 
 const KEY = "viz.heatmap";
 const MON = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" });
-const ROW_H = 20, GAP = 2, GROUP_GAP = 6, TOP = 22, LABEL_PAD = 16, REGION_W = 96;
+const ROW_H = 20, GAP = 2, GROUP_GAP = 6, TOP = 22, LABEL_PAD = 16, REGION_W = 104;
 const fin = (x) => typeof x === "number" && Number.isFinite(x);
+const STATE_NAME_BY_ABBR = new Map(Object.values(US_STATE_META).filter((x) => x.abbr && x.id !== "US").map((x) => [x.abbr, x.name]));
 
 /** @returns {{ destroy(): void }} */
 export function mount(el, ctx) {
@@ -59,7 +61,7 @@ export function mount(el, ctx) {
       isDefault: () => view.cols === AXES[view.rows][0], onSelect: (cols) => setView({ cols }) }),
     model: fragment({ label: "Model", title: "Model", items: modelChoices, value: () => view.model,
       isDefault: () => view.model === "truth", onSelect: (model) => setView({ model }) }),
-    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => [0, 1, 2, 3].map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk` })),
+    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => targetHorizons(manifest, store.get().target).map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk` })),
       value: () => view.horizon, isDefault: () => view.horizon === 1, onSelect: (horizon) => setView({ horizon }) }),
     metric: fragment({ label: "Metric", title: "Metric", items: () => metricsFor(view, counts()).map((m) => ({ value: m, label: METRICS[m].label })),
       value: () => view.metric, isDefault: () => view.metric === metricsFor(view, counts())[0], onSelect: (metric) => setView({ metric }) }),
@@ -102,7 +104,12 @@ export function mount(el, ctx) {
   // soft: only the chart's date or place changed, so an unchanged request needs a redraw, not a rebuild
   function load(force = false, soft = false) {
     const s = store.get(), sc = scopeOf(s, manifest);
+    const tMeta = manifest.targetById.get(s.target);
     const none = (text) => { slot._ctl?.abort(); reqKey = ""; resp = grid = null; lay = null; f.loading(false); f.empty(text); };
+    if (tMeta?.is_categorical || (tMeta?.output_types?.length && !tMeta.output_types.includes("quantile"))) {
+      none("Categorical target — inspect rate-change probabilities above");
+      return;
+    }
     if (!sc.seasons.length) { none("No season in scope"); return; }
     const models = modelAxis(view) ? withBaseline(s.sel.selected) : null;
     // the server scores every model when given none: never ask for that
@@ -139,6 +146,17 @@ export function mount(el, ctx) {
   const weekOf = (iso) => { const id = manifest.seasonOf(iso); return id ? seasonWeekOf(startYearOf(id), parseIso(iso)) : NaN; };
   const withBaseline = (ids) => (ids.length ? [...new Set([...ids, manifest.baseline].filter(Boolean))] : null);
 
+  function regionOf(key) {
+    const loc = P.byAbbr.get(key) || manifest.locationById.get(key);
+    const reg = loc?.region;
+    if (reg) {
+      const m = /^HHS-(\d+)$/.exec(reg);
+      if (m) return +m[1];
+      return reg;
+    }
+    return HHS[key] ?? "Other";
+  }
+
   function rebuild() {
     if (!resp) return;
     const s = store.get(), sc = scopeOf(s, manifest);
@@ -146,7 +164,9 @@ export function mount(el, ctx) {
     hover = null; cursor.hidden = true; readout.hide();
     grid = buildGrid(resp, view, {
       baseline: manifest.baseline, weeks: sc.weeks, weekOf, horizons: sc.horizons,
-      region: (a) => HHS[a], population: (a) => P.byAbbr.get(a)?.population, season: (iso) => manifest.seasonOf(iso),
+      region: regionOf,
+      population: (a) => (P.byAbbr.get(a) || manifest.locationById.get(a))?.population,
+      season: (iso) => manifest.seasonOf(iso),
       label: (k) => labelOf(view.rows, k, ids),
     });
     grid.ids = ids;
@@ -283,9 +303,15 @@ export function mount(el, ctx) {
         g.strokeStyle = line; g.lineWidth = 1; g.beginPath();
         g.moveTo(bx + 4, y0 + 0.5); g.lineTo(bx + 0.5, y0 + 0.5); g.lineTo(bx + 0.5, y1 - 0.5); g.lineTo(bx + 4, y1 - 0.5); g.stroke();
         g.textAlign = "right"; g.textBaseline = "middle";
-        g.font = `${Fo.axis}px ${Fo.mono}`; g.fillStyle = ink3;
-        g.fillText(`Region ${n}`, bx - 6, y0 + 7);
-        if (y1 - y0 > 26) { g.font = `${Fo.micro ?? 11}px ${Fo.sans}`; g.fillStyle = ink; g.fillText(clip(HHS_NAMES[n] ?? "", L.reg - 24, g.font, measure), bx - 6, y0 + 21); }
+        if (typeof n === "number" && HHS_NAMES[n]) {
+          g.font = `${Fo.axis}px ${Fo.mono}`; g.fillStyle = ink3;
+          g.fillText(`Region ${n}`, bx - 6, y0 + 7);
+          if (y1 - y0 > 26) { g.font = `${Fo.micro ?? 11}px ${Fo.sans}`; g.fillStyle = ink; g.fillText(clip(HHS_NAMES[n], L.reg - 20, g.font, measure), bx - 6, y0 + 21); }
+        } else {
+          const title = STATE_NAME_BY_ABBR.get(n) || String(n || "");
+          g.font = `${Fo.micro ?? 11}px ${Fo.sans}`; g.fillStyle = ink;
+          g.fillText(clip(title, L.reg - 18, g.font, measure), bx - 6, Math.min(y0 + 10, (y0 + y1) / 2));
+        }
         i0 = r;
       }
       g.textAlign = "left";
@@ -397,7 +423,7 @@ export function mount(el, ctx) {
   function showOnChart(r, c) {
     const keys = { [view.rows]: grid.rows[r].key, [view.cols]: grid.cols[c].key };
     const s = store.get(), patch = {};
-    if (keys.location) { const l = P.byAbbr.get(keys.location); if (l) patch.location = l.id; }
+    if (keys.location) { const l = manifest.locationById.get(keys.location) || P.byAbbr.get(keys.location); if (l) patch.location = l.id; }
     if (keys.date) { const iso = nearestRound(keys.date, manifest); if (iso) patch.date = iso; }
     const model = keys.model ?? (view.model !== "truth" ? view.model : null);
     if (model) {

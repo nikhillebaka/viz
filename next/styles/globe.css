@@ -1,0 +1,127 @@
+/* Monochrome luminance Globe overlay (/next/ grammar: zero vignette, liquid-glass HUD). */
+.app-globe {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-fixed) - 1);
+  background: var(--surface-paper);
+}
+.gb-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface-paper);
+}
+.gb-canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; display: block; }
+.gb-canvas:active { cursor: grabbing; }
+
+.gb-recents {
+  position: absolute;
+  z-index: var(--z-chrome);
+  top: calc(var(--inset) + var(--size-control) + var(--gap));
+  left: var(--inset);
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+  max-width: calc(100% - 360px);
+  pointer-events: none;
+}
+.gb-recents > * { pointer-events: auto; }
+
+.gb-hud-bl {
+  position: absolute;
+  bottom: var(--inset);
+  left: var(--inset);
+  z-index: var(--z-chrome);
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+.gb-hud-bl > * { pointer-events: auto; }
+
+.gb-hud-br {
+  position: absolute;
+  bottom: var(--inset);
+  right: var(--inset);
+  z-index: var(--z-chrome);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  pointer-events: none;
+}
+.gb-hud-br > * { pointer-events: auto; }
+
+.gb-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-8);
+  height: var(--size-control-sm);
+  padding: 0 var(--space-12);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-small);
+  color: var(--ink-secondary);
+}
+.gb-key-ramp { width: 96px; height: var(--space-6); border-radius: var(--radius-pill); }
+
+.gb-drawer {
+  position: absolute;
+  top: calc(var(--inset) + var(--size-control) + var(--gap));
+  right: var(--inset);
+  z-index: var(--z-chrome);
+  width: 320px;
+  max-width: calc(100vw - 2 * var(--inset));
+  max-height: calc(100svh - 2 * var(--inset) - 2 * var(--size-control) - 2 * var(--gap));
+  padding: var(--space-16) var(--space-20);
+  border-radius: var(--radius-panel);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ink-faint) transparent;
+}
+.gb-drawer-head { padding: 0 0 var(--space-12); border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.gb-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-12); }
+.gb-title { margin: 0; font-size: var(--text-title); font-weight: var(--weight-strong); color: var(--ink-primary); letter-spacing: -0.015em; }
+.gb-sub { margin: var(--space-4) 0 0; font-size: var(--text-small); color: var(--ink-tertiary); }
+
+.gb-nums { padding: var(--space-12) 0; border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
+.gb-num-row { display: flex; flex-wrap: wrap; gap: var(--space-12) var(--space-20); }
+.gb-num { display: flex; flex-direction: column; gap: var(--space-2); min-width: 82px; }
+.gb-num-k { font-size: var(--text-micro); color: var(--ink-tertiary); text-transform: uppercase; letter-spacing: 0.04em; }
+.gb-num-v { font-size: var(--text-title); font-weight: var(--weight-medium); color: var(--ink-primary); font-variant-numeric: tabular-nums; }
+.gb-num-s { font-size: var(--text-small); color: var(--ink-tertiary); }
+
+.gb-drawer-acts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding-top: var(--space-12);
+  font-size: var(--text-control);
+}
+.gb-open-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  font-weight: var(--weight-medium);
+}
+.gb-open-btn:hover { text-decoration: underline; }
+
+.gb-metros { margin-top: var(--space-12); padding-top: var(--space-12); border-top: var(--stroke-hairline) solid var(--line-hairline); }
+.gb-metros-title {
+  margin: 0 0 var(--space-6);
+  font-size: var(--text-micro);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-tertiary);
+}
+
+@media (max-width: 960px) {
+  .gb-recents { max-width: calc(100% - 2 * var(--inset)); }
+  .gb-drawer { width: 280px; }
+}
