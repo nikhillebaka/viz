@@ -103,7 +103,8 @@ export class Interaction {
     let t = null, preview = null, hot = null, cursor = "";
     if (this.mouse && s && nav && !nav.moving && !activeLayer()) {
       const [px, py] = this.local(this.mouse.x, this.mouse.y);
-      const t0 = chart.fan.dates[0], wk = t0 + Math.round((s.x.invert(px) - t0) / WEEK) * WEEK, xw = s.x(wk);
+      const g0 = Number.isFinite(chart.fan.gridOrigin) ? chart.fan.gridOrigin : chart.fan.dates[0];
+      const wk = g0 + Math.round((s.x.invert(px) - g0) / WEEK) * WEEK, xw = s.x(wk);
       const hit = this.#hit(px, py);
       if (hit) { cursor = "pointer"; if (hit.ctx) hot = hit.id; else preview = hit.id; }
       if (xw >= 0 && xw <= s.w && py <= s.ay && (hit || nearMark(s, px, py))) t = wk;

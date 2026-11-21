@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { layoutFan, hoverInfo, lineUnder, labelAt, pointsAt, seriesColor } from "../../chart/layout.js";
 import { decodeFan } from "../../lib/api.js";
 import { valueFormat } from "../../lib/format.js";
-import { parseIso, WEEK } from "../../lib/scale.js";
+import { DAY, parseIso, WEEK } from "../../lib/scale.js";
 import { buildFan, spread, weeks } from "./fixtures/synthetic.mjs";
 
 const W = 1440, H = 900;
@@ -307,4 +307,87 @@ test("pointsAt morphs smoothly across the boundary where truth anchor drops out"
   // Horizon h=0 interpolates smoothly from pA[1] to pZ[0]
   assert.equal(mid[1].h, 0);
   assert.equal(mid[1].t, (pA[1].t + pZ[0].t) / 2);
+});
+
+test("RespiCast 1-indexed Wednesday rounds align cutoff, hoverInfo, and fanEnd with Sunday truth", () => {
+  // VZF2 payload builder with Wednesday rounds, Sunday observations, and horizon_offset_days = -10
+  const obs = [
+    ["2026-10-25", 100],
+    ["2026-11-01", 120],
+    ["2026-11-08", 140],
+    ["2026-11-15", 160],
+  ];
+  const rounds = ["2026-11-11", "2026-11-18"];
+  const quantiles = [0.025, 0.25, 0.5, 0.75, 0.975];
+  const buildRespiFan = (globalHorizons, perRoundHorizons) => {
+    const body = [...obs.map(([, v]) => v)];
+    const offset = body.length;
+    for (let r = 0; r < rounds.length; r++) {
+      const hs = perRoundHorizons[r];
+      for (let hi = 0; hi < globalHorizons.length; hi++) {
+        const h = globalHorizons[hi];
+        const m = hs.includes(h) ? 150 + r * 20 + h * 10 : NaN;
+        for (const q of quantiles) body.push(Number.isFinite(m) ? m * (1 + (q - 0.5) * 0.4) : NaN);
+      }
+    }
+    const headObj = {
+      version: 2,
+      target: "ARI incidence",
+      season: "2026-2027",
+      location: "DE",
+      start: "2026-08-03",
+      end: "2027-07-25",
+      horizon_offset_days: -10,
+      rounds,
+      horizons: globalHorizons,
+      quantiles,
+      observed: { dates: obs.map(([d]) => d), offset: 0, length: obs.length },
+      prior_max: null,
+      models: [{ id: "m0", offset, rounds: [0, 1], horizons: globalHorizons }],
+    };
+    let jBytes = new TextEncoder().encode(JSON.stringify(headObj));
+    if (jBytes.length % 4) {
+      const p = new Uint8Array(jBytes.length + (4 - (jBytes.length % 4))).fill(32);
+      p.set(jBytes);
+      jBytes = p;
+    }
+    const buf = new ArrayBuffer(8 + jBytes.length + body.length * 4);
+    const u8 = new Uint8Array(buf), dv = new DataView(buf);
+    u8.set([86, 90, 70, 50], 0); // "VZF2"
+    dv.setUint32(4, jBytes.length, true);
+    u8.set(jBytes, 8);
+    body.forEach((v, i) => dv.setFloat32(8 + jBytes.length + 4 * i, v, true));
+    return decodeFan(buf);
+  };
+
+  const rFan = buildRespiFan([1, 2, 3, 4], [[1, 2, 3, 4], [1, 2, 3, 4]]);
+  assert.equal(rFan.gridOrigin, parseIso("2026-10-25"), "gridOrigin aligns to Sunday truth");
+  assert.equal(rFan.horizons.join(","), "1,2,3,4");
+
+  const refIdx = rFan.indexOf("2026-11-18");
+  const s = layoutFan(rFan, base({ t: refIdx, ymax: 400, models: [{ id: "m0", slot: 0, label: "m0" }] }), W, H);
+  // h=1 on Wed Nov 18 with -10d offset is Sun Nov 15 -> cutoff is Sun Nov 8 (strictly before h=1)
+  assert.equal(s.cutoff, parseIso("2026-11-08"));
+
+  // Hovering on Sun Nov 15 finds observed AND h=1 forecast; hovering Sun Nov 22 finds h=2
+  const h1 = hoverInfo(rFan, s, parseIso("2026-11-15"));
+  assert.equal(h1.h, 1);
+  assert.equal(h1.observed, 160);
+  assert.equal(h1.rows.length, 1);
+  const h2 = hoverInfo(rFan, s, parseIso("2026-11-22"));
+  assert.equal(h2.h, 2);
+  assert.equal(h2.rows.length, 1);
+
+  // Direct label sits 14px right of the h=4 forecast target date (Wed Nov 18 + 4 wk - 10d = Sun Dec 06)
+  const expectedFanEndX = s.x(parseIso("2026-11-18") + 4 * WEEK - 10 * DAY);
+  assert.ok(Math.abs(s.labels[0].x - (expectedFanEndX + 14)) < 1e-6);
+
+  // Mixed global horizons [0, 1, 2, 3, 4] (older round had h=0) where Nov 18 only forecasts [1, 2, 3, 4]
+  const mixedFan = buildRespiFan([0, 1, 2, 3, 4], [[0, 1, 2, 3, 4], [1, 2, 3, 4]]);
+  const mIdx = mixedFan.indexOf("2026-11-18");
+  const ms = layoutFan(mixedFan, base({ t: mIdx, ymax: 400, models: [{ id: "m0", slot: 0, label: "m0" }] }), W, H);
+  assert.equal(ms.cutoff, parseIso("2026-11-08"), "cutoff uses active round earliest forecast (h=1 -> Nov 15, so Nov 8), not global h=0");
+  const h0 = hoverInfo(mixedFan, ms, parseIso("2026-11-08"));
+  assert.equal(h0.h, null, "phantom empty h=0 reads as pure observed history");
+  assert.equal(h0.observed, 140);
 });

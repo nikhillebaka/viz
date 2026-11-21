@@ -57,7 +57,7 @@
  *               ghost, summary, hit: { x0, x1, y0, y1 } | null }]
  *   hoverX   x of the hover hairline, or null;  missing: charted ids with no forecast this week
  * Every path (line, lo, hi, dots, observed parts) is a flat array [x0, y0, x1, y1, …]. */
-import { WEEK, linear, niceStep, ticks as steps, monthStarts } from "../lib/scale.js";
+import { DAY, WEEK, linear, niceStep, ticks as steps, monthStarts } from "../lib/scale.js";
 import { fmtDay, fmtMonth } from "../lib/format.js";
 import { fitLabels } from "../lib/labels.js";
 
@@ -156,31 +156,51 @@ function folded(pts, k) {
   return out;
 }
 
-// the data cutoff for a reference date: the last observed week before it (else the week before)
-function cutoffFor(fan, ref) {
+// the earliest non-anchor forecast target timestamp actually present on timeline index di, else fallback from fan.horizons
+function firstTargetFor(fan, di, ref, ids) {
+  let best = Infinity;
+  const check = (list) => {
+    for (const id of list) {
+      const pts = fan.points(id, di, 0);
+      const first = pts?.find((p) => !p.anchor);
+      if (first && first.t < best) best = first.t;
+    }
+  };
+  if (ids?.length) check(ids);
+  if (!Number.isFinite(best) && fan.present?.size) check(fan.present);
+  if (Number.isFinite(best)) return Math.min(ref, best);
+  const offsetMs = (fan.horizonOffsetDays || 0) * DAY;
+  const firstH = fan.horizons.length ? Math.min(...fan.horizons) : 0;
+  return Math.min(ref, ref + firstH * WEEK + offsetMs);
+}
+
+// the data cutoff for timeline week di: the last observed week before the first forecast target (else 1 wk before it)
+function cutoffFor(fan, di, ref, ids) {
+  const firstTarget = firstTargetFor(fan, di, ref, ids);
   const o = fan.observed;
   let lo = 0, hi = o.length;
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (o[mid].t < ref) lo = mid + 1; else hi = mid; }
-  return lo > 0 ? o[lo - 1].t : ref - WEEK;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (o[mid].t < firstTarget) lo = mid + 1; else hi = mid; }
+  return lo > 0 ? o[lo - 1].t : firstTarget - WEEK;
 }
 
 // interpolate the cutoff across neighbouring rounds so scrolling beyond truth never jumps mid-animation
-function cutoffAt(fan, t, ref, whole) {
+function cutoffAt(fan, t, ref, whole, ids) {
   const D = fan.dates;
   if (!D.length) return ref - WEEK;
-  if (whole) return cutoffFor(fan, ref);
+  if (whole) return cutoffFor(fan, clamp(Math.round(t), 0, D.length - 1), ref, ids);
   const i0 = clamp(Math.floor(t), 0, D.length - 1);
   const i1 = clamp(Math.ceil(t), 0, D.length - 1);
-  if (i0 === i1) return cutoffFor(fan, D[i0]);
+  if (i0 === i1) return cutoffFor(fan, i0, D[i0], ids);
   const frac = clamp(t - i0, 0, 1);
-  const c0 = cutoffFor(fan, D[i0]), c1 = cutoffFor(fan, D[i1]);
+  const c0 = cutoffFor(fan, i0, D[i0], ids), c1 = cutoffFor(fan, i1, D[i1], ids);
   return c0 + (c1 - c0) * frac;
 }
 
-// the horizon a week falls on, relative to timeline week di, or null outside the forecast window
+// the horizon a week falls on, relative to timeline week di (including horizonOffsetDays), or null outside the window
 function horizonOf(fan, di, t) {
   if (!Number.isFinite(t) || !fan.dates.length) return null;
-  const h = Math.round((t - fan.dates[di]) / WEEK);
+  const offsetMs = (fan.horizonOffsetDays || 0) * DAY;
+  const h = Math.round((t - fan.dates[di] - offsetMs) / WEEK);
   return fan.horizons.includes(h) ? h : null;
 }
 
@@ -216,6 +236,7 @@ export function layoutFan(fan, opts, w, h) {
   const axisFmt = opts.format?.axis || String;
   const pad = { l: 56, r: 150, t: 72, b: 64, ...opts.pad };
   const D = fan.dates, n = D.length;
+  const offsetMs = (fan.horizonOffsetDays || 0) * DAY;
   const lastH = fan.horizons.length ? Math.max(...fan.horizons) : 3;
   const levels = Array.isArray(opts.levels) ? opts.levels : opts.level === 0 ? [] : [opts.level ?? 0.95];
   const level = levels[0] ?? 0, outcome = opts.outcome !== false;
@@ -225,15 +246,16 @@ export function layoutFan(fan, opts, w, h) {
   const ref = whole ? D[di] : D[0] + tc * WEEK;
   const si = Number.isInteger(opts.settle) ? clamp(opts.settle, 0, Math.max(0, n - 1)) : di;
   const models = opts.models || [];
+  const modelIds = models.map((m) => m.id);
   const rulerStep = w < 600 ? 11 : 14;
   // rulers sit in the margin beside the fan and push the labels aside; they never narrow the plot
   const rk = clamp(+opts.rulers || 0, 0, 1);
   const rulerW = 18 + models.length * rulerStep;
-  const x = linear(opts.domain || [ref - 14 * WEEK, ref + lastH * WEEK], [pad.l, w - pad.r]);
+  const x = linear(opts.domain || [ref - 14 * WEEK, ref + lastH * WEEK + offsetMs], [pad.l, w - pad.r]);
   const ay = h - pad.b;
-  const ymax = opts.ymax > 0 ? opts.ymax : fan.yMax(models.map((m) => m.id));
+  const ymax = opts.ymax > 0 ? opts.ymax : fan.yMax(modelIds);
   const y = linear([0, ymax], [ay, pad.t]);
-  const cutoff = cutoffAt(fan, t, ref, whole);
+  const cutoff = cutoffAt(fan, t, ref, whole, modelIds);
 
   // charted models: those with points here are the series; the rest keep their slot as a dimmed label
   const S = [], missing = [];
@@ -277,7 +299,7 @@ export function layoutFan(fan, opts, w, h) {
   }
   const months = fitLabels(cand, (t) => measure(t, monthFont), 10);
   // while between weeks, the labels name the week the chart will settle on (what the stepper shows)
-  const dates = { cut: { x: xc, date: day(whole && si === di ? cutoff : cutoffFor(fan, D[si])) }, ref: { x: xr, date: day(D[si]) } };
+  const dates = { cut: { x: xc, date: day(whole && si === di ? cutoff : cutoffFor(fan, si, D[si], modelIds)) }, ref: { x: xr, date: day(D[si]) } };
 
   // bands: unfocused first so the focused one sits on top; per model, the levels it has quantiles for
   const BL = [];
@@ -349,7 +371,7 @@ export function layoutFan(fan, opts, w, h) {
   const hot = hotC ? { id: hotC.id, line: hotC.line } : null;
 
   // width rulers beside the fan, at the hovered forecast week (else the last horizon)
-  const fanEnd = x(ref + lastH * WEEK);
+  const fanEnd = x(ref + lastH * WEEK + offsetMs);
   const rx0 = fanEnd + 18;
   let rulers = null;
   if (rk > 0.001 && B.length) {
@@ -461,7 +483,8 @@ export function hoverInfo(fan, scene, t) {
     n++; if (p.med < min) min = p.med; if (p.med > max) max = p.med;
     if (scene.hot && c.id === scene.hot.id) hot = { id: c.id, label: c.label, med: p.med, lo: p.lo, hi: p.hi };
   }
-  return { t, h, observed, rows, hot, context: { n, min: n ? min : null, max: n ? max : null } };
+  const hOut = h != null && (rows.length > 0 || n > 0) ? h : null;
+  return { t, h: hOut, observed, rows, hot, context: { n, min: n ? min : null, max: n ? max : null } };
 }
 
 const LINE_HIT = 4; // px either side of a line that still counts as on it

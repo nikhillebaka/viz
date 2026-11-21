@@ -8,6 +8,7 @@ import http.client
 import json
 from pathlib import Path
 import shutil
+import struct
 import threading
 import time
 import unittest
@@ -343,6 +344,81 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
                 shutil.rmtree(tmp_next, ignore_errors=True)
+
+    def test_vzf2_one_indexed_respicast_omits_phantom_h0(self):
+        eu_hub = Path(tempfile.mkdtemp())
+        eu_cache = Path(tempfile.mkdtemp())
+        try:
+            (eu_hub / "hub-config").mkdir()
+            (eu_hub / "auxiliary-data").mkdir()
+            (eu_hub / "target-data").mkdir()
+            pl.DataFrame({
+                "abbreviation": ["DE"],
+                "location": ["DE"],
+                "location_name": ["Germany"],
+                "population": [83_400_000],
+            }).write_csv(eu_hub / "auxiliary-data" / "locations.csv")
+            tasks = {
+                "rounds": [{
+                    "round_id_from_variable": True,
+                    "round_id": "origin_date",
+                    "model_tasks": [{
+                        "task_ids": {
+                            "origin_date": {"optional": ["2026-11-11", "2026-11-18"]},
+                            "target": {"required": ["ARI incidence"]},
+                            "location": {"required": ["DE"]},
+                            "horizon": {"required": [1, 2, 3, 4]},
+                        },
+                        "output_type": {"quantile": {}},
+                    }],
+                }]
+            }
+            (eu_hub / "hub-config" / "tasks.json").write_text(json.dumps(tasks), encoding="utf-8")
+            pl.DataFrame({
+                "as_of": ["2026-11-21"] * 4,
+                "target": ["ARI incidence"] * 4,
+                "target_end_date": ["2026-10-25", "2026-11-01", "2026-11-08", "2026-11-15"],
+                "location": ["DE"] * 4,
+                "horizon": [0] * 4,
+                "output_type": ["quantile"] * 4,
+                "output_type_id": [None] * 4,
+                "oracle_value": [900.0, 950.0, 1020.0, 1100.0],
+            }).write_csv(eu_hub / "target-data" / "oracle-output.csv")
+
+            mdir = eu_hub / "model-output" / "EU-Model"
+            mdir.mkdir(parents=True)
+            for ref in ("2026-11-11", "2026-11-18"):
+                rows = []
+                from datetime import date, timedelta
+                ref_d = date.fromisoformat(ref)
+                for h in (1, 2, 3, 4):
+                    ted = (ref_d + timedelta(days=7 * h - 10)).isoformat()
+                    for q in (0.025, 0.25, 0.5, 0.75, 0.975):
+                        rows.append({
+                            "origin_date": ref,
+                            "target": "ARI incidence",
+                            "horizon": h,
+                            "target_end_date": ted,
+                            "location": "DE",
+                            "output_type": "quantile",
+                            "output_type_id": str(q),
+                            "value": 1000.0 + h * 50.0 + q * 20.0,
+                        })
+                pl.DataFrame(rows).write_csv(mdir / f"{ref}-EU-Model.csv")
+
+            mgr = HubManager(data_dir=eu_cache, cli_hubs=[eu_hub], include_enclosing=False)
+            ctx = mgr.get_context()
+            buf = ctx.next_data.fan("ARI incidence", "2026-2027", "DE", version=2)
+            self.assertIsNotNone(buf)
+            self.assertTrue(buf.startswith(b"VZF2"))
+            n = struct.unpack("<I", buf[4:8])[0]
+            hdr = json.loads(buf[8:8 + n])
+            self.assertEqual(hdr["horizons"], [1, 2, 3, 4])
+            self.assertEqual(hdr["horizon_offset_days"], -10)
+            self.assertEqual(hdr["observed"]["dates"], ["2026-10-25", "2026-11-01", "2026-11-08", "2026-11-15"])
+        finally:
+            shutil.rmtree(eu_hub, ignore_errors=True)
+            shutil.rmtree(eu_cache, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -594,10 +594,7 @@ class NextData:
         obs_horizons = sorted({int(h) for _, df in present for h in df.get_column("horizon").unique().to_list() if h is not None})
         if obs_horizons:
             min_h, max_h = min(obs_horizons), max(obs_horizons)
-            if min_h >= 0:
-                horizons = list(range(0, max(max_h, 3) + 1))
-            else:
-                horizons = list(range(min_h, max_h + 1))
+            horizons = list(range(min_h, max(max_h, min_h + 3) + 1))
         else:
             horizons = [0, 1, 2, 3]
         h_index = {h: i for i, h in enumerate(horizons)}

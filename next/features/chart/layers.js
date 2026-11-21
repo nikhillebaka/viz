@@ -249,7 +249,8 @@ export class Layers {
     const fan = this.chart.fan, sk = this.sk, y = +fan.season.slice(0, 4);
     const seasons = Array.from({ length: PAST }, (_, i) => `${y - 1 - i}-${y - i}`).join(",");
     const p = this.#track(getJson("/api/season-curves", { target: fan.target, location: fan.location, seasons }), sk, (r) => {
-      const w1 = seasonWeek1(y);
+      const obsDow = fan.observed?.length ? new Date(fan.observed[0].t).getUTCDay() : 6;
+      const w1 = seasonWeek1(y) + (obsDow === 0 ? DAY : 0);
       const curves = (r?.curves || []).filter((c) => +String(c.season).slice(0, 4) < y)
         .sort((a, b) => String(b.season).localeCompare(String(a.season))).slice(0, PAST);
       this.cur = curves.map((c, i) => makeLine((c.points || []).map((p) => ({ t: w1 + (p.week - 1) * WEEK, v: p.value })),

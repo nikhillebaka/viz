@@ -6,7 +6,8 @@
  * - Detached overseas territories stay unshaded and unselectable
  * - Frosted multi-signal Place Drawer opening any stream directly in-place */
 import { h, on, cssColor, storage, onThemeChange } from "../lib/dom.js";
-import { valueFormat } from "../lib/format.js";
+import { fmtDay, valueFormat } from "../lib/format.js";
+import { parseIso } from "../lib/scale.js";
 import { loadGlobe } from "../lib/api.js";
 import { glass } from "../ui/glass.js";
 import { pill, icon } from "../ui/controls.js";
@@ -282,7 +283,6 @@ export function mountGlobeView(host, ctx) {
   const recentsEl = h("div", { class: "gb-recents", hidden: true, role: "group", "aria-label": "Recent places" });
   const hudBL = h("div", { class: "gb-hud-bl" });
   const hudBR = h("div", { class: "gb-hud-br" });
-  const readout = h("div", { class: "c-readout v-readout", role: "status", hidden: true });
   const drawer = h("aside", { class: "c-panel gb-drawer", hidden: true, "aria-label": "Place summary" });
 
   const layerBtn = pill({
@@ -299,7 +299,7 @@ export function mountGlobeView(host, ctx) {
   const zoomOutBtn = pill({ label: "−", size: "sm", className: "icon", ariaLabel: "Zoom out", onClick: () => zoomByFactor(1 / 1.48) });
   hudBR.append(zoomInBtn, zoomOutBtn);
 
-  wrap.append(canvas, recentsEl, hudBL, hudBR, drawer, readout);
+  wrap.append(canvas, recentsEl, hudBL, hudBR, drawer);
   host.replaceChildren(wrap);
 
   const layerGlass = glass(layerBtn);
@@ -513,13 +513,10 @@ export function mountGlobeView(host, ctx) {
     drawer.hidden = false;
     const pop = reg.population;
     const allStreams = reg.streams || [];
-    const catStreams = reg.categorical_streams || [];
-    const totalCount = allStreams.length + catStreams.length;
     const lvlLabel = LEVEL_LABELS[reg.level] || reg.level || null;
     const subParts = [
       lvlLabel,
       Number.isFinite(pop) && pop > 1 ? `Pop ${pop >= 1e6 ? `${(pop / 1e6).toFixed(1)}M` : `${Math.round(pop / 1e3)}k`}` : null,
-      totalCount ? `${totalCount} ${totalCount === 1 ? "signal" : "signals"}` : null,
     ].filter(Boolean);
 
     // Order selected signal first, otherwise keep provider order
@@ -527,9 +524,13 @@ export function mountGlobeView(host, ctx) {
       ? [...allStreams].sort((a, b) => (a.signal_id === signalId ? -1 : b.signal_id === signalId ? 1 : 0))
       : allStreams;
 
-    const childHsas = hasMetroCast && metroCastOn && reg.level !== "hsa"
+    const rawChildren = hasMetroCast && metroCastOn && reg.level !== "hsa"
       ? (reg.children || []).map((ck) => regions[ck]).filter(Boolean)
       : [];
+    const withData = rawChildren.filter((r) => r.streams?.length);
+    const childHsas = (withData.length ? withData : rawChildren)
+      .slice()
+      .sort((a, b) => (a.name || a.key).localeCompare(b.name || b.key));
 
     const streamTitle = (st) => {
       const tShort = st.target_short || st.target_id || "";
@@ -542,6 +543,16 @@ export function mountGlobeView(host, ctx) {
         || (st.pathogen === "influenza" && /\bflu\b/i.test(tShort));
       return overlaps ? tShort : `${pathLabel} · ${tShort}`;
     };
+
+    const primaryMode = layerId === "forecast" ? "forecast" : "observed";
+    const valColLabel = primaryMode === "forecast" ? "Forecast" : "Latest";
+    const hasNonMetroStream = orderedStreams.some((s) => s.geo_kind !== "us-metrocast");
+    const newestIso = orderedStreams.map((s) => s.obs_date || s.ref_date).filter(Boolean).sort().at(-1) || null;
+    const asOfText = newestIso ? fmtDay(parseIso(newestIso)) : null;
+    const footerText = [
+      asOfText && asOfText !== "–" ? `As of ${asOfText}` : null,
+      "Click a row to open chart",
+    ].filter(Boolean).join(" · ");
 
     const layerNodes = [...drawer.querySelectorAll(":scope > .c-glass-layer")];
     const content = h("div", { class: "gb-drawer-body" },
@@ -556,46 +567,45 @@ export function mountGlobeView(host, ctx) {
         subParts.length ? h("p", { class: "gb-sub" }, subParts.join(" · ")) : null,
       ),
       orderedStreams.length ? h("div", { class: "gb-streams" },
+        h("div", { class: "gb-streams-head", "aria-hidden": "true" },
+          h("span", null, "Signal"),
+          h("span", { class: "gb-streams-col" }, valColLabel),
+          h("span", { class: "gb-streams-col" }, "Trend"),
+          h("span", { class: "gb-stream-go-spacer" })),
         ...orderedStreams.map((st) => {
           const isFocusSig = st.signal_id === signalId;
-          const title = streamTitle(st);
-          const sourceTag = st.geo_kind === "us-metrocast" ? st.hub_short : null;
-          const rowTitle = sourceTag && title ? `${title} · ${sourceTag}` : (title || sourceTag || "Signal");
-          const obsPart = st.observed != null && Number.isFinite(st.observed) ? `Obs ${formatStreamValue(st.observed, st)}` : null;
-          const fcstPart = st.forecast != null && Number.isFinite(st.forecast) ? `Fcst ${formatStreamValue(st.forecast, st)}` : null;
-          const trendPart = Number.isFinite(st.trend_pct) ? `${st.trend_pct >= 0 ? "+" : ""}${Math.round(st.trend_pct)}%` : null;
-          const numParts = [obsPart, fcstPart, trendPart].filter(Boolean);
+          const title = streamTitle(st) || st.hub_short || "Signal";
+          const showMetroTag = st.geo_kind === "us-metrocast" && hasNonMetroStream;
+          const primaryVal = primaryMode === "forecast" ? (st.forecast ?? st.observed) : (st.observed ?? st.forecast);
+          const valText = formatStreamValue(primaryVal, st);
+          const trendText = Number.isFinite(st.trend_pct)
+            ? `${st.trend_pct >= 0 ? "+" : "−"}${Math.round(Math.abs(st.trend_pct))}%`
+            : "–";
           return h("button", {
             type: "button",
             class: ["c-row gb-stream-row", isFocusSig && "on"],
             onclick: () => openStreamInChart(st.hub_id, st.target_id, st.location_id),
           },
-          h("div", { class: "c-row-text" },
-            h("div", { class: "gb-stream-head" },
-              h("span", { class: "c-row-label" }, rowTitle),
-              st.ref_date ? h("span", { class: "c-row-sub mono" }, st.ref_date.slice(5)) : null),
-            h("div", { class: "gb-stream-nums mono" }, numParts.length ? numParts.join(" · ") : "–")),
-          h("span", { class: "gb-stream-go" }, "→"));
+          h("span", { class: "gb-stream-name" },
+            title,
+            showMetroTag ? h("span", { class: "gb-stream-tag" }, st.hub_short || "MetroCast") : null),
+          h("span", { class: "gb-stream-val mono" }, valText),
+          h("span", { class: "gb-stream-trend mono" }, trendText),
+          h("span", { class: "gb-stream-go", "aria-hidden": "true" }, "→"));
         }),
       ) : h("p", { class: "pk-empty", style: { padding: "var(--space-8) 0" } }, "No weekly observations for current round"),
-      catStreams.length ? h("div", { class: "gb-cats" },
-        ...catStreams.map((cs) => h("button", {
-          type: "button", class: "c-row",
-          onclick: () => openStreamInChart(cs.hub_id, cs.target_id, cs.location_id),
-        },
-        h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, cs.short || cs.label || cs.target_id || "Categorical"), h("span", { class: "c-row-sub" }, cs.hub_short || "")),
-        h("span", { class: "gb-stream-go" }, "PMF →"))),
-      ) : null,
+      orderedStreams.length ? h("p", { class: "gb-drawer-foot" }, footerText) : null,
       childHsas.length ? h("div", { class: "gb-metros" },
         h("h4", { class: "gb-metros-title" }, `MetroCast HSAs (${childHsas.length})`),
         ...childHsas.map((hsa) => {
           const hs = streamForRegion(hsa, signalId);
+          const hsVal = hs ? (primaryMode === "forecast" ? (hs.forecast ?? hs.observed) : (hs.observed ?? hs.forecast)) : null;
           return h("button", {
             type: "button", class: "c-row",
             onclick: () => focusRegion(hsa.key),
           },
           h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, hsa.name || hsa.key)),
-          h("span", { class: "c-row-sub mono" }, hs ? formatStreamValue(hs.observed ?? hs.forecast, hs) : "–"));
+          h("span", { class: "c-row-sub mono" }, hs ? formatStreamValue(hsVal, hs) : "–"));
         }),
       ) : null,
     );
@@ -690,51 +700,26 @@ export function mountGlobeView(host, ctx) {
       camLat = clamp(camLat + dLat, -82, 82);
       velLon = dLon * 0.65; velLat = dLat * 0.65;
       lastPt = { x: e.clientX, y: e.clientY };
-      if (hoverItem) { hoverItem = null; readout.hidden = true; }
+      canvas.style.cursor = "grabbing";
+      if (hoverItem) hoverItem = null;
       scheduleDraw();
       return;
     }
 
     const picked = pickAtScreen(sx, sy);
-    if (picked) {
+    const prevKey = hoverItem ? `${hoverItem.kind}:${hoverItem.id}` : "";
+    const nextKey = picked ? `${picked.kind}:${picked.id}` : "";
+    canvas.style.cursor = picked ? "pointer" : "";
+    if (prevKey !== nextKey) {
       hoverItem = picked;
-      const reg = regions[picked.key];
-      const rows = [];
-      if (layerId !== "none" && reg?.streams?.length) {
-        const list = signalId === "all"
-          ? reg.streams.slice(0, 3)
-          : reg.streams.filter((s) => s.signal_id === signalId);
-        for (const st of list) {
-          const val = layerId === "forecast" ? (st.forecast ?? st.observed)
-            : layerId === "trend" ? null
-              : (st.observed ?? st.forecast);
-          const right = layerId === "trend"
-            ? (Number.isFinite(st.trend_pct) ? `${st.trend_pct >= 0 ? "+" : ""}${Math.round(st.trend_pct)}%` : "–")
-            : formatStreamValue(val, st);
-          rows.push(h("tr", null,
-            h("td", { class: "c-readout-name" }, st.target_short),
-            h("td", { class: "num" }, right)));
-        }
-      }
-      readout.replaceChildren(
-        h("div", { class: "c-readout-head" },
-          h("span", { style: { fontWeight: "600", color: "var(--ink-primary)" } }, picked.name),
-          h("span", { class: "quiet" }, picked.kind === "metro" ? "MetroCast" : picked.kind === "state" ? "State" : "Country"),
-        ),
-        rows.length ? h("table", null, h("tbody", null, ...rows)) : null,
-      );
-      readout.hidden = false;
-      readout.style.transform = `translate(${clamp(sx + 16, 12, rect.width - 230)}px, ${clamp(sy - 18, 60, rect.height - 108)}px)`;
-    } else if (hoverItem) {
-      hoverItem = null;
-      readout.hidden = true;
+      scheduleDraw();
     }
-    scheduleDraw();
   }));
 
   const endDrag = (e) => {
     if (!dragging) return;
     dragging = false;
+    canvas.style.cursor = "";
     if (movedPx < 5 && downPt) {
       const rect = canvas.getBoundingClientRect();
       const hit = pickAtScreen(e.clientX - rect.left, e.clientY - rect.top);
@@ -746,7 +731,7 @@ export function mountGlobeView(host, ctx) {
   };
   offs.push(on(canvas, "pointerup", endDrag));
   offs.push(on(canvas, "pointercancel", endDrag));
-  offs.push(on(canvas, "pointerleave", () => { hoverItem = null; readout.hidden = true; scheduleDraw(); }));
+  offs.push(on(canvas, "pointerleave", () => { canvas.style.cursor = ""; if (hoverItem) { hoverItem = null; scheduleDraw(); } }));
   offs.push(on(canvas, "wheel", (e) => {
     e.preventDefault();
     const rect = canvas.getBoundingClientRect();

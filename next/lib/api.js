@@ -291,6 +291,7 @@ export class Fan {
     this.#med = this.#qIndex(0.5);
 
     const offsetMs = this.horizonOffsetDays * DAY;
+    this.gridOrigin = obs.length ? obs[0].t : (Number.isFinite(t0) ? t0 + offsetMs : NaN);
     const lastH = this.horizons.length ? Math.max(...this.horizons) : 0;
     const lastRound = rt.length ? this.dates.at(-1) : NaN;
     const first = obs.length ? obs[0].t : t0 - WEEK;
