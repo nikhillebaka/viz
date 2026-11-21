@@ -31,8 +31,22 @@ import {
 import { EU_META, ISO_NUM_TO_ALPHA2, US_STATE_META } from "../geo/eu_tiles.js";
 import { classifyHubGeo, loadUsGeoCache } from "../geo/picker_geo.js";
 
-const MAX_ZOOM = 48;
-const MIN_ZOOM = 1.0;
+/** Camera and layer-transition zoom thresholds for the unified Globe view. */
+export const GLOBE_ZOOM = Object.freeze({
+  MIN: 1.0,
+  MAX: 48,
+  US_DEFAULT: 2.0,
+  EU_DEFAULT: 2.55,
+  STATE_INITIAL: 2.8,
+  STATE_FADE_START: 1.18,
+  STATE_FADE_END: 1.75,
+  METRO_FADE_START: 4.8,
+  METRO_FADE_END: 6.8,
+  METRO_PICK: 5.4,
+  METRO_LABEL: 7.2,
+  METRO_FIT_MIN: 8.5,
+  METRO_INITIAL: 9.0,
+});
 
 const EU_MAINLAND_BOUNDS = Object.freeze({ minLon: -26, maxLon: 45, minLat: 33, maxLat: 73 });
 const DETACH_ISOS = new Set([...Object.keys(EU_META), "FR", "NO", "NL", "PT", "ES", "DK", "GB"]);
@@ -141,7 +155,7 @@ export function mountGlobeView(host, ctx) {
   // Start facing whichever continent the user came from, while the whole sphere stays live
   let camLon = geoCls.kind === "eu-countries" ? 10 : -94;
   let camLat = geoCls.kind === "eu-countries" ? 50 : 38.5;
-  let camZoom = geoCls.kind === "eu-countries" ? 2.55 : 2.0;
+  let camZoom = geoCls.kind === "eu-countries" ? GLOBE_ZOOM.EU_DEFAULT : GLOBE_ZOOM.US_DEFAULT;
   let velLon = 0;
   let velLat = 0;
   let flight = null;
@@ -466,7 +480,7 @@ export function mountGlobeView(host, ctx) {
     if (EU_META[euCode]?.lon != null) return { lon: EU_META[euCode].lon, lat: EU_META[euCode].lat, zoom: 7.5 };
     const country = countries?.find((c) => !c.detached && (c.iso2 === key || (key === "GB" && c.iso2 === "UK")));
     if (country?.centroidLonLat) return { lon: country.centroidLonLat[0], lat: country.centroidLonLat[1], zoom: 5.5 };
-    if (key === "US") return { lon: -94, lat: 38.5, zoom: 2.0 };
+    if (key === "US") return { lon: -94, lat: 38.5, zoom: GLOBE_ZOOM.US_DEFAULT };
     return null;
   }
 
@@ -474,7 +488,7 @@ export function mountGlobeView(host, ctx) {
     if (key === "US") return 2.15;
     const reg = regions[key];
     const mh = activeMetros.find((m) => m.id === key);
-    if (mh?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(mh.alpha)), 5, 34);
+    if (mh?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(mh.alpha)), GLOBE_ZOOM.METRO_FIT_MIN, 34);
     const fips = reg?.state_fips || (US_STATE_META[key] ? key : null);
     const st = fips && usGeo?.states?.find((s) => s.fips === fips);
     if (st?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(st.alpha)), 3.2, 22);
@@ -616,7 +630,7 @@ export function mountGlobeView(host, ctx) {
   /* ---------------- Camera & Pointer ---------------- */
   function flyTo(lon, lat, zoom) {
     velLon = 0; velLat = 0;
-    flight = { fromLonLat: [camLon, camLat], fromZoom: camZoom, toLonLat: [lon, lat], toZoom: clamp(zoom, MIN_ZOOM, MAX_ZOOM), t0: performance.now(), dur: 540 };
+    flight = { fromLonLat: [camLon, camLat], fromZoom: camZoom, toLonLat: [lon, lat], toZoom: clamp(zoom, GLOBE_ZOOM.MIN, GLOBE_ZOOM.MAX), t0: performance.now(), dur: 540 };
     startLoop();
   }
 
@@ -625,7 +639,7 @@ export function mountGlobeView(host, ctx) {
     const W = wrap.clientWidth, H = wrap.clientHeight;
     const baseRadius = Math.min(W, H) * 0.42;
     const { cx, cy, radiusPx, R } = lastGeoSpec;
-    const nextZoom = clamp(camZoom * factor, MIN_ZOOM, MAX_ZOOM);
+    const nextZoom = clamp(camZoom * factor, GLOBE_ZOOM.MIN, GLOBE_ZOOM.MAX);
     if (anchorSx != null && anchorSy != null && R && baseRadius > 10) {
       const hit = screenToLonLat(anchorSx, anchorSy, cx, cy, radiusPx, R);
       if (hit) {
@@ -642,7 +656,7 @@ export function mountGlobeView(host, ctx) {
     const { cx, cy, radiusPx } = lastGeoSpec;
     if (Math.hypot(sx - cx, sy - cy) > radiusPx) return null;
 
-    if (hasMetroCast && metroCastOn && camZoom >= 2.1) {
+    if (hasMetroCast && metroCastOn && camZoom >= GLOBE_ZOOM.METRO_PICK) {
       for (const dot of hitDots) {
         if (Math.hypot(sx - dot.sx, sy - dot.sy) <= 10 && regions[dot.id]) {
           return { kind: "metro", id: dot.id, name: dot.name, key: dot.id };
@@ -834,8 +848,8 @@ export function mountGlobeView(host, ctx) {
     };
 
     const drawStatesLayer = hasUsStates;
-    const stateAlpha = drawStatesLayer ? smoothstep(1.18, 1.75, camZoom) : 0;
-    const metroAlpha = hasMetroCast && metroCastOn ? smoothstep(2.05, 3.1, camZoom) : 0;
+    const stateAlpha = drawStatesLayer ? smoothstep(GLOBE_ZOOM.STATE_FADE_START, GLOBE_ZOOM.STATE_FADE_END, camZoom) : 0;
+    const metroAlpha = hasMetroCast && metroCastOn ? smoothstep(GLOBE_ZOOM.METRO_FADE_START, GLOBE_ZOOM.METRO_FADE_END, camZoom) : 0;
 
     // 1. World countries (both US and Europe connected simultaneously!)
     hitCountries = [];
@@ -1033,7 +1047,7 @@ export function mountGlobeView(host, ctx) {
           g.globalAlpha = metroAlpha;
           g.beginPath(); g.arc(sx, sy, isSel ? 4.4 : 2.8, 0, Math.PI * 2);
           g.fillStyle = isSel ? accent : cssColor("var(--ink-primary)"); g.fill();
-          if (camZoom >= 3.4 || isSel || isHov) {
+          if (camZoom >= GLOBE_ZOOM.METRO_LABEL || isSel || isHov) {
             const lbl = reg?.abbr || mh.abbr || displayName;
             const tw = g.measureText(lbl).width;
             const box = { x: sx + 6, y: sy - 7, w: tw + 8, h: 14 };
@@ -1114,7 +1128,7 @@ export function mountGlobeView(host, ctx) {
         if (pt) {
           camLon = pt.lon;
           camLat = pt.lat;
-          camZoom = hasMetroCast && metroIdSet.has(curKey) ? 6.5 : 2.8;
+          camZoom = hasMetroCast && metroIdSet.has(curKey) ? GLOBE_ZOOM.METRO_INITIAL : GLOBE_ZOOM.STATE_INITIAL;
         }
       }
       renderRecents();

@@ -9,7 +9,7 @@ import { parseUrl, writeUrl, defaults, targetDimSpecs, defaultDims, isCategorica
 import { buildTargetMenuGroups } from "../../features/TargetMenu.js";
 import { matchCatalogPlaces } from "../../features/LocationPicker.js";
 import { findRateChangeTarget } from "../../sections/rate_change/index.js";
-import { formatStreamValue } from "../../features/GlobeView.js";
+import { formatStreamValue, GLOBE_ZOOM } from "../../features/GlobeView.js";
 
 describe("Phase 3 multi-hub frontend helpers", () => {
   it("classifyHubGeo identifies us-states, us-metrocast, eu-countries (UK split), and generic", () => {
@@ -394,5 +394,22 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     assert.equal(formatStreamValue(null, { use_rate: false, scale: "count" }), "–");
     assert.equal(formatStreamValue(undefined, { use_rate: false, scale: "percentage" }), "–");
     assert.equal(formatStreamValue(NaN, { use_rate: true, scale: "count" }), "–");
+  });
+
+  it("GLOBE_ZOOM preserves a wide whole-state selection band before MetroCast HSAs fade in and intercept picks", () => {
+    const z = GLOBE_ZOOM;
+    assert.ok(z.MIN < z.STATE_FADE_START);
+    assert.ok(z.STATE_FADE_START < z.STATE_FADE_END);
+    assert.ok(z.STATE_FADE_END < z.US_DEFAULT);
+    assert.ok(z.US_DEFAULT < z.STATE_INITIAL);
+    assert.ok(z.STATE_INITIAL < z.METRO_FADE_START);
+    assert.ok(z.METRO_FADE_START < z.METRO_PICK);
+    assert.ok(z.METRO_PICK < z.METRO_FADE_END);
+    assert.ok(z.METRO_FADE_END < z.METRO_LABEL);
+    assert.ok(z.METRO_LABEL < z.METRO_FIT_MIN);
+    assert.ok(z.METRO_FIT_MIN <= z.METRO_INITIAL);
+    assert.ok(z.METRO_INITIAL < z.MAX);
+    assert.ok(z.METRO_FADE_START >= 4.5);
+    assert.ok(z.METRO_PICK >= 5.0);
   });
 });
