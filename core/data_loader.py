@@ -184,6 +184,7 @@ class SandboxDataLoader:
         self._models_cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._models_cache_mtime: float = -1.0
         self._models_cache_lock = threading.Lock()
+        self._dedup_lock = threading.Lock()
         self._phase_cache: Dict[str, Tuple[Tuple[Any, ...], pl.DataFrame]] = {}
         self._phase_cache_lock = threading.Lock()
 
@@ -796,6 +797,254 @@ class SandboxDataLoader:
         """Detect and return distinct targets forecasted by the model, cached in meta.json."""
         return self._read_model_meta(model_id, is_local=is_local, files=files)["targets"]
 
+    @staticmethod
+    def _find_round_file(directory: Path, date_str: str) -> Optional[Path]:
+        """Find a single forecast file for `date_str` inside `directory`, preferring Parquet."""
+        if not directory.is_dir():
+            return None
+        for ext in (".parquet", ".csv"):
+            matches = sorted(directory.glob(f"{date_str}-*{ext}"))
+            if matches:
+                return matches[0]
+        return None
+
+    def _read_round_values(self, file_path: Path) -> Optional[pl.DataFrame]:
+        """Read a single CSV/Parquet round file with canonical key + value columns for dedup comparison."""
+        try:
+            if file_path.suffix.lower() == ".parquet":
+                df = pl.read_parquet(file_path)
+            else:
+                df = pl.read_csv(
+                    file_path,
+                    schema_overrides={
+                        "location": pl.String,
+                        "output_type_id": pl.String,
+                        "target": pl.String,
+                        "output_type": pl.String,
+                        "reference_date": pl.String,
+                        "origin_date": pl.String,
+                        "horizon": pl.Int32,
+                        "value": pl.Float64,
+                    },
+                    null_values=NULL_VALUES,
+                    ignore_errors=False,
+                )
+        except Exception as exc:
+            logger.debug("Dedup read failed on %s: %s", file_path, exc)
+            return None
+
+        if df.is_empty():
+            return None
+        pad_fips = bool(getattr(self.get_geo_graph(), "uses_us_fips", True))
+        cols = set(df.columns)
+        exprs = [
+            (pl.col("target").cast(pl.String) if "target" in cols else pl.lit("")).fill_null("").alias("target"),
+            (pl.col("location").cast(pl.String) if "location" in cols else pl.lit("")).fill_null("").alias("location"),
+            (
+                pl.col("horizon").cast(pl.Float64, strict=False).cast(pl.Int32, strict=False)
+                if "horizon" in cols else pl.lit(-999999, dtype=pl.Int32)
+            ).fill_null(-999999).alias("horizon"),
+            (pl.col("output_type").cast(pl.String) if "output_type" in cols else pl.lit("quantile")).fill_null("").alias("output_type"),
+            (pl.col("output_type_id").cast(pl.String) if "output_type_id" in cols else pl.lit("")).fill_null("").alias("output_type_id"),
+            (pl.col("value").cast(pl.Float64, strict=False) if "value" in cols else pl.lit(None, dtype=pl.Float64)).fill_nan(None).alias("value"),
+        ]
+        out = df.select(exprs)
+        if pad_fips:
+            out = out.with_columns(
+                pl.when(pl.col("location").str.contains(r"^\d$"))
+                .then("0" + pl.col("location"))
+                .otherwise(pl.col("location"))
+                .alias("location")
+            )
+        return out.unique(subset=["target", "location", "horizon", "output_type", "output_type_id"], keep="last")
+
+    def _remote_model_fingerprint(self, hub_id: str, hub_model_name: str) -> Dict[str, Any]:
+        """Combined file fingerprint across remote model, sample, and pmf output folders."""
+        count = 0
+        total_size = 0
+        max_mtime = 0.0
+        for d in (
+            self.remote_store.model_dir(hub_id, hub_model_name),
+            self.remote_store.sample_dir(hub_id, hub_model_name),
+            self.remote_store.pmf_dir(hub_id, hub_model_name),
+        ):
+            _, fp = self.cache_mgr._scan_source_files(d)
+            count += fp["count"]
+            total_size += fp["total_size"]
+            max_mtime = max(max_mtime, fp["max_mtime"])
+        return {"count": count, "total_size": total_size, "max_mtime": max_mtime}
+
+    def _models_values_match(self, repo_name: str, hub_id: str, hub_model_name: str, common_dates: List[str]) -> bool:
+        """
+        Return True when a repo model and a remote hub model agree in forecast values on sampled overlapping rounds.
+        Results are persisted in `<cache_dir>/model_dedup.json` keyed by file fingerprints.
+        """
+        if not common_dates:
+            return False
+        _, repo_fp = self.cache_mgr._scan_source_files(self.model_output_dir / repo_name)
+        hub_fp = self._remote_model_fingerprint(hub_id, hub_model_name)
+        cur_fp = {"repo": repo_fp, "hub": hub_fp}
+
+        dedup_path = self.cache_mgr.cache_dir / "model_dedup.json"
+        cache_key = f"{repo_name}|{hub_id}:{hub_model_name}"
+        with self._dedup_lock:
+            if dedup_path.is_file():
+                try:
+                    saved = json.loads(dedup_path.read_text(encoding="utf-8"))
+                    ent = saved.get(cache_key) if isinstance(saved, dict) else None
+                    if isinstance(ent, dict) and ent.get("fp") == cur_fp:
+                        return bool(ent.get("match"))
+                except (OSError, ValueError):
+                    pass
+
+        picks: List[str] = []
+        for idx in (-1, 0, len(common_dates) // 2):
+            d = common_dates[idx]
+            if d not in picks:
+                picks.append(d)
+
+        key_cols = ["target", "location", "horizon", "output_type", "output_type_id"]
+        verified_any = False
+        matched = True
+        for d in picks:
+            local_file = self._find_round_file(self.model_output_dir / repo_name, d)
+            if local_file is None:
+                continue
+            hub_frames = []
+            for hdir in (
+                self.remote_store.model_dir(hub_id, hub_model_name),
+                self.remote_store.pmf_dir(hub_id, hub_model_name),
+                self.remote_store.sample_dir(hub_id, hub_model_name),
+            ):
+                hf = self._find_round_file(hdir, d)
+                if hf is not None:
+                    hdf = self._read_round_values(hf)
+                    if hdf is not None and not hdf.is_empty():
+                        hub_frames.append(hdf)
+            if not hub_frames:
+                continue
+            df_l = self._read_round_values(local_file)
+            if df_l is None or df_l.is_empty():
+                continue
+            df_h = pl.concat(hub_frames, how="vertical").unique(subset=key_cols, keep="first")
+            joined = df_l.join(df_h, on=key_cols, how="inner", suffix="_hub")
+            if joined.is_empty():
+                continue
+            verified_any = True
+            diff_ok = (
+                (pl.col("value").is_null() & pl.col("value_hub").is_null())
+                | (
+                    pl.col("value").is_not_null()
+                    & pl.col("value_hub").is_not_null()
+                    & (
+                        (pl.col("value") - pl.col("value_hub")).abs()
+                        <= 1e-5 * pl.max_horizontal(pl.lit(1.0), pl.col("value").abs(), pl.col("value_hub").abs())
+                    )
+                )
+            )
+            if not bool(joined.select(diff_ok.all()).item()):
+                matched = False
+                break
+
+        result = bool(verified_any and matched)
+        with self._dedup_lock:
+            existing: Dict[str, Any] = {}
+            if dedup_path.is_file():
+                try:
+                    raw = json.loads(dedup_path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        existing = raw
+                except (OSError, ValueError):
+                    existing = {}
+            existing[cache_key] = {"fp": cur_fp, "match": result}
+            dedup_path.parent.mkdir(parents=True, exist_ok=True)
+            tid = f"{os.getpid()}_{threading.get_ident()}"
+            tmp = dedup_path.with_suffix(f".tmp.{tid}.json")
+            try:
+                tmp.write_text(json.dumps(existing), encoding="utf-8")
+                os.replace(tmp, dedup_path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        return result
+
+    def _deduplicate_repo_and_hub_models(self, models: Dict[str, Dict[str, Any]]) -> None:
+        """Merge remote hub duplicates with identical local repo models while preserving genuine local forks."""
+        for hub_key_id, hub_info in list(models.items()):
+            if hub_info.get("source") != "hub":
+                continue
+            hub_id = hub_info.get("hub")
+            name = hub_info.get("display_name") or (hub_key_id.split(":", 1)[1] if ":" in hub_key_id else "")
+            if not hub_id or not name or name not in models:
+                continue
+            repo_info = models[name]
+            if repo_info.get("source") != "repo":
+                continue
+
+            repo_dates = set(repo_info.get("dates") or [])
+            hub_dates = set(hub_info.get("dates") or [])
+            common = sorted(repo_dates & hub_dates)
+            if not common or not self._models_values_match(name, hub_id, name, common):
+                continue
+
+            merged_targets = sorted(set(repo_info.get("targets") or []) | set(hub_info.get("targets") or []))
+            merged_ot = sorted(set(repo_info.get("output_types") or []) | set(hub_info.get("output_types") or []))
+            merged_extra = sorted(set(repo_info.get("extra_task_ids") or []) | set(hub_info.get("extra_task_ids") or []))
+            merged_peaks_t = sorted(set(repo_info.get("peak_targets") or []) | set(hub_info.get("peak_targets") or []))
+            merged_peaks_d = sorted(set(repo_info.get("peak_dates") or []) | set(hub_info.get("peak_dates") or []))
+            designated = bool(repo_info.get("designated") or hub_info.get("designated"))
+            has_samples = bool(repo_info.get("has_samples") or hub_info.get("has_samples"))
+            has_pmf = bool(repo_info.get("has_pmf") or hub_info.get("has_pmf"))
+            from_samples = bool(repo_info.get("from_samples") or hub_info.get("from_samples"))
+
+            if hub_dates <= repo_dates:
+                repo_info["designated"] = designated
+                if merged_peaks_t:
+                    repo_info["peak_targets"] = merged_peaks_t
+                if merged_peaks_d:
+                    repo_info["peak_dates"] = merged_peaks_d
+                repo_info["dedup_from_hub"] = hub_id
+            elif repo_dates < hub_dates:
+                dates = list(hub_info.get("dates") or [])
+                repo_info.update({
+                    "raw_name": hub_key_id,
+                    "dates": dates,
+                    "seasons": list(hub_info.get("seasons") or []),
+                    "targets": merged_targets,
+                    "output_types": merged_ot,
+                    "extra_task_ids": merged_extra,
+                    "has_samples": has_samples,
+                    "has_pmf": has_pmf,
+                    "from_samples": from_samples,
+                    "peak_targets": merged_peaks_t,
+                    "peak_dates": merged_peaks_d,
+                    "count": len(dates),
+                    "min_date": hub_info.get("min_date"),
+                    "max_date": hub_info.get("max_date"),
+                    "designated": designated,
+                    "dedup_from_hub": hub_id,
+                })
+            else:
+                union_dates = sorted(repo_dates | hub_dates)
+                repo_info.update({
+                    "raw_name": f"merged:{hub_id}:{name}",
+                    "dates": union_dates,
+                    "seasons": sorted(set(repo_info.get("seasons") or []) | set(hub_info.get("seasons") or [])),
+                    "targets": merged_targets,
+                    "output_types": merged_ot,
+                    "extra_task_ids": merged_extra,
+                    "has_samples": has_samples,
+                    "has_pmf": has_pmf,
+                    "from_samples": from_samples,
+                    "peak_targets": merged_peaks_t,
+                    "peak_dates": merged_peaks_d,
+                    "count": len(union_dates),
+                    "min_date": union_dates[0] if union_dates else None,
+                    "max_date": union_dates[-1] if union_dates else None,
+                    "designated": designated,
+                    "dedup_from_hub": hub_id,
+                })
+            del models[hub_key_id]
+
     def scan_models(self, force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
         """
         Scan both model-output/ and local-output/ for available models.
@@ -906,6 +1155,7 @@ class SandboxDataLoader:
             # 3. Models copied from live hubs (namespaced '<hub>:<model>', so they never collide with repo models)
             if self.include_remote:
                 models.update(self._scan_hub_models(set(models)))
+                self._deduplicate_repo_and_hub_models(models)
 
             # 4. Dynamic and saved synthetic ensembles
             if hasattr(self, "ensemble_mgr"):
@@ -1019,15 +1269,31 @@ class SandboxDataLoader:
             if not sub.is_empty():
                 return sub if as_polars else _safe_to_pandas(sub)
 
-        # Direct file fallback if cache miss (supports both CSV and Parquet)
-        candidates = [
-            self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet" if is_local else self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet",
-            self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.csv" if is_local else self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.csv",
-            self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet",
-            self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.csv",
-            self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet",
-            self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.csv",
-        ]
+        # Direct file fallback if cache miss (supports CSV, Parquet, hub:, and merged: keys)
+        merged = self.cache_mgr.merged_key(raw_id)
+        hub = self.cache_mgr.hub_key(raw_id)
+        if merged is not None:
+            m_hub, m_name = merged
+            candidates = [
+                self.model_output_dir / m_name / f"{reference_date}-{m_name}.parquet",
+                self.model_output_dir / m_name / f"{reference_date}-{m_name}.csv",
+                self.remote_store.model_dir(m_hub, m_name) / f"{reference_date}-{m_name}.parquet",
+                self.remote_store.model_dir(m_hub, m_name) / f"{reference_date}-{m_name}.csv",
+            ]
+        elif hub is not None:
+            candidates = [
+                self.remote_store.model_dir(*hub) / f"{reference_date}-{hub[1]}.parquet",
+                self.remote_store.model_dir(*hub) / f"{reference_date}-{hub[1]}.csv",
+            ]
+        else:
+            candidates = [
+                self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet" if is_local else self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet",
+                self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.csv" if is_local else self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.csv",
+                self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet",
+                self.model_output_dir / raw_id / f"{reference_date}-{raw_id}.csv",
+                self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.parquet",
+                self.local_output_dir / raw_id / f"{reference_date}-{raw_id}.csv",
+            ]
         file_path = next((c for c in candidates if c.exists()), None)
         if file_path is None:
             return None
@@ -1650,8 +1916,8 @@ class SandboxDataLoader:
         all_models_meta = self.scan_models()
 
         for mid in model_ids:
-            is_local = all_models_meta.get(mid, {}).get("is_local", False) if mid in all_models_meta else False
-            lf_m = self.cache_mgr.scan_model(mid, is_local=is_local)
+            raw_mid, is_local = self._resolve_model_id_and_local(mid)
+            lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_local)
             if lf_m is None:
                 df_raw = self.load_forecast_file(mid, reference_date, as_polars=True)
                 if df_raw is None or df_raw.is_empty():
@@ -3205,10 +3471,23 @@ class SandboxDataLoader:
         If file is missing (e.g. local experimental model), generate clean inferred metadata.
         """
         raw_id, _ = self._resolve_model_id_and_local(model_id)
+        merged = self.cache_mgr.merged_key(raw_id)
         hub = self.cache_mgr.hub_key(raw_id)
-        if hub is not None:
-            # Hub models read the YAML copied from the hub's model-metadata/ folder
-            candidates = [self.remote_store.metadata_path(*hub)]
+        if merged is not None:
+            m_hub, m_name = merged
+            candidates = [
+                self.model_metadata_dir / f"{m_name}.yml",
+                self.model_metadata_dir / f"{m_name}.yaml",
+                self.remote_store.metadata_path(m_hub, m_name),
+            ]
+            model_id = m_name
+        elif hub is not None:
+            # Hub models read the YAML copied from the hub's model-metadata/ folder (fallback local repo copy)
+            candidates = [
+                self.remote_store.metadata_path(*hub),
+                self.model_metadata_dir / f"{hub[1]}.yml",
+                self.model_metadata_dir / f"{hub[1]}.yaml",
+            ]
             model_id = hub[1]
         else:
             candidates = [

@@ -7,6 +7,7 @@
 import { h } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { icon, toast } from "../ui/controls.js";
+import { clearAllCaches } from "../lib/api.js";
 import { fmtDay } from "../lib/format.js";
 import { parseIso } from "../lib/scale.js";
 import { getJSON, postJSON, fmtBytes, fmtAgo, reloadSoon, loadWarningSummary } from "./More.js";
@@ -100,8 +101,27 @@ function startPoll() {
   pollTimer = setTimeout(tick, POLL_MS);
 }
 
-const openRemoteHub = (remoteId) => location.assign(`/next/?hub=${encodeURIComponent(`remote_${remoteId}`)}`);
 let activeRemoteHubId = null;
+let activeCtx = null;
+
+function openRemoteHub(remoteId) {
+  const wsId = `remote_${remoteId}`;
+  if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
+    activeCtx.switchContext({ hub: wsId });
+    return;
+  }
+  location.assign(`/next/?hub=${encodeURIComponent(wsId)}`);
+}
+
+async function applyWorkspaceUpdate() {
+  clearAllCaches();
+  if (activeCtx?.reloadCatalog) await activeCtx.reloadCatalog().catch(() => {});
+  if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
+    await activeCtx.switchContext({ hub: activeCtx.manifest.hub_id, forceReload: true });
+    return;
+  }
+  reloadSoon(1200);
+}
 
 function finished(x) {
   const j = x.job || {}, s = j.summary || {};
@@ -109,9 +129,15 @@ function finished(x) {
   if (j.status === "done") {
     const changes = [s.added && `${s.added} new`, s.updated && `${s.updated} updated`, s.removed && `${s.removed} removed`].filter(Boolean).join(" · ") || "no changes";
     notes.set(x.id, `Synced · ${changes}${s.failed ? ` · ${s.failed} unreadable` : ""}`);
+    clearAllCaches();
+    activeCtx?.reloadCatalog?.().catch(() => {});
     if (x.compatible !== false || x.id === activeRemoteHubId) {
       toast(`${x.label} synced · ${changes}`);
-      reloadSoon(1600);
+      if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
+        setTimeout(() => applyWorkspaceUpdate(), 900);
+      } else {
+        reloadSoon(1600);
+      }
     } else {
       toast(`${x.label} synced · ${changes}`, {
         duration: 10000,
@@ -142,6 +168,10 @@ async function loadBrowse(path = "") {
 
 async function openLocalHub(id) {
   try { await postJSON("/api/workspace/activate", { id }); } catch { /* same-tab ?hub= works directly */ }
+  if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
+    activeCtx.switchContext({ hub: id });
+    return;
+  }
   location.assign(`/next/?hub=${encodeURIComponent(id)}`);
 }
 
@@ -152,6 +182,7 @@ async function openLocalHub(id) {
  * @returns {Promise<object | null>} the layer
  */
 export async function openHubs(anchor, ctx = {}) {
+  activeCtx = ctx;
   const manifest = ctx.manifest || {};
   const currentHubId = manifest.hub_id || null;
   activeRemoteHubId = currentHubId?.startsWith("remote_") ? currentHubId.slice(7) : null;
@@ -217,6 +248,12 @@ export async function openHubs(anchor, ctx = {}) {
         return;
       }
       toast(`${hub?.label || "Hub"} · connected`);
+      clearAllCaches();
+      await activeCtx?.reloadCatalog?.().catch(() => {});
+      if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id && hub?.id) {
+        activeCtx.switchContext({ hub: hub.id });
+        return;
+      }
       location.assign(`/next/?hub=${encodeURIComponent(hub.id)}`);
     } catch (err) {
       localNoteText = err.message || "Could not add local hub";
@@ -240,6 +277,8 @@ export async function openHubs(anchor, ctx = {}) {
         return;
       }
       await loadWorkspace();
+      clearAllCaches();
+      await activeCtx?.reloadCatalog?.().catch(() => {});
       if (workspace?.mode === "local" && browserOpen) await loadBrowse(browse?.path || "").catch(() => {});
       render?.();
     } catch (err) {
@@ -609,7 +648,7 @@ async function toggle(x) {
   try {
     await postJSON("/api/remote/toggle", { hub: x.id, enabled: !x.enabled });
     toast(`${x.label} ${x.enabled ? "hidden" : "shown"}`);
-    reloadSoon();
+    await applyWorkspaceUpdate();
   } catch (err) { notes.set(x.id, `Couldn't update · ${err.message}`); render?.(); }
 }
 
@@ -668,7 +707,7 @@ async function remove(x) {
     await postJSON("/api/remote/remove", { hub: x.id });
     toast(`Removed ${x.label}`);
     if (activeRemoteHubId === x.id) location.assign("/next/");
-    else reloadSoon();
+    else await applyWorkspaceUpdate();
   } catch (err) { notes.set(x.id, `Couldn't remove · ${err.message}`); render?.(); }
 }
 

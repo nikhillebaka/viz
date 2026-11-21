@@ -72,12 +72,82 @@ export function nextRecent(recent, id, from) {
 }
 
 /**
+ * Search across all canonical places in `catalog` (falling back to `manifest.locations` when no catalog).
+ * Ranks exact abbr/id/name matches first, then starts-with, word-starts-with, then substring; ties
+ * prefer places present in `activeHubId`, then alphabetical by name.
+ * @param {object | null} catalog
+ * @param {import("../lib/api.js").Manifest} manifest
+ * @param {string} query
+ * @param {string | null} activeHubId
+ * @returns {Array<{ key: string, name: string, abbr: string, level: string, inActiveHub: boolean, targetHubId: string | null, targetLocationId: string, regionHint: string }>}
+ */
+export function matchCatalogPlaces(catalog, manifest, query, activeHubId) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+
+  const rankPlace = (name, abbr, ids) => {
+    const nl = (name || "").toLowerCase();
+    const al = (abbr || "").toLowerCase();
+    if (al === q || nl === q || ids.some((id) => (id || "").toLowerCase() === q)) return 0;
+    if (nl.startsWith(q)) return 1;
+    if (nl.split(/[\s-]+/).some((w) => w.startsWith(q))) return 2;
+    if (nl.includes(q)) return 3;
+    return -1;
+  };
+
+  if (catalog?.places && Object.keys(catalog.places).length) {
+    const out = [];
+    for (const p of Object.values(catalog.places)) {
+      const hubs = Array.isArray(p.hubs) ? p.hubs : [];
+      if (!hubs.length) continue;
+      const ids = [p.key, ...hubs.map((h) => h.location_id)];
+      const r = rankPlace(p.name, p.abbr, ids);
+      if (r < 0) continue;
+      const activeEnt = hubs.find((h) => h.hub_id === activeHubId) || null;
+      const bestEnt = activeEnt || hubs[0];
+      const regions = [...new Set(hubs.map((h) => h.region_label).filter(Boolean))];
+      const pathogens = [...new Set(hubs.map((h) => h.pathogen_label).filter(Boolean))];
+      const hintParts = [];
+      if (!activeEnt && regions.length) hintParts.push(regions[0]);
+      else if (p.level === "hsa") hintParts.push("MetroCast");
+      else if (p.region) hintParts.push(p.region);
+      if (pathogens.length) hintParts.push(pathogens.join(", "));
+      out.push({
+        key: p.key,
+        name: p.name || p.key,
+        abbr: p.abbr || p.key,
+        level: p.level || "custom",
+        inActiveHub: !!activeEnt,
+        targetHubId: bestEnt?.hub_id || activeHubId || null,
+        targetLocationId: bestEnt?.location_id || p.key,
+        regionHint: hintParts.join(" · "),
+        _rank: r,
+      });
+    }
+    out.sort((a, b) => a._rank - b._rank || (a.inActiveHub === b.inActiveHub ? 0 : a.inActiveHub ? -1 : 1) || a.name.localeCompare(b.name));
+    return out.map(({ _rank, ...rest }) => rest);
+  }
+
+  return matchLocations(manifest?.locations || [], q).map((l) => ({
+    key: l.id,
+    name: l.name || l.id,
+    abbr: l.abbr || l.id,
+    level: l.level || "custom",
+    inActiveHub: true,
+    targetHubId: activeHubId || null,
+    targetLocationId: l.id,
+    regionHint: [l.region, l.level].filter(Boolean).join(" · "),
+  }));
+}
+
+/**
  * Open the location picker from the Location bubble (or close it, if it is open from there).
- * Renders only the geography belonging to the loaded hub while search indexes all manifest locations.
+ * Renders only the geography belonging to the loaded hub while search indexes all connected places.
  */
 export function openLocationPicker(anchor, ctx) {
-  const { manifest, store } = ctx;
+  const { manifest, store, catalog } = ctx;
   const locs = manifest.locations || [];
+  const totalCount = catalog?.places ? Object.keys(catalog.places).length : locs.length;
   const current = store.get().location;
   const nameOf = (id) => manifest.locationById.get(id)?.name || id;
   const geoCls = classifyHubGeo(manifest);
@@ -89,7 +159,7 @@ export function openLocationPicker(anchor, ctx) {
     content(body, layer) {
       const input = h("input", {
         type: "search",
-        placeholder: `Search ${locs.length} locations`,
+        placeholder: totalCount > locs.length ? `Search ${totalCount} places` : `Search ${locs.length} locations`,
         "aria-label": "Search locations",
         autocomplete: "off",
         spellcheck: "false",
@@ -112,6 +182,44 @@ export function openLocationPicker(anchor, ctx) {
         layer.close(true);
       };
 
+      const pickCatalogHit = (hit) => {
+        if (!hit) return;
+        if (hit.inActiveHub && manifest.locationById.has(hit.targetLocationId)) {
+          pick(hit.targetLocationId);
+          return;
+        }
+        if (ctx.switchContext && hit.targetHubId) {
+          layer.close(false);
+          ctx.switchContext({ hub: hit.targetHubId, location: hit.targetLocationId });
+        }
+      };
+
+      const renderCatalogRows = (hits, box, compact = false, heading = null) => {
+        box.classList.toggle("is-compact", compact);
+        if (!hits.length) {
+          box.replaceChildren();
+          box.hidden = true;
+          return;
+        }
+        const nodes = heading ? [h("div", { class: "lp-cross-head" }, heading)] : [];
+        for (let i = 0; i < hits.length; i++) {
+          const item = hits[i];
+          const row = h("button", {
+            type: "button",
+            class: ["c-row two", i === 0 && !compact && "on"],
+            onclick: () => pickCatalogHit(item),
+          },
+          h("span", { class: "c-row-text" },
+            h("span", { class: "c-row-label" }, item.name),
+            item.regionHint ? h("span", { class: "c-row-sub" }, item.regionHint) : null,
+          ),
+          h("span", { class: "c-row-sub mono" }, item.abbr || item.key));
+          nodes.push(row);
+        }
+        box.replaceChildren(...nodes);
+        box.hidden = false;
+      };
+
       const globeFoot = typeof ctx.openGlobe === "function"
         ? h("div", { class: "lp-globe-foot" },
           h("button", {
@@ -131,7 +239,8 @@ export function openLocationPicker(anchor, ctx) {
       body.addEventListener("focusin", prefetch);
 
       if (geoCls.kind === "us-states") {
-        // Classic 11x8 US tile map with full keyboard arrow navigation
+        // Classic 11x8 US tile map with full keyboard arrow navigation + cross-hub search results
+        const resultsBox = h("div", { class: "lp-results", hidden: true });
         const us = locs.find((l) => l.id === "US");
         const onMap = locs.filter((l) => l.id !== "US" && TILES[l.abbr]);
         const offMap = locs.filter((l) => l.id !== "US" && !TILES[l.abbr]);
@@ -149,7 +258,7 @@ export function openLocationPicker(anchor, ctx) {
             h("div", { class: "c-tile-grid lp-tiles" }, tiles),
             offMap.length ? h("div", { class: "lp-chips" }, offMap.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.id))) : null,
           ].filter(Boolean));
-        body.append(...[h("label", { class: "c-search", html: icon.search }, input), chips, map, globeFoot].filter(Boolean));
+        body.append(...[h("label", { class: "c-search", html: icon.search }, input), chips, resultsBox, map, globeFoot].filter(Boolean));
 
         const byAbbr = new Map(onMap.map((l, i) => [l.abbr, tiles[i]]));
         const mapItems = () => [...map.querySelectorAll("[data-loc]")];
@@ -158,22 +267,52 @@ export function openLocationPicker(anchor, ctx) {
         rove(map.querySelector(".on") || usTile || tiles[0]);
         const focus = (el) => { if (!el) return; if (map.contains(el)) rove(el); el.focus({ preventScroll: true }); };
 
-        let best = null;
+        let bestInHub = null;
+        let topCrossHit = null;
         const filter = () => {
-          const ms = matchLocations(locs, input.value), set = new Set(ms.map((l) => l.id));
-          best = ms[0]?.id ?? null;
-          layer.panel.classList.toggle("filtering", !!input.value.trim());
+          const rawQ = input.value.trim();
+          const ms = matchLocations(locs, rawQ), set = new Set(ms.map((l) => l.id));
+          bestInHub = ms[0]?.id ?? null;
+          layer.panel.classList.toggle("filtering", !!rawQ);
           for (const b of mapItems()) {
             b.classList.toggle("match", set.has(b.dataset.loc));
-            b.classList.toggle("best", b.dataset.loc === best);
+            b.classList.toggle("best", b.dataset.loc === bestInHub);
           }
+          if (!rawQ) {
+            topCrossHit = null;
+            map.hidden = false;
+            renderCatalogRows([], resultsBox);
+            layer.place?.();
+            return;
+          }
+          const catHits = matchCatalogPlaces(catalog, manifest, rawQ, manifest.hub_id || null);
+          const crossHits = catHits.filter((h) => !h.inActiveHub);
+          topCrossHit = catHits[0] || null;
+          if (!ms.length) {
+            map.hidden = true;
+            if (!catHits.length) {
+              resultsBox.classList.remove("is-compact");
+              resultsBox.hidden = false;
+              resultsBox.replaceChildren(h("p", { class: "pk-empty" }, `No match for “${rawQ}”`));
+            } else {
+              renderCatalogRows(catHits.slice(0, 12), resultsBox, false);
+            }
+          } else {
+            map.hidden = false;
+            if (crossHits.length) renderCatalogRows(crossHits.slice(0, 4), resultsBox, true, "Other connected hubs");
+            else renderCatalogRows([], resultsBox);
+          }
+          layer.place?.();
         };
         input.addEventListener("input", filter);
         input.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") { e.preventDefault(); if (best) pick(best); }
-          else if (e.key === "ArrowDown") {
+          if (e.key === "Enter") {
             e.preventDefault();
-            focus((best && map.querySelector(`[data-loc="${CSS.escape(best)}"]`)) || chips?.firstElementChild || map.querySelector("[tabindex='0']"));
+            if (bestInHub) pick(bestInHub);
+            else if (topCrossHit) pickCatalogHit(topCrossHit);
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            focus((bestInHub && map.querySelector(`[data-loc="${CSS.escape(bestInHub)}"]`)) || resultsBox.querySelector("button") || chips?.firstElementChild || map.querySelector("[tabindex='0']"));
           }
         });
         body.addEventListener("click", (e) => { const b = e.target.closest("[data-loc]"); if (b) pick(b.dataset.loc); });
@@ -343,36 +482,29 @@ export function openLocationPicker(anchor, ctx) {
         const q = input.value.trim();
         if (!q) {
           topHit = null;
-          resultsBox.hidden = true;
+          renderCatalogRows([], resultsBox);
           map.hidden = false;
           renderContextual();
           layer.place?.();
           return;
         }
-        const hits = matchLocations(locs, q).slice(0, 12);
-        topHit = hits[0]?.id ?? null;
+        const hits = matchCatalogPlaces(catalog, manifest, q, manifest.hub_id || null).slice(0, 12);
+        topHit = hits[0] ?? null;
         map.hidden = true;
-        resultsBox.hidden = false;
         if (!hits.length) {
+          resultsBox.classList.remove("is-compact");
+          resultsBox.hidden = false;
           resultsBox.replaceChildren(h("p", { class: "pk-empty" }, `No match for “${q}”`));
+          layer.place?.();
           return;
         }
-        resultsBox.replaceChildren(...hits.map((item, idx) =>
-          h("button", {
-            type: "button",
-            class: ["c-row two", idx === 0 && "on"],
-            "data-loc": item.id,
-          },
-          h("span", { class: "c-row-text" },
-            h("span", { class: "c-row-label" }, item.name || item.id),
-            h("span", { class: "c-row-sub" }, [item.region, item.level].filter(Boolean).join(" · ")),
-          ),
-          h("span", { class: "c-row-sub mono" }, item.abbr || item.id))));
+        renderCatalogRows(hits, resultsBox, false);
+        layer.place?.();
       };
 
       input.addEventListener("input", drawSearch);
       input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && topHit) { e.preventDefault(); pick(topHit); }
+        if (e.key === "Enter" && topHit) { e.preventDefault(); pickCatalogHit(topHit); }
       });
       body.addEventListener("click", (e) => {
         const b = e.target.closest("[data-loc]");

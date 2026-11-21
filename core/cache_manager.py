@@ -274,11 +274,95 @@ class ParquetCacheManager:
         if not self.include_remote or ":" not in model_id:
             return None
         hub_id, _, name = model_id.partition(":")
-        if hub_id in ("local", "synthetic") or not name or "/" in name or "\\" in name or name.startswith("."):
+        if hub_id in ("local", "synthetic", "merged") or not name or "/" in name or "\\" in name or name.startswith("."):
             return None
         if hub_id not in self.active_remote_hub_ids():
             return None
         return hub_id, name
+
+    def merged_key(self, model_id: str) -> Optional[Tuple[str, str]]:
+        """Split a virtual deduplicated union key 'merged:<hub_id>:<model>' into (hub_id, model)."""
+        if not self.include_remote or not model_id.startswith("merged:"):
+            return None
+        rest = model_id[7:]
+        hub_id, _, name = rest.partition(":")
+        if not hub_id or not name or "/" in name or "\\" in name or name.startswith("."):
+            return None
+        if hub_id not in self.active_remote_hub_ids():
+            return None
+        return hub_id, name
+
+    def _merge_parquets(
+        self,
+        repo_pq: Optional[Path],
+        hub_pq: Optional[Path],
+        dest_pq: Path,
+        meta_path: Path,
+        lock_key: str,
+    ) -> Optional[Path]:
+        """Union repo and remote Parquets for the same model, preferring local repo rounds on date overlap."""
+        repo_ok = repo_pq is not None and repo_pq.is_file()
+        hub_ok = hub_pq is not None and hub_pq.is_file()
+        if not repo_ok and not hub_ok:
+            return None
+        if not repo_ok:
+            return hub_pq
+        if not hub_ok:
+            return repo_pq
+
+        r_st, h_st = repo_pq.stat(), hub_pq.stat()
+        fp = {
+            "repo_mtime": r_st.st_mtime,
+            "repo_size": r_st.st_size,
+            "hub_mtime": h_st.st_mtime,
+            "hub_size": h_st.st_size,
+        }
+
+        def _is_merge_fresh() -> bool:
+            if not dest_pq.is_file() or not meta_path.is_file():
+                return False
+            try:
+                saved = json.loads(meta_path.read_text(encoding="utf-8"))
+                return (
+                    saved.get("repo_size") == fp["repo_size"]
+                    and saved.get("hub_size") == fp["hub_size"]
+                    and abs(saved.get("repo_mtime", 0.0) - fp["repo_mtime"]) < 1e-3
+                    and abs(saved.get("hub_mtime", 0.0) - fp["hub_mtime"]) < 1e-3
+                )
+            except (OSError, ValueError):
+                return False
+
+        if _is_merge_fresh():
+            return dest_pq
+
+        with self._model_locks.get(lock_key):
+            if _is_merge_fresh():
+                return dest_pq
+            repo_df = pl.read_parquet(repo_pq)
+            hub_df = pl.read_parquet(hub_pq)
+            if "reference_date" in repo_df.columns:
+                repo_df = repo_df.with_columns(pl.col("reference_date").cast(pl.String))
+                repo_dates = repo_df.get_column("reference_date").unique().drop_nulls().to_list()
+            else:
+                repo_dates = []
+            if "reference_date" in hub_df.columns:
+                hub_df = hub_df.with_columns(pl.col("reference_date").cast(pl.String))
+                hub_extra = hub_df.filter(~pl.col("reference_date").is_in(repo_dates)) if repo_dates else hub_df
+            else:
+                hub_extra = hub_df.head(0)
+
+            combined = repo_df if hub_extra.is_empty() else pl.concat([repo_df, hub_extra], how="diagonal_relaxed")
+            dest_pq.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_parquet(combined, dest_pq)
+            tid = f"{os.getpid()}_{threading.get_ident()}"
+            tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
+            try:
+                with open(tmp_meta, "w", encoding="utf-8") as fm:
+                    json.dump(fp, fm)
+                os.replace(tmp_meta, meta_path)
+            finally:
+                tmp_meta.unlink(missing_ok=True)
+            return dest_pq
 
     def _resolve_model_paths(self, model_id: str, is_local: bool = False) -> Optional[Tuple[Path, Path, str, Optional[Tuple[str, str]], bool]]:
         """Resolve `(source_dir, dest_dir, file_stem, hub_tuple_or_None, is_local)` for a model."""
@@ -372,6 +456,26 @@ class ParquetCacheManager:
                 tmp_meta.unlink(missing_ok=True)
             return dest_pq
 
+    def _get_merged_artifact(
+        self,
+        hub_id: str,
+        name: str,
+        suffix: str,
+        meta_suffix: str,
+        fetch_fn: Any,
+        lock_prefix: str,
+    ) -> Optional[Path]:
+        """Resolve and merge repo + remote Parquet artifacts for `merged:<hub_id>:<name>`."""
+        repo_pq = fetch_fn(name, is_local=False)
+        hub_pq = fetch_fn(f"{hub_id}:{name}", is_local=False)
+        return self._merge_parquets(
+            repo_pq,
+            hub_pq,
+            self.models_cache_dir / f"{name}.merged.{hub_id}{suffix}",
+            self.models_cache_dir / f"{name}.merged.{hub_id}{meta_suffix}",
+            f"merged::{lock_prefix}::{hub_id}::{name}",
+        )
+
     def get_model_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
         """
         Build/return consolidated quantile Parquet (plus samples, pmf, and derived peak sidecars)
@@ -379,6 +483,12 @@ class ParquetCacheManager:
         Thread-safe with per-model locking and atomic filesystem replacement.
         """
         from viz.core.ingest import NormalizationError, normalize_forecast_frame
+
+        merged = self.merged_key(model_id)
+        if merged is not None:
+            return self._get_merged_artifact(
+                merged[0], merged[1], ".parquet", ".meta.json", self.get_model_parquet, "q"
+            )
 
         resolved = self._resolve_model_paths(model_id, is_local=is_local)
         if resolved is None:
@@ -561,6 +671,11 @@ class ParquetCacheManager:
 
     def get_model_samples_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
         """Get or build consolidated weekly sample-trajectory Parquet (`<model>.samples.parquet`)."""
+        merged = self.merged_key(model_id)
+        if merged is not None:
+            return self._get_merged_artifact(
+                merged[0], merged[1], ".samples.parquet", ".samples.meta.json", self.get_model_samples_parquet, "samples"
+            )
         hub = self.hub_key(model_id)
         if hub is not None:
             s_dir = self.remote_store.sample_dir(*hub)
@@ -592,6 +707,11 @@ class ParquetCacheManager:
 
     def get_model_pmf_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
         """Get or build consolidated weekly PMF Parquet (`<model>.pmf.parquet`)."""
+        merged = self.merged_key(model_id)
+        if merged is not None:
+            return self._get_merged_artifact(
+                merged[0], merged[1], ".pmf.parquet", ".pmf.meta.json", self.get_model_pmf_parquet, "pmf"
+            )
         hub = self.hub_key(model_id)
         if hub is not None:
             p_dir = self.remote_store.pmf_dir(*hub)
@@ -636,6 +756,11 @@ class ParquetCacheManager:
         refreshed by the same fingerprint, so the weekly tables and their caches are never touched.
         Returns None when the model submitted no peak forecasts.
         """
+        merged = self.merged_key(model_id)
+        if merged is not None:
+            return self._get_merged_artifact(
+                merged[0], merged[1], ".peak.parquet", ".peak.meta.json", self.get_model_peak_parquet, "peak"
+            )
         hub = self.hub_key(model_id)
         if hub is not None:
             source_dir = self.remote_store.peak_dir(*hub)
@@ -1435,6 +1560,14 @@ class ParquetCacheManager:
         """Remove cached parquet and metadata files to force regeneration."""
         suffixes = (".parquet", ".meta.json", ".peak.parquet", ".peak.meta.json", ".samples.parquet", ".samples.meta.json", ".pmf.parquet", ".pmf.meta.json")
         if model_id:
+            merged = self.merged_key(model_id)
+            if merged is not None:
+                hub_id, base_name = merged
+                for suffix in suffixes:
+                    (self.models_cache_dir / f"{base_name}.merged.{hub_id}{suffix}").unlink(missing_ok=True)
+                self.clear_cache(base_name)
+                self.clear_cache(f"{hub_id}:{base_name}")
+                return
             hub = self.hub_key(model_id)
             if hub is not None:
                 d = self.hub_models_cache_dir / hub[0]

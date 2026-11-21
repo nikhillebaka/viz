@@ -6,6 +6,8 @@ import { classifyHubGeo } from "../../geo/picker_geo.js";
 import { targetHorizons, scopeOf } from "../../sections/scope.js";
 import { scorePmfDistribution, verticalPmfSegments } from "../../features/PmfView.js";
 import { parseUrl, writeUrl, defaults, targetDimSpecs, defaultDims, isCategoricalTarget } from "../../features/url.js";
+import { buildTargetMenuGroups } from "../../features/TargetMenu.js";
+import { matchCatalogPlaces } from "../../features/LocationPicker.js";
 
 describe("Phase 3 multi-hub frontend helpers", () => {
   it("classifyHubGeo identifies us-states, us-metrocast, eu-countries (UK split), and generic", () => {
@@ -135,5 +137,86 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     assert.equal(back.trajectories, true);
     assert.deepEqual(back.dims, { age_group: "65+" });
     assert.equal(parseUrl("?dim_age_group=invalid", rsvMan).dims, undefined);
+  });
+
+  it("buildTargetMenuGroups and matchCatalogPlaces unify cross-hub targets and places cleanly", () => {
+    const man = indexManifest({
+      hub_id: "local_flu",
+      default_target: "wk inc flu hosp",
+      targets: [{ id: "wk inc flu hosp", short: "Flu admissions", label: "Incident Flu Admissions" }],
+      locations: [
+        { id: "US", abbr: "US", name: "United States" },
+        { id: "25", abbr: "MA", name: "Massachusetts" },
+      ],
+      seasons: [{ id: "2025-2026", rounds: ["2025-11-22"] }],
+      models: [{ id: "Ens", abbr: "Ens" }],
+    });
+
+    const catalog = {
+      hubs: [
+        { id: "local_flu", default_location: "US" },
+        { id: "remote_flu_metrocast", default_location: "boston" },
+        { id: "remote_covid19", default_location: "US" },
+        { id: "remote_respicast_syndromic", default_location: "DE" },
+      ],
+      targets: [
+        { key: "local_flu::wk inc flu hosp", hub_id: "local_flu", hub_short: "FluSight", target_id: "wk inc flu hosp", label: "Incident Flu Admissions", short: "Flu admissions", pathogen: "influenza", pathogen_label: "Influenza", geo_kind: "us-states", region_label: "US" },
+        { key: "remote_flu_metrocast::Flu ED visits pct", hub_id: "remote_flu_metrocast", hub_short: "MetroCast", target_id: "Flu ED visits pct", label: "Flu ED Visits", short: "Flu ED %", pathogen: "influenza", pathogen_label: "Influenza", geo_kind: "us-metrocast", region_label: "US · MetroCast" },
+        { key: "remote_covid19::wk inc covid hosp", hub_id: "remote_covid19", hub_short: "COVID-19", target_id: "wk inc covid hosp", label: "Incident COVID-19 Admissions", short: "COVID admissions", pathogen: "covid19", pathogen_label: "COVID-19", geo_kind: "us-states", region_label: "US" },
+        { key: "remote_respicast_syndromic::ILI incidence", hub_id: "remote_respicast_syndromic", hub_short: "RespiCast", target_id: "ILI incidence", label: "ILI Incidence", short: "ILI / 100k", pathogen: "syndromic", pathogen_label: "ILI / ARI", geo_kind: "eu-countries", region_label: "Europe" },
+      ],
+      places: {
+        "25": {
+          key: "25", name: "Massachusetts", abbr: "MA", level: "state", state_fips: "25", parent_key: "US",
+          hubs: [
+            { hub_id: "local_flu", location_id: "25", pathogen_label: "Influenza", region_label: "US" },
+            { hub_id: "remote_flu_metrocast", location_id: "massachusetts", pathogen_label: "Influenza", region_label: "US · MetroCast" },
+            { hub_id: "remote_covid19", location_id: "25", pathogen_label: "COVID-19", region_label: "US" },
+          ],
+        },
+        boston: {
+          key: "boston", name: "Boston, MA", abbr: "Boston", level: "hsa", state_fips: "25", parent_key: "25",
+          hubs: [{ hub_id: "remote_flu_metrocast", location_id: "boston", pathogen_label: "Influenza", region_label: "US · MetroCast" }],
+        },
+        FR: {
+          key: "FR", name: "France", abbr: "FR", level: "country",
+          hubs: [{ hub_id: "remote_respicast_syndromic", location_id: "FR", pathogen_label: "ILI / ARI", region_label: "Europe" }],
+        },
+        GB: {
+          key: "GB", name: "United Kingdom", abbr: "UK", level: "country",
+          hubs: [{ hub_id: "remote_respicast_syndromic", location_id: "UK", pathogen_label: "ILI / ARI", region_label: "Europe" }],
+        },
+      },
+    };
+
+    // At Massachusetts ("25"): Influenza + COVID-19 appear above sep, Europe below sep
+    const maMenu = buildTargetMenuGroups(catalog, man, "25", "local_flu", "wk inc flu hosp");
+    const sepIdx = maMenu.findIndex((e) => e.type === "sep");
+    assert.ok(sepIdx > 0);
+    const above = maMenu.slice(0, sepIdx).filter((e) => e.type === "item");
+    const below = maMenu.slice(sepIdx + 1).filter((e) => e.type === "item");
+    assert.equal(above.length, 3);
+    assert.equal(above[1].shortcut, "MetroCast");
+    assert.equal(below.length, 1);
+    assert.equal(below[0].targetId, "ILI incidence");
+
+    // At Boston HSA: inherits parent Massachusetts state targets via parent_key="25"
+    const bosMenu = buildTargetMenuGroups(catalog, man, "boston", "remote_flu_metrocast", "Flu ED visits pct");
+    const bosAbove = bosMenu.slice(0, bosMenu.findIndex((e) => e.type === "sep")).filter((e) => e.type === "item");
+    assert.equal(bosAbove.find((e) => e.hubId === "remote_covid19")?.shortcut, "MA");
+
+    // Cross-hub place search while viewing US FluSight
+    const frHits = matchCatalogPlaces(catalog, man, "france", "local_flu");
+    assert.equal(frHits.length, 1);
+    assert.equal(frHits[0].inActiveHub, false);
+    assert.equal(frHits[0].targetHubId, "remote_respicast_syndromic");
+    assert.equal(frHits[0].targetLocationId, "FR");
+
+    const ukHits = matchCatalogPlaces(catalog, man, "uk", "local_flu");
+    assert.equal(ukHits[0].targetLocationId, "UK");
+
+    const bosHits = matchCatalogPlaces(catalog, man, "boston", "local_flu");
+    assert.equal(bosHits[0].targetHubId, "remote_flu_metrocast");
+    assert.equal(bosHits[0].targetLocationId, "boston");
   });
 });

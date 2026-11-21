@@ -546,7 +546,7 @@ class HubManager:
         mode: str = "local",
         cli_hubs: Optional[List[Path]] = None,
         include_enclosing: bool = True,
-        max_loaded: int = 8,
+        max_loaded: int = 12,
     ):
         clean_mode = (mode or "local").strip().lower()
         if clean_mode not in ("local", "web"):
@@ -594,6 +594,9 @@ class HubManager:
                         None,
                     )
                     self.registry.set_active(fallback.id if fallback else None)
+
+        from viz.core.catalog import WorkspaceCatalog
+        self.catalog = WorkspaceCatalog(self)
 
     def _remote_hub_record(self, hub_id: str) -> Optional[LocalHubRecord]:
         """Synthetic workspace record for a synced remote hub opened standalone (`remote_<id>`)."""
@@ -730,6 +733,7 @@ class HubManager:
 
     def _on_remote_inventory_change(self, hub_id: str, changed_models: List[str]):
         remote_ws_id = f"{REMOTE_HUB_PREFIX}{hub_id}"
+        self.catalog.invalidate()
         with self._lock:
             self._contexts.pop(remote_ws_id, None)
             loaded = list(self._contexts.values())
@@ -743,6 +747,8 @@ class HubManager:
             ctx.loader.scan_models(force_refresh=True)
 
     def _invalidate_all_contexts(self, exclude_id: Optional[str] = None):
+        if hasattr(self, "catalog"):
+            self.catalog.invalidate()
         with self._lock:
             items = [(hid, ctx) for hid, ctx in self._contexts.items() if hid != exclude_id]
         for _, ctx in items:
@@ -792,6 +798,7 @@ class HubManager:
         with self._lock:
             self._contexts.pop(rec.id, None)
         self._invalidate_all_contexts(exclude_id=rec.id)
+        self.catalog.invalidate()
         if activate:
             self._refresh_cached_server_config()
         return {
@@ -809,6 +816,7 @@ class HubManager:
         if not Path(rec.path).is_dir():
             raise ValueError(f"Hub folder no longer exists: {rec.path}")
         self.registry.set_active(hub_id)
+        self.catalog.invalidate()
         self._refresh_cached_server_config()
         return {
             "ok": True,
@@ -827,6 +835,7 @@ class HubManager:
 
         self.registry.remove_hub(hub_id)
         self._invalidate_all_contexts()
+        self.catalog.invalidate()
 
         if clear_cache:
             hubs_root = (self.data_dir / "hubs").resolve()

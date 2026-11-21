@@ -1,16 +1,17 @@
-/* Live interactive monochrome luminance Globe for /next/.
+/* Unified multi-hub monochrome luminance Globe for /next/.
  * - Flat paper backdrop (zero vignette in light or dark mode)
- * - Monochrome luminance ramp driven live from /api/next/spatial
- * - Strictly hub-scoped MetroCast HSAs: county/HSA borders appear ONLY when the connected hub
- *   has MetroCast HSAs (`classifyHubGeo(manifest).kind === "us-metrocast"`), never on US-state or EU hubs
- * - Detached overseas territories (French Guiana, Svalbard, etc.) stay unshaded and unselectable
- * - Cursor-anchored zoom up to 48x, frosted Place Drawer with Open chart -> */
+ * - Simultaneous US states, European countries, and MetroCast HSAs from GET /api/next/globe
+ * - Clear Signal + Display selector (`All · Relative activity` or any single pathogen/target stream)
+ * - Dissolved MetroCast HSA borders on zoom strictly for connected MetroCast regions
+ * - Detached overseas territories stay unshaded and unselectable
+ * - Frosted multi-signal Place Drawer opening any stream directly in-place */
 import { h, on, cssColor, storage, onThemeChange } from "../lib/dom.js";
 import { valueFormat } from "../lib/format.js";
+import { loadGlobe } from "../lib/api.js";
 import { glass } from "../ui/glass.js";
 import { pill, icon } from "../ui/controls.js";
 import { openMenu } from "../ui/floating.js";
-import { getJson, query, linkStyle, fitCanvas, perFrame, onDprChange } from "../sections/shared.js";
+import { linkStyle, fitCanvas, onDprChange } from "../sections/shared.js";
 import {
   arcsToUnitSphere,
   clipPolygonToHemisphere,
@@ -28,7 +29,6 @@ import {
 } from "../geo/topo.js";
 import { EU_META, ISO_NUM_TO_ALPHA2, US_STATE_META } from "../geo/eu_tiles.js";
 import { classifyHubGeo, loadUsGeoCache } from "../geo/picker_geo.js";
-import { isCategoricalTarget } from "./url.js";
 
 const MAX_ZOOM = 48;
 const MIN_ZOOM = 1.0;
@@ -37,13 +37,14 @@ const EU_MAINLAND_BOUNDS = Object.freeze({ minLon: -26, maxLon: 45, minLat: 33, 
 const DETACH_ISOS = new Set([...Object.keys(EU_META), "FR", "NO", "NL", "PT", "ES", "DK", "GB"]);
 const DETACH_BOUNDS_BY_ISO = Object.fromEntries([...DETACH_ISOS].map((iso) => [iso, EU_MAINLAND_BOUNDS]));
 
-const LAYER_MODES = [
+const DISPLAY_MODES = [
   { id: "observed", label: "Observed" },
   { id: "forecast", label: "Forecast" },
-  { id: "trend", label: "Wk Δ trend" },
+  { id: "trend", label: "Wk Δ" },
   { id: "none", label: "Outlines only" },
 ];
 
+const RECENTS_KEY = "viz.globe_recents";
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const smoothstep = (e0, e1, x) => {
   const t = clamp((x - e0) / (e1 - e0), 0, 1);
@@ -54,8 +55,6 @@ function parseRgbCss(str, fallback = [245, 245, 245]) {
   const m = String(str || "").match(/[\d.]+/g);
   return m && m.length >= 3 ? [Number(m[0]), Number(m[1]), Number(m[2])] : fallback;
 }
-
-const recentsKey = (hubId) => (hubId ? `viz.h.${hubId}.globe_recents` : "viz.globe_recents");
 
 let worldGeoPromise = null;
 function loadWorldCountries() {
@@ -105,185 +104,160 @@ async function loadSphereBundle() {
 }
 
 /**
- * Mounts the interactive monochrome Globe overlay into `host`.
+ * Mounts the unified interactive monochrome Globe overlay into `host`.
  * @param {HTMLElement} host
- * @param {{ manifest: import("../lib/api.js").Manifest, store: object, onClose?: () => void }} ctx
+ * @param {{ manifest: import("../lib/api.js").Manifest, store: object, catalog?: object, switchContext?: (o: object) => Promise<void>, onClose?: () => void }} ctx
  */
 export function mountGlobeView(host, ctx) {
   const { manifest, store, onClose } = ctx;
   linkStyle("globe");
-
   const geoCls = classifyHubGeo(manifest);
-  const isMetroHub = geoCls.kind === "us-metrocast";
-  const isEuHub = geoCls.kind === "eu-countries";
-  const isUsStates = geoCls.kind === "us-states";
 
-  let camLon = isEuHub ? 10 : -94;
-  let camLat = isEuHub ? 50 : 38.5;
-  let camZoom = isEuHub ? 2.55 : 2.0;
+  // Start facing whichever continent the user came from, while the whole sphere stays live
+  let camLon = geoCls.kind === "eu-countries" ? 10 : -94;
+  let camLat = geoCls.kind === "eu-countries" ? 50 : 38.5;
+  let camZoom = geoCls.kind === "eu-countries" ? 2.55 : 2.0;
   let velLon = 0;
   let velLat = 0;
   let flight = null;
 
+  let globeData = null;
+  let regions = {};
+  let signals = [];
+  let signalId = "all";
   let layerId = "observed";
-  let metroCastOn = isMetroHub;
-  let selectedLocId = null;
+  let metroCastOn = true;
+  let hasUsStates = geoCls.kind === "us-states" || geoCls.kind === "us-metrocast" || manifest.locationById.has("US");
+  let hasEu = geoCls.kind === "eu-countries";
+  let hasMetroCast = geoCls.kind === "us-metrocast";
+  let metroIdSet = new Set();
+
+  let selectedKey = null;
   let hoverItem = null;
-  let spatialData = null;
-  let scaleDomain = { lo: 0, hi: 1, isPct: false, per100k: false };
   let activeMetros = [];
   let activeMetroStates = new Set();
   let useFullMetroMesh = false;
   let geo = null;
   let destroyed = false;
-  let spatialToken = 0;
 
   let hitCountries = [];
   let hitStates = [];
   let hitMetros = [];
   let hitDots = [];
   let lastGeoSpec = { cx: 0, cy: 0, radiusPx: 1, R: null };
-  const spatialSlot = {};
 
   const loadRecents = () => {
-    const raw = storage.get(recentsKey(manifest.hub_id), []);
+    const raw = storage.get(RECENTS_KEY, []);
     if (!Array.isArray(raw)) return [];
-    return raw.filter((id) => typeof id === "string" && manifest.locationById.has(id)).slice(0, 5);
+    return raw.filter((id) => typeof id === "string" && id && (!Object.keys(regions).length || regions[id])).slice(0, 6);
   };
   let recents = loadRecents();
-  const recordRecent = (locId) => {
-    if (!locId || !manifest.locationById.has(locId)) return;
-    recents = [locId, ...recents.filter((x) => x !== locId)].slice(0, 5);
-    storage.set(recentsKey(manifest.hub_id), recents);
+  const recordRecent = (key) => {
+    if (!key) return;
+    recents = [key, ...recents.filter((x) => x !== key)].slice(0, 6);
+    storage.set(RECENTS_KEY, recents);
     renderRecents();
   };
 
-  /* ---------------- Spatial Target & Value Helpers ---------------- */
-  function spatialTargetMeta() {
-    const s = store.get();
-    const cur = manifest.targetById.get(s.target);
-    if (cur && !isCategoricalTarget(cur)) return cur;
-    return (manifest.targets || []).find((t) => !isCategoricalTarget(t)) || null;
+  /* ---------------- Unified Region & Signal Helpers ---------------- */
+  const activeSignalMeta = () => signals.find((s) => s.id === signalId) || signals[0] || null;
+
+  function regionByCountryIso(cid) {
+    if (!cid) return null;
+    if (regions[cid]) return regions[cid];
+    if (cid === "GB" && regions.UK) return regions.UK;
+    if (cid === "UK" && regions.GB) return regions.GB;
+    return null;
   }
 
-  function resolveCountryLocation(cid) {
-    if (!cid) return null;
-    if (manifest.locationById.has(cid)) return manifest.locationById.get(cid);
-    if (cid === "GB") {
-      if (manifest.locationById.has("UK")) return manifest.locationById.get("UK");
-      if (manifest.locationById.has("GB-ENG")) return manifest.locationById.get("GB-ENG");
+  function regionByStateFips(fips) {
+    return (fips && regions[fips]) || null;
+  }
+
+  function streamForRegion(reg, sigId = signalId) {
+    if (!reg || !Array.isArray(reg.streams) || !reg.streams.length) return null;
+    if (sigId && sigId !== "all") {
+      return reg.streams.find((s) => s.signal_id === sigId) || null;
+    }
+    // Composite: pick the stream driving peak activity for this place
+    let best = null;
+    let bestAct = -1;
+    for (const s of reg.streams) {
+      const a = Number.isFinite(s.activity) ? s.activity : -0.5;
+      if (a > bestAct) { bestAct = a; best = s; }
+    }
+    return best || reg.streams[0];
+  }
+
+  function formatStreamValue(val, stream) {
+    if (!Number.isFinite(val)) return "–";
+    if (stream?.use_rate) return `${val >= 10 ? val.toFixed(1) : val.toFixed(2)} /100k`;
+    return valueFormat({ scale: stream?.scale || "count", is_rate: stream?.scale && stream.scale !== "count" }).readout(val);
+  }
+
+  function metricForKey(key, mode = layerId) {
+    if (!key || mode === "none") return null;
+    const reg = regions[key];
+    if (!reg) return null;
+
+    if (signalId === "all") {
+      const top = streamForRegion(reg, "all");
+      if (!top) return null;
+      const act = mode === "forecast" ? (reg.composite_forecast_activity ?? reg.composite_activity) : reg.composite_activity;
+      const trend = reg.composite_trend_pct;
+      return {
+        isComposite: true,
+        norm: mode === "trend"
+          ? (Number.isFinite(trend) ? clamp((trend + 50) / 100, 0, 1) : null)
+          : (Number.isFinite(act) ? clamp(act, 0, 1) : null),
+        topStream: top,
+        trendPct: trend,
+      };
+    }
+
+    const st = streamForRegion(reg, signalId);
+    if (!st) return null;
+    const sig = activeSignalMeta();
+    let norm = null;
+    if (mode === "trend") {
+      norm = Number.isFinite(st.trend_pct) ? clamp((st.trend_pct + 50) / 100, 0, 1) : null;
+    } else if (mode === "forecast") {
+      norm = Number.isFinite(st.forecast_activity) ? clamp(st.forecast_activity, 0, 1) : st.activity;
+    } else {
+      norm = Number.isFinite(st.activity) ? clamp(st.activity, 0, 1) : st.forecast_activity;
+    }
+    return {
+      isComposite: false,
+      norm: Number.isFinite(norm) ? clamp(norm, 0, 1) : null,
+      stream: st,
+      sig,
+      observed: st.observed,
+      forecast: st.forecast,
+      trendPct: st.trend_pct,
+    };
+  }
+
+  function normForRegionKey(key) {
+    if (layerId === "none") return null;
+    const m = metricForKey(key, layerId);
+    return m?.norm ?? null;
+  }
+
+  function currentKeyFromManifest() {
+    const locId = store.get().location;
+    if (!locId) return null;
+    if (regions[locId]) return locId;
+    if (locId === "UK" && regions.GB) return "GB";
+    const places = ctx.catalog?.places || {};
+    for (const p of Object.values(places)) {
+      if (p.hubs?.some((ent) => ent.hub_id === manifest.hub_id && ent.location_id === locId)) {
+        return p.key;
+      }
     }
     return null;
   }
 
-  function resolveStateLocation(fips) {
-    return geoCls.stateByFips.get(fips) || manifest.locationById.get(fips) || null;
-  }
-
-  function locRecord(locId) {
-    if (!locId || !spatialData) return null;
-    if (spatialData.locations?.[locId]) return spatialData.locations[locId];
-    const abbr = manifest.locationById.get(locId)?.abbr;
-    return abbr ? spatialData.states?.[abbr] ?? null : null;
-  }
-
-  function metricForLoc(locId, mode = layerId) {
-    if (!locId || mode === "none") return null;
-    const rec = locRecord(locId);
-    if (!rec) return null;
-    const tMeta = spatialTargetMeta();
-    const useRate = !!tMeta?.per_100k_capable && rec.population > 1;
-    const availH = spatialData?.available_horizons || [];
-    const baseH = availH.includes(1) ? 1 : availH[0] ?? 0;
-    const trendH = availH.find((x) => x > 0) ?? baseH;
-
-    let obsVal = NaN;
-    const obsKeys = Object.keys(rec.truth || {}).sort();
-    const ted0 = spatialData?.dates_by_horizon?.[availH.includes(0) ? 0 : availH[0]];
-    const rawObs = ted0 && rec.truth?.[ted0] != null ? rec.truth[ted0] : (obsKeys.length ? rec.truth[obsKeys.at(-1)] : NaN);
-    if (Number.isFinite(rawObs)) obsVal = useRate ? (rawObs / rec.population) * 1e5 : rawObs;
-
-    const s = store.get();
-    const candIds = [
-      ...s.sel.selected,
-      ...(manifest.recommended || []),
-      ...Object.keys(rec.models || {}),
-    ];
-    let entry = null;
-    let modelId = null;
-    for (const mid of candIds) {
-      if (rec.models?.[mid]?.[baseH]) {
-        entry = rec.models[mid][baseH];
-        modelId = mid;
-        break;
-      }
-    }
-
-    let fcstVal = NaN;
-    if (entry) {
-      fcstVal = useRate && Number.isFinite(entry.rate_per_100k) ? entry.rate_per_100k : entry.median;
-    }
-    const tEntry = modelId ? rec.models?.[modelId]?.[trendH] : entry;
-    const trendPct = tEntry && Number.isFinite(tEntry.trend_pct) ? tEntry.trend_pct : NaN;
-
-    let primary = NaN;
-    if (mode === "observed") primary = Number.isFinite(obsVal) ? obsVal : fcstVal;
-    else if (mode === "forecast") primary = Number.isFinite(fcstVal) ? fcstVal : obsVal;
-    else if (mode === "trend") primary = trendPct;
-
-    return { value: primary, observed: obsVal, forecast: fcstVal, trendPct, useRate, population: rec.population };
-  }
-
-  function recomputeScale() {
-    if (layerId === "none" || !spatialData) {
-      scaleDomain = { lo: 0, hi: 1, isPct: false, per100k: false };
-      return;
-    }
-    const vals = [];
-    const tMeta = spatialTargetMeta();
-    let anyRate = false;
-    for (const loc of manifest.locations || []) {
-      if (loc.id === "US") continue;
-      const m = metricForLoc(loc.id, layerId);
-      if (m && Number.isFinite(m.value)) {
-        vals.push(m.value);
-        if (m.useRate) anyRate = true;
-      }
-    }
-    if (!vals.length) {
-      scaleDomain = { lo: 0, hi: 1, isPct: layerId === "trend", per100k: anyRate };
-      return;
-    }
-    vals.sort((a, b) => a - b);
-    if (layerId === "trend") {
-      const p95 = Math.max(15, Math.min(200, Math.abs(vals[Math.floor((vals.length - 1) * 0.95)] || 50)));
-      scaleDomain = { lo: -p95, hi: p95, isPct: true, per100k: false, isProp: false };
-      return;
-    }
-    const lo = vals.length >= 8 ? vals[Math.floor((vals.length - 1) * 0.05)] : 0;
-    const p95 = vals[Math.floor((vals.length - 1) * 0.95)] ?? vals.at(-1);
-    const hi = Math.max(lo + 1e-6, p95 > 0 ? p95 : vals.at(-1) || 1);
-    const isProp = tMeta?.scale === "proportion" || tMeta?.scale === "percentage";
-    scaleDomain = { lo: Math.max(0, lo), hi, isPct: false, per100k: anyRate, isProp };
-  }
-
-  function normForLoc(locId) {
-    if (layerId === "none") return null;
-    const m = metricForLoc(locId, layerId);
-    if (!m || !Number.isFinite(m.value)) return null;
-    const { lo, hi } = scaleDomain;
-    return clamp((m.value - lo) / Math.max(1e-9, hi - lo), 0, 1);
-  }
-
-  function formatMetric(v, useRate = false) {
-    if (!Number.isFinite(v)) return "–";
-    const tMeta = spatialTargetMeta();
-    if (useRate) return `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} /100k`;
-    if (tMeta) return valueFormat(tMeta).readout(v);
-    return v >= 10 ? v.toFixed(1) : v.toFixed(2);
-  }
-
-  /* ---------------- DOM ---------------- */
+  /* ---------------- DOM & Liquid Glass HUD ---------------- */
   const wrap = h("div", { class: "gb-wrap" });
   const canvas = h("canvas", { class: "gb-canvas", "aria-label": "Interactive monochrome globe" });
   const recentsEl = h("div", { class: "gb-recents", hidden: true, role: "group", "aria-label": "Recent places" });
@@ -293,10 +267,10 @@ export function mountGlobeView(host, ctx) {
   const drawer = h("aside", { class: "c-panel gb-drawer", hidden: true, "aria-label": "Place summary" });
 
   const layerBtn = pill({
-    label: "Observed",
+    label: "All · Relative activity",
     size: "sm",
     chevron: true,
-    ariaLabel: "Globe layer menu",
+    ariaLabel: "Globe signal and display layer",
     onClick: () => openLayerMenu(),
   });
   const keyWrap = h("div", { class: "gb-key" });
@@ -310,17 +284,27 @@ export function mountGlobeView(host, ctx) {
   host.replaceChildren(wrap);
 
   const layerGlass = glass(layerBtn);
-  const hudGlasses = [layerGlass, glass(keyWrap), glass(zoomInBtn), glass(zoomOutBtn), glass(drawer, { panel: true })];
+  const keyGlass = glass(keyWrap);
+  const hudGlasses = [layerGlass, keyGlass, glass(zoomInBtn), glass(zoomOutBtn), glass(drawer, { panel: true })];
   const recentGlasses = [];
-  document.fonts?.ready?.then(() => layerGlass.update());
+  document.fonts?.ready?.then(() => { layerGlass.update(); keyGlass.update(); });
 
   function updateLegendAndLabel() {
-    const def = LAYER_MODES.find((x) => x.id === layerId) || LAYER_MODES[0];
+    const modeDef = DISPLAY_MODES.find((x) => x.id === layerId) || DISPLAY_MODES[0];
+    const sig = activeSignalMeta();
+    let btnText = modeDef.label;
+    if (layerId === "none") {
+      btnText = "Outlines only";
+    } else if (signalId === "all") {
+      btnText = layerId === "trend" ? "All · Wk Δ" : layerId === "forecast" ? "All · Forecast" : "All · Relative activity";
+    } else if (sig) {
+      btnText = `${sig.short} · ${modeDef.label}`;
+    }
     const lbl = layerBtn.querySelector(".c-pill-label");
-    if (lbl) lbl.textContent = def.label;
+    if (lbl) lbl.textContent = btnText;
     layerGlass.update();
 
-    if (layerId === "none" || !spatialData) {
+    if (layerId === "none" || !signals.length) {
       keyWrap.hidden = true;
       return;
     }
@@ -329,43 +313,71 @@ export function mountGlobeView(host, ctx) {
     const ink = parseRgbCss(cssColor("var(--ink-primary)"), isLight ? [17, 18, 22] : [235, 237, 240]);
     const lowCol = `rgba(${ink[0]}, ${ink[1]}, ${ink[2]}, 0.06)`;
     const hiCol = `rgba(${ink[0]}, ${ink[1]}, ${ink[2]}, ${isLight ? 0.62 : 0.56})`;
-    const tMeta = spatialTargetMeta();
+    const layerNodes = [...keyWrap.querySelectorAll(":scope > .c-glass-layer")];
+
+    if (layerId === "trend") {
+      keyWrap.replaceChildren(
+        ...layerNodes,
+        h("span", { class: "mono" }, "−50%"),
+        h("span", { class: "gb-key-ramp", style: { background: `linear-gradient(90deg, ${lowCol}, ${hiCol})` } }),
+        h("span", { class: "mono" }, "+50%"),
+        h("span", { class: "gb-key-tag" }, signalId === "all" ? "Wk Δ" : (sig?.short || "Wk Δ")),
+      );
+      keyGlass.update();
+      return;
+    }
+
+    if (signalId === "all") {
+      keyWrap.replaceChildren(
+        ...layerNodes,
+        h("span", { class: "mono" }, "Low"),
+        h("span", { class: "gb-key-ramp", style: { background: `linear-gradient(90deg, ${lowCol}, ${hiCol})` } }),
+        h("span", { class: "mono" }, "High"),
+        h("span", { class: "gb-key-tag" }, layerId === "forecast" ? "forecast" : "activity"),
+      );
+      keyGlass.update();
+      return;
+    }
+
+    const loVal = layerId === "forecast" ? (sig?.fc_lo ?? sig?.lo ?? 0) : (sig?.lo ?? 0);
+    const hiVal = layerId === "forecast" ? (sig?.fc_hi ?? sig?.hi ?? 1) : (sig?.hi ?? 1);
+    const tLike = { scale: sig?.scale || "count", is_rate: sig?.scale && sig.scale !== "count" };
     const fmtBound = (v) => {
-      if (scaleDomain.isPct) return `${v >= 0 ? "+" : ""}${Math.round(v)}%`;
-      if (scaleDomain.isProp && tMeta) return valueFormat(tMeta).readout(v);
-      if (Math.abs(v) >= 1e3) return valueFormat(tMeta || { scale: "count" }).axis(Math.round(v));
+      if (sig?.scale === "proportion" || sig?.scale === "percentage") return valueFormat(tLike).readout(v);
+      if (Math.abs(v) >= 1e3) return valueFormat(tLike).axis(Math.round(v));
       return Math.abs(v) >= 10 || Math.abs(v) < 1e-6 ? String(Math.round(v)) : v.toFixed(1);
     };
-    const layerNodes = [...keyWrap.querySelectorAll(":scope > .c-glass-layer")];
     keyWrap.replaceChildren(
       ...layerNodes,
-      h("span", { class: "mono" }, fmtBound(scaleDomain.lo)),
+      h("span", { class: "mono" }, fmtBound(loVal)),
       h("span", { class: "gb-key-ramp", style: { background: `linear-gradient(90deg, ${lowCol}, ${hiCol})` } }),
-      h("span", { class: "mono" }, scaleDomain.per100k ? `${fmtBound(scaleDomain.hi)} /100k` : fmtBound(scaleDomain.hi)),
+      h("span", { class: "mono" }, sig?.per_100k ? `${fmtBound(hiVal)} /100k` : fmtBound(hiVal)),
     );
+    keyGlass.update();
   }
 
   function renderRecents() {
     recentGlasses.splice(0).forEach((g) => g.destroy());
-    recentsEl.hidden = recents.length === 0;
-    if (!recents.length) {
+    const valid = recents.filter((key) => regions[key]);
+    recentsEl.hidden = valid.length === 0;
+    if (!valid.length) {
       recentsEl.replaceChildren();
       return;
     }
-    const btns = recents.map((id) => {
-      const loc = manifest.locationById.get(id);
+    const btns = valid.map((key) => {
+      const reg = regions[key];
       return pill({
-        label: loc?.abbr || loc?.name || id,
+        label: reg?.abbr || reg?.name || key,
         size: "sm",
-        pressed: id === selectedLocId,
-        onClick: () => focusLocation(id),
+        pressed: key === selectedKey,
+        onClick: () => focusRegion(key),
       });
     });
     const clr = pill({
       icon: icon.close,
       size: "sm",
       ariaLabel: "Clear recent places",
-      onClick: () => { recents = []; storage.set(recentsKey(manifest.hub_id), []); renderRecents(); },
+      onClick: () => { recents = []; storage.set(RECENTS_KEY, []); renderRecents(); },
     });
     recentsEl.replaceChildren(...btns, clr);
     for (const b of btns) recentGlasses.push(glass(b));
@@ -373,20 +385,42 @@ export function mountGlobeView(host, ctx) {
   }
 
   function openLayerMenu() {
-    const items = LAYER_MODES.map((it) => ({
-      label: it.label,
-      checked: layerId === it.id,
-      onSelect: () => {
-        layerId = it.id;
-        recomputeScale();
-        updateLegendAndLabel();
-        renderDrawer();
-        scheduleDraw();
-      },
-    }));
-    if (isMetroHub) {
+    const items = [];
+    if (signals.length) {
+      items.push({ header: "Signal" });
+      for (const sig of signals) {
+        items.push({
+          label: sig.id === "all" ? "All connected · Relative activity" : sig.label,
+          shortcut: sig.id === "all" ? undefined : (sig.geo_kind === "eu-countries" ? "EU" : sig.geo_kind === "us-metrocast" ? "MetroCast" : undefined),
+          checked: signalId === sig.id,
+          onSelect: () => {
+            signalId = sig.id;
+            if (layerId === "none") layerId = "observed";
+            updateLegendAndLabel();
+            renderDrawer();
+            scheduleDraw();
+          },
+        });
+      }
+      items.push("-");
+    }
+    items.push({ header: "Display" });
+    for (const md of DISPLAY_MODES) {
+      items.push({
+        label: md.label,
+        checked: layerId === md.id,
+        onSelect: () => {
+          layerId = md.id;
+          updateLegendAndLabel();
+          renderDrawer();
+          scheduleDraw();
+        },
+      });
+    }
+    if (hasMetroCast) {
       items.push("-", {
         label: "MetroCast HSAs",
+        toggle: true,
         checked: metroCastOn,
         onSelect: () => {
           metroCastOn = !metroCastOn;
@@ -395,127 +429,147 @@ export function mountGlobeView(host, ctx) {
         },
       });
     }
-    openMenu(layerBtn, { label: "Globe layer", placement: "top-start", items });
+    openMenu(layerBtn, { label: "Globe signal & layer", placement: "top-start", items });
   }
 
-  function coordsForLoc(locId) {
-    if (!locId) return null;
+  function coordsForRegion(key) {
+    if (!key) return null;
+    const reg = regions[key];
     if (geo) {
-      const mh = activeMetros.find((m) => m.id === locId);
+      const mh = activeMetros.find((m) => m.id === key);
       if (mh && mh.lon != null && mh.lat != null) return { lon: mh.lon, lat: mh.lat, zoom: 14 };
-      const fips = geoCls.stateFipsOf(locId);
-      if (fips && US_STATE_META[fips]) {
-        const u = US_STATE_META[fips];
-        if (u.lon != null && u.lat != null) return { lon: u.lon, lat: u.lat, zoom: 8.5 };
+      const fips = reg?.state_fips || (US_STATE_META[key] ? key : null);
+      if (fips && US_STATE_META[fips]?.lon != null) {
+        return { lon: US_STATE_META[fips].lon, lat: US_STATE_META[fips].lat, zoom: 8.5 };
       }
-      if (EU_META[locId]) {
-        const e = EU_META[locId];
-        if (e.lon != null && e.lat != null) return { lon: e.lon, lat: e.lat, zoom: 7.5 };
-      }
-      const country = geo.countries.find((c) => !c.detached && (c.iso2 === locId || (locId === "UK" && c.iso2 === "GB")));
+      const euCode = key === "UK" ? "GB" : key;
+      if (EU_META[euCode]?.lon != null) return { lon: EU_META[euCode].lon, lat: EU_META[euCode].lat, zoom: 7.5 };
+      const country = geo.countries.find((c) => !c.detached && (c.iso2 === key || (key === "GB" && c.iso2 === "UK")));
       if (country?.centroidLonLat) return { lon: country.centroidLonLat[0], lat: country.centroidLonLat[1], zoom: 5.5 };
     }
-    const fips = geoCls.stateFipsOf(locId);
-    if (fips && US_STATE_META[fips]) {
-      const u = US_STATE_META[fips];
-      return u.lon != null ? { lon: u.lon, lat: u.lat, zoom: 8 } : null;
-    }
-    if (locId === "US") return { lon: -94, lat: 38.5, zoom: 2.0 };
-    if (EU_META[locId]?.lon != null) return { lon: EU_META[locId].lon, lat: EU_META[locId].lat, zoom: 7 };
+    const fips = reg?.state_fips || (US_STATE_META[key] ? key : null);
+    if (fips && US_STATE_META[fips]?.lon != null) return { lon: US_STATE_META[fips].lon, lat: US_STATE_META[fips].lat, zoom: 8 };
+    if (key === "US") return { lon: -94, lat: 38.5, zoom: 2.0 };
+    if (EU_META[key]?.lon != null) return { lon: EU_META[key].lon, lat: EU_META[key].lat, zoom: 7 };
     return null;
   }
 
-  function computeFitZoom(locId) {
-    if (locId === "US") return 2.15;
+  function computeFitZoom(key) {
+    if (key === "US") return 2.15;
+    const reg = regions[key];
     if (geo) {
-      const mh = activeMetros.find((m) => m.id === locId);
+      const mh = activeMetros.find((m) => m.id === key);
       if (mh?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(mh.alpha)), 5, 34);
-      const fips = geoCls.stateFipsOf(locId);
+      const fips = reg?.state_fips || (US_STATE_META[key] ? key : null);
       const st = fips && geo.usGeo.states.find((s) => s.fips === fips);
       if (st?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(st.alpha)), 3.2, 22);
-      const co = geo.countries.find((c) => !c.detached && (c.iso2 === locId || (locId === "UK" && c.iso2 === "GB")));
+      const co = geo.countries.find((c) => !c.detached && (c.iso2 === key || (key === "GB" && c.iso2 === "UK")));
       if (co?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(co.alpha)), 2.8, 22);
     }
-    return coordsForLoc(locId)?.zoom ?? 6;
+    return coordsForRegion(key)?.zoom ?? 6;
   }
 
-  function focusLocation(locId, fly = true) {
-    const loc = manifest.locationById.get(locId);
-    if (!loc) return;
-    selectedLocId = locId;
-    recordRecent(locId);
+  function focusRegion(key, fly = true) {
+    if (!regions[key]) return;
+    selectedKey = key;
+    recordRecent(key);
     renderDrawer();
     if (fly) {
-      const pt = coordsForLoc(locId);
-      if (pt) flyTo(pt.lon, pt.lat, computeFitZoom(locId));
+      const pt = coordsForRegion(key);
+      if (pt) flyTo(pt.lon, pt.lat, computeFitZoom(key));
     }
     scheduleDraw();
   }
 
+  function openStreamInChart(hubId, targetId, locationId) {
+    onClose?.();
+    if (ctx.switchContext) {
+      ctx.switchContext({ hub: hubId, target: targetId, location: locationId });
+    } else {
+      store.set({ location: locationId });
+    }
+  }
+
   function renderDrawer() {
-    const loc = selectedLocId ? manifest.locationById.get(selectedLocId) : null;
-    if (!loc) {
+    const reg = selectedKey ? regions[selectedKey] : null;
+    if (!reg) {
       drawer.hidden = true;
       return;
     }
     drawer.hidden = false;
-    const m = metricForLoc(loc.id, layerId === "none" ? "observed" : layerId);
-    const pop = m?.population ?? loc.population;
+    const pop = reg.population;
+    const allStreams = reg.streams || [];
+    const catStreams = reg.categorical_streams || [];
+    const totalCount = allStreams.length + catStreams.length;
+    const lvlLabel = reg.level === "hsa" ? "MetroCast HSA" : reg.level === "state" ? "State" : reg.level === "country" ? "Country" : reg.level;
     const subParts = [
-      loc.region || loc.level || null,
+      lvlLabel || null,
       pop > 1 ? `Pop ${pop >= 1e6 ? `${(pop / 1e6).toFixed(1)}M` : `${Math.round(pop / 1e3)}k`}` : null,
-      store.get().date,
+      totalCount ? `${totalCount} ${totalCount === 1 ? "signal" : "signals"}` : null,
     ].filter(Boolean);
 
-    const fips = geoCls.stateFipsOf(loc.id);
-    const stateHsas = isMetroHub && metroCastOn && loc.level !== "hsa" && fips
-      ? (geoCls.hsasByStateFips.get(fips) || [])
+    // Order selected signal first, otherwise keep provider order
+    const orderedStreams = signalId && signalId !== "all"
+      ? [...allStreams].sort((a, b) => (a.signal_id === signalId ? -1 : b.signal_id === signalId ? 1 : 0))
+      : allStreams;
+
+    const childHsas = hasMetroCast && metroCastOn && reg.level !== "hsa"
+      ? (reg.children || []).map((ck) => regions[ck]).filter(Boolean)
       : [];
 
     const layerNodes = [...drawer.querySelectorAll(":scope > .c-glass-layer")];
     const content = h("div", null,
       h("header", { class: "gb-drawer-head" },
         h("div", { class: "gb-title-row" },
-          h("h3", { class: "gb-title" }, loc.name || loc.id),
+          h("h3", { class: "gb-title" }, reg.name || reg.key),
           h("button", {
             type: "button", class: "c-btn sm icon", "aria-label": "Close summary", html: icon.close,
-            onclick: () => { selectedLocId = null; renderDrawer(); scheduleDraw(); },
+            onclick: () => { selectedKey = null; renderDrawer(); scheduleDraw(); },
           }),
         ),
         subParts.length ? h("p", { class: "gb-sub" }, subParts.join(" · ")) : null,
       ),
-      m ? h("div", { class: "gb-nums" },
-        h("div", { class: "gb-num-row" },
-          h("div", { class: "gb-num" },
-            h("span", { class: "gb-num-k" }, "Observed"),
-            h("span", { class: "gb-num-v mono" }, formatMetric(m.observed, m.useRate)),
-          ),
-          h("div", { class: "gb-num" },
-            h("span", { class: "gb-num-k" }, "Forecast"),
-            h("span", { class: "gb-num-v mono" }, formatMetric(m.forecast, m.useRate)),
-          ),
-          Number.isFinite(m.trendPct) ? h("div", { class: "gb-num" },
-            h("span", { class: "gb-num-k" }, "Wk Δ"),
-            h("span", { class: "gb-num-v mono" }, `${m.trendPct >= 0 ? "+" : ""}${Math.round(m.trendPct)}%`),
-          ) : null,
-        ),
+      orderedStreams.length ? h("div", { class: "gb-streams" },
+        ...orderedStreams.map((st) => {
+          const isFocusSig = st.signal_id === signalId;
+          const title = st.pathogen_label && !st.target_short.toLowerCase().includes(st.pathogen_label.toLowerCase().split(" ")[0])
+            ? `${st.pathogen_label} · ${st.target_short}`
+            : st.target_short;
+          const sourceTag = st.geo_kind === "us-metrocast" ? st.hub_short : null;
+          return h("button", {
+            type: "button",
+            class: ["c-row gb-stream-row", isFocusSig && "on"],
+            onclick: () => openStreamInChart(st.hub_id, st.target_id, st.location_id),
+          },
+          h("div", { class: "c-row-text" },
+            h("div", { class: "gb-stream-head" },
+              h("span", { class: "c-row-label" }, sourceTag ? `${title} · ${sourceTag}` : title),
+              st.ref_date ? h("span", { class: "c-row-sub mono" }, st.ref_date.slice(5)) : null),
+            h("div", { class: "gb-stream-nums mono" },
+              st.observed != null ? `Obs ${formatStreamValue(st.observed, st)}` : null,
+              st.forecast != null ? `${st.observed != null ? " · " : ""}Fcst ${formatStreamValue(st.forecast, st)}` : null,
+              Number.isFinite(st.trend_pct) ? ` · ${st.trend_pct >= 0 ? "+" : ""}${Math.round(st.trend_pct)}%` : null)),
+          h("span", { class: "gb-stream-go" }, "→"));
+        }),
+      ) : h("p", { class: "pk-empty", style: { padding: "var(--space-8) 0" } }, "No weekly observations for current round"),
+      catStreams.length ? h("div", { class: "gb-cats" },
+        ...catStreams.map((cs) => h("button", {
+          type: "button", class: "c-row",
+          onclick: () => openStreamInChart(cs.hub_id, cs.target_id, cs.location_id),
+        },
+        h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, cs.short), h("span", { class: "c-row-sub" }, cs.hub_short)),
+        h("span", { class: "gb-stream-go" }, "PMF →"))),
       ) : null,
-      h("div", { class: "gb-drawer-acts" },
-        h("button", {
-          type: "button", class: "gb-open-btn",
-          onclick: () => { store.set({ location: loc.id }); onClose?.(); },
-        }, "Open chart →"),
-      ),
-      stateHsas.length ? h("div", { class: "gb-metros" },
-        h("h4", { class: "gb-metros-title" }, `MetroCast HSAs (${stateHsas.length})`),
-        ...stateHsas.map((hsa) => {
-          const hm = metricForLoc(hsa.id, layerId === "none" ? "observed" : layerId);
+      childHsas.length ? h("div", { class: "gb-metros" },
+        h("h4", { class: "gb-metros-title" }, `MetroCast HSAs (${childHsas.length})`),
+        ...childHsas.map((hsa) => {
+          const hs = streamForRegion(hsa, signalId);
           return h("button", {
             type: "button", class: "c-row",
-            onclick: () => focusLocation(hsa.id),
+            onclick: () => focusRegion(hsa.key),
           },
           h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, hsa.name)),
-          h("span", { class: "c-row-sub mono" }, hm ? formatMetric(hm.value, hm.useRate) : "–"));
+          h("span", { class: "c-row-sub mono" }, hs ? formatStreamValue(hs.observed ?? hs.forecast, hs) : "–"));
         }),
       ) : null,
     );
@@ -552,33 +606,33 @@ export function mountGlobeView(host, ctx) {
     const { cx, cy, radiusPx } = lastGeoSpec;
     if (Math.hypot(sx - cx, sy - cy) > radiusPx) return null;
 
-    if (isMetroHub && metroCastOn && camZoom >= 2.1) {
+    if (hasMetroCast && metroCastOn && camZoom >= 2.1) {
       for (const dot of hitDots) {
-        if (Math.hypot(sx - dot.sx, sy - dot.sy) <= 10) {
-          return { kind: "metro", id: dot.id, name: dot.name, locId: dot.id };
+        if (Math.hypot(sx - dot.sx, sy - dot.sy) <= 10 && regions[dot.id]) {
+          return { kind: "metro", id: dot.id, name: dot.name, key: dot.id };
         }
       }
       for (const mh of hitMetros) {
-        if (pointInRingsEvenOdd(sx, sy, mh.screenRings)) {
-          return { kind: "metro", id: mh.id, name: mh.name, locId: mh.id };
+        if (pointInRingsEvenOdd(sx, sy, mh.screenRings) && regions[mh.id]) {
+          return { kind: "metro", id: mh.id, name: mh.name, key: mh.id };
         }
       }
     }
 
     for (const st of hitStates) {
       if (pointInRingsEvenOdd(sx, sy, st.screenRings)) {
-        const loc = resolveStateLocation(st.fips);
-        if (!loc) continue;
-        return { kind: "state", id: st.fips, name: loc.name || st.name || st.fips, locId: loc.id };
+        const reg = regionByStateFips(st.fips);
+        if (!reg) continue;
+        return { kind: "state", id: st.fips, name: reg.name || st.name || st.fips, key: reg.key };
       }
     }
 
     for (const co of hitCountries) {
       if (pointInRingsEvenOdd(sx, sy, co.screenRings)) {
         const cid = co.iso2 || co.id;
-        const loc = resolveCountryLocation(cid);
-        if (!loc) continue;
-        return { kind: "country", id: cid, name: loc.name || cid, locId: loc.id };
+        const reg = regionByCountryIso(cid);
+        if (!reg) continue;
+        return { kind: "country", id: cid, name: reg.name || cid, key: reg.key };
       }
     }
     return null;
@@ -618,22 +672,33 @@ export function mountGlobeView(host, ctx) {
     const picked = pickAtScreen(sx, sy);
     if (picked) {
       hoverItem = picked;
-      const m = layerId === "none" ? null : metricForLoc(picked.locId, layerId);
+      const reg = regions[picked.key];
+      const rows = [];
+      if (layerId !== "none" && reg?.streams?.length) {
+        const list = signalId === "all"
+          ? reg.streams.slice(0, 3)
+          : reg.streams.filter((s) => s.signal_id === signalId);
+        for (const st of list) {
+          const val = layerId === "forecast" ? (st.forecast ?? st.observed)
+            : layerId === "trend" ? null
+              : (st.observed ?? st.forecast);
+          const right = layerId === "trend"
+            ? (Number.isFinite(st.trend_pct) ? `${st.trend_pct >= 0 ? "+" : ""}${Math.round(st.trend_pct)}%` : "–")
+            : formatStreamValue(val, st);
+          rows.push(h("tr", null,
+            h("td", { class: "c-readout-name" }, st.target_short),
+            h("td", { class: "num" }, right)));
+        }
+      }
       readout.replaceChildren(
         h("div", { class: "c-readout-head" },
           h("span", { style: { fontWeight: "600", color: "var(--ink-primary)" } }, picked.name),
           h("span", { class: "quiet" }, picked.kind === "metro" ? "MetroCast" : picked.kind === "state" ? "State" : "Country"),
         ),
-        m ? h("table", null,
-          h("tbody", null,
-            h("tr", null, h("td", { class: "c-readout-name" }, "Observed"), h("td", { class: "num" }, formatMetric(m.observed, m.useRate))),
-            h("tr", null, h("td", { class: "c-readout-name" }, "Forecast"), h("td", { class: "num" }, formatMetric(m.forecast, m.useRate))),
-            Number.isFinite(m.trendPct) ? h("tr", null, h("td", { class: "c-readout-name" }, "Wk Δ"), h("td", { class: "num" }, `${m.trendPct >= 0 ? "+" : ""}${Math.round(m.trendPct)}%`)) : null,
-          ),
-        ) : null,
+        rows.length ? h("table", null, h("tbody", null, ...rows)) : null,
       );
       readout.hidden = false;
-      readout.style.transform = `translate(${clamp(sx + 16, 12, rect.width - 230)}px, ${clamp(sy - 18, 60, rect.height - 96)}px)`;
+      readout.style.transform = `translate(${clamp(sx + 16, 12, rect.width - 230)}px, ${clamp(sy - 18, 60, rect.height - 108)}px)`;
     } else if (hoverItem) {
       hoverItem = null;
       readout.hidden = true;
@@ -647,7 +712,7 @@ export function mountGlobeView(host, ctx) {
     if (movedPx < 5 && downPt) {
       const rect = canvas.getBoundingClientRect();
       const hit = pickAtScreen(e.clientX - rect.left, e.clientY - rect.top);
-      if (hit) focusLocation(hit.locId);
+      if (hit) focusRegion(hit.key);
     } else if (Math.hypot(velLon, velLat) * lastGeoSpec.radiusPx > 0.35) {
       startLoop();
     }
@@ -665,7 +730,7 @@ export function mountGlobeView(host, ctx) {
     const rect = canvas.getBoundingClientRect();
     const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
     const hit = pickAtScreen(sx, sy);
-    if (hit) focusLocation(hit.locId);
+    if (hit) focusRegion(hit.key);
     else zoomByFactor(1.85, sx, sy);
   }));
 
@@ -690,77 +755,77 @@ export function mountGlobeView(host, ctx) {
     draw();
     if (keep) loopRaf = requestAnimationFrame(tick);
   }
+  function scheduleDraw() { if (!loopRaf && !destroyed) loopRaf = requestAnimationFrame(tick); }
 
-  const scheduleDraw = perFrame(draw);
   function draw() {
-    if (destroyed) return;
-    const W = wrap.clientWidth, H = wrap.clientHeight;
-    if (W < 40 || H < 40) return;
-    const g = fitCanvas(canvas, W, H);
+    const fit = fitCanvas(canvas);
+    if (!fit) return;
+    const { g, width: W, height: H } = fit;
     const isLight = document.documentElement.dataset.theme === "light";
-
-    const inkRgb = parseRgbCss(cssColor("var(--ink-primary)"), isLight ? [17, 18, 22] : [235, 237, 240]);
-    const inkSecondary = cssColor("var(--ink-secondary)");
-    const inkFaint = cssColor("var(--ink-faint)");
-    const lineAxis = cssColor("var(--line-axis)");
-    const lineHairline = cssColor("var(--line-hairline)");
+    const paper = cssColor("var(--surface-paper)");
     const accent = cssColor("var(--accent)");
-    const surfRaised = cssColor("var(--surface-raised)");
-    const fontSans = getComputedStyle(document.documentElement).getPropertyValue("--font-sans");
+    const inkFaint = cssColor("var(--ink-faint)");
+    const inkSecondary = cssColor("var(--ink-secondary)");
+    const lineAxis = cssColor("var(--line-axis)");
+    const inkRgb = parseRgbCss(cssColor("var(--ink-primary)"), isLight ? [17, 18, 22] : [235, 237, 240]);
+    const fontSans = cssColor("var(--font-sans)") || "system-ui, sans-serif";
 
-    const drawerShift = selectedLocId && W > 900 ? -120 : 0;
-    const cx = W * 0.5 + drawerShift, cy = H * 0.5;
-    const radiusPx = Math.min(W, H) * 0.42 * camZoom;
+    g.fillStyle = paper;
+    g.fillRect(0, 0, W, H);
+    if (!geo) return;
+
+    const cx = W * 0.5, cy = H * 0.52;
+    const baseRadius = Math.min(W, H) * 0.42;
+    const radiusPx = baseRadius * camZoom;
     const R = makeRotationMatrix(camLon, camLat);
     lastGeoSpec = { cx, cy, radiusPx, R };
 
-    const halfDiag = Math.hypot(Math.max(cx, W - cx), Math.max(cy, H - cy));
-    const viewR = halfDiag / radiusPx;
-    const thetaMaxRad = viewR < 0.99 ? Math.asin(viewR) : null;
-    const clipToLimb = radiusPx <= halfDiag + 4;
+    const viewCornerR = Math.hypot(Math.max(cx, W - cx), Math.max(cy, H - cy));
+    const ratio = radiusPx > 1 ? viewCornerR / radiusPx : 2;
+    const thetaMaxRad = ratio < 0.999 ? Math.asin(ratio) : Math.PI;
+    const clipToLimb = radiusPx < Math.min(W, H) * 0.72;
 
     g.save();
-    g.fillStyle = surfRaised;
     if (clipToLimb) {
-      g.beginPath(); g.arc(cx, cy, radiusPx, 0, Math.PI * 2); g.fill(); g.clip();
-    } else {
-      g.fillRect(0, 0, W, H);
-    }
-
-    if (!geo) {
-      g.restore();
-      if (clipToLimb) drawLimb(g, cx, cy, radiusPx, lineAxis);
-      return;
+      g.beginPath(); g.arc(cx, cy, radiusPx, 0, Math.PI * 2); g.clip();
     }
 
     // Graticule
+    g.save();
+    g.strokeStyle = isLight ? "rgba(17,18,22,0.045)" : "rgba(255,255,255,0.045)";
+    g.lineWidth = 0.6;
     g.beginPath();
-    for (const arc of [...geo.gratLat, ...geo.gratLon]) {
-      for (const seg of clipPolylineToHemisphere(arc, R)) {
-        g.moveTo(cx + seg[0] * radiusPx, cy - seg[1] * radiusPx);
-        for (let i = 2; i < seg.length; i += 2) g.lineTo(cx + seg[i] * radiusPx, cy - seg[i + 1] * radiusPx);
+    for (const grp of [geo.gratLat, geo.gratLon]) {
+      for (const pts of grp) {
+        for (const run of clipPolylineToHemisphere(pts, R)) {
+          g.moveTo(cx + run[0] * radiusPx, cy - run[1] * radiusPx);
+          for (let i = 2; i < run.length; i += 2) g.lineTo(cx + run[i] * radiusPx, cy - run[i + 1] * radiusPx);
+        }
       }
     }
-    g.strokeStyle = lineHairline;
-    g.lineWidth = 0.7;
     g.stroke();
+    g.restore();
 
-    const luminanceFill = (norm, isSel, isHov) => {
+    const luminanceFill = (norm, isSel, isHov, isConnected) => {
       if (layerId === "none") {
         if (isSel) return `rgba(${inkRgb[0]}, ${inkRgb[1]}, ${inkRgb[2]}, 0.09)`;
         if (isHov) return `rgba(${inkRgb[0]}, ${inkRgb[1]}, ${inkRgb[2]}, 0.06)`;
-        return isLight ? "rgba(0,0,0,0.015)" : "rgba(255,255,255,0.02)";
+        if (isConnected) return isLight ? "rgba(0,0,0,0.04)" : "rgba(255,255,255,0.045)";
+        return isLight ? "rgba(0,0,0,0.012)" : "rgba(255,255,255,0.018)";
       }
-      if (norm == null) return isLight ? "rgba(0,0,0,0.025)" : "rgba(255,255,255,0.025)";
+      if (norm == null) {
+        if (isConnected) return isLight ? "rgba(0,0,0,0.045)" : "rgba(255,255,255,0.045)";
+        return isLight ? "rgba(0,0,0,0.018)" : "rgba(255,255,255,0.02)";
+      }
       const alpha = clamp(0.05 + Math.pow(clamp(norm, 0, 1), 1.05) * (isLight ? 0.52 : 0.44), 0.05, 0.62);
       return `rgba(${inkRgb[0]}, ${inkRgb[1]}, ${inkRgb[2]}, ${alpha.toFixed(3)})`;
     };
 
-    const drawStatesLayer = !isEuHub && (isUsStates || isMetroHub || manifest.locationById.has("US"));
+    const drawStatesLayer = hasUsStates;
     const stateAlpha = drawStatesLayer ? smoothstep(1.18, 1.75, camZoom) : 0;
-    const metroAlpha = isMetroHub && metroCastOn ? smoothstep(2.05, 3.1, camZoom) : 0;
+    const metroAlpha = hasMetroCast && metroCastOn ? smoothstep(2.05, 3.1, camZoom) : 0;
 
-    // 1. World countries (detached territories stay unshaded & unselectable)
+    // 1. World countries (both US and Europe connected simultaneously!)
     hitCountries = [];
     for (const co of geo.countries) {
       if (!coneVisibleInViewport(co, R, thetaMaxRad)) continue;
@@ -781,7 +846,7 @@ export function mountGlobeView(host, ctx) {
         g.closePath();
       }
       if (co.detached) {
-        g.fillStyle = luminanceFill(null, false, false);
+        g.fillStyle = luminanceFill(null, false, false, false);
         g.fill("evenodd");
         g.lineWidth = 0.65;
         g.strokeStyle = inkFaint;
@@ -790,21 +855,21 @@ export function mountGlobeView(host, ctx) {
       }
 
       const cid = co.iso2 || co.id;
-      const loc = resolveCountryLocation(cid);
-      if (loc) hitCountries.push({ ...co, iso2: co.iso2, screenRings });
+      const reg = regionByCountryIso(cid);
+      if (reg) hitCountries.push({ ...co, iso2: co.iso2, screenRings });
       const skipUsShade = cid === "US" && stateAlpha > 0.35;
-      const norm = loc && !skipUsShade ? normForLoc(loc.id) : null;
+      const norm = reg && !skipUsShade ? normForRegionKey(reg.key) : null;
       const isHov = hoverItem?.kind === "country" && hoverItem.id === cid;
-      const isSel = !!(loc && selectedLocId === loc.id);
+      const isSel = !!(reg && selectedKey === reg.key);
 
-      g.fillStyle = luminanceFill(norm, isSel, isHov);
+      g.fillStyle = luminanceFill(norm, isSel, isHov, !!reg);
       g.fill("evenodd");
-      g.lineWidth = isSel ? 1.5 : isHov ? 1.15 : 0.65;
-      g.strokeStyle = isSel ? accent : isHov ? cssColor("var(--ink-primary)") : inkFaint;
+      g.lineWidth = isSel ? 1.5 : isHov ? 1.15 : reg ? 0.85 : 0.55;
+      g.strokeStyle = isSel ? accent : isHov ? cssColor("var(--ink-primary)") : reg ? inkSecondary : inkFaint;
       g.stroke();
     }
 
-    // 2. U.S. States & strictly hub-scoped MetroCast HSAs
+    // 2. U.S. States & dissolved MetroCast HSAs (whenever any US or MetroCast hub is connected)
     hitStates = [];
     hitMetros = [];
     hitDots = [];
@@ -821,12 +886,12 @@ export function mountGlobeView(host, ctx) {
           screenRings.push(sr);
         }
         if (!screenRings.length) continue;
-        hitStates.push({ ...st, screenRings });
-        const loc = resolveStateLocation(st.fips);
-        const norm = loc ? normForLoc(loc.id) : null;
+        const reg = regionByStateFips(st.fips);
+        if (reg) hitStates.push({ ...st, screenRings });
+        const norm = reg ? normForRegionKey(reg.key) : null;
         const isHov = hoverItem?.kind === "state" && hoverItem.id === st.fips;
-        const isSel = !!(loc && selectedLocId === loc.id);
-        const isCovered = isMetroHub && metroCastOn && activeMetroStates.has(st.fips);
+        const isSel = !!(reg && selectedKey === reg.key);
+        const isCovered = hasMetroCast && metroCastOn && activeMetroStates.has(st.fips);
         const stFade = isCovered && metroAlpha > 0 ? Math.max(0.16, 1 - metroAlpha * 0.84) : 1;
 
         g.beginPath();
@@ -836,7 +901,7 @@ export function mountGlobeView(host, ctx) {
           g.closePath();
         }
         g.globalAlpha = stateAlpha * stFade;
-        g.fillStyle = luminanceFill(norm, isSel, isHov);
+        g.fillStyle = luminanceFill(norm, isSel, isHov, !!reg);
         g.fill("evenodd");
       }
 
@@ -853,9 +918,10 @@ export function mountGlobeView(host, ctx) {
             screenRings.push(sr);
           }
           if (!screenRings.length) continue;
-          hitMetros.push({ id: mh.id, name: mh.name, screenRings });
-          const norm = normForLoc(mh.id);
-          const isSel = selectedLocId === mh.id;
+          const reg = regions[mh.id];
+          hitMetros.push({ id: mh.id, name: reg?.name || mh.name, screenRings });
+          const norm = reg ? normForRegionKey(reg.key) : null;
+          const isSel = selectedKey === mh.id;
           const isHov = hoverItem?.kind === "metro" && hoverItem.id === mh.id;
 
           g.beginPath();
@@ -864,11 +930,11 @@ export function mountGlobeView(host, ctx) {
             for (let i = 2; i < sr.length; i += 2) g.lineTo(sr[i], sr[i + 1]);
             g.closePath();
           }
-          g.fillStyle = luminanceFill(norm, isSel, isHov);
+          g.fillStyle = luminanceFill(norm, isSel, isHov, !!reg);
           g.fill("evenodd");
         }
 
-        // Exterior HSA borders (only across connected MetroCast HSAs)
+        // Exterior HSA borders (strictly across connected MetroCast HSAs)
         g.beginPath();
         if (useFullMetroMesh) {
           for (const seg3 of geo.usGeo.metroMesh) {
@@ -919,15 +985,15 @@ export function mountGlobeView(host, ctx) {
         g.stroke();
       };
       for (const st of hitStates) {
-        const loc = resolveStateLocation(st.fips);
-        if (!loc) continue;
-        if (selectedLocId === loc.id || (hoverItem?.kind === "state" && hoverItem.id === st.fips)) {
-          drawHighlight(st.screenRings, selectedLocId === loc.id);
+        const reg = regionByStateFips(st.fips);
+        if (!reg) continue;
+        if (selectedKey === reg.key || (hoverItem?.kind === "state" && hoverItem.id === st.fips)) {
+          drawHighlight(st.screenRings, selectedKey === reg.key);
         }
       }
       for (const mh of hitMetros) {
-        if (selectedLocId === mh.id || (hoverItem?.kind === "metro" && hoverItem.id === mh.id)) {
-          drawHighlight(mh.screenRings, selectedLocId === mh.id);
+        if (selectedKey === mh.id || (hoverItem?.kind === "metro" && hoverItem.id === mh.id)) {
+          drawHighlight(mh.screenRings, selectedKey === mh.id);
         }
       }
       g.restore();
@@ -944,17 +1010,17 @@ export function mountGlobeView(host, ctx) {
           const py = R[3] * mh.x + R[4] * mh.y + R[5] * mh.z;
           const sx = cx + px * radiusPx, sy = cy - py * radiusPx;
           if (sx < -24 || sx > W + 24 || sy < -24 || sy > H + 24) continue;
-          const loc = manifest.locationById.get(mh.id);
-          const displayName = loc?.name || mh.name;
+          const reg = regions[mh.id];
+          const displayName = reg?.name || mh.name;
           hitDots.push({ id: mh.id, name: displayName, sx, sy });
-          const isSel = selectedLocId === mh.id;
+          const isSel = selectedKey === mh.id;
           const isHov = hoverItem?.kind === "metro" && hoverItem.id === mh.id;
 
           g.globalAlpha = metroAlpha;
           g.beginPath(); g.arc(sx, sy, isSel ? 4.4 : 2.8, 0, Math.PI * 2);
           g.fillStyle = isSel ? accent : cssColor("var(--ink-primary)"); g.fill();
           if (camZoom >= 3.4 || isSel || isHov) {
-            const lbl = loc?.abbr || mh.abbr || displayName;
+            const lbl = reg?.abbr || mh.abbr || displayName;
             const tw = g.measureText(lbl).width;
             const box = { x: sx + 6, y: sy - 7, w: tw + 8, h: 14 };
             const clash = !isSel && !isHov && placed.some((b) => !(box.x + box.w < b.x || box.x > b.x + b.w || box.y + box.h < b.y || box.y > b.y + b.h));
@@ -970,80 +1036,69 @@ export function mountGlobeView(host, ctx) {
     }
 
     g.restore();
-    if (clipToLimb) drawLimb(g, cx, cy, radiusPx, lineAxis);
+    if (clipToLimb) {
+      g.save();
+      g.beginPath(); g.arc(cx, cy, radiusPx, 0, Math.PI * 2);
+      g.strokeStyle = lineAxis; g.lineWidth = 1; g.stroke();
+      g.restore();
+    }
   }
 
-  function drawLimb(g, cx, cy, r, lineAxis) {
-    g.save();
-    g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2);
-    g.strokeStyle = lineAxis; g.lineWidth = 1; g.stroke();
-    g.restore();
-  }
-
-  async function refreshSpatial() {
-    const sToken = ++spatialToken;
-    const tMeta = spatialTargetMeta();
-    const s = store.get();
-    if (!tMeta || !s.date) {
-      spatialData = null;
-      recomputeScale();
-      updateLegendAndLabel();
-      renderDrawer();
-      scheduleDraw();
-      return;
-    }
-    const mIds = (s.sel.selected.length ? s.sel.selected : (manifest.recommended || [])).filter((id) => manifest.modelById.has(id));
-    const qs = query({ target: tMeta.id, date: s.date, horizon: "all", ...(mIds.length ? { models: mIds.join(",") } : {}) });
-    try {
-      const json = await getJson(`/api/next/spatial?${qs}`, { slot: spatialSlot });
-      if (destroyed || sToken !== spatialToken) return;
-      spatialData = json;
-      recomputeScale();
-      updateLegendAndLabel();
-      renderDrawer();
-      scheduleDraw();
-    } catch {
-      if (destroyed || sToken !== spatialToken) return;
-      spatialData = null;
-      recomputeScale();
-      updateLegendAndLabel();
-      scheduleDraw();
-    }
+  function applyMetroGeometry() {
+    if (!geo || !hasMetroCast || !metroIdSet.size) return;
+    activeMetros = geo.usGeo.metroFeatures.filter((m) => metroIdSet.has(m.id));
+    activeMetroStates = new Set(activeMetros.map((m) => m.stateFips));
+    useFullMetroMesh = activeMetros.length === geo.usGeo.metroFeatures.length;
   }
 
   const ro = new ResizeObserver(() => scheduleDraw());
   ro.observe(wrap);
   offs.push(
     () => ro.disconnect(),
-    store.select(["target", "date", "sel"], () => refreshSpatial()),
     onThemeChange(() => { updateLegendAndLabel(); scheduleDraw(); }),
     onDprChange(() => scheduleDraw()),
   );
 
   renderRecents();
   updateLegendAndLabel();
-  refreshSpatial();
 
-  loadSphereBundle().then((loaded) => {
+  Promise.all([
+    loadGlobe().catch(() => null),
+    loadSphereBundle().catch(() => null),
+  ]).then(([glData, sphere]) => {
     if (destroyed) return;
-    geo = loaded;
-    if (isMetroHub) {
-      activeMetros = geo.usGeo.metroFeatures.filter((m) => manifest.locationById.has(m.id));
-      activeMetroStates = new Set(activeMetros.map((m) => m.stateFips));
-      useFullMetroMesh = activeMetros.length === geo.usGeo.metroFeatures.length;
+    if (glData?.regions) {
+      globeData = glData;
+      regions = glData.regions;
+      signals = glData.signals || [];
+      signalId = signals[0]?.id || "all";
+      const cov = glData.coverage || {};
+      hasUsStates = Boolean(cov.has_us_states || cov.has_metrocast);
+      hasEu = Boolean(cov.has_eu);
+      hasMetroCast = Boolean(cov.has_metrocast);
+      metroIdSet = new Set(cov.metro_ids || []);
     }
-    const curLoc = store.get().location;
-    if (curLoc && curLoc !== "US" && manifest.locationById.has(curLoc)) {
-      const pt = coordsForLoc(curLoc);
-      if (pt) { camLon = pt.lon; camLat = pt.lat; camZoom = isMetroHub && activeMetros.some((m) => m.id === curLoc) ? 6.5 : 2.8; }
+    if (sphere) geo = sphere;
+    applyMetroGeometry();
+
+    const curKey = currentKeyFromManifest();
+    if (curKey && curKey !== "US") {
+      const pt = coordsForRegion(curKey);
+      if (pt) {
+        camLon = pt.lon;
+        camLat = pt.lat;
+        camZoom = hasMetroCast && metroIdSet.has(curKey) ? 6.5 : 2.8;
+      }
     }
+    renderRecents();
+    updateLegendAndLabel();
+    renderDrawer();
     scheduleDraw();
-  }).catch(() => {});
+  });
 
   return {
     destroy() {
       destroyed = true;
-      spatialToken++;
       if (loopRaf) cancelAnimationFrame(loopRaf);
       offs.forEach((off) => off());
       hudGlasses.forEach((g) => g.destroy());

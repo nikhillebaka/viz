@@ -87,6 +87,12 @@
 .lp-us { width: 100%; margin-bottom: var(--space-8); }
 .lp-tiles { grid-template-columns: repeat(11, 1fr); }
 .lp-results { max-height: 280px; overflow: auto; padding: 0 var(--space-4) var(--space-4); }
+.lp-results.is-compact { max-height: 152px; margin-bottom: var(--space-4); border-bottom: var(--stroke-hairline) solid var(--fill-selected); }
+.lp-cross-head {
+  padding: var(--space-4) var(--space-8) var(--space-2);
+  font-size: var(--text-micro); font-weight: var(--weight-medium); letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--ink-tertiary);
+}
 .lp-eu-tiles {
   --eu-tile: 27px;
   display: grid; gap: 3px; justify-content: center;

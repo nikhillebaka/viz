@@ -43,7 +43,8 @@ export function mountShell(root, ctx) {
   const backBtn = pill({ label: "← Chart", className: "app-globe-back" });
   const modelsBtn = pill({ label: "Models", dots: [], chevron: true, className: "app-models" });
   const placeBtn = pill({ label: "Location", chevron: true, className: "app-place" });
-  const targetBtn = manifest.targets.length > 1 ? pill({ label: "Target", chevron: true, className: "app-target" }) : null;
+  const showTargetBtn = (ctx.catalog?.targets?.length || 0) > 1 || manifest.targets.length > 1;
+  const targetBtn = showTargetBtn ? pill({ label: "Target", chevron: true, className: "app-target" }) : null;
   const themeBtn = pill({ icon: icon.theme, ariaLabel: "Light or dark", className: "app-theme" });
   for (const b of [modelsBtn, placeBtn, targetBtn]) b?.setAttribute("aria-haspopup", b === targetBtn ? "menu" : "dialog");
   tl.append(...[backBtn, modelsBtn, placeBtn, targetBtn].filter(Boolean));
@@ -73,7 +74,14 @@ export function mountShell(root, ctx) {
   const renderTarget = () => {
     if (!targetBtn) return;
     const t = manifest.targetById.get(store.get().target);
-    targetBtn.querySelector(".c-pill-label").textContent = t?.short || t?.label || store.get().target;
+    let text = t?.short || t?.label || store.get().target;
+    const catTargets = ctx.catalog?.targets || [];
+    const multiPathogen = new Set(catTargets.map((x) => x.pathogen)).size > 1;
+    if (multiPathogen && !/\b(flu|influenza|covid|sars|rsv|ili|ari)\b/i.test(text)) {
+      const catT = catTargets.find((x) => x.hub_id === manifest.hub_id && x.target_id === t?.id);
+      if (catT?.pathogen_label) text = `${catT.pathogen_label} · ${text}`;
+    }
+    targetBtn.querySelector(".c-pill-label").textContent = text;
     targetBtn.setAttribute("aria-label", `Target: ${t?.label ?? store.get().target}`);
   };
   renderModels(); renderPlace(); renderTarget();
@@ -321,6 +329,8 @@ export function mountShell(root, ctx) {
       globeHost?.remove();
       view.remove();
       fixed.remove();
+      root.classList.remove("is-inset", "is-tucked", "is-globe-open", "is-ready");
+      root.style.removeProperty("--inset-goal");
     },
   };
 }

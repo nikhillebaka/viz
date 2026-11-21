@@ -141,7 +141,8 @@ class NextData:
             return cached
         raw = info.get("raw_name", model_id)
         hub_key = self.loader.cache_mgr.hub_key(raw)
-        bare = hub_key[1] if hub_key else raw
+        merged_key = self.loader.cache_mgr.merged_key(raw) if hub_key is None else None
+        bare = hub_key[1] if hub_key else (merged_key[1] if merged_key else raw)
         team, _, abbr = bare.partition("-")
         if not abbr:
             team, abbr = "", bare

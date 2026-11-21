@@ -20,22 +20,37 @@ export function getActiveHub() {
   return activeHubId;
 }
 
-/** Set the active workspace hub id and clear manifest/fan caches. */
+/** Set the active workspace hub id and clear cached fans (loaded manifests stay cached for fast switching). */
 export function setActiveHub(id) {
   activeHubId = id ? String(id) : null;
-  manifestP = null;
+  fans.clear();
+}
+
+/** Drop every cached manifest, catalog, globe, and fan response (e.g. after data sync or refresh). */
+export function clearAllCaches() {
+  manifestCache.clear();
+  catalogP = null;
+  globeP = null;
   fans.clear();
 }
 
 /**
- * Append `workspace=<activeHubId>` to `/api/...` URLs (excluding `/api/workspace*`) without altering
- * existing query params such as `/api/remote/*`'s `hub=`.
+ * Append `workspace=<activeHubId>` to `/api/...` URLs (excluding `/api/workspace*`,
+ * `/api/next/catalog`, and `/api/next/globe`) without altering existing params such as `/api/remote/*`'s `hub=`.
  * @param {string} url
  * @returns {string}
  */
 export function apiUrl(url) {
   if (!activeHubId || typeof url !== "string" || !url.startsWith("/api/")) return url;
-  if (url === "/api/workspace" || url.startsWith("/api/workspace/") || url.startsWith("/api/workspace?")) return url;
+  const basePath = url.split("?")[0];
+  if (
+    basePath === "/api/workspace"
+    || basePath.startsWith("/api/workspace/")
+    || basePath === "/api/next/catalog"
+    || basePath === "/api/next/globe"
+  ) {
+    return url;
+  }
   const qIdx = url.indexOf("?");
   if (qIdx !== -1) {
     const params = new URLSearchParams(url.slice(qIdx + 1));
@@ -135,20 +150,49 @@ export function indexManifest(json) {
   };
 }
 
-let manifestP = null;
+const manifestCache = new Map();
+let catalogP = null;
+let globeP = null;
+
 /**
- * GET /api/next/manifest, indexed. Cached for the page's life; a failed load is not cached.
+ * GET /api/next/manifest, indexed and cached per hub id for instant cross-hub switching.
+ * @param {string | null} [hubId=activeHubId]
  * @returns {Promise<Manifest>}
  */
-export function loadManifest() {
-  return (manifestP ||= getJson("/api/next/manifest").then((json) => {
+export function loadManifest(hubId = activeHubId) {
+  const key = hubId || "__default__";
+  const hit = manifestCache.get(key);
+  if (hit) return hit;
+  const url = hubId ? `/api/next/manifest?workspace=${encodeURIComponent(hubId)}` : "/api/next/manifest";
+  const p = getJsonRaw(url).then((json) => {
     if (!activeHubId && json?.hub_id) activeHubId = json.hub_id;
-    return indexManifest(json);
-  }, (e) => { manifestP = null; throw e; }));
+    const indexed = indexManifest(json);
+    if (json?.hub_id && !manifestCache.has(json.hub_id)) manifestCache.set(json.hub_id, p);
+    return indexed;
+  }, (e) => { manifestCache.delete(key); throw e; });
+  manifestCache.set(key, p);
+  return p;
 }
 
-async function getJson(url) {
-  const targetUrl = apiUrl(url);
+/** Force-drop cached catalog and globe snapshots so the next load fetches fresh state. */
+export function invalidateCatalog() {
+  catalogP = null;
+  globeP = null;
+}
+
+/** GET /api/next/catalog — unified cross-hub index of providers, targets, and canonical places. */
+export function loadCatalog(force = false) {
+  if (force) catalogP = null;
+  return (catalogP ||= getJson("/api/next/catalog").catch((e) => { catalogP = null; throw e; }));
+}
+
+/** GET /api/next/globe — unified multi-hub spatial summary across all active providers. */
+export function loadGlobe(force = false) {
+  if (force) globeP = null;
+  return (globeP ||= getJson("/api/next/globe").catch((e) => { globeP = null; throw e; }));
+}
+
+async function getJsonRaw(targetUrl) {
   const r = await fetch(targetUrl);
   if (!r.ok) {
     const e = new Error(`${targetUrl}: ${r.status}`);
@@ -156,6 +200,10 @@ async function getJson(url) {
     throw e;
   }
   return r.json();
+}
+
+async function getJson(url) {
+  return getJsonRaw(apiUrl(url));
 }
 
 /* ================================================================ fan */

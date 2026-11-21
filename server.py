@@ -492,6 +492,14 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_next_api(self, path: str, query: dict):
         name = path[len("/api/next/"):]
         mgr = self._mgr()
+        if name == "catalog":
+            cat = mgr.catalog.build_catalog()
+            self._send_json(cat, etag=self._weak_etag(f"cat|{cat.get('stamp')}|{mgr.mode}"))
+            return
+        if name == "globe":
+            globe = mgr.catalog.build_globe()
+            self._send_json(globe, etag=self._weak_etag(f"globe|{globe.get('stamp')}|{mgr.mode}"))
+            return
         if name == "manifest":
             req_id = self._requested_hub_id(query)
             ctx = mgr.get_context(req_id)

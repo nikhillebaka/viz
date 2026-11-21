@@ -1,10 +1,19 @@
 /* Boot: the manifest → the starting state (defaults ← storage ← URL; the URL wins) → the store → the page.
  * Then the URL and browser storage follow the store. `window.__viz` is the one global, for the e2e checks. */
-import { loadManifest, getActiveHub, setActiveHub } from "./lib/api.js";
+import {
+  loadManifest,
+  loadCatalog,
+  invalidateCatalog,
+  clearAllCaches,
+  getActiveHub,
+  setActiveHub,
+} from "./lib/api.js";
 import { createStore } from "./lib/store.js";
 import { h, storage } from "./lib/dom.js";
+import { DAY, parseIso } from "./lib/scale.js";
+import { activeLayer } from "./ui/floating.js";
 import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted } from "./features/selection.js";
-import { defaults, defaultDate, defaultDims, readUrl, syncUrl, parseLevels } from "./features/url.js";
+import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
 
@@ -116,7 +125,180 @@ async function renderWelcome(manifest) {
   root.replaceChildren(welcome, fixed);
 }
 
+function nearestWithin(iso, rounds, maxDays = 21) {
+  const t = parseIso(iso);
+  if (!Number.isFinite(t) || !rounds?.length) return null;
+  let best = null, bd = Infinity;
+  for (const r of rounds) {
+    const d = Math.abs(r.t - t);
+    if (d < bd) { bd = d; best = r.iso; }
+  }
+  return bd <= maxDays * DAY ? best : null;
+}
+
+function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc) {
+  if (explicitLoc && nextMan.locationById.has(explicitLoc)) return explicitLoc;
+  const places = catalog?.places || {};
+  let prevPlace = null;
+  if (prevLocId) {
+    for (const p of Object.values(places)) {
+      if (p.hubs?.some((ent) => ent.hub_id === prevHubId && ent.location_id === prevLocId)) {
+        prevPlace = p;
+        break;
+      }
+    }
+    if (!prevPlace && places[prevLocId]) prevPlace = places[prevLocId];
+  }
+  if (prevPlace) {
+    const direct = prevPlace.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && nextMan.locationById.has(ent.location_id));
+    if (direct) return direct.location_id;
+    for (const childKey of prevPlace.children || []) {
+      const child = places[childKey];
+      const childEnt = child?.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && nextMan.locationById.has(ent.location_id));
+      if (childEnt) return childEnt.location_id;
+    }
+  }
+  if (prevLocId && nextMan.locationById.has(prevLocId)) return prevLocId;
+  return fromStorage(nextMan).location || defaults(nextMan).location;
+}
+
+function stripAppQueryParams(oldMan) {
+  const dimKeys = new Set();
+  for (const t of oldMan?.targets || []) for (const s of targetDimSpecs(t)) dimKeys.add(`dim_${s.name}`);
+  const cur = new URLSearchParams(location.search);
+  const keep = new URLSearchParams();
+  for (const [k, v] of cur) if (!KEYS.includes(k) && !dimKeys.has(k)) keep.append(k, v);
+  const qs = keep.toString();
+  history.replaceState(history.state, "", `${location.pathname}${qs ? `?${qs}` : ""}${location.hash}`);
+}
+
+let activeUnmount = null;
+let switchSeq = 0;
+
+function mountContext(manifest, { catalog = null, stateOverride = null, initialUrl = null } = {}) {
+  const fromUrl = initialUrl ? initialUrl : {};
+  const { selFlags, ...url } = fromUrl;
+  const stored = fromStorage(manifest);
+  const def = defaults(manifest);
+  const resolvedTarget = stateOverride?.target ?? url.target ?? def.target;
+  const initDims = defaultDims(manifest, resolvedTarget);
+  const state = {
+    ...(manifest.hub_id ? { hub: manifest.hub_id } : {}),
+    ...def,
+    outcome: true,
+    layers: [],
+    trajectories: false,
+    theme: storedTheme(),
+    ...stored,
+    ...url,
+    ...(stateOverride || {}),
+    dims: { ...initDims, ...(url.dims || {}), ...(stateOverride?.dims || {}) },
+  };
+  if (selFlags && !stateOverride?.sel) {
+    if (selFlags.showAll !== undefined) state.sel = setShowAll(state.sel, selFlags.showAll);
+    if (selFlags.baseline !== undefined) state.sel = setBaseline(state.sel, selFlags.baseline);
+  }
+  if (!url.date && !stateOverride?.date) state.date = defaultDate(manifest, state.sel);
+  if (state.focus && !isCharted(state.sel, state.focus) && !(state.focus === manifest.baseline && state.sel.baseline)) state.focus = null;
+
+  const store = createStore(state);
+  const ctx = {
+    manifest,
+    store,
+    chart: null,
+    catalog,
+    async reloadCatalog() {
+      invalidateCatalog();
+      const nextCat = await loadCatalog(true).catch(() => null);
+      if (nextCat) ctx.catalog = nextCat;
+      return nextCat;
+    },
+    async switchContext({ hub = null, target = null, location: nextLoc = null, date = null, dims = null, keepGlobe = false, forceReload = false } = {}) {
+      const targetHub = hub || manifest.hub_id;
+      if (!forceReload && targetHub === manifest.hub_id) {
+        const cur = store.get();
+        const patch = {};
+        if (target && manifest.targetById.has(target) && target !== cur.target) {
+          patch.target = target;
+          patch.dims = { ...defaultDims(manifest, target), ...(dims || {}) };
+        } else if (dims) {
+          patch.dims = { ...(cur.dims || {}), ...dims };
+        }
+        if (nextLoc && manifest.locationById.has(nextLoc) && nextLoc !== cur.location) {
+          patch.location = nextLoc;
+        }
+        if (date) {
+          const snapped = nearestWithin(date, manifest.allRounds, 21);
+          if (snapped) patch.date = snapped;
+        }
+        if (Object.keys(patch).length) store.set(patch);
+        return;
+      }
+
+      const seq = ++switchSeq;
+      activeLayer()?.close(false);
+      const prev = store.get();
+      if (forceReload) clearAllCaches();
+      setActiveHub(targetHub);
+
+      const prog = document.querySelector(".app-progress") || document.body.appendChild(h("div", { class: "app-progress", role: "progressbar", "aria-label": "Loading" }));
+      prog.classList.remove("is-done");
+      const [nextMan, nextCat] = await Promise.all([
+        loadManifest(targetHub),
+        forceReload ? loadCatalog(true).catch(() => ctx.catalog) : Promise.resolve(ctx.catalog),
+      ]);
+      if (seq !== switchSeq) return;
+
+      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc);
+      const nextDef = defaults(nextMan);
+      const resolvedT = (target && nextMan.targetById.has(target)) ? target : nextDef.target;
+      const nextStored = fromStorage(nextMan);
+      const nextSel = nextStored.sel || nextDef.sel;
+      const resolvedDate = (date && nearestWithin(date, nextMan.allRounds, 21))
+        || nearestWithin(prev.date, nextMan.allRounds, 21)
+        || defaultDate(nextMan, nextSel);
+
+      if (keepGlobe && window.location.hash !== "#globe") {
+        history.replaceState(history.state, "", `${window.location.pathname}${window.location.search}#globe`);
+      } else if (!keepGlobe && window.location.hash === "#globe") {
+        history.replaceState(history.state, "", `${window.location.pathname}${window.location.search}`);
+      }
+      stripAppQueryParams(manifest);
+      activeUnmount?.();
+
+      mountContext(nextMan, {
+        catalog: nextCat,
+        stateOverride: {
+          hub: nextMan.hub_id || targetHub,
+          target: resolvedT,
+          location: resolvedLoc,
+          date: resolvedDate,
+          sel: nextSel,
+          dims: { ...defaultDims(nextMan, resolvedT), ...(dims || {}) },
+          levels: prev.levels,
+          rulers: prev.rulers,
+          layers: prev.layers,
+          theme: prev.theme,
+          outcome: prev.outcome,
+        },
+      });
+    },
+  };
+
+  const shell = mountShell(root, ctx);
+  const stopUrl = syncUrl(store, manifest);
+  const stopPersist = persist(store, manifest.hub_id);
+  activeUnmount = () => {
+    stopUrl();
+    stopPersist();
+    shell.destroy();
+    activeUnmount = null;
+  };
+  window.__viz = { store, manifest, chart: ctx.chart, get nav() { return ctx.chart.nav; }, idle: () => ctx.chart.idle() };
+}
+
 async function boot() {
+  const catalogP = loadCatalog().catch(() => null);
   let manifest;
   try {
     manifest = await loadManifest();
@@ -139,40 +321,22 @@ async function boot() {
     }
   }
 
+  const catalog = await catalogP;
+  if ((manifest.empty || !manifest.allRounds.length) && catalog?.hubs?.length) {
+    setActiveHub(catalog.hubs[0].id);
+    try {
+      manifest = await loadManifest(catalog.hubs[0].id);
+    } catch { /* fallback to welcome below */ }
+  }
+
   if (manifest.empty || !manifest.allRounds.length) {
     await renderWelcome(manifest);
     return;
   }
 
-  const { selFlags, ...url } = readUrl(manifest);
-  const def = defaults(manifest);
-  const resolvedTarget = url.target ?? def.target;
-  const initDims = defaultDims(manifest, resolvedTarget);
-  const state = {
-    ...(manifest.hub_id ? { hub: manifest.hub_id } : {}),
-    ...def,
-    outcome: true,
-    layers: [],
-    trajectories: false,
-    theme: storedTheme(),
-    ...fromStorage(manifest),
-    ...url,
-    dims: { ...initDims, ...(url.dims || {}) },
-  };
-  if (selFlags) {
-    if (selFlags.showAll !== undefined) state.sel = setShowAll(state.sel, selFlags.showAll);
-    if (selFlags.baseline !== undefined) state.sel = setBaseline(state.sel, selFlags.baseline);
-  }
-  // no date in the URL: the latest round the starting selection has forecasts for
-  if (!url.date) state.date = defaultDate(manifest, state.sel);
-  // focus only on a model that is drawn: charted, or the baseline while it is on
-  if (state.focus && !isCharted(state.sel, state.focus) && !(state.focus === manifest.baseline && state.sel.baseline)) state.focus = null;
+  const initialUrl = readUrl(manifest);
+  mountContext(manifest, { catalog, initialUrl });
 
-  const store = createStore(state);
-  const ctx = { manifest, store, chart: null };
-  mountShell(root, ctx);
-  syncUrl(store, manifest);
-  persist(store, manifest.hub_id);
   // a link that names models from a live hub that isn't synced here: say so, with a way to sync it
   {
     const named = (new URLSearchParams(location.search).get("models") || "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -194,7 +358,6 @@ async function boot() {
       import("./ui/controls.js").then(({ toast }) => toast(n ? `Data refreshed · ${n} models` : "Data refreshed"));
     }
   } catch {}
-  window.__viz = { store, manifest, chart: ctx.chart, get nav() { return ctx.chart.nav; }, idle: () => ctx.chart.idle() };
 }
 
 boot();

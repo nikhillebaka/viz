@@ -65,6 +65,7 @@
   color: var(--ink-secondary);
 }
 .gb-key-ramp { width: 96px; height: var(--space-6); border-radius: var(--radius-pill); }
+.gb-key-tag { color: var(--ink-tertiary); font-size: var(--text-micro); letter-spacing: 0.02em; }
 
 .gb-drawer {
   position: absolute;
@@ -110,6 +111,19 @@
   font-weight: var(--weight-medium);
 }
 .gb-open-btn:hover { text-decoration: underline; }
+
+.gb-streams {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-6) 0;
+  border-bottom: var(--stroke-hairline) solid var(--line-hairline);
+}
+.gb-stream-row { padding-inline: var(--space-6); border-radius: var(--radius-tile); }
+.gb-stream-row.on .c-row-label { color: var(--accent); }
+.gb-stream-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-8); }
+.gb-stream-nums { font-size: var(--text-small); color: var(--ink-secondary); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.gb-stream-go { font-size: var(--text-small); color: var(--accent); flex: none; margin-left: var(--space-8); }
+.gb-cats { padding: var(--space-6) 0; border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
 
 .gb-metros { margin-top: var(--space-12); padding-top: var(--space-12); border-top: var(--stroke-hairline) solid var(--line-hairline); }
 .gb-metros-title {

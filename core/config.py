@@ -405,7 +405,9 @@ class VizConfig:
                 return "COVID admissions"
             if "rsv" in t_low:
                 return "RSV admissions"
-            return "Flu admissions"
+            if "flu" in t_low:
+                return "Flu admissions"
+            return "Hospital admissions"
         return target if len(target) <= 22 else (tmeta_name or target)[:22]
 
     def get_target_metadata(self, target: str) -> Dict[str, Any]:
@@ -472,8 +474,10 @@ class VizConfig:
                 default_display = "Incident COVID-19 Admissions"
             elif "rsv" in t_lower:
                 default_display = "Incident RSV Admissions"
-            else:
+            elif "flu" in t_lower:
                 default_display = "Incident Flu Admissions"
+            else:
+                default_display = "Hospital Admissions"
             default_unit = "Patients / Wk" if ("hosp" in t_lower or "admit" in t_lower) else ("Visits / Wk" if "visit" in t_lower else "Count")
         else:
             scale = "count"
