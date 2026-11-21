@@ -389,6 +389,28 @@ class TestHeatmapServerAPI(unittest.TestCase):
             len(data_active["y_keys"]) + len(data_active["inactive_models"])
         )
 
+    def test_heatmap_fair_shared_tasks_model_loc(self):
+        """With fair=True, model_loc compares models strictly on shared (location, reference_date, horizon) tasks."""
+        season = "2024-2025"
+        res_unfair = self.loader.get_heatmap_data(
+            rows="model", cols="location", metric="wis", location="states", season=season, horizon="all", fair=False,
+        )
+        res_fair = self.loader.get_heatmap_data(
+            rows="model", cols="location", metric="wis", location="states", season=season, horizon="all", fair=True,
+        )
+        models = [m for m, row in zip(res_unfair["y_keys"], res_unfair["matrix"]) if any(v is not None for v in row)]
+        self.assertGreaterEqual(len(models), 2)
+        m_a, m_b = models[0], models[1]
+        pair_fair = self.loader.get_heatmap_data(
+            rows="model", cols="location", metric="wis", location="states", season=season, horizon="all",
+            model_ids=[m_a, m_b], fair=True,
+        )
+        for abbr in pair_fair["x_keys"]:
+            ca = pair_fair["cell_meta"].get(f"{m_a}:{abbr}", {}).get("task_count", 0)
+            cb = pair_fair["cell_meta"].get(f"{m_b}:{abbr}", {}).get("task_count", 0)
+            self.assertEqual(ca, cb, f"Shared task counts must match in {abbr} ({m_a}={ca}, {m_b}={cb})")
+        self.assertIsNotNone(res_fair)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2063,16 +2063,22 @@ class SandboxDataLoader:
         include_inactive: Union[bool, str] = False,
         horizons: Optional[List[int]] = None,
         dates: Optional[List[str]] = None,
+        fair: Union[bool, str] = False,
     ) -> Dict[str, Any]:
         """
         horizons / dates (optional, default off so existing callers are unchanged): score only these
         horizons, and only these reference dates within the season scope (the next/ evaluation window).
+        fair (optional, default False): restrict model comparison modes to shared tasks across all requested models.
 
         Extract multi-dimensional matrix cross-sections for heatmap visualization:
         Directly driven by user-selected ROWS and COLS (Location, Model, Date, Horizon),
         with exact Leaderboard parity for TIME (Date, Season, Custom Seasons, All Time)
         and LOC (All States vs Single Location).
         """
+        if isinstance(fair, str):
+            fair = fair.lower() in ("1", "true", "yes")
+        else:
+            fair = bool(fair)
         if isinstance(include_inactive, str):
             include_inactive = include_inactive.lower() in ("1", "true", "yes")
         else:
@@ -2673,6 +2679,23 @@ class SandboxDataLoader:
                         tdf_m = tdf_m.filter(pl.col("horizon").is_in(list(horizons)))
                     model_task_dfs[mid] = tdf_m
 
+            if fair and len(cand_mids) >= 2:
+                present_tdfs = [model_task_dfs.get(m) for m in cand_mids]
+                if any(tdf is None or tdf.is_empty() for tdf in present_tdfs):
+                    for mid in list(model_task_dfs.keys()):
+                        model_task_dfs[mid] = model_task_dfs[mid].head(0)
+                else:
+                    extra_dim_cols = [
+                        c for c in self.config.get_extra_task_ids(target)
+                        if all(c in tdf.columns for tdf in present_tdfs)
+                    ]
+                    join_cols = ["location", "reference_date", "horizon"] + extra_dim_cols
+                    common = present_tdfs[0].select(join_cols).unique()
+                    for tdf in present_tdfs[1:]:
+                        common = common.join(tdf.select(join_cols).unique(), on=join_cols, how="inner")
+                    for mid in cand_mids:
+                        model_task_dfs[mid] = model_task_dfs[mid].join(common, on=join_cols, how="inner")
+
             y_keys = cand_mids
             y_labels = [f"{mid} {'[LOCAL]' if all_models_meta.get(mid, {}).get('is_local') else ''}".strip() for mid in cand_mids]
 
@@ -2701,7 +2724,7 @@ class SandboxDataLoader:
                             if loc in loc_to_abbr:
                                 abbr = loc_to_abbr[loc]
                                 loc_metrics[abbr] = {
-                                    "wis": round(row["wis"], 2) if row["wis"] is not None and not np.isnan(row["wis"]) else None,
+                                    "wis": round(row["wis"], 4) if row["wis"] is not None and not np.isnan(row["wis"]) else None,
                                     "wis_rate": round(row["wis_rate"], 2) if row.get("wis_rate") is not None and not np.isnan(row["wis_rate"]) else None,
                                     "mae": round(row["mae"], 2) if row.get("mae") is not None and not np.isnan(row["mae"]) else None,
                                     "cov95": round(row["cov95"] * 100, 1) if row.get("cov95") is not None and not np.isnan(row["cov95"]) else None,

@@ -83,23 +83,36 @@ export function loadCurves(target, location, seasons) {
 }
 
 /**
- * Mean WIS per state/country for a model and the baseline in one season (heatmap models × locations).
- * @param {number | "all"} [horizon="all"]
- * @returns {Promise<{ model: Map<abbr, number>, base: Map<abbr, number> }>}
+ * Shared-task mean WIS per state/country for a model and the baseline in one season (heatmap models × locations).
+ * @param {number[] | null} [horizons=null]
+ * @returns {Promise<{ model: Map<string, number>, base: Map<string, number>, counts: Map<string, number> }>}
  */
-export function loadPlaces(target, season, id, baseline, horizon = "all") {
+export function loadPlaces(target, season, id, baseline, horizons = null) {
   const models = [...new Set([id, baseline].filter(Boolean))];
-  const q = new URLSearchParams({ rows: "model", cols: "location", target, metric: "wis", location: "states", season, horizon: String(horizon), models: models.join(",") }).toString();
+  const p = new URLSearchParams({
+    rows: "model", cols: "location", target, metric: "wis", location: "states",
+    season, fair: "1", models: models.join(","),
+  });
+  if (Array.isArray(horizons) && horizons.length) p.set("horizons", horizons.join(","));
+  else p.set("horizon", "all");
+  const q = p.toString();
   const key = sk(q);
   if (caches.places.has(key)) return caches.places.get(key);
-  const p = getJson(`/api/heatmap?${q}`).then((d) => {
+  const pr = getJson(`/api/next/heatmap?${q}`).then((d) => {
     const row = (mid) => {
       const i = (d.y_keys || []).indexOf(mid), m = new Map();
       if (i < 0) return m;
       (d.x_keys || []).forEach((abbr, j) => { const v = d.matrix?.[i]?.[j]; if (typeof v === "number") m.set(abbr, v); });
       return m;
     };
-    return { model: row(id), base: row(baseline) };
+    const counts = new Map();
+    if (d.cell_meta) {
+      for (const abbr of d.x_keys || []) {
+        const cnt = d.cell_meta[`${id}:${abbr}`]?.task_count;
+        if (typeof cnt === "number") counts.set(abbr, cnt);
+      }
+    }
+    return { model: row(id), base: row(baseline), counts };
   }).catch((e) => { caches.places.delete(key); throw e; });
-  return remember(caches.places, key, p);
+  return remember(caches.places, key, pr);
 }

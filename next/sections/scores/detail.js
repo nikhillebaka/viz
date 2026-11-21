@@ -6,8 +6,7 @@ import { tooltip } from "../../ui/floating.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { classifyHubGeo } from "../../geo/picker_geo.js";
 import { EU_GRID_PROPORTIONED, EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT } from "../../geo/eu_tiles.js";
-import { targetHorizons } from "../scope.js";
-import { LEVELS, fmtScore, fmtRel, relLevel, horizonsLabel } from "./model.js";
+import { LEVELS, fmtScore, fmtRel, relLevel } from "./model.js";
 import { loadDetails, loadPlaces } from "./data.js";
 import { s } from "./figures.js";
 import { seriesColor } from "../../chart/layout.js";
@@ -65,22 +64,21 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
   el.append(
     block("Anatomy", anatomy, key),
     block("Coverage", h("div", { class: "sc-cov-wrap" }, cov)),
-    block(tilesTitle(scope, manifest, store.get().target), tiles),
+    block(tilesTitle(scope, manifest), tiles),
     h("div", { class: "sc-block sc-wide" }, h("div", { class: "sc-block-title" }, "Submissions"), subs),
     h("div", { class: "sc-block sc-wide" }, facts),
   );
 
-  // per location: the model's mean WIS over the baseline's (a ratio of means, not the pairwise relative WIS),
-  // the newest scoped season, every week; one horizon when the scope has exactly one (tilesTitle says so)
+  // per location: shared-task mean WIS over the baseline's on the newest scoped season & active horizons
   const season = scope.seasons[0];
   if (season && !row.baseline) {
     tiles.append(h("span", { class: "sc-quiet" }, "Loading"));
-    const horizon = scope.horizons?.length === 1 ? scope.horizons[0] : "all";
-    loadPlaces(store.get().target, season, row.id, baseline || scope.baseline, horizon).then(({ model, base: b }) => {
+    loadPlaces(store.get().target, season, row.id, baseline || scope.baseline, scope.horizons).then(({ model, base: b, counts }) => {
       tiles.replaceChildren(...tileItems.map((it) => {
         const { loc, key: k, label } = it;
         const m = loc ? (model.get(loc.abbr) ?? model.get(loc.id) ?? model.get(k)) : null;
         const bv = loc ? (b.get(loc.abbr) ?? b.get(loc.id) ?? b.get(k)) : null;
+        const n = loc ? (counts?.get(loc.abbr) ?? counts?.get(loc.id) ?? counts?.get(k) ?? null) : null;
         const rel = m != null && bv > 0 ? m / bv : null, lvl = relLevel(rel);
         const gridStyle = it.col != null
           ? {
@@ -93,7 +91,7 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
           style: { ...gridStyle, "--c": lvl ? `var(--score-${lvl})` : null },
           "aria-label": label, onclick: () => loc && goTo({ location: loc.id }),
         });
-        tooltip(t, `${label} · ${rel == null ? "–" : `${fmtRel(rel)}× baseline WIS · WIS ${fmtScore(m)}`}`);
+        tooltip(t, `${label} · ${rel == null ? "–" : `${fmtRel(rel)}× baseline WIS · WIS ${fmtScore(m)}${n != null ? ` · ${n} ${n === 1 ? "forecast" : "forecasts"}` : ""}`}`);
         return t;
       }));
     }, () => tiles.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load locations")));
@@ -138,15 +136,12 @@ function buildTileLayout(geoCls, manifest, byAbbr) {
   };
 }
 
-/* "Locations", plus where the tiles' scope is wider than the table's: they cover one season, every week
- * and all horizons (or the one horizon in scope) */
-function tilesTitle(scope, manifest, targetId) {
-  const hs = scope.horizons;
+/* "Locations", plus where the tiles' scope is wider than the table's: one season and every week */
+function tilesTitle(scope, manifest) {
   return [
     "Locations",
     scope.seasons.length > 1 && (manifest.seasonById.get(scope.seasons[0])?.label || scope.seasons[0]),
     (scope.weeks || scope.phase) && "whole season",
-    hs && hs.length > 1 && horizonsLabel(null, targetHorizons(manifest, targetId)),
   ].filter(Boolean).join(" · ");
 }
 

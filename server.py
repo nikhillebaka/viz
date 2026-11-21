@@ -1026,6 +1026,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         normalize = query.get("normalize", ["none"])[0].strip()
         include_inactive_param = query.get("include_inactive", ["0"])[0].strip().lower()
         include_inactive = include_inactive_param in ("1", "true", "yes")
+        fair = query.get("fair", ["0"])[0].strip().lower() in ("1", "true", "yes")
 
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()] if models_param else None
 
@@ -1045,6 +1046,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 sort_by=sort_by,
                 normalize=normalize,
                 include_inactive=include_inactive,
+                fair=fair,
                 **(self._heatmap_scope(query) if next_api else {}),
             )
             self._send_json(heatmap_data)
