@@ -251,9 +251,14 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path.startswith("/api/remote/"):
             if not self._require_local_mutation("Remote hub actions"):
                 return
-            ctx = self._require_ctx(query, allow_hub_param=False)
-            if ctx is not None:
-                self._route_remote_post(ctx, path)
+            mgr = self._mgr()
+            req_id = self._requested_hub_id(query, allow_hub_param=False)
+            ctx = mgr.get_context(req_id)
+            if req_id and ctx is None:
+                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                return
+            remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
+            self._route_remote_post(remote_mgr, path)
             return
         if path == "/api/cache/refresh":
             if not self._require_local_mutation("Cache refresh"):
@@ -368,29 +373,44 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             if ctx is not None:
                 self._handle_peak_map(ctx, query)
         elif path == "/api/remote/hubs":
-            ctx = self._require_ctx(query, allow_hub_param=False)
-            if ctx is not None:
-                self._send_json({
-                    "hubs": ctx.remote_mgr.list_hubs(),
-                    "busy": ctx.remote_mgr.is_busy(),
-                    "current_season": current_season(),
-                })
+            mgr = self._mgr()
+            req_id = self._requested_hub_id(query, allow_hub_param=False)
+            ctx = mgr.get_context(req_id)
+            if req_id and ctx is None:
+                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                return
+            remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
+            self._send_json({
+                "hubs": remote_mgr.list_hubs(),
+                "busy": remote_mgr.is_busy(),
+                "current_season": current_season(),
+            })
         elif path == "/api/remote/job":
-            ctx = self._require_ctx(query, allow_hub_param=False)
-            if ctx is not None:
-                hub_id = query.get("hub", [""])[0]
-                self._send_json({
-                    "job": ctx.remote_mgr.get_job(hub_id),
-                    "hub": next((h for h in ctx.remote_mgr.list_hubs() if h["id"] == hub_id), None),
-                })
+            mgr = self._mgr()
+            req_id = self._requested_hub_id(query, allow_hub_param=False)
+            ctx = mgr.get_context(req_id)
+            if req_id and ctx is None:
+                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                return
+            remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
+            hub_id = query.get("hub", [""])[0]
+            self._send_json({
+                "job": remote_mgr.get_job(hub_id),
+                "hub": next((h for h in remote_mgr.list_hubs() if h["id"] == hub_id), None),
+            })
         elif path == "/api/remote/warnings":
-            ctx = self._require_ctx(query, allow_hub_param=False)
-            if ctx is not None:
-                hub_id = query.get("hub", [""])[0]
-                if ctx.loader.remote_store.get_spec(hub_id) is None:
-                    self._send_json({"error": f"Unknown hub '{hub_id}'"}, status=404)
-                else:
-                    self._send_json({"hub": hub_id, "warnings": ctx.remote_mgr.warnings(hub_id)})
+            mgr = self._mgr()
+            req_id = self._requested_hub_id(query, allow_hub_param=False)
+            ctx = mgr.get_context(req_id)
+            if req_id and ctx is None:
+                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                return
+            remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
+            hub_id = query.get("hub", [""])[0]
+            if remote_mgr.store.get_spec(hub_id) is None:
+                self._send_json({"error": f"Unknown hub '{hub_id}'"}, status=404)
+            else:
+                self._send_json({"hub": hub_id, "warnings": remote_mgr.warnings(hub_id)})
         elif path in ("/api/cache/refresh", "/api/cache/clear"):
             self._send_json(
                 {"error": "Method Not Allowed", "detail": "Cache refresh and clear operations must use HTTP POST."},
@@ -1081,7 +1101,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             logger.warning("Metrics evaluation error: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
 
-    def _route_remote_post(self, ctx: HubContext, path: str):
+    def _route_remote_post(self, remote_mgr: Any, path: str):
         """Hub sync endpoints. Only these (user-initiated) calls ever reach the network."""
         body = self._read_json_body()
         hub_id = str(body.get("hub", "")).strip()
@@ -1090,21 +1110,21 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 source = str(body.get("source") or body.get("bucket") or "").strip()
                 transport = body.get("transport")
                 branch = str(body.get("branch") or "main").strip() or "main"
-                result = ctx.remote_mgr.add_hub(source, body.get("label"), transport=transport, branch=branch)
+                result = remote_mgr.add_hub(source, body.get("label"), transport=transport, branch=branch)
                 self._send_json(result, status=200 if result.get("ok") else 422)
             elif path == "/api/remote/check":
-                self._send_json(ctx.remote_mgr.check(hub_id))
+                self._send_json(remote_mgr.check(hub_id))
             elif path == "/api/remote/sync":
                 seasons = body.get("seasons")
                 seasons = [str(x) for x in seasons] if isinstance(seasons, list) else None
-                self._send_json({"job": ctx.remote_mgr.start_sync(hub_id, seasons)})
+                self._send_json({"job": remote_mgr.start_sync(hub_id, seasons)})
             elif path == "/api/remote/cancel":
-                self._send_json({"cancelled": ctx.remote_mgr.cancel(hub_id)})
+                self._send_json({"cancelled": remote_mgr.cancel(hub_id)})
             elif path == "/api/remote/remove":
-                ctx.remote_mgr.remove(hub_id)
+                remote_mgr.remove(hub_id)
                 self._send_json({"status": "ok", "removed": hub_id})
             elif path == "/api/remote/toggle":
-                ctx.remote_mgr.set_enabled(hub_id, bool(body.get("enabled", True)))
+                remote_mgr.set_enabled(hub_id, bool(body.get("enabled", True)))
                 self._send_json({"status": "ok", "hub": hub_id, "enabled": bool(body.get("enabled", True))})
             else:
                 self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)

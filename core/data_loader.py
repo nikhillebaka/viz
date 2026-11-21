@@ -225,8 +225,11 @@ class SandboxDataLoader:
         observed_locs: Optional[List[str]] = None
         if not loc_file.exists():
             # Fallback for CSV-free hubs (e.g. RespiCast) when parquet truth already exists on disk.
-            for pq_name in ("oracle.parquet", "admissions.parquet"):
-                pq_path = self.cache_mgr.targets_cache_dir / pq_name
+            cand_pqs = []
+            for pq_name in ("oracle.parquet", "admissions.parquet", "latest.parquet", "time_series.parquet"):
+                cand_pqs.append(self.cache_mgr.targets_cache_dir / pq_name)
+                cand_pqs.append(self.cache_mgr.target_data_dir / pq_name)
+            for pq_path in cand_pqs:
                 if pq_path.exists():
                     try:
                         observed_locs = (
@@ -323,6 +326,9 @@ class SandboxDataLoader:
                 mtime = max(mtime, synth_dir.stat().st_mtime)
             if self.include_remote:
                 mtime = max(mtime, self.remote_store.state_mtime())
+            manifest_file = self.base_dir / "manifest.json"
+            if manifest_file.is_file():
+                mtime = max(mtime, manifest_file.stat().st_mtime)
         except Exception:
             pass
         return mtime
@@ -561,6 +567,100 @@ class SandboxDataLoader:
         with self._phase_cache_lock:
             self._phase_cache.clear()
 
+    def _models_from_remote_manifest(
+        self,
+        man: Dict[str, Any],
+        *,
+        prefix: Optional[str],
+        source: str,
+        hub_id: Optional[str],
+        hub_label: Optional[str],
+        base_dir: Path,
+        taken: Set[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Build model inventory entries from a synced remote hub's `manifest.json` without Parquet scans."""
+        models: Dict[str, Dict[str, Any]] = {}
+        cal = self.get_calendar()
+        per_model: Dict[str, Dict[str, Any]] = {}
+        peak_info: Dict[str, Dict[str, set]] = {}
+        for f in man.get("files", {}).values():
+            if not isinstance(f, dict) or not f.get("model"):
+                continue
+            if f.get("peak_targets"):
+                pk = peak_info.setdefault(f["model"], {"targets": set(), "dates": set()})
+                pk["targets"].update(f["peak_targets"])
+                pk["dates"].add(f["reference_date"])
+            if not (f.get("path") or f.get("samples_path") or f.get("pmf_path")):
+                continue
+            pm = per_model.setdefault(
+                f["model"],
+                {
+                    "dates": set(),
+                    "targets": set(),
+                    "output_types": set(),
+                    "extra_task_ids": set(),
+                    "has_samples": False,
+                    "has_pmf": False,
+                    "from_samples": False,
+                    "warnings": [],
+                    "revisions": 0,
+                    "posted": "",
+                },
+            )
+            pm["dates"].add(f["reference_date"])
+            pm["targets"].update(f.get("targets", []))
+            pm["output_types"].update(f.get("output_types", []))
+            pm["extra_task_ids"].update(f.get("extra_task_ids", []))
+            pm["has_samples"] = pm["has_samples"] or bool(f.get("samples")) or ("sample" in f.get("output_types", []))
+            pm["has_pmf"] = pm["has_pmf"] or bool(f.get("pmf")) or ("pmf" in f.get("output_types", []))
+            pm["from_samples"] = pm["from_samples"] or bool(f.get("from_samples"))
+            pm["warnings"].extend(f.get("warnings", []))
+            pm["revisions"] += int(f.get("revisions", 0))
+            pm["posted"] = max(pm["posted"], f.get("last_modified", ""))
+        meta = man.get("metadata", {})
+        for name, pm in sorted(per_model.items()):
+            key = f"{prefix}:{name}" if prefix else name
+            if key in taken:
+                continue
+            dates = sorted(pm["dates"])
+            for w in pm["warnings"]:
+                msg = f"[{hub_label}] {w}" if hub_label else str(w)
+                self.cache_mgr.warning_registry.add_warning(key, msg)
+            entry: Dict[str, Any] = {
+                "id": key,
+                "raw_name": key,
+                "display_name": name,
+                "is_local": False,
+                "is_synthetic": False,
+                "source": source,
+                "designated": bool(meta.get(name, {}).get("designated", False)),
+                "path": str(base_dir / "model-output" / name),
+                "count": len(dates),
+                "dates": dates,
+                "seasons": sorted({cal.season_for_date(d) for d in dates}),
+                # Weekly targets only; season peak targets are listed separately
+                "targets": sorted(t for t in pm["targets"] if not is_peak_target(t)),
+                "output_types": sorted(pm["output_types"]),
+                "extra_task_ids": sorted(pm["extra_task_ids"]),
+                "has_samples": pm["has_samples"],
+                "has_pmf": pm["has_pmf"],
+                "from_samples": pm["from_samples"],
+                "peak_targets": sorted(peak_info.get(name, {}).get("targets", [])),
+                "peak_dates": sorted(peak_info.get(name, {}).get("dates", [])),
+                "family": self.infer_model_family(name),
+                "min_date": dates[0] if dates else None,
+                "max_date": dates[-1] if dates else None,
+                "last_posted": pm["posted"] or None,
+                "revision_count": pm["revisions"],
+                "warnings_count": len(pm["warnings"]),
+            }
+            if hub_id is not None:
+                entry["hub"] = hub_id
+            if hub_label is not None:
+                entry["hub_label"] = hub_label
+            models[key] = entry
+        return models
+
     def _scan_hub_models(self, taken: Set[str]) -> Dict[str, Dict[str, Any]]:
         """Inventory of models copied from active compatible hubs, read from each hub's manifest (no Parquet scans)."""
         models: Dict[str, Dict[str, Any]] = {}
@@ -569,79 +669,17 @@ class SandboxDataLoader:
             if spec.id not in active_hubs:
                 continue
             man = self.remote_store.load_manifest(spec.id)
-            cal = self.get_calendar()
-            per_model: Dict[str, Dict[str, Any]] = {}
-            peak_info: Dict[str, Dict[str, set]] = {}
-            for f in man.get("files", {}).values():
-                if f.get("peak_targets"):
-                    pk = peak_info.setdefault(f["model"], {"targets": set(), "dates": set()})
-                    pk["targets"].update(f["peak_targets"])
-                    pk["dates"].add(f["reference_date"])
-                if not (f.get("path") or f.get("samples_path") or f.get("pmf_path")):
-                    continue
-                pm = per_model.setdefault(
-                    f["model"],
-                    {
-                        "dates": set(),
-                        "targets": set(),
-                        "output_types": set(),
-                        "extra_task_ids": set(),
-                        "has_samples": False,
-                        "has_pmf": False,
-                        "from_samples": False,
-                        "warnings": [],
-                        "revisions": 0,
-                        "posted": "",
-                    },
+            models.update(
+                self._models_from_remote_manifest(
+                    man,
+                    prefix=spec.id,
+                    source="hub",
+                    hub_id=spec.id,
+                    hub_label=spec.short_label,
+                    base_dir=self.remote_store.hub_dir(spec.id),
+                    taken=taken | set(models),
                 )
-                pm["dates"].add(f["reference_date"])
-                pm["targets"].update(f.get("targets", []))
-                pm["output_types"].update(f.get("output_types", []))
-                pm["extra_task_ids"].update(f.get("extra_task_ids", []))
-                pm["has_samples"] = pm["has_samples"] or bool(f.get("samples")) or ("sample" in f.get("output_types", []))
-                pm["has_pmf"] = pm["has_pmf"] or bool(f.get("pmf")) or ("pmf" in f.get("output_types", []))
-                pm["from_samples"] = pm["from_samples"] or bool(f.get("from_samples"))
-                pm["warnings"].extend(f.get("warnings", []))
-                pm["revisions"] += int(f.get("revisions", 0))
-                pm["posted"] = max(pm["posted"], f.get("last_modified", ""))
-            meta = man.get("metadata", {})
-            for name, pm in sorted(per_model.items()):
-                key = f"{spec.id}:{name}"
-                if key in taken:
-                    continue
-                dates = sorted(pm["dates"])
-                for w in pm["warnings"]:
-                    self.cache_mgr.warning_registry.add_warning(key, f"[{spec.short_label}] {w}")
-                models[key] = {
-                    "id": key,
-                    "raw_name": key,
-                    "display_name": name,
-                    "is_local": False,
-                    "is_synthetic": False,
-                    "source": "hub",
-                    "hub": spec.id,
-                    "hub_label": spec.short_label,
-                    "designated": bool(meta.get(name, {}).get("designated", False)),
-                    "path": str(self.remote_store.model_dir(spec.id, name)),
-                    "count": len(dates),
-                    "dates": dates,
-                    "seasons": sorted({cal.season_for_date(d) for d in dates}),
-                    # Weekly targets only; season peak targets are listed separately
-                    "targets": sorted(t for t in pm["targets"] if not is_peak_target(t)),
-                    "output_types": sorted(pm["output_types"]),
-                    "extra_task_ids": sorted(pm["extra_task_ids"]),
-                    "has_samples": pm["has_samples"],
-                    "has_pmf": pm["has_pmf"],
-                    "from_samples": pm["from_samples"],
-                    "peak_targets": sorted(peak_info.get(name, {}).get("targets", [])),
-                    "peak_dates": sorted(peak_info.get(name, {}).get("dates", [])),
-                    "family": self.infer_model_family(name),
-                    "min_date": dates[0] if dates else None,
-                    "max_date": dates[-1] if dates else None,
-                    "last_posted": pm["posted"] or None,
-                    "revision_count": pm["revisions"],
-                    "warnings_count": len(pm["warnings"]),
-                }
+            )
         return models
 
     def _read_model_meta(
@@ -772,8 +810,29 @@ class SandboxDataLoader:
             cal = self.get_calendar()
             models = {}
 
-            # 1. Production / Main model-output
-            if self.model_output_dir.exists():
+            # 1. Production / Main model-output (or synced remote manifest.json when opened standalone)
+            base_manifest_file = self.base_dir / "manifest.json"
+            used_standalone_manifest = False
+            if not self.include_remote and base_manifest_file.is_file():
+                try:
+                    standalone_man = json.loads(base_manifest_file.read_text(encoding="utf-8"))
+                    if isinstance(standalone_man, dict) and isinstance(standalone_man.get("files"), dict):
+                        models.update(
+                            self._models_from_remote_manifest(
+                                standalone_man,
+                                prefix=None,
+                                source="repo",
+                                hub_id=None,
+                                hub_label=None,
+                                base_dir=self.base_dir,
+                                taken=set(),
+                            )
+                        )
+                        used_standalone_manifest = True
+                except (OSError, ValueError):
+                    pass
+
+            if not used_standalone_manifest and self.model_output_dir.exists():
                 for p in sorted(self.model_output_dir.iterdir()):
                     if p.is_dir() and not p.name.startswith("."):
                         forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)

@@ -384,6 +384,7 @@ class ParquetCacheManager:
         if resolved is None:
             return None
         source_dir, dest_dir, file_stem, hub, is_local = resolved
+        is_remote_dir = (hub is not None) or (not is_local and (self.base_dir / "manifest.json").is_file())
 
         pq_path = dest_dir / f"{file_stem}.parquet"
         samples_pq = dest_dir / f"{file_stem}.samples.parquet"
@@ -445,7 +446,7 @@ class ParquetCacheManager:
                         )
                         continue
 
-                    if hub is not None and "output_type" in df.columns and df.select((pl.col("output_type") == "quantile").all()).item():
+                    if is_remote_dir and "output_type" in df.columns and df.select((pl.col("output_type") == "quantile").all()).item():
                         # Already-normalized remote parquet: validate quickly and keep canonical columns
                         missing_req = [c for c in ["location", "output_type_id", "value"] if c not in df.columns]
                         if missing_req:
@@ -514,12 +515,12 @@ class ParquetCacheManager:
 
                 if s_dfs:
                     self._atomic_write_parquet(pl.concat(s_dfs, how="diagonal_relaxed"), samples_pq)
-                elif hub is None:
+                elif not is_remote_dir:
                     samples_pq.unlink(missing_ok=True)
 
                 if p_dfs:
                     self._atomic_write_parquet(pl.concat(p_dfs, how="diagonal_relaxed"), pmf_pq)
-                elif hub is None:
+                elif not is_remote_dir:
                     pmf_pq.unlink(missing_ok=True)
 
                 if pk_dfs:
@@ -560,34 +561,62 @@ class ParquetCacheManager:
 
     def get_model_samples_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
         """Get or build consolidated weekly sample-trajectory Parquet (`<model>.samples.parquet`)."""
-        resolved = self._resolve_model_paths(model_id, is_local=is_local)
-        if resolved is None:
-            return None
-        source_dir, dest_dir, file_stem, hub, is_local = resolved
+        hub = self.hub_key(model_id)
         if hub is not None:
             s_dir = self.remote_store.sample_dir(*hub)
             if not s_dir.is_dir():
                 return None
+            dest_dir = self.hub_models_cache_dir / hub[0]
+            dest_dir.mkdir(parents=True, exist_ok=True)
             return self._consolidate_sidecar_parquets(
-                s_dir, dest_dir / f"{file_stem}.samples.parquet", dest_dir / f"{file_stem}.samples.meta.json", model_id, "samples"
+                s_dir, dest_dir / f"{hub[1]}.samples.parquet", dest_dir / f"{hub[1]}.samples.meta.json", model_id, "samples"
             )
+        if not is_local and not model_id.startswith("local:"):
+            s_dir = self.base_dir / "sample-output" / model_id
+            if s_dir.is_dir():
+                self.models_cache_dir.mkdir(parents=True, exist_ok=True)
+                return self._consolidate_sidecar_parquets(
+                    s_dir,
+                    self.models_cache_dir / f"{model_id}.samples.parquet",
+                    self.models_cache_dir / f"{model_id}.samples.meta.json",
+                    model_id,
+                    "samples",
+                )
+        resolved = self._resolve_model_paths(model_id, is_local=is_local)
+        if resolved is None:
+            return None
+        _, dest_dir, file_stem, _, is_local = resolved
         self.get_model_parquet(model_id, is_local=is_local)
         p = dest_dir / f"{file_stem}.samples.parquet"
         return p if p.is_file() else None
 
     def get_model_pmf_parquet(self, model_id: str, is_local: bool = False) -> Optional[Path]:
         """Get or build consolidated weekly PMF Parquet (`<model>.pmf.parquet`)."""
-        resolved = self._resolve_model_paths(model_id, is_local=is_local)
-        if resolved is None:
-            return None
-        source_dir, dest_dir, file_stem, hub, is_local = resolved
+        hub = self.hub_key(model_id)
         if hub is not None:
             p_dir = self.remote_store.pmf_dir(*hub)
             if not p_dir.is_dir():
                 return None
+            dest_dir = self.hub_models_cache_dir / hub[0]
+            dest_dir.mkdir(parents=True, exist_ok=True)
             return self._consolidate_sidecar_parquets(
-                p_dir, dest_dir / f"{file_stem}.pmf.parquet", dest_dir / f"{file_stem}.pmf.meta.json", model_id, "pmf"
+                p_dir, dest_dir / f"{hub[1]}.pmf.parquet", dest_dir / f"{hub[1]}.pmf.meta.json", model_id, "pmf"
             )
+        if not is_local and not model_id.startswith("local:"):
+            p_dir = self.base_dir / "pmf-output" / model_id
+            if p_dir.is_dir():
+                self.models_cache_dir.mkdir(parents=True, exist_ok=True)
+                return self._consolidate_sidecar_parquets(
+                    p_dir,
+                    self.models_cache_dir / f"{model_id}.pmf.parquet",
+                    self.models_cache_dir / f"{model_id}.pmf.meta.json",
+                    model_id,
+                    "pmf",
+                )
+        resolved = self._resolve_model_paths(model_id, is_local=is_local)
+        if resolved is None:
+            return None
+        _, dest_dir, file_stem, _, is_local = resolved
         self.get_model_parquet(model_id, is_local=is_local)
         p = dest_dir / f"{file_stem}.pmf.parquet"
         return p if p.is_file() else None
@@ -615,6 +644,17 @@ class ParquetCacheManager:
         else:
             if model_id.startswith("local:"):
                 model_id, is_local = model_id[6:], True
+            if not is_local:
+                pk_dir = self.base_dir / "peak-output" / model_id
+                if pk_dir.is_dir():
+                    self.models_cache_dir.mkdir(parents=True, exist_ok=True)
+                    return self._consolidate_sidecar_parquets(
+                        pk_dir,
+                        self.models_cache_dir / f"{model_id}.peak.parquet",
+                        self.models_cache_dir / f"{model_id}.peak.meta.json",
+                        model_id,
+                        "peak",
+                    )
             source_dir = (self.local_output_dir if is_local else self.model_output_dir) / model_id
             if not source_dir.is_dir():
                 alt_dir = (self.model_output_dir if is_local else self.local_output_dir) / model_id
@@ -851,6 +891,7 @@ class ParquetCacheManager:
         repo_oracle = self._first_existing([
             self.target_data_dir / "oracle-output.parquet",
             self.target_data_dir / "oracle-output.csv",
+            self.target_data_dir / "oracle.parquet",
         ])
         if repo_oracle is not None:
             sources.append(TruthSource(source_id="repo", label="repo", kind="oracle", priority=PRIORITY_REPO, path=repo_oracle))
@@ -858,6 +899,7 @@ class ParquetCacheManager:
         repo_ts = self._first_existing([
             self.target_data_dir / "time-series.parquet",
             self.target_data_dir / "time-series.csv",
+            self.target_data_dir / "time_series.parquet",
         ])
         if repo_ts is not None:
             sources.append(TruthSource(source_id="repo_ts", label="repo time-series", kind="time_series", priority=PRIORITY_REPO - 1, path=repo_ts))
@@ -865,6 +907,7 @@ class ParquetCacheManager:
         repo_latest = self._first_existing([
             self.target_data_dir / "latest-data.parquet",
             self.target_data_dir / "latest-data.csv",
+            self.target_data_dir / "latest.parquet",
         ])
         if repo_latest is not None:
             sources.append(TruthSource(source_id="repo_latest", label="repo latest", kind="latest", priority=PRIORITY_REPO - 2, path=repo_latest))
@@ -969,8 +1012,11 @@ class ParquetCacheManager:
             target = VizConfig(self.base_dir).get_default_target()
 
         sources: List[TruthSource] = []
-        repo_adm = self.target_data_dir / "target-hospital-admissions.csv"
-        if repo_adm.is_file():
+        repo_adm = self._first_existing([
+            self.target_data_dir / "admissions.parquet",
+            self.target_data_dir / "target-hospital-admissions.csv",
+        ])
+        if repo_adm is not None:
             sources.append(TruthSource(source_id="repo_adm", label="repo", kind="admissions", priority=PRIORITY_REPO, path=repo_adm))
         legacy_adm = self.auxiliary_data_dir / "surveillance" / "target-hospital-admissions.csv"
         if legacy_adm.is_file():
@@ -1008,10 +1054,13 @@ class ParquetCacheManager:
             repo_oracle = self._first_existing([
                 self.target_data_dir / "oracle-output.parquet",
                 self.target_data_dir / "oracle-output.csv",
+                self.target_data_dir / "oracle.parquet",
                 self.target_data_dir / "latest-data.parquet",
                 self.target_data_dir / "latest-data.csv",
+                self.target_data_dir / "latest.parquet",
                 self.target_data_dir / "time-series.parquet",
                 self.target_data_dir / "time-series.csv",
+                self.target_data_dir / "time_series.parquet",
             ])
             if repo_oracle is not None:
                 sources.append(TruthSource(source_id="repo_oracle_adm", label="repo oracle", kind="oracle", priority=PRIORITY_REPO, path=repo_oracle))
@@ -1140,9 +1189,14 @@ class ParquetCacheManager:
         if any(is_flu_hosp_target(t) for t in (allowed_targets or {default_target})) and as_of_file.is_file():
             sources.append(TruthSource(source_id="bundled_asof", label="surveillance", kind="as_of", priority=PRIORITY_ARCHIVE, path=as_of_file))
 
+        repo_asof = self.target_data_dir / "as_of_snapshots.parquet"
+        if repo_asof.is_file():
+            sources.append(TruthSource(source_id="repo_asof_vint", label="repo snapshots", kind="as_of", priority=PRIORITY_REPO, path=repo_asof))
+
         repo_ts = self._first_existing([
             self.target_data_dir / "time-series.parquet",
             self.target_data_dir / "time-series.csv",
+            self.target_data_dir / "time_series.parquet",
         ])
         if repo_ts is not None:
             sources.append(TruthSource(source_id="repo_ts_vint", label="repo time-series", kind="time_series", priority=PRIORITY_REPO - 1, path=repo_ts))
@@ -1151,6 +1205,7 @@ class ParquetCacheManager:
         repo_oracle = self._first_existing([
             self.target_data_dir / "oracle-output.parquet",
             self.target_data_dir / "oracle-output.csv",
+            self.target_data_dir / "oracle.parquet",
         ])
         if repo_oracle is not None:
             sources.append(TruthSource(source_id="repo_oracle_vint", label="repo", kind="oracle", priority=PRIORITY_REPO - 2, path=repo_oracle))

@@ -100,14 +100,24 @@ function startPoll() {
   pollTimer = setTimeout(tick, POLL_MS);
 }
 
+const openRemoteHub = (remoteId) => location.assign(`/next/?hub=${encodeURIComponent(`remote_${remoteId}`)}`);
+let activeRemoteHubId = null;
+
 function finished(x) {
   const j = x.job || {}, s = j.summary || {};
   checks.delete(x.id);
   if (j.status === "done") {
     const changes = [s.added && `${s.added} new`, s.updated && `${s.updated} updated`, s.removed && `${s.removed} removed`].filter(Boolean).join(" · ") || "no changes";
     notes.set(x.id, `Synced · ${changes}${s.failed ? ` · ${s.failed} unreadable` : ""}`);
-    toast(`${x.label} synced · ${changes}`);
-    reloadSoon(1600);
+    if (x.compatible !== false || x.id === activeRemoteHubId) {
+      toast(`${x.label} synced · ${changes}`);
+      reloadSoon(1600);
+    } else {
+      toast(`${x.label} synced · ${changes}`, {
+        duration: 10000,
+        action: { label: "Open", onClick: () => openRemoteHub(x.id) },
+      });
+    }
   } else if (j.status === "cancelled") {
     notes.set(x.id, "Sync cancelled · finished files kept");
   } else {
@@ -143,8 +153,8 @@ async function openLocalHub(id) {
  */
 export async function openHubs(anchor, ctx = {}) {
   const manifest = ctx.manifest || {};
-  const hubless = Boolean(ctx.hubless || manifest.empty);
   const currentHubId = manifest.hub_id || null;
+  activeRemoteHubId = currentHubId?.startsWith("remote_") ? currentHubId.slice(7) : null;
 
   const localBox = h("div", { class: "mo-local-wrap" }, h("div", { class: "mo-note" }, "Loading local hubs…"));
   const remoteBox = h("div", { class: "mo-remote-wrap" });
@@ -157,16 +167,16 @@ export async function openHubs(anchor, ctx = {}) {
   browserOpen = false;
 
   const list = h("div", { class: "mo-hubs" });
-  const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "S3 bucket · S3 hubs only", "aria-label": "Hub S3 bucket" });
+  const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "S3 bucket or GitHub owner/repo", "aria-label": "Hub S3 bucket or GitHub repository" });
   const addBtn = h("button", { type: "button", class: "c-btn filled sm" }, "Add hub");
   const addNote = h("div", { class: "mo-note", "aria-live": "polite" });
   const add = async () => {
-    const bucket = input.value.trim();
-    if (!bucket) { input.focus(); return; }
-    addBtn.disabled = true; remoteNoteText = `Checking ${bucket}…`; addNote.textContent = remoteNoteText;
+    const source = input.value.trim();
+    if (!source) { input.focus(); return; }
+    addBtn.disabled = true; remoteNoteText = `Checking ${source}…`; addNote.textContent = remoteNoteText;
     try {
-      const r = await postJSON("/api/remote/add", { bucket }, { okStatuses: [422] });
-      if (!r.ok) remoteNoteText = `Not supported · ${r.reason || "not a flu hub"}`;
+      const r = await postJSON("/api/remote/add", { source }, { okStatuses: [422] });
+      if (!r.ok) remoteNoteText = `Not supported · ${r.reason || "not a supported Hubverse hub"}`;
       else {
         input.value = "";
         remoteNoteText = r.already_registered ? `${r.hub.label} · already connected` : `${r.hub.label} · added`;
@@ -363,27 +373,37 @@ export async function openHubs(anchor, ctx = {}) {
   };
 
   const renderRemote = () => {
-    if (hubless) {
-      remoteBox.replaceChildren();
-      return;
-    }
-    const visible = hubs.filter((x) => x.compatible !== false || x.synced || !x.builtin);
+    const isWeb = (workspace?.mode || manifest.mode) === "web";
+    const orderRank = (x) => {
+      if (x.id === activeRemoteHubId) return 0;
+      if (x.synced && x.enabled !== false && x.compatible !== false) return 1;
+      if (x.compatible !== false) return 2;
+      if (x.synced) return 3;
+      if (!x.builtin) return 4;
+      return 5;
+    };
+    const visible = hubs
+      .map((x, idx) => ({ x, idx, rank: orderRank(x) }))
+      .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
+      .map((r) => r.x);
+
     const remoteHead = h("div", { class: "c-section mo-section-gap" },
       h("span", { class: "c-section-title" },
-        h("span", null, "Live hubs · S3"),
+        h("span", null, "Live hubs"),
         h("span", { class: "c-section-count" }, plural(visible.length, "hub"))));
     if (!hubs.length && remoteBusy) {
       list.replaceChildren(h("div", { class: "mo-note" }, "Loading…"));
     } else if (!visible.length) {
-      list.replaceChildren(h("div", { class: "mo-note" }, "No compatible S3 hubs configured for this hub."));
+      list.replaceChildren(h("div", { class: "mo-note" }, remoteNoteText || "No remote hubs registered."));
     } else {
-      list.replaceChildren(...visible.map(hubBlock));
+      list.replaceChildren(...visible.map((x) => hubBlock(x, { isWeb })));
     }
     remoteBox.replaceChildren(
       remoteHead,
       list,
-      h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
-      addNote);
+      isWeb ? null : h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
+      isWeb ? null : addNote,
+    );
   };
 
   render = () => {
@@ -393,22 +413,17 @@ export async function openHubs(anchor, ctx = {}) {
   };
 
   localBusy = true;
-  remoteBusy = !hubless;
+  remoteBusy = true;
   render();
 
-  const tasks = [
+  await Promise.all([
     loadWorkspace()
       .catch((err) => { localNoteText = `Couldn't load workspace · ${err.message}`; })
       .finally(() => { localBusy = false; render?.(); }),
-  ];
-  if (!hubless) {
-    tasks.push(
-      loadHubs()
-        .catch((err) => { remoteNoteText = `Couldn't load hubs · ${err.message}`; })
-        .finally(() => { remoteBusy = false; render?.(); }),
-    );
-  }
-  await Promise.all(tasks);
+    loadHubs()
+      .catch((err) => { remoteNoteText = `Couldn't load hubs · ${err.message}`; })
+      .finally(() => { remoteBusy = false; render?.(); }),
+  ]);
 
   if (workspace?.mode === "local" && (workspace.hubs || []).length === 0) {
     browserOpen = true;
@@ -416,7 +431,7 @@ export async function openHubs(anchor, ctx = {}) {
   }
 
   render?.();
-  if (!hubless && hubs.some(running)) startPoll();
+  if (hubs.some(running)) startPoll();
   return layer;
 }
 
@@ -485,17 +500,26 @@ function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
     snap.truncated ? h("div", { class: "mo-note" }, "Showing first entries · type a full path above to jump directly") : null);
 }
 
-function hubBlock(x) {
+function hubBlock(x, { isWeb = false } = {}) {
   const busy = running(x), anyBusy = hubs.some(running);
-  const state = busy ? "Syncing" : !x.synced ? "Not synced" : x.enabled ? "Live" : "Hidden";
-  const shown = h("button", {
-    type: "button", class: "mo-toggle", role: "checkbox", "aria-checked": String(!!x.enabled), disabled: !x.synced || busy,
-    "aria-label": `Show ${x.label} models`, onclick: () => toggle(x),
-  }, h("span", { class: "c-check" }), "Shown");
+  const compatible = x.compatible !== false;
+  const isActiveRemote = activeRemoteHubId === x.id;
+  const state = isActiveRemote ? "Active" : busy ? "Syncing" : !x.synced ? "Not synced" : !compatible ? "Synced" : x.enabled ? "Live" : "Hidden";
+  const stateCls = (isActiveRemote || (x.synced && !compatible && !busy))
+    ? "is-live"
+    : `is-${state.toLowerCase().replace(" ", "-")}`;
 
+  const shown = (x.synced && compatible && !isActiveRemote && !isWeb)
+    ? h("button", {
+      type: "button", class: "mo-toggle", role: "checkbox", "aria-checked": String(!!x.enabled), disabled: busy,
+      "aria-label": `Show ${x.label} models`, onclick: () => toggle(x),
+    }, h("span", { class: "c-check" }), "Shown")
+    : null;
+
+  const srcKind = x.transport === "github" ? "GitHub" : "S3";
   const meta = x.synced
     ? [plural(x.models || 0, "model"), plural(x.files || 0, "file"), fmtBytes(x.bytes), `synced ${fmtAgo(x.last_sync)}`].join(" · ")
-    : "Nothing downloaded";
+    : [srcKind, x.geography, x.description].filter(Boolean).join(" · ") || "Nothing downloaded";
   const upstream = upstreamOf(x);
   const truthUp = hasTruthUpdate(x);
   const needsUp = needsUpdateOf(x);
@@ -511,7 +535,7 @@ function hubBlock(x) {
   const listed = checks.get(x.id)?.seasons || [];
   const all = [...new Set([...(x.seasons || []), ...(currentSeason ? [currentSeason] : []), ...listed.map((s) => s.season)])].sort().reverse();
   const sel = picked.get(x.id) || new Set();
-  const chips = all.map((s) => {
+  const chips = isWeb ? [] : all.map((s) => {
     const info = listed.find((y) => y.season === s);
     const have = (x.seasons || []).includes(s);
     return h("button", {
@@ -529,38 +553,53 @@ function hubBlock(x) {
   const fresh = [...sel].filter((s) => !(x.seasons || []).includes(s));
   const syncLabel = fresh.length ? `Sync ${plural(fresh.length, "season")}` : x.synced ? "Update" : "Sync";
   const isArmed = armed.has(x.id);
-  const removeBtn = (x.synced || !x.builtin)
+  const removeBtn = (!isWeb && (x.synced || !x.builtin))
     ? h("button", { type: "button", class: ["c-btn sm mo-remove", isArmed && "armed"], disabled: anyBusy, onclick: () => remove(x) }, isArmed ? "Remove local copy?" : "Remove")
     : null;
-  const actions = busy
-    ? [h("button", { type: "button", class: "c-btn filled sm", onclick: () => cancel(x) }, "Cancel")]
-    : !x.synced
-      ? [
-        h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
-        h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
-        removeBtn,
-      ]
-      : (fresh.length > 0 || needsUp)
-        ? [
-          h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
-          h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
-          removeBtn,
-        ]
-        : [
-          h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check for updates"),
-          removeBtn,
-        ];
+  const openBtn = (x.synced && !isActiveRemote)
+    ? h("button", {
+      type: "button",
+      class: ["c-btn sm", (fresh.length > 0 || needsUp) && !isWeb ? "filled" : "mo-primary"],
+      onclick: () => openRemoteHub(x.id),
+    }, "Open")
+    : null;
+
+  let actions = [];
+  if (busy && !isWeb) {
+    actions = [h("button", { type: "button", class: "c-btn filled sm", onclick: () => cancel(x) }, "Cancel")];
+  } else if (isWeb) {
+    actions = [openBtn].filter(Boolean);
+  } else if (!x.synced) {
+    actions = [
+      h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
+      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
+      removeBtn,
+    ];
+  } else if (fresh.length > 0 || needsUp) {
+    actions = [
+      openBtn,
+      h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
+      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
+      removeBtn,
+    ];
+  } else {
+    actions = [
+      openBtn,
+      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check for updates"),
+      removeBtn,
+    ];
+  }
 
   return h("div", { class: "mo-src", "data-hub": x.id },
     h("div", { class: "mo-src-head" },
-      h("span", { class: "mo-src-name" }, x.repo_url ? h("a", { href: x.repo_url, target: "_blank", rel: "noopener" }, x.label) : x.label),
-      h("span", { class: ["mo-src-state", `is-${state.toLowerCase().replace(" ", "-")}`] }, state),
-      x.synced ? shown : null),
+      h("span", { class: "mo-src-name", title: x.description || undefined }, x.repo_url ? h("a", { href: x.repo_url, target: "_blank", rel: "noopener" }, x.label) : x.label),
+      h("span", { class: ["mo-src-state", stateCls] }, state),
+      shown),
     h("div", { class: "mo-src-meta" }, meta),
     meta2 ? h("div", { class: "mo-src-meta" }, meta2) : null,
     chips.length ? h("div", { class: "mo-chips", role: "group", "aria-label": "Seasons to sync" }, chips) : null,
     progress,
-    h("div", { class: "mo-actions" }, actions),
+    h("div", { class: "mo-actions" }, actions.filter(Boolean)),
     notes.has(x.id) ? h("div", { class: "mo-note" }, notes.get(x.id)) : null);
 }
 
@@ -591,8 +630,11 @@ async function check(x) {
     const latestPart = p.latest_round ? ` · latest ${day(p.latest_round)}` : "";
     notes.set(x.id, `${changes ? `${changes} upstream` : "Up to date"}${latestPart}`);
     if (!x.synced && !(x.seasons || []).length) {
-      const newest = (r.seasons || []).map((s) => s.season).sort().at(-1);
-      if (!picked.get(x.id)?.size && newest) picked.set(x.id, new Set([newest]));
+      const avail = (r.seasons || []).map((s) => s.season).sort();
+      const newest = avail.at(-1);
+      const curPicked = picked.get(x.id);
+      const hasValidPick = curPicked && [...curPicked].some((s) => avail.includes(s));
+      if (!hasValidPick && newest) picked.set(x.id, new Set([newest]));
     }
   } catch (err) { notes.set(x.id, `Couldn't reach the hub · ${err.message}`); }
   render?.();
@@ -625,7 +667,8 @@ async function remove(x) {
   try {
     await postJSON("/api/remote/remove", { hub: x.id });
     toast(`Removed ${x.label}`);
-    reloadSoon();
+    if (activeRemoteHubId === x.id) location.assign("/next/");
+    else reloadSoon();
   } catch (err) { notes.set(x.id, `Couldn't remove · ${err.message}`); render?.(); }
 }
 

@@ -42,6 +42,7 @@ from viz.remote.sync import RemoteManager
 logger = logging.getLogger("viz.workspace")
 
 MAX_BROWSE_ENTRIES = 400
+REMOTE_HUB_PREFIX = "remote_"
 
 
 def _utcnow() -> str:
@@ -381,8 +382,15 @@ class ScopedRemoteManager:
     def warnings(self, hub_id: str) -> List[Dict[str, Any]]:
         return self._shared.warnings(hub_id)
 
-    def add_hub(self, bucket: str, label: Optional[str] = None) -> Dict[str, Any]:
-        res = self._shared.add_hub(bucket, label)
+    def add_hub(
+        self,
+        source: str,
+        label: Optional[str] = None,
+        *,
+        transport: Optional[str] = None,
+        branch: str = "main",
+    ) -> Dict[str, Any]:
+        res = self._shared.add_hub(source, label, transport=transport, branch=branch)
         if res.get("ok") and isinstance(res.get("hub"), dict):
             res = {**res, "hub": {**res["hub"], "compatible": bool(self._is_compatible(res["hub"]["id"]))}}
         return res
@@ -412,6 +420,7 @@ class HubContext:
         data_dir: Path,
         mode: str = "local",
         *,
+        include_remote: bool = True,
         peer_truth_provider: Optional[Callable[[Path, Set[str]], List[Dict[str, Any]]]] = None,
         on_shared_change: Optional[Callable[[], None]] = None,
         shared_remote_store: Optional[RemoteStore] = None,
@@ -438,7 +447,7 @@ class HubContext:
 
         self.loader = SandboxDataLoader(
             self.base_dir,
-            include_remote=True,
+            include_remote=include_remote,
             cache_dir=self.cache_dir,
             remote_dir=self.remote_dir,
             hub_models_cache_dir=self.hub_models_cache_dir,
@@ -586,14 +595,35 @@ class HubManager:
                     )
                     self.registry.set_active(fallback.id if fallback else None)
 
+    def _remote_hub_record(self, hub_id: str) -> Optional[LocalHubRecord]:
+        """Synthetic workspace record for a synced remote hub opened standalone (`remote_<id>`)."""
+        if not hub_id.startswith(REMOTE_HUB_PREFIX):
+            return None
+        rid = hub_id[len(REMOTE_HUB_PREFIX):]
+        spec = self.remote_store.get_spec(rid)
+        if spec is None or not self.remote_store.has_data(rid):
+            return None
+        return LocalHubRecord(
+            id=hub_id,
+            path=str(self.remote_store.hub_dir(rid)),
+            label=spec.label or spec.short_label or rid,
+            added_at="",
+            last_opened="",
+            auto_detected=False,
+        )
+
     def default_hub_id(self) -> Optional[str]:
         active_id = self.registry.get_active_id()
         if active_id:
-            rec = self.registry.get_hub(active_id)
+            rec = self.registry.get_hub(active_id) or self._remote_hub_record(active_id)
             if rec and Path(rec.path).is_dir():
                 return rec.id
         for rec in self.registry.list_hubs():
             if Path(rec.path).is_dir():
+                return rec.id
+        for rid in self.remote_store.synced_hub_ids():
+            rec = self._remote_hub_record(f"{REMOTE_HUB_PREFIX}{rid}")
+            if rec and Path(rec.path).is_dir():
                 return rec.id
         return None
 
@@ -619,6 +649,10 @@ class HubManager:
                 self._contexts.pop(target_id, None)
 
             rec = self.registry.get_hub(target_id)
+            is_standalone_remote = False
+            if rec is None:
+                rec = self._remote_hub_record(target_id)
+                is_standalone_remote = rec is not None
             if rec is None or not Path(rec.path).is_dir():
                 return None
 
@@ -626,6 +660,7 @@ class HubManager:
                 rec,
                 self.data_dir,
                 mode=self.mode,
+                include_remote=not is_standalone_remote,
                 peer_truth_provider=self._peer_truth_sources,
                 on_shared_change=lambda exclude_id=target_id: self._invalidate_all_contexts(exclude_id=exclude_id),
                 shared_remote_store=self.remote_store,
@@ -694,7 +729,9 @@ class HubManager:
             return next(reversed(self._contexts.values()), None) if self._contexts else None
 
     def _on_remote_inventory_change(self, hub_id: str, changed_models: List[str]):
+        remote_ws_id = f"{REMOTE_HUB_PREFIX}{hub_id}"
         with self._lock:
+            self._contexts.pop(remote_ws_id, None)
             loaded = list(self._contexts.values())
         if not loaded:
             return
@@ -845,7 +882,7 @@ class HubManager:
         }
 
     def workspace_hubs_brief(self) -> List[Dict[str, Any]]:
-        """Lightweight registered hub list included inside /api/next/manifest."""
+        """Lightweight registered hub list (local + synced standalone remote hubs) for /api/next/manifest."""
         active_id = self.default_hub_id()
         out = []
         for rec in self.registry.list_hubs():
@@ -861,6 +898,18 @@ class HubManager:
             if self.mode == "local":
                 item["path"] = rec.path
             out.append(item)
+        for rid in self.remote_store.synced_hub_ids():
+            spec = self.remote_store.get_spec(rid)
+            if spec is None:
+                continue
+            ws_id = f"{REMOTE_HUB_PREFIX}{rid}"
+            out.append({
+                "id": ws_id,
+                "label": spec.label or spec.short_label or rid,
+                "active": ws_id == active_id,
+                "exists": True,
+                "remote_id": rid,
+            })
         return out
 
     def inspect_path(self, path_str: Any) -> Dict[str, Any]:
