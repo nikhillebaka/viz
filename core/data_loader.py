@@ -688,6 +688,10 @@ class SandboxDataLoader:
     ) -> Dict[str, Any]:
         """Read cached model summary (targets, output_types, sidecar presence) from meta.json or parquet/raw fallback."""
         dest_dir = self.cache_mgr.local_models_cache_dir if is_local else self.cache_mgr.models_cache_dir
+        sidecar_samples_dir = (self.base_dir / "sample-output" / model_id) if not is_local else None
+        has_sidecar_samples = bool(
+            sidecar_samples_dir and sidecar_samples_dir.is_dir() and any(sidecar_samples_dir.glob("*.parquet"))
+        )
         meta_path = dest_dir / f"{model_id}.meta.json"
         if meta_path.exists():
             try:
@@ -698,7 +702,7 @@ class SandboxDataLoader:
                             "targets": list(saved["targets"]),
                             "output_types": list(saved.get("output_types") or []),
                             "extra_task_ids": list(saved.get("extra_task_ids") or []),
-                            "has_samples": bool(saved.get("has_samples", (dest_dir / f"{model_id}.samples.parquet").exists())),
+                            "has_samples": bool(saved.get("has_samples", False)) or (dest_dir / f"{model_id}.samples.parquet").exists() or has_sidecar_samples,
                             "has_pmf": bool(saved.get("has_pmf", (dest_dir / f"{model_id}.pmf.parquet").exists())),
                             "from_samples": bool(saved.get("from_samples", False)),
                         }
@@ -706,7 +710,7 @@ class SandboxDataLoader:
                 pass
 
         pq_path = dest_dir / f"{model_id}.parquet"
-        has_samples = (dest_dir / f"{model_id}.samples.parquet").exists()
+        has_samples = (dest_dir / f"{model_id}.samples.parquet").exists() or has_sidecar_samples
         has_pmf = (dest_dir / f"{model_id}.pmf.parquet").exists()
         tgts_set: Set[str] = set()
         ots_set: Set[str] = set()
@@ -997,7 +1001,19 @@ class SandboxDataLoader:
             from_samples = bool(repo_info.get("from_samples") or hub_info.get("from_samples"))
 
             if hub_dates <= repo_dates:
+                needs_hub_sidecar = bool(
+                    (hub_info.get("has_samples") and not repo_info.get("has_samples"))
+                    or (hub_info.get("has_pmf") and not repo_info.get("has_pmf"))
+                )
                 repo_info["designated"] = designated
+                repo_info["targets"] = merged_targets
+                repo_info["output_types"] = merged_ot
+                repo_info["extra_task_ids"] = merged_extra
+                repo_info["has_samples"] = has_samples
+                repo_info["has_pmf"] = has_pmf
+                repo_info["from_samples"] = from_samples
+                if needs_hub_sidecar:
+                    repo_info["raw_name"] = f"merged:{hub_id}:{name}"
                 if merged_peaks_t:
                     repo_info["peak_targets"] = merged_peaks_t
                 if merged_peaks_d:

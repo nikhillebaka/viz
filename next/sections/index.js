@@ -2,6 +2,7 @@
  * the page stays focused and uncluttered, plus conditional companion Rate change when available. */
 import { h, storage } from "../lib/dom.js";
 import { findRateChangeTarget } from "./rate_change/index.js";
+import { hasSampleModels } from "./trajectories/model.js";
 
 const TAB_KEY = "viz.section_tab";
 const BASE_SECTIONS = [
@@ -9,6 +10,7 @@ const BASE_SECTIONS = [
   { id: "heatmap", label: "Heatmap" },
   { id: "map", label: "Map" },
   { id: "peaks", label: "Peaks" },
+  { id: "trajectories", label: "Trajectories", optional: true },
   { id: "rate_change", label: "Rate change", optional: true },
 ];
 
@@ -27,14 +29,16 @@ export function mountSections(root, ctx) {
   const loading = new Map();
   let gone = false;
 
-  const hasRateChange = () => {
+  const isAvailable = (id) => {
     const s = store.get();
-    return !!findRateChangeTarget(ctx.catalog, manifest, s.target, s.location);
+    if (id === "rate_change") return !!findRateChangeTarget(ctx.catalog, manifest, s.target, s.location);
+    if (id === "trajectories") return hasSampleModels(manifest, s.target);
+    return true;
   };
 
   let activeId = storage.get(TAB_KEY, "scores");
   if (!BASE_SECTIONS.some((s) => s.id === activeId)) activeId = "scores";
-  if (activeId === "rate_change" && !hasRateChange()) activeId = "scores";
+  if (!isAvailable(activeId)) activeId = "scores";
 
   const ensureMounted = (id) => {
     if (mounted.has(id) || loading.has(id)) return;
@@ -58,12 +62,14 @@ export function mountSections(root, ctx) {
   };
 
   const syncTabs = () => {
-    const showRc = hasRateChange();
-    if (activeId === "rate_change" && !showRc) activeId = "scores";
+    if (!isAvailable(activeId)) {
+      activeId = "scores";
+      ensureMounted(activeId);
+    }
     for (const s of BASE_SECTIONS) {
       const btn = tabs.get(s.id);
       const panel = panels.get(s.id);
-      const avail = !s.optional || showRc;
+      const avail = !s.optional || isAvailable(s.id);
       const isActive = avail && s.id === activeId;
       btn.hidden = !avail;
       btn.setAttribute("aria-selected", String(isActive));
@@ -73,8 +79,7 @@ export function mountSections(root, ctx) {
   };
 
   const selectTab = (id) => {
-    if (!BASE_SECTIONS.some((s) => s.id === id)) return;
-    if (id === "rate_change" && !hasRateChange()) return;
+    if (!BASE_SECTIONS.some((s) => s.id === id) || !isAvailable(id)) return;
     activeId = id;
     storage.set(TAB_KEY, id);
     syncTabs();

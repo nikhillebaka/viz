@@ -1,0 +1,24 @@
+/* Live sample trajectories workbench (/next/sections/trajectories/). Tokens only. */
+.tr-nums {
+  padding: var(--space-16) 0;
+  border-bottom: var(--stroke-hairline) solid var(--line-hairline);
+}
+
+.tr-fig {
+  position: relative;
+  margin-top: var(--space-16);
+}
+
+.tr-canvas {
+  display: block;
+  width: 100%;
+  height: 440px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.tr-note {
+  margin: var(--space-12) 0 0;
+  font-size: var(--text-small);
+  color: var(--ink-tertiary);
+}

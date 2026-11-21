@@ -2,7 +2,7 @@
  * Loads draws lazily per (target, season, location, settled round, dims) when toggled on
  * (or automatically on sample-only targets) and lays out faint per-series spaghetti paths
  * underneath the charted medians and above the interval bands. */
-import { loadTrajectories } from "../../lib/api.js";
+import { getActiveHub, loadTrajectories } from "../../lib/api.js";
 import { DAY, parseIso, toIso } from "../../lib/scale.js";
 
 const TRAJ_CACHE = 12;
@@ -10,8 +10,9 @@ const MAX_DRAWS_PER_MODEL = 36;
 const cache = new Map(); // key -> Promise<decoded | null>
 
 function cacheKey(target, season, location, date, modelsKey, dims) {
+  const hub = getActiveHub() || "";
   const dimsKey = dims ? Object.entries(dims).sort().map(([k, v]) => `${k}=${v}`).join("&") : "";
-  return `${target}\n${season}\n${location}\n${date}\n${modelsKey}\n${dimsKey}`;
+  return `${hub}\n${target}\n${season}\n${location}\n${date}\n${modelsKey}\n${dimsKey}`;
 }
 
 /** Cached trajectory fetch (returns null cleanly on 404/empty). Pure per key, LRU capped. */
@@ -136,7 +137,8 @@ export class ChartTrajectories {
       const anchorY = anchor ? scene.y(anchor.med) : NaN;
       const firstH = entry.horizons[0];
       const firstT = refT + (firstH * 7 + offDays) * DAY;
-      const useAnchor = anchor && Number.isFinite(anchorX) && Number.isFinite(anchorY) && anchor.t < firstT;
+      const useAnchor = anchor && Number.isFinite(anchorX) && Number.isFinite(anchorY)
+        && anchor.t < firstT && (firstT - anchor.t) <= 7 * DAY;
 
       const alpha = (hasFocus ? (ser.id === scene.focus ? 0.28 : 0.045) : 0.16) * scrubFade * (ser.open ?? 1);
       const w = ser.id === scene.focus ? 1.15 : 0.9;

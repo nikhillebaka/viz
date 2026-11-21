@@ -151,14 +151,23 @@ export class ChartBubbles {
         ...(() => {
           const { manifest } = this.chart.ctx;
           const targetMeta = manifest.targetById.get(s.target);
-          const anyMarkedSample = manifest.models.some((m) => m.has_samples);
+          const sampleModels = manifest.models.filter((m) => m.has_samples && (!s.target || !m.targets?.length || m.targets.includes(s.target)));
+          const anyMarkedSample = sampleModels.length > 0;
+          const base = manifest.baselineFor?.(s.target, manifest.seasonOf(s.date)) ?? manifest.baseline;
           const anyChartedSample = s.sel.charted.some((c) => manifest.modelById.get(c.id)?.has_samples)
-            || !!(s.sel.baseline && manifest.baseline && manifest.modelById.get(manifest.baseline)?.has_samples);
-          const hasSamples = anyMarkedSample ? anyChartedSample : !!targetMeta?.output_types?.includes("sample");
+            || !!(s.sel.baseline && base && manifest.modelById.get(base)?.has_samples);
+          const hasTargetSamples = anyMarkedSample || !!targetMeta?.output_types?.includes("sample");
           const sampleOnly = !!targetMeta?.output_types?.includes("sample") && !targetMeta?.output_types?.includes("quantile");
-          return hasSamples && !sampleOnly
-            ? [{ label: "Sample trajectories", toggle: true, checked: !!s.trajectories, onSelect: () => store.set({ trajectories: !store.get().trajectories }) }]
-            : [];
+          if (!hasTargetSamples || sampleOnly) return [];
+          const playable = !anyMarkedSample || anyChartedSample;
+          return [{
+            label: "Sample trajectories",
+            toggle: true,
+            checked: playable && !!s.trajectories,
+            disabled: !playable,
+            shortcut: playable ? undefined : "Select a sample model",
+            onSelect: () => store.set({ trajectories: !store.get().trajectories }),
+          }];
         })(),
         "-",
         { label: "About intervals", onSelect: () => guide("intervals") },
