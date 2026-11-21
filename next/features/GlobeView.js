@@ -106,7 +106,7 @@ function parseRgbCss(str, fallback = [245, 245, 245]) {
 let worldGeoPromise = null;
 function loadWorldCountries() {
   if (!worldGeoPromise) {
-    const worldUrl = new URL("../geo/world-countries-110m.json", import.meta.url).href;
+    const worldUrl = new URL("../geo/world-countries-50m.json", import.meta.url).href;
     worldGeoPromise = fetch(worldUrl)
       .then((r) => { if (!r.ok) throw new Error(`world-countries: ${r.status}`); return r.json(); })
       .then((worldTopo) => {
@@ -812,6 +812,8 @@ export function mountGlobeView(host, ctx) {
     const clipToLimb = radiusPx < Math.min(W, H) * 0.72;
 
     g.save();
+    g.lineJoin = "round";
+    g.lineCap = "round";
     if (clipToLimb) {
       g.beginPath(); g.arc(cx, cy, radiusPx, 0, Math.PI * 2); g.clip();
     }
@@ -847,6 +849,18 @@ export function mountGlobeView(host, ctx) {
       return `rgba(${inkRgb[0]}, ${inkRgb[1]}, ${inkRgb[2]}, ${alpha.toFixed(3)})`;
     };
 
+    const drawHighlight = (rings, isSel, selWidth = 2.0, hovWidth = 1.35) => {
+      g.beginPath();
+      for (const sr of rings) {
+        g.moveTo(sr[0], sr[1]);
+        for (let i = 2; i < sr.length; i += 2) g.lineTo(sr[i], sr[i + 1]);
+        g.closePath();
+      }
+      g.strokeStyle = isSel ? accent : cssColor("var(--ink-primary)");
+      g.lineWidth = isSel ? selWidth : hovWidth;
+      g.stroke();
+    };
+
     const drawStatesLayer = hasUsStates;
     const stateAlpha = drawStatesLayer ? smoothstep(GLOBE_ZOOM.STATE_FADE_START, GLOBE_ZOOM.STATE_FADE_END, camZoom) : 0;
     const metroAlpha = hasMetroCast && metroCastOn ? smoothstep(GLOBE_ZOOM.METRO_FADE_START, GLOBE_ZOOM.METRO_FADE_END, camZoom) : 0;
@@ -854,6 +868,7 @@ export function mountGlobeView(host, ctx) {
     // 1. World countries (both US and Europe connected simultaneously!)
     hitCountries = [];
     if (countries) {
+      const countryHighlights = [];
       for (const co of countries) {
         if (!coneVisibleInViewport(co, R, thetaMaxRad)) continue;
         const screenRings = [];
@@ -891,9 +906,13 @@ export function mountGlobeView(host, ctx) {
 
         g.fillStyle = luminanceFill(norm, isSel, isHov, !!reg);
         g.fill("evenodd");
-        g.lineWidth = isSel ? 1.5 : isHov ? 1.15 : reg ? 0.85 : 0.55;
-        g.strokeStyle = isSel ? accent : isHov ? cssColor("var(--ink-primary)") : reg ? inkSecondary : inkFaint;
+        g.lineWidth = reg ? 0.85 : 0.55;
+        g.strokeStyle = reg ? inkSecondary : inkFaint;
         g.stroke();
+        if (isSel || isHov) countryHighlights.push({ screenRings, isSel });
+      }
+      for (const hl of countryHighlights) {
+        drawHighlight(hl.screenRings, hl.isSel, 1.8, 1.25);
       }
     }
 
@@ -1001,17 +1020,6 @@ export function mountGlobeView(host, ctx) {
       g.lineWidth = clamp(0.75 + stateAlpha * 0.4, 0.75, 1.35);
       g.stroke();
 
-      const drawHighlight = (rings, isSel) => {
-        g.beginPath();
-        for (const sr of rings) {
-          g.moveTo(sr[0], sr[1]);
-          for (let i = 2; i < sr.length; i += 2) g.lineTo(sr[i], sr[i + 1]);
-          g.closePath();
-        }
-        g.strokeStyle = isSel ? accent : cssColor("var(--ink-primary)");
-        g.lineWidth = isSel ? 2.0 : 1.35;
-        g.stroke();
-      };
       for (const st of hitStates) {
         const reg = regionByStateFips(st.fips);
         if (!reg) continue;

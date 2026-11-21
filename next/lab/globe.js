@@ -78,7 +78,7 @@ function buildSparklineSvg(wave) {
 let worldGeoPromise = null;
 function loadWorldCountries() {
   if (!worldGeoPromise) {
-    const worldUrl = new URL("../geo/world-countries-110m.json", import.meta.url).href;
+    const worldUrl = new URL("../geo/world-countries-50m.json", import.meta.url).href;
     worldGeoPromise = fetch(worldUrl).then((r) => r.json()).then((worldTopo) => {
       const worldArcs = arcsToUnitSphere(decodeArcs(worldTopo));
       const raw = extractPolygons(worldTopo, "countries", worldArcs).map((f) => ({
@@ -781,7 +781,7 @@ export function mount(root, ctx) {
     const stateAlpha = smoothstep(1.18, 1.75, camZoom);
     const metroAlpha = metroCastOn ? smoothstep(2.1, 3.2, camZoom) : 0;
 
-    // 3. World Countries (110m) — detached territories (French Guiana, Svalbard) stay neutral
+    // 3. World Countries (50m) — detached territories (French Guiana, Svalbard) stay neutral
     hitCountries = [];
     for (const co of geo.countries) {
       if (!coneVisibleInViewport(co, R, thetaMaxRad)) continue;

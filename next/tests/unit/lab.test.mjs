@@ -83,7 +83,7 @@ describe("next/geo/topo.js + metrocast_hsas.json", () => {
   });
 
   it("maps all 95 MetroCast HSAs onto us-counties-10m.json and dissolves interior borders cleanly", () => {
-    const world = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "world-countries-110m.json"), "utf8"));
+    const world = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "world-countries-50m.json"), "utf8"));
     const us = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "us-counties-10m.json"), "utf8"));
     const hsasData = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "metrocast_hsas.json"), "utf8"));
 
@@ -97,7 +97,7 @@ describe("next/geo/topo.js + metrocast_hsas.json", () => {
     const usArcs = arcsToUnitSphere(decodeArcs(us));
     const { metroMesh, metroFeatures, coveredStates } = buildMetroOverlays(us, usArcs, hsasData);
 
-    assert.equal(countries.length, 177);
+    assert.equal(countries.length, 241);
     assert.equal(states.length, 56);
     assert.equal(coveredStates.size, 15);
     assert.equal(metroFeatures.length, 95);
@@ -205,8 +205,8 @@ describe("next/geo/topo.js + metrocast_hsas.json", () => {
     }
   });
 
-  it("detaches overseas territories (French Guiana, Svalbard) from European country polygons", () => {
-    const world = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "world-countries-110m.json"), "utf8"));
+  it("detaches overseas territories (French Guiana, Svalbard) from 50m European country polygons", () => {
+    const world = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "world-countries-50m.json"), "utf8"));
     const countries = extractPolygons(world, "countries").map((f) => ({
       ...f,
       iso2: ISO_NUM_TO_ALPHA2[String(f.id).padStart(3, "0")] || ISO_NUM_TO_ALPHA2[String(f.id)] || null,
@@ -215,14 +215,26 @@ describe("next/geo/topo.js + metrocast_hsas.json", () => {
     const boundsByIso = Object.fromEntries(Object.keys(EU_META).map((iso) => [iso, euBox]));
     const split = splitDetachedTerritories(countries, boundsByIso);
 
-    const fr = split.find((c) => c.iso2 === "FR");
-    const no = split.find((c) => c.iso2 === "NO");
+    const fr = split.find((c) => !c.detached && c.iso2 === "FR");
+    const no = split.find((c) => !c.detached && c.iso2 === "NO");
     const detached = split.filter((c) => c.detached);
 
-    assert.ok(fr && fr.rings.length === 2); // Mainland + Corsica only
-    assert.ok(no && no.rings.length === 1); // Mainland Norway only
-    assert.equal(detached.length, 4);        // French Guiana + 3 Svalbard islands
+    assert.ok(fr && fr.rings.length >= 2);
+    assert.ok(no && no.rings.length >= 1);
+    assert.ok(detached.length >= 15);
     for (const d of detached) assert.equal(d.iso2, null);
+
+    for (const iso of Object.keys(EU_META)) {
+      if (iso.startsWith("GB-")) continue;
+      const feat = split.find((c) => !c.detached && c.iso2 === iso);
+      assert.ok(feat && feat.rings.length >= 1, `Missing 50m feature for EU country ${iso}`);
+    }
+
+    for (const iso of ["FR", "DE", "IT", "GB", "NO", "GR"]) {
+      const feat = split.find((c) => !c.detached && c.iso2 === iso);
+      const verts = feat.rings.reduce((n, r) => n + r.length / 3, 0);
+      assert.ok(verts >= 400, `${iso} expected high-resolution >= 400 vertices, got ${verts}`);
+    }
   });
 });
 

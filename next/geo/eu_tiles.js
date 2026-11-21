@@ -106,15 +106,15 @@ export function validateTileLayout(tiles, cols, rows) {
   return { ok: overlaps.length === 0 && outOfBounds.length === 0, overlaps, outOfBounds };
 }
 
-/** ISO 3166-1 numeric codes from Natural Earth world-110m mapped to ISO alpha-2 IDs. */
+/** ISO 3166-1 numeric codes from Natural Earth world-50m mapped to ISO alpha-2 IDs. */
 export const ISO_NUM_TO_ALPHA2 = Object.freeze({
   "040": "AT", "056": "BE", "100": "BG", "756": "CH", "196": "CY",
   "203": "CZ", "276": "DE", "208": "DK", "233": "EE", "724": "ES",
   "246": "FI", "250": "FR", "826": "GB", "300": "GR", "191": "HR",
-  "348": "HU", "372": "IE", "352": "IS", "380": "IT", "440": "LT",
-  "442": "LU", "428": "LV", "528": "NL", "578": "NO", "616": "PL",
-  "620": "PT", "642": "RO", "752": "SE", "705": "SI", "703": "SK",
-  "804": "UA", "840": "US",
+  "348": "HU", "372": "IE", "352": "IS", "380": "IT", "438": "LI",
+  "440": "LT", "442": "LU", "428": "LV", "470": "MT", "528": "NL",
+  "578": "NO", "616": "PL", "620": "PT", "642": "RO", "752": "SE",
+  "705": "SI", "703": "SK", "804": "UA", "840": "US",
 });
 
 /** Built-in European EEA/EU/UK reference metadata matching core/geo.py `EUROPE_REF`. */
