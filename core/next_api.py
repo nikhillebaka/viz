@@ -10,20 +10,38 @@ Endpoints:
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import json
 import logging
 import re
 import struct
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import polars as pl
 
 from viz.core.baselines import build_manifest_baselines
+from viz.core.calendar import parse_iso_date
 
 logger = logging.getLogger("viz.next")
+
+
+def _resolve_horizon_offset(frames: Sequence[pl.DataFrame], default_offset: int) -> int:
+    """Prefer empirical `(target_end_date - reference_date).days - 7 * horizon` when rows carry target_end_date."""
+    counts: Counter[int] = Counter()
+    for df in frames:
+        if df.is_empty() or "_ted" not in df.columns:
+            continue
+        sub = df.select(["reference_date", "horizon", "_ted"]).drop_nulls().unique().head(64)
+        for ref_s, h, ted_s in sub.iter_rows():
+            try:
+                diff = (parse_iso_date(str(ted_s)[:10]) - parse_iso_date(str(ref_s)[:10])).days - 7 * int(h)
+                if -14 <= diff <= 14:
+                    counts[diff] += 1
+            except Exception:
+                pass
+    return counts.most_common(1)[0][0] if counts else int(default_offset)
 
 FAN_MAGIC_V1 = b"VZF1"
 FAN_MAGIC_V2 = b"VZF2"
@@ -530,14 +548,15 @@ class NextData:
                 if dcol in names:
                     q_lf = q_lf.filter(pl.col(dcol).cast(pl.String) == dval)
             ids.append(mid)
-            frames.append(
-                q_lf.select([
-                    pl.col("reference_date"),
-                    pl.col("horizon").cast(pl.Int32),
-                    pl.col("output_type_id").cast(pl.Float64).round(4).alias("q"),
-                    pl.col("value").cast(pl.Float64),
-                ])
-            )
+            cols = [
+                pl.col("reference_date"),
+                pl.col("horizon").cast(pl.Int32),
+                pl.col("output_type_id").cast(pl.Float64).round(4).alias("q"),
+                pl.col("value").cast(pl.Float64),
+            ]
+            if "target_end_date" in names:
+                cols.append(pl.col("target_end_date").cast(pl.String).str.slice(0, 10).alias("_ted"))
+            frames.append(q_lf.select(cols))
 
         collected = pl.collect_all(frames) if frames else []
         present: List[Tuple[str, pl.DataFrame]] = []
@@ -551,6 +570,8 @@ class NextData:
                 df = df.filter(pl.col("horizon") >= 0)
             if not df.is_empty():
                 present.append((mid, df))
+
+        resolved_offset = _resolve_horizon_offset([df for _, df in present], cal.horizon_offset_days)
 
         d_all, v_all = self._observed(target).get(str(location), ([], []))
         obs = [(d, v) for d, v in zip(d_all, v_all) if start <= d <= end]
@@ -640,7 +661,7 @@ class NextData:
                 "location": str(location),
                 "start": start,
                 "end": end,
-                "horizon_offset_days": int(cal.horizon_offset_days),
+                "horizon_offset_days": resolved_offset,
                 "dims": resolved_dims,
                 "rounds": rounds,
                 "horizons": horizons,
@@ -694,16 +715,19 @@ class NextData:
                 if dcol in names:
                     q = q.filter(pl.col(dcol).cast(pl.String) == dval)
             ids.append(mid)
-            frames.append(
-                q.select([
-                    pl.col("horizon").cast(pl.Int32),
-                    pl.col("output_type_id").cast(pl.String).alias("sid"),
-                    pl.col("value").cast(pl.Float64),
-                ])
-            )
+            cols = [
+                pl.col("horizon").cast(pl.Int32),
+                pl.col("output_type_id").cast(pl.String).alias("sid"),
+                pl.col("value").cast(pl.Float64),
+            ]
+            if "target_end_date" in names and "reference_date" in names:
+                cols.append(pl.col("reference_date").cast(pl.String))
+                cols.append(pl.col("target_end_date").cast(pl.String).str.slice(0, 10).alias("_ted"))
+            frames.append(q.select(cols))
 
         collected = pl.collect_all(frames) if frames else []
         present = [(mid, df) for mid, df in zip(ids, collected) if not df.is_empty()]
+        resolved_offset = _resolve_horizon_offset([df for _, df in present], cal.horizon_offset_days)
 
         global_h = sorted({int(h) for _, df in present for h in df.get_column("horizon").unique().to_list() if h is not None})
         body: List[np.ndarray] = []
@@ -738,7 +762,7 @@ class NextData:
             "season": season,
             "location": str(location),
             "reference_date": round_date,
-            "horizon_offset_days": int(cal.horizon_offset_days),
+            "horizon_offset_days": resolved_offset,
             "dims": resolved_dims,
             "horizons": global_h,
             "models": header_models,

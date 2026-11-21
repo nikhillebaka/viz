@@ -216,13 +216,14 @@ class CalendarSpec:
 DEFAULT_FLUSIGHT_CALENDAR = CalendarSpec()
 
 
-def _collect_task_dates(tasks_config: Optional[Dict[str, Any]]) -> Tuple[str, List[str], List[str], List[Tuple[str, int, str]]]:
+def _collect_task_dates(tasks_config: Optional[Dict[str, Any]]) -> Tuple[str, List[str], List[str], List[Tuple[str, int, str]], List[int]]:
     round_id_col = "reference_date"
     ref_dates: List[str] = []
     ted_dates: List[str] = []
     triples: List[Tuple[str, int, str]] = []
+    horizons: List[int] = []
     if not isinstance(tasks_config, dict):
-        return round_id_col, ref_dates, ted_dates, triples
+        return round_id_col, ref_dates, ted_dates, triples, horizons
 
     for rnd in tasks_config.get("rounds") or []:
         if not isinstance(rnd, dict):
@@ -247,24 +248,27 @@ def _collect_task_dates(tasks_config: Optional[Dict[str, Any]]) -> Tuple[str, Li
                             bucket.extend(str(x).strip()[:10] for x in vals if x is not None and len(str(x).strip()) >= 10)
             ref_dates.extend(mt_refs)
 
-            if isinstance(h_spec, dict) and isinstance(ted_spec, dict):
-                mt_teds: List[str] = []
-                for k in ("required", "optional"):
-                    vals = ted_spec.get(k)
-                    if isinstance(vals, list):
-                        mt_teds.extend(str(x).strip()[:10] for x in vals if x is not None and len(str(x).strip()) >= 10)
-                hs: List[int] = []
+            mt_hs: List[int] = []
+            if isinstance(h_spec, dict):
                 for k in ("required", "optional"):
                     vals = h_spec.get(k)
                     if isinstance(vals, list):
                         for x in vals:
                             try:
-                                hs.append(int(x))
+                                mt_hs.append(int(x))
                             except (TypeError, ValueError):
                                 pass
-                if mt_refs and mt_teds and hs:
-                    triples.append((min(mt_refs), min(hs), min(mt_teds)))
-    return round_id_col, ref_dates, ted_dates, triples
+                horizons.extend(mt_hs)
+
+            if isinstance(ted_spec, dict) and mt_hs:
+                mt_teds: List[str] = []
+                for k in ("required", "optional"):
+                    vals = ted_spec.get(k)
+                    if isinstance(vals, list):
+                        mt_teds.extend(str(x).strip()[:10] for x in vals if x is not None and len(str(x).strip()) >= 10)
+                if mt_refs and mt_teds:
+                    triples.append((min(mt_refs), min(mt_hs), min(mt_teds)))
+    return round_id_col, ref_dates, ted_dates, triples, horizons
 
 
 def infer_calendar(
@@ -278,9 +282,9 @@ def infer_calendar(
 ) -> CalendarSpec:
     """
     Infer a hub's CalendarSpec from Hubverse `tasks.json`, observed data, and optional user overrides.
-    Zero external hardcoding: handles MMWR/Sat, ISO/Wed->Sun (-3d), seasonal vs year-round COVID.
+    Zero external hardcoding: handles MMWR/Sat, ISO/Wed->Sun (-3d / -10d), seasonal vs year-round COVID.
     """
-    round_id_col, cfg_refs, cfg_teds, cfg_triples = _collect_task_dates(tasks_config)
+    round_id_col, cfg_refs, cfg_teds, cfg_triples, cfg_horizons = _collect_task_dates(tasks_config)
 
     all_refs = list(cfg_refs) + [str(d)[:10] for d in (observed_rounds or []) if d]
     all_teds = list(cfg_teds) + [str(d)[:10] for d in (observed_target_dates or []) if d]
@@ -314,7 +318,7 @@ def infer_calendar(
     for ref_s, h, ted_s in (observed_pairs or ()):
         try:
             diff = (parse_iso_date(ted_s) - parse_iso_date(ref_s)).days - 7 * int(h)
-            if -6 <= diff <= 6:
+            if -14 <= diff <= 14:
                 offset_counts[diff] += 1
         except Exception:
             pass
@@ -325,7 +329,7 @@ def infer_calendar(
         for ref_s, h, ted_s in cfg_triples:
             try:
                 diff = (parse_iso_date(ted_s) - parse_iso_date(ref_s)).days - 7 * int(h)
-                if -6 <= diff <= 6:
+                if -14 <= diff <= 14:
                     cfg_offsets[diff] += 1
             except Exception:
                 pass
@@ -335,6 +339,13 @@ def infer_calendar(
             horizon_offset_days = 0
         else:
             horizon_offset_days = ((target_dow - round_dow + 3) % 7) - 3
+            if (
+                round_id_col == "origin_date"
+                and cfg_horizons
+                and 0 not in cfg_horizons
+                and min(cfg_horizons) == 1
+            ):
+                horizon_offset_days -= 7
 
     # Season mode & active months: detect continuous / year-round vs seasonal winter pathogens
     target_list = [str(t).lower() for t in (targets or ())]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -25,6 +26,89 @@ PATHOGEN_LABELS: Dict[str, Tuple[str, str]] = {
     "respiratory_syndromic": ("syndromic", "ILI / ARI"),
     "syndromic": ("syndromic", "ILI / ARI"),
 }
+
+CONCEPT_LABELS: Dict[str, str] = {
+    "flu_ed_share": "Influenza ED visits share",
+    "flu_hosp": "Influenza hospital admissions",
+    "flu_hosp_rate_change": "Influenza hospital admissions rate change",
+    "ili_ed_share": "ILI ED visits share",
+    "ili_ed_visits": "ILI ED visits",
+    "ili_incidence": "ILI incidence",
+    "ari_incidence": "ARI incidence",
+    "covid_hosp": "COVID-19 hospital admissions",
+    "covid_ed_share": "COVID-19 ED visits share",
+    "rsv_hosp": "RSV hospital admissions",
+    "rsv_ed_share": "RSV ED visits share",
+}
+
+_RE_ED = re.compile(r"\bed\b|ed_|_ed|emergency")
+_RE_HOSP = re.compile(r"hosp|admit|admission|nhsn")
+_RE_SHARE = re.compile(r"\bproportion\b|\bpercentage\b|\bpct\b|\bprop\b|\bshare\b|%")
+_RE_ILI = re.compile(r"\bili\b|influenza-like|influenza like")
+_RE_ARI = re.compile(r"\bari\b|acute respiratory")
+
+
+def canonical_target_concept(
+    target_id: str,
+    metadata: Optional[Dict[str, Any]],
+    pathogen: str,
+    *,
+    user_aliases: Optional[Dict[str, Dict[str, str]]] = None,
+    hub_id: Optional[str] = None,
+) -> Tuple[str, str, bool]:
+    """
+    Map a hub-specific target into `(concept_id, concept_label, ambiguous)`.
+    Respects explicit user overrides first; falls back to semantic classification,
+    marking unrecognized targets `ambiguous=True` so users can unify them via Data sources.
+    """
+    tm = metadata or {}
+    if user_aliases and hub_id:
+        explicit = (user_aliases.get(hub_id) or {}).get(target_id)
+        if isinstance(explicit, str) and explicit.strip():
+            cid = explicit.strip()
+            return (cid, CONCEPT_LABELS.get(cid, tm.get("display_name") or target_id), False)
+
+    disp = str(tm.get("display_name") or target_id)
+    short = str(tm.get("short_name") or "")
+    scale = str(tm.get("scale") or "").lower()
+    text = f"{target_id} {disp} {short}".lower()
+
+    if pathogen == "influenza" and (tm.get("is_categorical") or ("rate" in text and "change" in text)):
+        cid = "flu_hosp_rate_change"
+        return (cid, CONCEPT_LABELS[cid], False)
+
+    is_share = scale in ("proportion", "percentage") or bool(_RE_SHARE.search(text))
+    is_ed = bool(_RE_ED.search(text))
+    is_hosp = bool(_RE_HOSP.search(text))
+    is_ili = bool(_RE_ILI.search(text))
+    is_ari = bool(_RE_ARI.search(text))
+    is_inc = "incidence" in text
+
+    if is_ili:
+        if is_ed and is_share:
+            return ("ili_ed_share", CONCEPT_LABELS["ili_ed_share"], False)
+        if is_ed:
+            return ("ili_ed_visits", CONCEPT_LABELS["ili_ed_visits"], False)
+        if is_inc or pathogen == "syndromic":
+            return ("ili_incidence", CONCEPT_LABELS["ili_incidence"], False)
+
+    if is_ari and (is_inc or pathogen == "syndromic"):
+        return ("ari_incidence", CONCEPT_LABELS["ari_incidence"], False)
+
+    if is_ed and is_share:
+        by_p = {"influenza": "flu_ed_share", "covid19": "covid_ed_share", "rsv": "rsv_ed_share"}
+        cid = by_p.get(pathogen)
+        if cid:
+            return (cid, CONCEPT_LABELS[cid], False)
+
+    if is_hosp:
+        by_p = {"influenza": "flu_hosp", "covid19": "covid_hosp", "rsv": "rsv_hosp"}
+        cid = by_p.get(pathogen)
+        if cid:
+            return (cid, CONCEPT_LABELS[cid], False)
+
+    tid_low = re.sub(r"[^a-z0-9]+", "_", str(target_id).strip().lower()).strip("_") or "target"
+    return (f"custom::{pathogen}::{tid_low}", disp, True)
 
 
 def infer_pathogen(
@@ -164,12 +248,15 @@ class WorkspaceCatalog:
         local_recs = [(r.id, r.path) for r in mgr.registry.list_hubs()]
         remote_ids = tuple(mgr.remote_store.synced_hub_ids())
         enabled_mask = tuple((rid, mgr.remote_store.is_enabled(rid)) for rid in remote_ids)
+        aliases = mgr.registry.get_target_aliases()
+        aliases_stamp = tuple(sorted((hid, tuple(sorted(m.items()))) for hid, m in aliases.items()))
         return (
             mgr.mode,
             mgr.default_hub_id(),
             tuple(local_recs),
             mgr.remote_store.state_mtime(),
             enabled_mask,
+            aliases_stamp,
         )
 
     def _gather_providers(self) -> Tuple[Optional[str], List[Dict[str, Any]], Dict[str, str]]:
@@ -179,6 +266,7 @@ class WorkspaceCatalog:
         """
         mgr = self.mgr
         active_id = mgr.default_hub_id()
+        user_aliases = mgr.registry.get_target_aliases()
         records = list(mgr.registry.list_hubs())
         # Evaluate the active local hub first so it takes precedence cleanly
         records.sort(key=lambda r: (0 if r.id == active_id else 1, r.id))
@@ -195,10 +283,20 @@ class WorkspaceCatalog:
             if not weekly or not has_rounds:
                 continue
             locs = ctx.loader.get_locations()
+            geo_kind = classify_geo_kind(locs, ctx.loader.get_geo_graph())
+            local_concepts: Set[str] = set()
+            for lt in weekly:
+                tm = ctx.config.get_target_metadata(lt)
+                tp, _ = infer_pathogen(rec.id, ctx.display_label, targets=[lt])
+                cid, _, ambig = canonical_target_concept(lt, tm, tp, user_aliases=user_aliases, hub_id=rec.id)
+                if not ambig:
+                    local_concepts.add(cid)
             local_profiles.append({
                 "id": rec.id,
                 "targets": set(ctx.config.get_targets()),
                 "weekly": set(weekly),
+                "concepts": local_concepts,
+                "geo_kind": geo_kind,
                 "locations": set(locs.keys()),
             })
             providers.append({
@@ -223,16 +321,43 @@ class WorkspaceCatalog:
             if not r_weekly or not has_rounds:
                 continue
             r_weekly_set = set(r_weekly)
+            spec = mgr.remote_store.get_spec(rid)
+            r_locs_dict = ctx.loader.get_locations()
+            r_locs = set(r_locs_dict.keys())
+            r_geo_kind = classify_geo_kind(r_locs_dict, ctx.loader.get_geo_graph())
+            r_concepts: Dict[str, Tuple[str, str, bool]] = {}
+            for rt in r_weekly:
+                tm = ctx.config.get_target_metadata(rt)
+                rp, _ = infer_pathogen(ws_id, ctx.display_label, spec=spec, targets=[rt])
+                r_concepts[rt] = canonical_target_concept(rt, tm, rp, user_aliases=user_aliases, hub_id=ws_id)
 
             covered_targets: Set[str] = set()
             best_local: Optional[str] = None
             for lp in local_profiles:
-                if mgr.remote_store.is_compatible(rid, targets=lp["targets"], locations=lp["locations"]):
-                    overlap = r_weekly_set & lp["weekly"]
-                    if overlap:
-                        covered_targets.update(overlap)
-                        if best_local is None:
-                            best_local = lp["id"]
+                if lp["geo_kind"] != r_geo_kind:
+                    continue
+                # Pass targets=None to allow renamed/aliased local targets with matching
+                # canonical concepts in the same geography to subsume equivalent remote targets.
+                if not mgr.remote_store.is_compatible(rid, targets=None, locations=lp["locations"]):
+                    continue
+                loc_overlap = lp["locations"] & r_locs
+                if lp["locations"] and r_locs:
+                    if not loc_overlap:
+                        continue
+                    if len(lp["locations"]) > 3 and len(r_locs) > 3 and len(loc_overlap) < min(len(lp["locations"]), len(r_locs)) * 0.4:
+                        continue
+                overlap: Set[str] = set()
+                for rt in r_weekly_set:
+                    if rt in lp["weekly"]:
+                        overlap.add(rt)
+                        continue
+                    rcid, _, r_ambig = r_concepts[rt]
+                    if not r_ambig and rcid in lp["concepts"]:
+                        overlap.add(rt)
+                if overlap:
+                    covered_targets.update(overlap)
+                    if best_local is None:
+                        best_local = lp["id"]
 
             if best_local is not None and covered_targets >= r_weekly_set:
                 subsumed_map[ws_id] = best_local
@@ -243,7 +368,6 @@ class WorkspaceCatalog:
                 subsumed_map[ws_id] = best_local or ""
                 continue
 
-            spec = mgr.remote_store.get_spec(rid)
             providers.append({
                 "id": ws_id,
                 "ctx": ctx,
@@ -263,6 +387,7 @@ class WorkspaceCatalog:
                 return self._catalog_cache
 
         active_id, providers, subsumed_map = self._gather_providers()
+        user_aliases = self.mgr.registry.get_target_aliases()
         hubs_out: List[Dict[str, Any]] = []
         targets_out: List[Dict[str, Any]] = []
         places: Dict[str, Dict[str, Any]] = {}
@@ -295,6 +420,7 @@ class WorkspaceCatalog:
             region_label = _region_label_for(geo_kind)
             pathogen, pathogen_label = infer_pathogen(hub_id, ctx.display_label, spec=spec, targets=weekly)
             short_label = (getattr(spec, "short_label", None) if spec else None) or ctx.display_label
+            hub_def_loc = geo.default_location()
 
             stamp_parts.append(f"{hub_id}:{ctx.next_data._stamp()}")
             hubs_out.append({
@@ -307,17 +433,52 @@ class WorkspaceCatalog:
                 "pathogen_label": pathogen_label,
                 "geo_kind": geo_kind,
                 "region_label": region_label,
-                "default_location": geo.default_location(),
+                "default_location": hub_def_loc,
                 "latest_round": latest_round,
                 "model_count": len(models),
                 "targets_count": len(weekly),
                 "active": hub_id == active_id,
             })
 
+            hub_aliases = user_aliases.get(hub_id) or {}
+            season_start = None
+            if latest_round:
+                try:
+                    cal = ctx.loader.get_calendar()
+                    season_start = cal.season_bounds(cal.season_for_date(latest_round))[0]
+                except Exception:
+                    season_start = None
             hub_target_entries: List[Dict[str, Any]] = []
             for tid in weekly:
                 tm = ctx.config.get_target_metadata(tid)
                 t_path, t_path_label = infer_pathogen(hub_id, ctx.display_label, spec=spec, targets=[tid])
+                cid, clabel, ambig = canonical_target_concept(
+                    tid, tm, t_path, user_aliases=user_aliases, hub_id=hub_id
+                )
+                obs_by_loc = ctx.next_data._observed(tid)
+                target_def_loc = hub_def_loc
+                if obs_by_loc:
+                    def_dates = obs_by_loc.get(hub_def_loc, ([], []))[0]
+                    has_active_def = bool(def_dates) and (
+                        any(d >= season_start for d in def_dates) if season_start else True
+                    )
+                    if not has_active_def:
+                        candidates = []
+                        for lid, (dates, _) in obs_by_loc.items():
+                            if dates and lid in locs:
+                                recent = sum(1 for d in dates if d >= season_start) if season_start else len(dates)
+                                if recent:
+                                    pop = locs[lid].get("population") or 0
+                                    candidates.append((1, pop, recent, lid))
+                        if not candidates:
+                            for lid, (dates, _) in obs_by_loc.items():
+                                if dates and lid in locs:
+                                    pop = locs[lid].get("population") or 0
+                                    candidates.append((0, pop, len(dates), lid))
+                        if candidates:
+                            candidates.sort(key=lambda item: (-item[0], -item[1], -item[2], item[3]))
+                            target_def_loc = candidates[0][3]
+
                 t_rec = {
                     "key": f"{hub_id}::{tid}",
                     "hub_id": hub_id,
@@ -326,6 +487,11 @@ class WorkspaceCatalog:
                     "target_id": tid,
                     "label": tm.get("display_name") or tid,
                     "short": tm.get("short_name") or (tm.get("display_name") or tid),
+                    "concept_id": cid,
+                    "concept_label": clabel,
+                    "ambiguous": ambig,
+                    "user_aliased": tid in hub_aliases,
+                    "default_location": target_def_loc,
                     "pathogen": t_path,
                     "pathogen_label": t_path_label,
                     "geo_kind": geo_kind,
@@ -343,6 +509,8 @@ class WorkspaceCatalog:
                     "target_id": tid,
                     "label": t_rec["label"],
                     "short": t_rec["short"],
+                    "concept_id": cid,
+                    "concept_label": clabel,
                     "pathogen": t_path,
                     "pathogen_label": t_path_label,
                     "is_categorical": t_rec["is_categorical"],
@@ -415,6 +583,8 @@ class WorkspaceCatalog:
             "resolved_active_hub": subsumed_map.get(active_id or "", active_id),
             "hubs": hubs_out,
             "targets": targets_out,
+            "concepts": [{"id": cid, "label": lbl} for cid, lbl in CONCEPT_LABELS.items()],
+            "target_aliases": user_aliases,
             "places": places,
             "subsumed_map": subsumed_map,
         }

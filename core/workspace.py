@@ -140,7 +140,7 @@ class WorkspaceRegistry:
         self._lock = threading.Lock()
 
     def _read_unlocked(self) -> Dict[str, Any]:
-        default = {"version": 1, "active_hub": None, "hubs": []}
+        default: Dict[str, Any] = {"version": 1, "active_hub": None, "hubs": [], "target_aliases": {}}
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -149,13 +149,49 @@ class WorkspaceRegistry:
             hubs = raw.get("hubs")
             if not isinstance(hubs, list):
                 hubs = []
+            raw_aliases = raw.get("target_aliases")
+            aliases: Dict[str, Dict[str, str]] = {}
+            if isinstance(raw_aliases, dict):
+                for hid, mapping in raw_aliases.items():
+                    if isinstance(hid, str) and isinstance(mapping, dict):
+                        clean = {str(k): str(v).strip() for k, v in mapping.items() if isinstance(k, str) and str(v or "").strip()}
+                        if clean:
+                            aliases[hid] = clean
             return {
                 "version": int(raw.get("version", 1)),
                 "active_hub": raw.get("active_hub") if isinstance(raw.get("active_hub"), str) else None,
                 "hubs": hubs,
+                "target_aliases": aliases,
             }
         except (OSError, ValueError):
             return default
+
+    def get_target_aliases(self) -> Dict[str, Dict[str, str]]:
+        """Return persistent per-hub `{target_id: concept_id}` overrides."""
+        with self._lock:
+            return {hid: dict(m) for hid, m in self._read_unlocked()["target_aliases"].items()}
+
+    def set_target_alias(self, hub_id: str, target_id: str, concept_id: Optional[str]) -> Dict[str, Dict[str, str]]:
+        """Persist or clear one `(hub_id, target_id) -> concept_id` override."""
+        clean_hub = str(hub_id or "").strip()
+        clean_target = str(target_id or "").strip()
+        clean_concept = str(concept_id or "").strip()
+        if not clean_hub or not clean_target:
+            raise ValueError("hub_id and target_id are required")
+        with self._lock:
+            raw = self._read_unlocked()
+            aliases = raw.setdefault("target_aliases", {})
+            hub_map = dict(aliases.get(clean_hub) or {})
+            if clean_concept:
+                hub_map[clean_target] = clean_concept
+            else:
+                hub_map.pop(clean_target, None)
+            if hub_map:
+                aliases[clean_hub] = hub_map
+            else:
+                aliases.pop(clean_hub, None)
+            _atomic_write_json(self.path, raw)
+            return {hid: dict(m) for hid, m in aliases.items()}
 
     def list_hubs(self) -> List[LocalHubRecord]:
         with self._lock:
@@ -286,6 +322,7 @@ class WorkspaceRegistry:
                 return False
             if raw.get("active_hub") == hub_id:
                 raw["active_hub"] = None
+            raw.get("target_aliases", {}).pop(hub_id, None)
             _atomic_write_json(self.path, raw)
             return True
 
@@ -854,6 +891,28 @@ class HubManager:
             "ok": True,
             "removed": hub_id,
             "workspace": self.workspace_summary(),
+        }
+
+    def set_target_alias(
+        self,
+        hub_id: str,
+        target_id: str,
+        concept_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Persist or clear a user `(hub_id, target_id) -> concept_id` unification alias."""
+        self._ensure_local_mode()
+        clean_hub = str(hub_id or "").strip()
+        clean_target = str(target_id or "").strip()
+        if not clean_hub or not clean_target:
+            raise ValueError("hub_id and target_id are required")
+        if self.get_context(clean_hub) is None:
+            raise KeyError(f"Unknown hub '{clean_hub}'")
+        aliases = self.registry.set_target_alias(clean_hub, clean_target, concept_id)
+        self.catalog.invalidate()
+        return {
+            "ok": True,
+            "target_aliases": aliases,
+            "catalog": self.catalog.build_catalog(),
         }
 
     def _hub_entry(self, rec: LocalHubRecord, active_id: Optional[str]) -> Dict[str, Any]:

@@ -300,7 +300,6 @@ export class Fan {
 
   #body; #Q; #med; #models; #obsAt;
   #pts = new Map();   // id → level → (FanPoint[] | null | undefined)[] by timeline index
-  #anchor = [];       // timeline index → observed anchor (or null)
   #ymax = new Map();
   #qi = new Map();
 
@@ -330,22 +329,20 @@ export class Fan {
     return r >= 0 && r !== undefined && !!this.#models.get(id)?.rounds.has(r);
   }
 
-  // the last observed week strictly before the timeline week di
-  #anchorAt(di) {
-    let a = this.#anchor[di];
-    if (a !== undefined) return a;
-    const ref = this.dates[di], o = this.observed;
-    let lo = 0, hi = o.length;               // first index with t >= ref
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (o[mid].t < ref) lo = mid + 1; else hi = mid; }
-    a = lo > 0 ? o[lo - 1] : null;
-    this.#anchor[di] = a;
+  // the last observed week strictly before firstT, provided the gap is at most 1 week
+  #anchorBefore(firstT) {
+    const o = this.observed;
+    let lo = 0, hi = o.length;               // first index with t >= firstT
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (o[mid].t < firstT) lo = mid + 1; else hi = mid; }
+    const a = lo > 0 ? o[lo - 1] : null;
+    if (!a || firstT - a.t > WEEK) return null;
     return a;
   }
 
   /**
    * A model's forecast on one timeline week at one interval level: the anchor (the last observed week
-   * before the round, if any), then one point per horizon with a median. lo/hi are NaN when the model
-   * lacks that level's quantiles (and always for level 0).
+   * at most 7 days before the first forecast point, if any), then one point per horizon with a median.
+   * lo/hi are NaN when the model lacks that level's quantiles (and always for level 0).
    * @param {string} id
    * @param {number} di timeline index
    * @param {number} level 0.95 | 0.8 | 0.5 | 0
@@ -380,7 +377,7 @@ export class Fan {
       out.push(Object.freeze({ t: ref + h * WEEK + offsetMs, h, lo: li < 0 ? NaN : B[base + li], hi: hi < 0 ? NaN : B[base + hi], med }));
     }
     if (!out.length) return null;
-    const a = this.#anchorAt(di);
+    const a = this.#anchorBefore(out[0].t);
     if (a) out.unshift(Object.freeze({ t: a.t, h: -1, lo: a.v, hi: a.v, med: a.v, anchor: true }));
     return Object.freeze(out);
   }

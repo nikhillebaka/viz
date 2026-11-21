@@ -480,6 +480,11 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(mgr.remove_local_hub(hub_id, clear_cache=bool(body.get("clear_cache", False))))
             elif path == "/api/workspace/pick-dir":
                 self._send_json(mgr.pick_native_directory(initial_dir=body.get("initial_dir")))
+            elif path == "/api/workspace/target-aliases":
+                hub_id = str(body.get("hub_id") or body.get("hub") or body.get("id") or "").strip()
+                target_id = str(body.get("target_id") or body.get("target") or "").strip()
+                concept_id = body.get("concept_id") if "concept_id" in body else body.get("concept")
+                self._send_json(mgr.set_target_alias(hub_id, target_id, concept_id))
             else:
                 self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)
         except KeyError as exc:

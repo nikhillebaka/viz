@@ -10,6 +10,7 @@ import { activeLayer, openMenu, tooltip } from "../ui/floating.js";
 import { pill, icon, timeKeys } from "../ui/controls.js";
 import { seriesColor } from "../chart/layout.js";
 import { FanChart } from "./FanChart.js";
+import { loadGlobe } from "../lib/api.js";
 import { openTargetMenu } from "./TargetMenu.js";
 import { targetDimSpecs, defaultDims, isCategoricalTarget } from "./url.js";
 import { mountSections } from "../sections/index.js";
@@ -170,7 +171,7 @@ export function mountShell(root, ctx) {
     progress.classList.add("is-done");
     setTimeout(() => progress.remove(), 600);
     // the pickers are needed on first click: fetch them while nothing else is happening
-    (window.requestIdleCallback ?? setTimeout)(() => { pickers.models().catch(() => {}); pickers.location().catch(() => {}); });
+    (window.requestIdleCallback ?? setTimeout)(() => { pickers.models().catch(() => {}); pickers.location().catch(() => {}); loadGlobe().catch(() => {}); });
   }
 
   const chart = new FanChart(view, ctx, {

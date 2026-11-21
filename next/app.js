@@ -16,9 +16,11 @@ import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted } from "./
 import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
+import { classifyHubGeo } from "./geo/picker_geo.js";
 
 const root = document.getElementById("app");
 const hubKey = (id, name) => (id ? `viz.h.${id}.${name}` : `viz.${name}`);
+const geoKey = (manifest) => `viz.geo.${classifyHubGeo(manifest).kind}.location`;
 
 /* What this browser remembers, validated against the manifest (anything unknown is ignored). */
 function fromStorage(manifest) {
@@ -49,10 +51,12 @@ function fromStorage(manifest) {
 }
 
 /* Remember what should survive a reload in this browser (ARCHITECTURE.md, "Browser storage"). */
-function persist(store, hubId) {
+function persist(store, manifest) {
+  const hubId = manifest.hub_id;
   return store.on((s, prev, changed) => {
     if (changed.has("location")) {
       storage.set(hubKey(hubId, "location"), s.location);
+      storage.set(geoKey(manifest), s.location);
       // recent places, however the place changed (picker, map, a row's link): it first, then the one
       // left, then the rest; distinct; four (the same rule as LocationPicker's nextRecent)
       const pKey = hubKey(hubId, "places");
@@ -136,7 +140,7 @@ function nearestWithin(iso, rounds, maxDays = 21) {
   return bd <= maxDays * DAY ? best : null;
 }
 
-function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc) {
+function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc, targetId) {
   if (explicitLoc && nextMan.locationById.has(explicitLoc)) return explicitLoc;
   const places = catalog?.places || {};
   let prevPlace = null;
@@ -159,7 +163,13 @@ function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitL
     }
   }
   if (prevLocId && nextMan.locationById.has(prevLocId)) return prevLocId;
-  return fromStorage(nextMan).location || defaults(nextMan).location;
+  const hubStored = fromStorage(nextMan).location;
+  if (hubStored) return hubStored;
+  const gStored = storage.get(geoKey(nextMan));
+  if (typeof gStored === "string" && nextMan.locationById.has(gStored)) return gStored;
+  const tMeta = targetId && catalog?.targets?.find((t) => (t.hub_id === nextMan.hub_id || !nextMan.hub_id) && t.target_id === targetId);
+  if (typeof tMeta?.default_location === "string" && nextMan.locationById.has(tMeta.default_location)) return tMeta.default_location;
+  return defaults(nextMan).location;
 }
 
 function stripAppQueryParams(oldMan) {
@@ -249,9 +259,19 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       ]);
       if (seq !== switchSeq) return;
 
-      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc);
       const nextDef = defaults(nextMan);
-      const resolvedT = (target && nextMan.targetById.has(target)) ? target : nextDef.target;
+      let resolvedT = (target && nextMan.targetById.has(target)) ? target : null;
+      if (!resolvedT) {
+        const catTargets = (nextCat || ctx.catalog)?.targets || [];
+        const curConcept = catTargets.find((t) => (t.hub_id === manifest.hub_id || !manifest.hub_id) && t.target_id === prev.target)?.concept_id;
+        if (curConcept) {
+          const match = catTargets.find((t) => (t.hub_id === targetHub || t.hub_id === nextMan.hub_id) && t.concept_id === curConcept && nextMan.targetById.has(t.target_id));
+          if (match) resolvedT = match.target_id;
+        }
+      }
+      if (!resolvedT) resolvedT = nextDef.target;
+      if (prev.location && manifest.locationById.has(prev.location)) storage.set(geoKey(manifest), prev.location);
+      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc, resolvedT);
       const nextStored = fromStorage(nextMan);
       const nextSel = nextStored.sel || nextDef.sel;
       const resolvedDate = (date && nearestWithin(date, nextMan.allRounds, 21))
@@ -287,7 +307,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
 
   const shell = mountShell(root, ctx);
   const stopUrl = syncUrl(store, manifest);
-  const stopPersist = persist(store, manifest.hub_id);
+  const stopPersist = persist(store, manifest);
   activeUnmount = () => {
     stopUrl();
     stopPersist();

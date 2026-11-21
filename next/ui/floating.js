@@ -8,9 +8,8 @@
  *    has left the screen
  *  - Escape and a pointerdown outside close it; focus goes into it on open (without a ring for pointer
  *    users) and back to the anchor on close; the anchor carries aria-expanded
- *  - opening fades and scales up from --scale-enter over --dur; a `morph` popover grows out of its anchor's
- *    rect instead (over --dur-move, --ease-spring) and shrinks back into it on close; other layers fade out
- *    over --dur-fast. Instant with reduced motion. */
+ *  - opening fades in with a calm directional edge slide over --dur and fades out over --dur-fast.
+ *    Instant with reduced motion. */
 import { h, on, token, tokenNum, reducedMotion } from "../lib/dom.js";
 import { computePosition, autoUpdate } from "../lib/position.js";
 import { glass } from "./glass.js";
@@ -18,6 +17,20 @@ import { glass } from "./glass.js";
 import { icon } from "./controls.js";
 
 const FOCUSABLE = ["button:not([disabled])", "[href]", "input:not([disabled])", "select", "textarea", "[tabindex]"].map((s) => `${s}:not([tabindex='-1'])`).join(", ");
+
+const EDGE_ORIGIN = {
+  bottom: "center top",
+  top: "center bottom",
+  right: "left center",
+  left: "right center",
+};
+
+const SLIDE_FROM = {
+  bottom: "translate3d(0, -5px, 0)",
+  top: "translate3d(0, 5px, 0)",
+  right: "translate3d(-5px, 0, 0)",
+  left: "translate3d(5px, 0, 0)",
+};
 
 /* ---------- input modality ----------
  * Focus rings are for keyboard users. When we move focus ourselves (into a layer, back to its anchor),
@@ -54,7 +67,6 @@ export const activeLayer = () => openLayer;
 
 const dur = (name) => (reducedMotion() ? 0 : tokenNum(name, 200));
 const rectOf = (el) => el.getBoundingClientRect();
-const radiusOf = (el, w, h) => Math.min(parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0, w / 2, h / 2);
 
 function trapFocus(e, root) {
   const f = [...root.querySelectorAll(FOCUSABLE)].filter((n) => n.offsetParent !== null);
@@ -65,12 +77,11 @@ function trapFocus(e, root) {
 }
 
 /* The shared layer. role: "dialog" (popover) or "menu". */
-function layerFor(anchor, { className, role, label, title, placement, width, morph, trap, onClose }) {
+function layerFor(anchor, { className, role, label, title, placement, width, trap, onClose }) {
   openLayer?.close(false);
   const panel = h("div", { class: ["c-panel c-float", className], role, "aria-label": label || title || null, tabindex: "-1" });
-  let head = null;
   if (title) {
-    head = h("div", { class: "c-float-head" },
+    const head = h("div", { class: "c-float-head" },
       h("span", { class: "c-float-title" }, title),
       h("button", { type: "button", class: "c-btn icon filled sm", "aria-label": "Close", html: icon.close, onclick: () => layer.close(true) }));
     panel.appendChild(head);
@@ -78,6 +89,7 @@ function layerFor(anchor, { className, role, label, title, placement, width, mor
   const body = h("div", { class: "c-float-body" });
   panel.appendChild(body);
   if (width) panel.style.width = `${width}px`;
+  panel.style.visibility = "hidden";
   document.body.appendChild(panel);
   const g = glass(panel, { panel: true });
 
@@ -94,35 +106,25 @@ function layerFor(anchor, { className, role, label, title, placement, width, mor
       return;
     }
     panel.style.maxHeight = "";
-    // a morphing panel takes its anchor's place (its corner where the anchor's was), not below it
-    const offset = morph ? -(placement.startsWith("left") || placement.startsWith("right") ? ar.width : ar.height) : tokenNum("--gap", 8);
+    const offset = tokenNum("--gap", 8);
     const size = { width: panel.offsetWidth, height: panel.offsetHeight };
     const p = computePosition(ar, size, { placement, offset, padding: inset() });
-    side = `${p.side}-${placement.split("-")[1] || "center"}`;
+    const chosenSide = p.side;
+    side = `${chosenSide}-${placement.split("-")[1] || "center"}`;
     panel.style.maxHeight = `${Math.floor(p.maxHeight)}px`;
     panel.style.left = `${p.x}px`; panel.style.top = `${p.y}px`;
-    panel.style.transformOrigin = morph ? "0 0" : p.origin;
-    box = { x: p.x, y: p.y, width: size.width, height: Math.min(size.height, Math.floor(p.maxHeight)), offset };
+    panel.style.transformOrigin = EDGE_ORIGIN[chosenSide] || "center top";
+    box = { x: p.x, y: p.y, width: size.width, height: Math.min(size.height, Math.floor(p.maxHeight)), offset, side: chosenSide };
   };
 
-  const content = head ? [head, body] : [body];
   const opener = document.activeElement;
-  // the transform that lays the panel exactly over its anchor, with the anchor's corner radius
-  const anchorFrame = () => {
-    const a = rectOf(anchor), sx = a.width / box.width, sy = a.height / box.height, ra = radiusOf(anchor, a.width, a.height);
-    return { transform: `translate(${a.left - box.x}px, ${a.top - box.y}px) scale(${sx}, ${sy})`, borderRadius: `${ra / sx}px / ${ra / sy}px` };
-  };
   const animateOpen = () => {
     if (reducedMotion()) return;
-    if (morph) {
-      const panelRadius = getComputedStyle(panel).borderTopLeftRadius;
-      const o = { duration: dur("--dur-move"), easing: token("--ease-spring") };
-      anchor.classList.add("c-morphing");
-      panel.animate([{ ...anchorFrame(), opacity: 0.5 }, { transform: "none", borderRadius: `${panelRadius} / ${panelRadius}`, opacity: 1 }], o);
-      for (const c of content) c.animate([{ opacity: 0 }, { opacity: 0, offset: 0.35 }, { opacity: 1 }], o);
-    } else {
-      panel.animate([{ opacity: 0, transform: `scale(${tokenNum("--scale-enter", 0.96)})` }, { opacity: 1, transform: "none" }], { duration: dur("--dur"), easing: token("--ease-out") });
-    }
+    const fromTransform = SLIDE_FROM[box?.side || "bottom"] || "translate3d(0, -5px, 0)";
+    panel.animate(
+      [{ opacity: 0, transform: fromTransform }, { opacity: 1, transform: "none" }],
+      { duration: dur("--dur"), easing: token("--ease-out") },
+    );
   };
 
   const onDown = (e) => { if (!panel.contains(e.target) && !anchor.contains(e.target)) layer.close(true); };
@@ -136,7 +138,7 @@ function layerFor(anchor, { className, role, label, title, placement, width, mor
   anchor.setAttribute("aria-expanded", "true");
   if (!anchor.hasAttribute("aria-haspopup")) anchor.setAttribute("aria-haspopup", role === "menu" ? "menu" : "dialog");
 
-  let closed = false, stop = () => {};
+  let closed = false, started = false, stop = () => {};
   const layer = {
     panel, body, anchor, place: () => place("layout"),
     /** @param {boolean} [restoreFocus=true] return focus to the anchor */
@@ -147,23 +149,15 @@ function layerFor(anchor, { className, role, label, title, placement, width, mor
       offs.forEach((off) => off());
       stop();
       anchor.setAttribute("aria-expanded", "false");
-      const done = () => { g.destroy(); panel.remove(); anchor.classList.remove("c-morphing"); };
+      const done = () => { g.destroy(); panel.remove(); };
       if (restoreFocus && anchor.isConnected) focusQuietly(anchor.matches(FOCUSABLE) ? anchor : opener);
       onClose?.();
       if (reducedMotion() || !box) { done(); return; }
-      // start from wherever an unfinished open animation has got to
-      const from = getComputedStyle(panel).transform;
       panel.getAnimations().forEach((a) => a.cancel());
-      let anim;
-      if (morph) {
-        const d = dur("--dur-move");
-        for (const c of content) c.animate([{ opacity: 1 }, { opacity: 0 }], { duration: dur("--dur-fast"), fill: "forwards" });
-        anim = panel.animate([{ transform: from === "none" ? "none" : from, opacity: 1 }, { ...anchorFrame(), opacity: 0 }], { duration: d, easing: token("--ease-spring"), fill: "forwards" });
-        // the anchor fades back in as the panel arrives
-        setTimeout(() => anchor.classList.remove("c-morphing"), d * 0.4);
-      } else {
-        anim = panel.animate([{ opacity: 1 }, { opacity: 0 }], { duration: dur("--dur-fast"), easing: token("--ease-out"), fill: "forwards" });
-      }
+      const anim = panel.animate(
+        [{ opacity: 1 }, { opacity: 0 }],
+        { duration: dur("--dur-fast"), easing: token("--ease-out"), fill: "forwards" },
+      );
       let finished = false;
       const fin = () => { if (!finished) { finished = true; done(); } };
       anim.onfinish = fin;
@@ -171,8 +165,14 @@ function layerFor(anchor, { className, role, label, title, placement, width, mor
     },
   };
   openLayer = layer;
-  stop = autoUpdate(anchor, panel, place);
-  return { layer, animateOpen };
+  const start = () => {
+    if (closed || started) return;
+    started = true;
+    stop = autoUpdate(anchor, panel, place);
+    panel.style.visibility = "";
+    animateOpen();
+  };
+  return { layer, start };
 }
 
 /**
@@ -184,16 +184,15 @@ function layerFor(anchor, { className, role, label, title, placement, width, mor
  * @returns {{ panel: HTMLElement, body: HTMLElement, close(restoreFocus?: boolean): void, place(): void } | null}
  *   null when this call closed it
  */
-export function openPopover(anchor, { content, title = "", placement = "bottom-start", width, morph = false, className = "", timeKeys = false, onClose } = {}) {
+export function openPopover(anchor, { content, title = "", placement = "bottom-start", width, className = "", timeKeys = false, onClose } = {}) {
   if (openLayer?.anchor === anchor) { openLayer.close(true); return null; }
-  const { layer, animateOpen } = layerFor(anchor, {
+  const { layer, start } = layerFor(anchor, {
     className: ["c-popover", className].filter(Boolean).join(" "), role: "dialog", title, placement,
-    width: width ?? tokenNum("--popover-width", 360), morph, trap: true, onClose,
+    width: width ?? tokenNum("--popover-width", 360), trap: true, onClose,
   });
   if (timeKeys) layer.panel.dataset.timeKeys = "";
   content?.(layer.body, layer);
-  layer.place();
-  animateOpen();
+  start();
   focusQuietly(layer.body.querySelector("input, button, [tabindex='0']") || layer.panel);
   return layer;
 }
@@ -213,7 +212,7 @@ export function openPopover(anchor, { content, title = "", placement = "bottom-s
  */
 export function openMenu(anchor, { items, placement = "bottom-start", label = "", onClose } = {}) {
   if (openLayer?.anchor === anchor) { openLayer.close(true); return null; }
-  const { layer, animateOpen } = layerFor(anchor, { className: "c-menu", role: "menu", label, placement, onClose });
+  const { layer, start } = layerFor(anchor, { className: "c-menu", role: "menu", label, placement, onClose });
   const checks = items.some((i) => i && typeof i === "object" && i.checked !== undefined);
   for (const it of items) {
     if (it === "-") { layer.body.appendChild(h("div", { class: "c-menu-sep", role: "separator" })); continue; }
@@ -257,8 +256,7 @@ export function openMenu(anchor, { items, placement = "bottom-start", label = ""
       if (m) { focusQuietly(m); revealInList(m); }
     }
   });
-  layer.place();
-  animateOpen();
+  start();
   const first = layer.body.querySelector(".c-menu-item[role='menuitemradio'][aria-checked='true']") || list()[0];
   focusQuietly(first);
   revealInList(first);

@@ -52,22 +52,33 @@ test("present and has", () => {
   assert.ok(!fan.has("nope", 5));
 });
 
-test("points: the anchor, then each horizon at the level's quantiles", () => {
-  const di = fan.indexOf("2025-11-29"); // round 2
+test("points: the anchor (within 1 week), then each horizon at the level's quantiles", () => {
+  const di = fan.indexOf("2025-11-29"); // round 2: Nov 22 is missing, so Nov 15 (>1w gap) must NOT anchor
   const p = fan.points("a", di, 0.95);
-  // the anchor is the last observed week strictly before Nov 29: Nov 22 is missing, so Nov 15
-  assert.deepEqual(p[0], { t: parseIso("2025-11-15"), h: -1, lo: fan.observedAt(parseIso("2025-11-15")), hi: fan.observedAt(parseIso("2025-11-15")), med: fan.observedAt(parseIso("2025-11-15")), anchor: true });
-  assert.equal(p.length, 5);
+  assert.equal(p.length, 4);
+  assert.equal(p[0].anchor, undefined);
+  assert.equal(p[0].h, 0);
   const med = 1000 + 200 + 10;
-  assert.equal(p[2].t, parseIso("2025-12-06"));
-  assert.equal(p[2].h, 1);
-  assert.ok(Math.abs(p[2].med - med) < 1e-3);
-  assert.ok(Math.abs(p[2].lo - med * (1 - 0.475 * 0.6)) < 1e-2, "0.025");
-  assert.ok(Math.abs(p[2].hi - med * (1 + 0.475 * 0.6)) < 1e-2, "0.975");
-  const p8 = fan.points("a", di, 0.8)[2], p5 = fan.points("a", di, 0.5)[2];
+  assert.equal(p[1].t, parseIso("2025-12-06"));
+  assert.equal(p[1].h, 1);
+  assert.ok(Math.abs(p[1].med - med) < 1e-3);
+  assert.ok(Math.abs(p[1].lo - med * (1 - 0.475 * 0.6)) < 1e-2, "0.025");
+  assert.ok(Math.abs(p[1].hi - med * (1 + 0.475 * 0.6)) < 1e-2, "0.975");
+  const p8 = fan.points("a", di, 0.8)[1], p5 = fan.points("a", di, 0.5)[1];
   assert.ok(Math.abs(p8.lo - med * (1 - 0.4 * 0.6)) < 1e-2, "0.1");
   assert.ok(Math.abs(p5.hi - med * (1 + 0.25 * 0.6)) < 1e-2, "0.75");
-  assert.ok(Number.isNaN(fan.points("a", di, 0)[2].lo), "level 0 has no interval");
+  assert.ok(Number.isNaN(fan.points("a", di, 0)[1].lo), "level 0 has no interval");
+});
+
+test("points: anchor connects when observed week is within 7 days of first forecast point", () => {
+  const f = decodeFan(buildFan({
+    rounds: ["2025-11-29"],
+    observed: [["2025-11-22", 42]],
+    models: [spread("a", () => 50)],
+  }));
+  const p = f.points("a", f.indexOf("2025-11-29"), 0.95);
+  assert.deepEqual(p[0], { t: parseIso("2025-11-22"), h: -1, lo: 42, hi: 42, med: 42, anchor: true });
+  assert.equal(p[1].h, 0);
 });
 
 test("points are cached, frozen, and null where there is no median", () => {
@@ -267,11 +278,11 @@ test("indexManifest resolves per-target and per-season baselines with fallback",
   assert.equal(legacy.baselineFor("wk inc flu hosp", "2026-2027"), "Legacy-baseline");
 });
 
-function buildVzf2({ target = "ILI incidence", season = "2025-2026", location = "DE", rounds, horizons, quantiles = [0.025, 0.5, 0.975], horizonOffsetDays = -3, dims = null, models }) {
+function buildVzf2({ target = "ILI incidence", season = "2025-2026", location = "DE", rounds, horizons, quantiles = [0.025, 0.5, 0.975], horizonOffsetDays = -3, dims = null, observedDates = ["2025-11-02"], models }) {
   const headerModels = [];
-  const chunks = [[0, 100]];
-  let offset = 1;
-  const obsArr = new Float32Array([42.5]);
+  const obsArr = new Float32Array(observedDates.map((_, i) => 42.5 + i));
+  const chunks = [obsArr];
+  let offset = obsArr.length;
   for (const m of models) {
     const mRounds = m.rounds;
     const mHorizons = m.horizons;
@@ -296,7 +307,7 @@ function buildVzf2({ target = "ILI incidence", season = "2025-2026", location = 
     rounds,
     horizons,
     quantiles,
-    observed: { dates: ["2025-11-02"], offset: 0, length: 1 },
+    observed: { dates: observedDates, offset: 0, length: observedDates.length },
     prior_max: 200,
     models: headerModels,
   };
@@ -307,7 +318,7 @@ function buildVzf2({ target = "ILI incidence", season = "2025-2026", location = 
   padded.fill(32, headBytes.length);
   const bodyFloats = new Float32Array(offset);
   bodyFloats.set(obsArr, 0);
-  let pos = 1;
+  let pos = obsArr.length;
   for (let i = 1; i < chunks.length; i++) { bodyFloats.set(chunks[i], pos); pos += chunks[i].length; }
   const out = new Uint8Array(8 + padded.length + bodyFloats.byteLength);
   out.set(new TextEncoder().encode("VZF2"), 0);
@@ -322,6 +333,7 @@ test("decodes VZF2 sparse blocks with horizon_offset_days (-3d RespiCast Wed -> 
     rounds: ["2025-11-05", "2025-11-12"],
     horizons: [1, 2, 3, 4],
     horizonOffsetDays: -3,
+    observedDates: ["2025-11-09"],
     dims: { age_group: "0-130" },
     models: [
       { id: "short", rounds: [1], horizons: [1, 2], fn: (r, h, q) => 100 + h * 10 + (q === 0.5 ? 0 : (q < 0.5 ? -5 : 5)) },
@@ -341,6 +353,36 @@ test("decodes VZF2 sparse blocks with horizon_offset_days (-3d RespiCast Wed -> 
   assert.equal(pts[1].t, parseIso("2025-11-16"));
   assert.ok(Math.abs(pts[1].med - 110) < 1e-4);
   assert.ok(Math.abs(f.yMax(["short"]) - 120) < 1e-4);
+});
+
+test("decodes VZF2 1-indexed RespiCast (-10d) and omits fake anchor when oracle is stale >7d", () => {
+  const freshBuf = buildVzf2({
+    season: "2026-2027",
+    rounds: ["2026-11-18"],
+    horizons: [1, 2, 3, 4],
+    horizonOffsetDays: -10,
+    observedDates: ["2026-11-08"],
+    models: [{ id: "rc", rounds: [0], horizons: [1, 2], fn: (_r, h) => 90 + h }],
+  });
+  const fresh = decodeFan(freshBuf);
+  const pf = fresh.points("rc", fresh.indexOf("2026-11-18"), 0.95);
+  assert.equal(pf[0].anchor, true);
+  assert.equal(pf[0].t, parseIso("2026-11-08"));
+  assert.equal(pf[1].t, parseIso("2026-11-15")); // Nov 18 + 7 - 10 = Nov 15 (7d after Nov 08)
+
+  const staleBuf = buildVzf2({
+    season: "2026-2027",
+    rounds: ["2026-11-18"],
+    horizons: [1, 2, 3, 4],
+    horizonOffsetDays: -10,
+    observedDates: ["2026-11-01"],
+    models: [{ id: "rc", rounds: [0], horizons: [1, 2], fn: (_r, h) => 90 + h }],
+  });
+  const stale = decodeFan(staleBuf);
+  const ps = stale.points("rc", stale.indexOf("2026-11-18"), 0.95);
+  assert.equal(ps[0].anchor, undefined);
+  assert.equal(ps[0].h, 1);
+  assert.equal(ps[0].t, parseIso("2026-11-15"));
 });
 
 test("decodeTrajectories decodes VZT1 binary sample blocks", () => {

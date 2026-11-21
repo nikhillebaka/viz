@@ -219,4 +219,83 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     assert.equal(bosHits[0].targetHubId, "remote_flu_metrocast");
     assert.equal(bosHits[0].targetLocationId, "boston");
   });
+
+  it("buildTargetMenuGroups: deduplicates same-concept targets and leaves cross-region locations to smart resolver", () => {
+    const man = indexManifest({
+      hub_id: "local_flu",
+      default_target: "proportion of ed visits due to flu",
+      locations: [{ id: "25", name: "Massachusetts", abbr: "MA" }],
+      targets: [{ id: "proportion of ed visits due to flu", label: "Flu ED Proportion", short: "Flu ED prop" }],
+      seasons: [{ id: "2025-2026", rounds: ["2025-11-22"] }],
+      models: [{ id: "Ens", abbr: "Ens" }],
+    });
+
+    const catalog = {
+      hubs: [
+        { id: "local_flu", kind: "local", model_count: 5, default_location: "US" },
+        { id: "remote_flu_metrocast", kind: "remote", model_count: 8, default_location: "boston" },
+        { id: "remote_respicast_syndromic", kind: "remote", model_count: 6, default_location: "FR" },
+      ],
+      targets: [
+        {
+          key: "local_flu::proportion of ed visits due to flu",
+          hub_id: "local_flu", hub_short: "Local",
+          target_id: "proportion of ed visits due to flu",
+          label: "proportion of ed visits due to flu",
+          concept_id: "flu_ed_share", concept_label: "Influenza ED visits share", ambiguous: false,
+          pathogen: "influenza", pathogen_label: "Influenza", geo_kind: "us-states", region_label: "US",
+        },
+        {
+          key: "remote_flu_metrocast::Flu ED visits pct",
+          hub_id: "remote_flu_metrocast", hub_short: "MetroCast",
+          target_id: "Flu ED visits pct",
+          label: "Percentage of ED visits due to influenza",
+          concept_id: "flu_ed_share", concept_label: "Influenza ED visits share", ambiguous: false,
+          pathogen: "influenza", pathogen_label: "Influenza", geo_kind: "us-metrocast", region_label: "US · MetroCast",
+        },
+        {
+          key: "remote_respicast_syndromic::ILI incidence",
+          hub_id: "remote_respicast_syndromic", hub_short: "RespiCast",
+          target_id: "ILI incidence",
+          label: "ILI Incidence",
+          concept_id: "ili_incidence", concept_label: "ILI incidence", ambiguous: false,
+          pathogen: "syndromic", pathogen_label: "ILI / ARI", geo_kind: "eu-countries", region_label: "Europe",
+        },
+      ],
+      places: {
+        "25": {
+          key: "25", name: "Massachusetts", abbr: "MA", level: "state", state_fips: "25", parent_key: "US",
+          hubs: [
+            { hub_id: "local_flu", location_id: "25" },
+            { hub_id: "remote_flu_metrocast", location_id: "massachusetts" },
+          ],
+        },
+        boston: {
+          key: "boston", name: "Boston, MA", abbr: "Boston", level: "hsa", state_fips: "25", parent_key: "25",
+          hubs: [{ hub_id: "remote_flu_metrocast", location_id: "boston" }],
+        },
+        FR: {
+          key: "FR", name: "France", abbr: "FR", level: "country",
+          hubs: [{ hub_id: "remote_respicast_syndromic", location_id: "FR" }],
+        },
+      },
+    };
+
+    const maMenu = buildTargetMenuGroups(catalog, man, "25", "local_flu", "proportion of ed visits due to flu");
+    const sepIdx = maMenu.findIndex((e) => e.type === "sep");
+    const above = maMenu.slice(0, sepIdx).filter((e) => e.type === "item");
+    const below = maMenu.slice(sepIdx + 1).filter((e) => e.type === "item");
+    assert.equal(above.length, 1);
+    assert.equal(above[0].hubId, "local_flu");
+    assert.equal(above[0].label, "Influenza ED visits share");
+    assert.equal(below.length, 1);
+    assert.equal(below[0].locationId, null);
+
+    // Inside Boston HSA, active direct MetroCast match wins over parent FluSight match
+    const bosMenu = buildTargetMenuGroups(catalog, man, "boston", "remote_flu_metrocast", "Flu ED visits pct");
+    const bosAbove = bosMenu.slice(0, bosMenu.findIndex((e) => e.type === "sep")).filter((e) => e.type === "item");
+    assert.equal(bosAbove.length, 1);
+    assert.equal(bosAbove[0].hubId, "remote_flu_metrocast");
+    assert.equal(bosAbove[0].locationId, "boston");
+  });
 });

@@ -60,15 +60,41 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
     } else {
       otherPlace.push({
         t,
-        locationId: hubById.get(t.hub_id)?.default_location || null,
+        locationId: null,
         viaParent: false,
       });
     }
   }
 
-  // Disambiguate when multiple hubs share the same pathogen (e.g. FluSight + MetroCast)
+  // Prefer active hub -> direct place match -> local provider -> highest model count when deduplicating concepts
+  const entryRank = (ent) => {
+    const hub = hubById.get(ent.t.hub_id);
+    return (
+      (ent.t.hub_id === activeHubId && ent.t.target_id === currentTargetId ? 1e7 : 0)
+      + (ent.t.hub_id === activeHubId ? 1e6 : 0)
+      + (!ent.viaParent ? 1e5 : 0)
+      + (hub?.kind === "local" ? 1e4 : 0)
+      + (hub?.model_count || 0)
+    );
+  };
+  const dedupEntries = (list, keyOf) => {
+    const best = new Map();
+    for (const ent of list) {
+      const k = keyOf(ent);
+      const cur = best.get(k);
+      if (!cur || entryRank(ent) > entryRank(cur)) best.set(k, ent);
+    }
+    return [...best.values()];
+  };
+
+  const uniqInPlace = dedupEntries(inPlace, (ent) => ent.t.concept_id || ent.t.key);
+  const uniqOtherPlace = dedupEntries(otherPlace, (ent) => (ent.t.concept_id ? `${ent.t.region_label || "Other"}::${ent.t.concept_id}` : ent.t.key));
+  const allShown = [...uniqInPlace, ...uniqOtherPlace];
+
+  // Disambiguate when multiple hubs share the same pathogen across remaining items
   const hubsPerPathogen = new Map();
-  for (const t of catTargets) {
+  for (const ent of allShown) {
+    const { t } = ent;
     if (!hubsPerPathogen.has(t.pathogen)) hubsPerPathogen.set(t.pathogen, new Set());
     hubsPerPathogen.get(t.pathogen).add(t.hub_id);
   }
@@ -79,22 +105,23 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
     if (!shortcut && multiHub && t.hub_short) {
       shortcut = t.hub_short;
     }
+    const label = (!t.ambiguous && t.concept_label) ? t.concept_label : (t.label || t.short || t.target_id);
     return {
       type: "item",
       key: t.key,
       hubId: t.hub_id,
       targetId: t.target_id,
       locationId,
-      label: t.label || t.short || t.target_id,
+      label,
       shortcut,
       checked: t.hub_id === activeHubId && t.target_id === currentTargetId,
     };
   };
 
   const out = [];
-  if (inPlace.length) {
+  if (uniqInPlace.length) {
     const byPathogen = new Map();
-    for (const ent of inPlace) {
+    for (const ent of uniqInPlace) {
       const grp = ent.t.pathogen_label || "Forecasts";
       if (!byPathogen.has(grp)) byPathogen.set(grp, []);
       byPathogen.get(grp).push(ent);
@@ -105,10 +132,10 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
     }
   }
 
-  if (otherPlace.length) {
+  if (uniqOtherPlace.length) {
     if (out.length) out.push({ type: "sep" });
     const byRegionPathogen = new Map();
-    for (const ent of otherPlace) {
+    for (const ent of uniqOtherPlace) {
       const reg = ent.t.region_label || "Other";
       const path = ent.t.pathogen_label || "Forecasts";
       const grp = `${reg} · ${path}`;

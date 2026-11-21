@@ -8,6 +8,7 @@
 /* not clipped: the bubbles' shadows fall onto the page below */
 .app-view { position: relative; height: max(480px, calc(100svh - var(--peek))); }
 .app-view[hidden] { display: none; }
+.app-globe { position: fixed; inset: 0; z-index: calc(var(--z-fixed) - 1); background: var(--surface-paper); }
 .app:not(.is-globe-open) .app-globe-back { display: none; }
 .app.is-globe-open .app-fixed [data-zone="tl"] > :not(.app-globe-back) { display: none; }
 .app.is-globe-open .app-view,

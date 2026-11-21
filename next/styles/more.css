@@ -128,3 +128,20 @@
 .mo-ens-name { font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mo-ens .mo-remove { margin-left: 0; }
 .pk-combine { margin-left: auto; font-size: var(--text-small); }
+
+/* ---------- local target unification mapping ---------- */
+.mo-alias-list {
+  margin-top: var(--space-8); padding-top: var(--space-6);
+  border-top: var(--stroke-hairline) solid var(--line-hairline);
+  display: flex; flex-direction: column; gap: var(--space-6);
+}
+.mo-alias-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); }
+.mo-alias-info { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.mo-alias-name { font-size: var(--text-small); font-weight: var(--weight-medium); color: var(--ink-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mo-alias-status { font-size: var(--text-axis); color: var(--ink-tertiary); }
+.mo-alias-status.is-ambig { color: var(--status-warning); }
+.mo-alias-select {
+  max-width: 196px; height: var(--size-chip); padding: 0 var(--space-8);
+  border: var(--stroke-hairline) solid var(--line-hairline); border-radius: var(--radius-item);
+  background: var(--fill-field); color: var(--ink-primary); font: inherit; font-size: var(--text-small);
+}

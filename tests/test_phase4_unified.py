@@ -457,6 +457,229 @@ class TestUnifiedCatalogAndGlobe(unittest.TestCase):
             viz_server.HUB_MANAGER = old_mgr
             viz_server.SandboxRequestHandler.hub_manager = old_cls_mgr
 
+    def test_respicast_calendar_and_target_unification(self):
+        import struct
+        from viz.core.calendar import infer_calendar
+        from viz.core.catalog import canonical_target_concept
+
+        # 1. RespiCast 1-indexed origin_date (Wed -> Sun): h=1 is -3d, so h=0 offset is -10d
+        rc_tasks = {
+            "rounds": [{
+                "round_id": "origin_date",
+                "model_tasks": [{
+                    "task_ids": {
+                        "origin_date": {"required": ["2026-11-18"]},
+                        "horizon": {"required": [1, 2, 3, 4]},
+                    }
+                }],
+            }]
+        }
+        cal_rc = infer_calendar(rc_tasks, observed_target_dates=["2026-11-08", "2026-11-15"])
+        self.assertEqual(cal_rc.horizon_offset_days, -10)
+
+        # Zero-indexed origin_date stays -3d
+        rc_zero = {
+            "rounds": [{
+                "round_id": "origin_date",
+                "model_tasks": [{
+                    "task_ids": {
+                        "origin_date": {"required": ["2026-11-18"]},
+                        "horizon": {"required": [0, 1, 2, 3]},
+                    }
+                }],
+            }]
+        }
+        cal_zero = infer_calendar(rc_zero, observed_target_dates=["2026-11-08", "2026-11-15"])
+        self.assertEqual(cal_zero.horizon_offset_days, -3)
+
+        # VZF2 payload with empirical target_end_date encodes horizon_offset_days == -10 when Wed->Sun @ h=1
+        rc2_vzf = Path(tempfile.mkdtemp())
+        d_vzf = Path(tempfile.mkdtemp())
+        try:
+            _write_basic_us_hub(rc2_vzf, ["wk inc flu hosp"], ["2025-11-22"])
+            m_vzf = HubManager(mode="local", data_dir=d_vzf, cli_hubs=[rc2_vzf], include_enclosing=False)
+            rc_emp = m_vzf.remote_store.hub_dir("respicast_syndromic")
+            (rc_emp / "hub-config").mkdir(parents=True, exist_ok=True)
+            (rc_emp / "target-data").mkdir(parents=True, exist_ok=True)
+            (rc_emp / "model-output" / "RC-emp").mkdir(parents=True, exist_ok=True)
+            (rc_emp / "hub-config" / "tasks.json").write_text(json.dumps({
+                "rounds": [{
+                    "round_id": "origin_date",
+                    "model_tasks": [{
+                        "task_ids": {
+                            "origin_date": {"required": ["2026-11-18"]},
+                            "target": {"required": ["ILI incidence"]},
+                            "location": {"required": ["FR"]},
+                            "horizon": {"required": [1, 2]},
+                        },
+                        "output_type": {"quantile": {"output_type_id": {"required": ["0.5"]}}},
+                    }],
+                }]
+            }), encoding="utf-8")
+            pl.DataFrame({
+                "reference_date": ["2026-11-18", "2026-11-18"],
+                "target": ["ILI incidence", "ILI incidence"],
+                "horizon": [1, 2],
+                "target_end_date": ["2026-11-15", "2026-11-22"],
+                "location": ["FR", "FR"],
+                "output_type": ["quantile", "quantile"],
+                "output_type_id": ["0.5", "0.5"],
+                "value": [400.0, 410.0],
+            }).write_parquet(rc_emp / "model-output" / "RC-emp" / "2026-11-18-RC-emp.parquet")
+            pl.DataFrame({
+                "location": ["FR"],
+                "location_name": ["France"],
+                "population": [67000000],
+            }).write_csv(rc_emp / "target-data" / "locations.csv")
+            pl.DataFrame({
+                "target": ["ILI incidence"],
+                "location": ["FR"],
+                "target_end_date": ["2026-11-08"],
+                "oracle_value": [390.0],
+            }).write_parquet(rc_emp / "target-data" / "oracle.parquet")
+            m_vzf.remote_store.save_manifest("respicast_syndromic", {
+                "files": {"q": {"model": "RC-emp", "reference_date": "2026-11-18", "path": "model-output/RC-emp/2026-11-18-RC-emp.parquet", "targets": ["ILI incidence"], "output_types": ["quantile"]}},
+                "seasons": ["2026-2027"],
+            })
+            rc_ctx = m_vzf.get_context("remote_respicast_syndromic")
+            buf = rc_ctx.next_data.fan("ILI incidence", "2026-2027", "FR", version=2)
+            self.assertIsNotNone(buf)
+            hlen = struct.unpack("<I", buf[4:8])[0]
+            header = json.loads(buf[8:8 + hlen].decode("utf-8"))
+            self.assertEqual(header["horizon_offset_days"], -10)
+        finally:
+            shutil.rmtree(rc2_vzf, ignore_errors=True)
+            shutil.rmtree(d_vzf, ignore_errors=True)
+
+        # 2. Semantic concept unification & oracle-backed per-target default_location
+        c_prop, _, a_prop = canonical_target_concept("proportion of ed visits due to flu", {"scale": "proportion"}, "influenza")
+        c_pct, _, a_pct = canonical_target_concept("Flu ED visits pct", {"scale": "percentage", "display_name": "Percentage of ED visits due to influenza"}, "influenza")
+        self.assertEqual(c_prop, "flu_ed_share")
+        self.assertEqual(c_pct, "flu_ed_share")
+        self.assertFalse(a_prop)
+        self.assertFalse(a_pct)
+
+        # Local fork with renamed Flu ED proportion target + custom ambiguous target
+        fork = Path(tempfile.mkdtemp())
+        d2 = Path(tempfile.mkdtemp())
+        try:
+            _write_basic_us_hub(fork, ["proportion of weekly incident ED visits due to flu", "my custom signal"], ["2025-11-22"])
+            _write_forecast_rows(
+                fork / "model-output" / "Local-Ens" / "2025-11-22-Local-Ens.csv",
+                "2025-11-22", "proportion of weekly incident ED visits due to flu",
+                [("US", 0, 0.04), ("25", 0, 0.05)],
+            )
+            _write_forecast_rows(
+                fork / "model-output" / "Local-Ens" / "2025-11-22-Local-Ens-2.csv",
+                "2025-11-22", "my custom signal",
+                [("US", 0, 12.0), ("25", 0, 1.0)],
+            )
+            pl.DataFrame({
+                "target": ["proportion of weekly incident ED visits due to flu", "my custom signal"],
+                "location": ["US", "US"],
+                "target_end_date": ["2025-11-22", "2025-11-22"],
+                "oracle_value": [0.038, 11.0],
+            }).write_csv(fork / "target-data" / "oracle-output.csv")
+
+            m2 = HubManager(mode="local", data_dir=d2, cli_hubs=[fork], include_enclosing=False)
+            # Remote flusight carrying wk inc flu prop ed visits + Europe RespiCast ILI without DE in oracle
+            fs2 = m2.remote_store.hub_dir("flusight")
+            _write_basic_us_hub(fs2, ["wk inc flu prop ed visits", "wk flu hosp rate change"], ["2025-11-22"])
+            _write_forecast_rows(
+                fs2 / "model-output" / "FS-ens" / "2025-11-22-FS-ens.parquet",
+                "2025-11-22", "wk inc flu prop ed visits", [("US", 0, 4.1)], parquet=True,
+            )
+            m2.remote_store.save_manifest("flusight", {
+                "files": {"a": {"model": "FS-ens", "reference_date": "2025-11-22", "path": "model-output/FS-ens/2025-11-22-FS-ens.parquet", "targets": ["wk inc flu prop ed visits"], "output_types": ["quantile"]}},
+                "seasons": ["2025-2026"],
+            })
+            rc2 = m2.remote_store.hub_dir("respicast_syndromic")
+            (rc2 / "hub-config").mkdir(parents=True, exist_ok=True)
+            (rc2 / "target-data").mkdir(parents=True, exist_ok=True)
+            pl.DataFrame({
+                "location": ["DE", "FR"],
+                "location_name": ["Germany", "France"],
+                "population": [83000000, 67000000],
+            }).write_csv(rc2 / "target-data" / "locations.csv")
+            (rc2 / "hub-config" / "tasks.json").write_text(json.dumps({
+                "rounds": [{
+                    "round_id": "origin_date",
+                    "model_tasks": [{
+                        "task_ids": {
+                            "origin_date": {"required": ["2025-11-19"]},
+                            "target": {"required": ["ARI incidence", "ILI incidence"]},
+                            "horizon": {"required": [1]},
+                        },
+                        "output_type": {"quantile": {"output_type_id": {"required": [0.5]}}},
+                    }],
+                }]
+            }))
+            (rc2 / "model-output" / "RC-ens").mkdir(parents=True, exist_ok=True)
+            _write_forecast_rows(
+                rc2 / "model-output" / "RC-ens" / "2025-11-19-RC-ens.parquet",
+                "2025-11-19", "ILI incidence", [("FR", 1, 150.0)], parquet=True,
+            )
+            pl.DataFrame({
+                "target": ["ARI incidence", "ILI incidence"],
+                "location": ["DE", "FR"],
+                "target_end_date": ["2025-11-16", "2025-11-16"],
+                "oracle_value": [900.0, 140.0],
+            }).write_parquet(rc2 / "target-data" / "oracle.parquet")
+            m2.remote_store.save_manifest("respicast_syndromic", {
+                "files": {"a": {"model": "RC-ens", "reference_date": "2025-11-19", "path": "model-output/RC-ens/2025-11-19-RC-ens.parquet", "targets": ["ILI incidence"], "output_types": ["quantile"]}},
+                "seasons": ["2025-2026"],
+            })
+
+            cat = m2.catalog.build_catalog()
+            cat_keys = {t["key"] for t in cat["targets"]}
+            # Renamed local flu prop target subsumes remote_flusight::wk inc flu prop ed visits cleanly
+            self.assertNotIn("remote_flusight::wk inc flu prop ed visits", cat_keys)
+            ili_rec = next(t for t in cat["targets"] if t["key"] == "remote_respicast_syndromic::ILI incidence")
+            self.assertEqual(ili_rec["default_location"], "FR")
+
+            local_hid = m2.default_hub_id()
+            custom_rec = next(t for t in cat["targets"] if t["key"] == f"{local_hid}::my custom signal")
+            self.assertTrue(custom_rec["ambiguous"])
+
+            # POST /api/workspace/target-aliases persists override and updates catalog
+            old_m = viz_server.HUB_MANAGER
+            old_cm = viz_server.SandboxRequestHandler.hub_manager
+            viz_server.HUB_MANAGER = m2
+            viz_server.SandboxRequestHandler.hub_manager = m2
+            try:
+                srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), viz_server.SandboxRequestHandler)
+                port = srv.server_address[1]
+                th = threading.Thread(target=srv.serve_forever, daemon=True)
+                th.start()
+                try:
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/workspace/target-aliases",
+                        data=json.dumps({"hub_id": local_hid, "target_id": "my custom signal", "concept_id": "flu_hosp"}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self.assertEqual(resp.status, 200)
+                        body = json.loads(resp.read().decode("utf-8"))
+                        self.assertEqual(body["target_aliases"][local_hid]["my custom signal"], "flu_hosp")
+                        updated = next(t for t in body["catalog"]["targets"] if t["key"] == f"{local_hid}::my custom signal")
+                        self.assertEqual(updated["concept_id"], "flu_hosp")
+                        self.assertFalse(updated["ambiguous"])
+                        self.assertTrue(updated["user_aliased"])
+                finally:
+                    srv.shutdown()
+                    srv.server_close()
+            finally:
+                viz_server.HUB_MANAGER = old_m
+                viz_server.SandboxRequestHandler.hub_manager = old_cm
+
+            # Persisted in workspace.json across HubManager reload
+            m2_reloaded = HubManager(mode="local", data_dir=d2, cli_hubs=[fork], include_enclosing=False)
+            self.assertEqual(m2_reloaded.registry.get_target_aliases()[local_hid]["my custom signal"], "flu_hosp")
+        finally:
+            shutil.rmtree(fork, ignore_errors=True)
+            shutil.rmtree(d2, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

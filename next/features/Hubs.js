@@ -7,7 +7,7 @@
 import { h } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { icon, toast } from "../ui/controls.js";
-import { clearAllCaches } from "../lib/api.js";
+import { clearAllCaches, loadCatalog } from "../lib/api.js";
 import { fmtDay } from "../lib/format.js";
 import { parseIso } from "../lib/scale.js";
 import { getJSON, postJSON, fmtBytes, fmtAgo, reloadSoon, loadWarningSummary } from "./More.js";
@@ -195,6 +195,9 @@ export async function openHubs(anchor, ctx = {}) {
   let remoteNoteText = "";
   let localBusy = true;
   let remoteBusy = false;
+  let catalog = ctx.catalog || null;
+  const aliasOpen = new Set();
+  let autoExpandedAmbiguous = false;
   browserOpen = false;
 
   const list = h("div", { class: "mo-hubs" });
@@ -299,15 +302,32 @@ export async function openHubs(anchor, ctx = {}) {
         h("span", null, "Local hubs"),
         h("span", { class: "c-section-count" }, plural(localHubs.length, "hub"))));
 
+    const concepts = catalog?.concepts || [];
     const cards = localHubs.map((lh) => {
       const isActive = currentHubId ? lh.id === currentHubId : Boolean(lh.active);
       const badgeText = !lh.exists ? "Missing" : isActive ? "Active" : "Saved";
       const badgeCls = !lh.exists ? "is-missing" : isActive ? "is-live" : "";
       const meta = [plural(lh.model_count || 0, "model"), plural(lh.targets_count || 0, "target")].join(" · ");
       const armedRemove = wsArmed.has(lh.id);
+      const hubTargets = (catalog?.targets || []).filter((t) => t.hub_id === lh.id);
+      const ambigCount = hubTargets.filter((t) => t.ambiguous).length;
+      const canUnify = isLocalMode && lh.exists && hubTargets.length > 0 && concepts.length > 0;
+      const showAliases = canUnify && aliasOpen.has(lh.id);
       const actions = [];
       if (!isActive && lh.exists) {
         actions.push(h("button", { type: "button", class: "c-btn sm mo-primary", onclick: () => openLocalHub(lh.id) }, "Open"));
+      }
+      if (canUnify) {
+        actions.push(h("button", {
+          type: "button",
+          class: "c-btn sm",
+          "aria-expanded": String(showAliases),
+          onclick: () => {
+            if (aliasOpen.has(lh.id)) aliasOpen.delete(lh.id);
+            else aliasOpen.add(lh.id);
+            render?.();
+          },
+        }, ambigCount ? `Unify targets (${ambigCount})` : "Unify targets"));
       }
       if (isLocalMode) {
         actions.push(h("button", {
@@ -316,13 +336,60 @@ export async function openHubs(anchor, ctx = {}) {
           onclick: () => forgetLocalHub(lh, localNoteEl),
         }, armedRemove ? "Forget?" : "Remove"));
       }
+      const aliasList = showAliases
+        ? h("div", { class: "mo-alias-list" }, ...hubTargets.map((t) => {
+          const status = t.ambiguous
+            ? "Unmatched — map to unify"
+            : t.user_aliased
+              ? `Mapped · ${t.concept_label}`
+              : `Matched · ${t.concept_label}`;
+          const sel = h("select", {
+            class: "mo-alias-select",
+            "aria-label": `Canonical concept for ${t.label || t.target_id}`,
+            onchange: async () => {
+              const val = sel.value || null;
+              sel.disabled = true;
+              try {
+                const res = await postJSON("/api/workspace/target-aliases", {
+                  hub_id: lh.id,
+                  target_id: t.target_id,
+                  concept_id: val,
+                });
+                if (res?.catalog) {
+                  catalog = res.catalog;
+                  if (activeCtx) activeCtx.catalog = res.catalog;
+                }
+                clearAllCaches();
+                toast(val ? `${t.short || t.target_id} unified` : `${t.short || t.target_id} reset to auto`);
+                render?.();
+              } catch (err) {
+                localNoteText = `Couldn't unify · ${err.message}`;
+                render?.();
+              } finally {
+                sel.disabled = false;
+              }
+            },
+          },
+          h("option", { value: "", selected: !t.user_aliased }, t.ambiguous ? "Keep separate" : "Automatic"),
+          ...concepts.map((c) => h("option", {
+            value: c.id,
+            selected: Boolean(t.user_aliased && t.concept_id === c.id),
+          }, c.label)));
+          return h("div", { class: "mo-alias-row" },
+            h("div", { class: "mo-alias-info" },
+              h("span", { class: "mo-alias-name", title: t.target_id }, t.label || t.target_id),
+              h("span", { class: ["mo-alias-status", t.ambiguous && "is-ambig"] }, status)),
+            sel);
+        }))
+        : null;
       return h("div", { class: "mo-src", "data-local-hub": lh.id },
         h("div", { class: "mo-src-head" },
           h("span", { class: "mo-src-name", title: lh.description || undefined }, lh.repo_url ? h("a", { href: lh.repo_url, target: "_blank", rel: "noopener" }, lh.label) : lh.label),
           h("span", { class: ["mo-src-state", badgeCls] }, badgeText)),
         h("div", { class: "mo-src-meta" }, meta),
         lh.path ? h("div", { class: "mo-src-path", title: lh.path }, lh.path) : null,
-        actions.length ? h("div", { class: "mo-actions" }, actions) : null);
+        actions.length ? h("div", { class: "mo-actions" }, actions) : null,
+        aliasList);
     });
 
     const localNoteEl = h("div", { class: "mo-note", "aria-live": "polite" }, localNoteText);
@@ -462,7 +529,18 @@ export async function openHubs(anchor, ctx = {}) {
     loadHubs()
       .catch((err) => { remoteNoteText = `Couldn't load hubs · ${err.message}`; })
       .finally(() => { remoteBusy = false; render?.(); }),
+    (catalog ? Promise.resolve(catalog) : loadCatalog())
+      .then((c) => { if (c) catalog = c; })
+      .catch(() => {}),
   ]);
+
+  if (!autoExpandedAmbiguous && catalog?.targets && workspace?.hubs) {
+    autoExpandedAmbiguous = true;
+    const localIds = new Set(workspace.hubs.map((h) => h.id));
+    for (const t of catalog.targets) {
+      if (t.ambiguous && localIds.has(t.hub_id)) aliasOpen.add(t.hub_id);
+    }
+  }
 
   if (workspace?.mode === "local" && (workspace.hubs || []).length === 0) {
     browserOpen = true;
