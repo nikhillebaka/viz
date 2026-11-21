@@ -28,7 +28,7 @@ const TEXT_FIELD = "input, textarea, select, [contenteditable]:not([contentedita
  * @param {{ manifest: import("../lib/api.js").Manifest, store: object, chart: object | null }} ctx
  * @returns {{ view: HTMLElement, destroy(): void }}
  */
-export function mountShell(root, ctx) {
+export function mountShell(root, ctx, { pickLocation = false } = {}) {
   const { manifest, store } = ctx;
   const doc = document.documentElement;
   root.classList.add("app");
@@ -68,9 +68,10 @@ export function mountShell(root, ctx) {
     modelsBtn.setAttribute("aria-label", n ? `Models: ${n} selected, ${charted.length} on the chart` : "Choose models");
   };
   const renderPlace = () => {
-    const loc = manifest.locationById.get(store.get().location);
-    placeBtn.querySelector(".c-pill-label").textContent = loc?.name ?? store.get().location;
-    placeBtn.setAttribute("aria-label", `Location: ${loc?.name ?? store.get().location}`);
+    const locId = store.get().location;
+    const loc = locId ? manifest.locationById.get(locId) : null;
+    placeBtn.querySelector(".c-pill-label").textContent = loc ? (loc.name ?? locId) : "Choose location";
+    placeBtn.setAttribute("aria-label", loc ? `Location: ${loc.name ?? locId}` : "Choose location");
   };
   const renderTarget = () => {
     if (!targetBtn) return;
@@ -139,9 +140,16 @@ export function mountShell(root, ctx) {
   }
   renderDims();
 
+  let sections = null;
+  const syncSectionVis = () => {
+    const s = store.get();
+    const cat = isCategoricalTarget(manifest.targetById.get(s.target));
+    if (sections?.el) sections.el.hidden = cat || !s.location;
+  };
+
   const offs = [
     store.select(["sel"], () => { renderModels(); gModels.update(); }),
-    store.select(["location"], () => { renderPlace(); gPlace.update(); }),
+    store.select(["location"], () => { renderPlace(); gPlace.update(); syncSectionVis(); }),
     store.select(["target"], () => { renderTarget(); if (targetBtn) gTarget.update(); renderDims(); syncTargetMode(); }),
     store.select(["dims"], () => syncDimLabels()),
     store.select(["theme"], (s) => { doc.dataset.theme = s.theme; }),
@@ -186,15 +194,17 @@ export function mountShell(root, ctx) {
   // model pages: data-model-sheet="<id>" anywhere opens the sheet; #model/<id> opens it on load and on change
   const sheet = () => import("./ModelSheet.js");
   sheet().then((m) => { m.installModelLinks(ctx); const id = m.modelHash(); if (id) m.openModel(id, ctx); }).catch(() => {});
-  const sections = mountSections(root, ctx);
+  sections = mountSections(root, ctx);
+  syncSectionVis();
 
   let pmfInst = null;
   let pmfLoadToken = 0;
   function syncTargetMode() {
-    const cat = isCategoricalTarget(manifest.targetById.get(store.get().target));
+    const s = store.get();
+    const cat = isCategoricalTarget(manifest.targetById.get(s.target));
     view.hidden = cat;
     pmfHost.hidden = !cat;
-    if (sections?.el) sections.el.hidden = cat;
+    syncSectionVis();
     if (cat) {
       if (pmfInst) return;
       const tok = ++pmfLoadToken;
@@ -230,7 +240,7 @@ export function mountShell(root, ctx) {
       const tok = ++globeToken;
       import("./GlobeView.js").then((m) => {
         if (gone || !globeOpen || tok !== globeToken || !globeHost) return;
-        globeInst = m.mountGlobeView(globeHost, { manifest, store, onClose: () => setGlobeOpen(false) });
+        globeInst = m.mountGlobeView(globeHost, { ...ctx, onClose: () => setGlobeOpen(false) });
       }).catch((err) => {
         console.error("viz: Globe could not load", err);
         setGlobeOpen(false);
@@ -261,6 +271,12 @@ export function mountShell(root, ctx) {
   let more = null, gone = false;
   import("./More.js").then((m) => { if (!gone) more = m.mountMore(tr, ctx); }).catch(() => {});
   syncTargetMode();
+  if (pickLocation) {
+    markReady();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (!gone && !store.get().location && !globeOpen) openPicker("location", placeBtn);
+    }));
+  }
 
   // The chart's own bubbles (bottom row, note, recenter) scroll with the chart; once that bottom row
   // reaches the fixed top bubbles they fade out instead of piling onto them. An observer, not a scroll

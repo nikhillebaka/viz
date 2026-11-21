@@ -180,11 +180,11 @@ function normalizePmfPayload(raw, manifest) {
  * @param {{ manifest: import("../lib/api.js").Manifest, store: object, onReady?: () => void }} ctx
  */
 export function mountPmfView(host, ctx) {
-  const { manifest, store, onReady } = ctx;
+  const { manifest, store, onReady, compact = false, getSource = null } = ctx;
   linkStyle("views");
   linkStyle("pmf");
 
-  const sec = h("section", { class: "v-section" });
+  const sec = h("section", { class: compact ? "v-section pmf-compact" : "v-section" });
   const line = h("div", { class: "v-line" });
   const titleEl = h("h2", { class: "v-title" });
   const head = h("header", { class: "v-head" }, titleEl, line);
@@ -213,6 +213,7 @@ export function mountPmfView(host, ctx) {
   let hitTargets = [];
   let token = 0;
   let destroyed = false;
+  let loadedReqKey = "";
   const offs = [];
 
   const setEmpty = (text, retry) => {
@@ -501,10 +502,9 @@ export function mountPmfView(host, ctx) {
     if (W < 60) return;
     const cmp = comparedModels();
     const isBarsSingle = shapeMode === "bars" && viewMode === "round";
-    const H = isBarsSingle ? Math.max(220, cmp.length * 88 + 44)
-      : shapeMode === "bars" ? 310
-      : shapeMode === "matrix" ? Math.max(240, data.categories.length * 42 + 64)
-      : 300;
+    const H = compact
+      ? (isBarsSingle ? Math.max(176, cmp.length * 64 + 36) : shapeMode === "bars" ? 228 : shapeMode === "matrix" ? Math.max(184, data.categories.length * 32 + 52) : 228)
+      : (isBarsSingle ? Math.max(220, cmp.length * 88 + 44) : shapeMode === "bars" ? 310 : shapeMode === "matrix" ? Math.max(240, data.categories.length * 42 + 64) : 300);
     const g = fitCanvas(canvas, W, H);
 
     const isLight = document.documentElement.dataset.theme === "light";
@@ -963,27 +963,53 @@ export function mountPmfView(host, ctx) {
     scheduleDraw();
   }
 
-  async function loadCurrent() {
-    const tToken = ++token;
+  async function loadCurrent(force = false) {
     const s = store.get();
-    const tMeta = manifest.targetById.get(s.target);
-    const place = manifest.locationById.get(s.location);
-    titleEl.textContent = tMeta?.label || tMeta?.short || s.target;
+    const src = getSource ? getSource() : {
+      targetId: s.target,
+      hubId: null,
+      locationId: s.location,
+      dims: s.dims,
+      locationName: manifest.locationById.get(s.location)?.name || s.location,
+      title: manifest.targetById.get(s.target)?.label || manifest.targetById.get(s.target)?.short || s.target,
+    };
+    const season = manifest.seasonOf(s.date) ?? manifest.latest?.season ?? manifest.seasons.at(-1)?.id;
+    titleEl.textContent = src?.title || "Rate change";
+
+    if (!src?.targetId || !src?.locationId) {
+      loadedReqKey = "";
+      data = null;
+      sec.classList.remove("is-loading");
+      setEmpty(src === null ? "No rate-change forecasts here" : "Choose a location");
+      onReady?.();
+      renderAll();
+      return;
+    }
+
+    const reqKey = `${src.hubId || ""}|${src.targetId}|${season}|${src.locationId}|${JSON.stringify(src.dims || {})}`;
+    if (!force && reqKey === loadedReqKey && data) {
+      roundIdx = nearestIndex(data.rounds, s.date);
+      renderAll();
+      return;
+    }
+    loadedReqKey = reqKey;
+
+    const tToken = ++token;
+    const placeName = src.locationName || manifest.locationById.get(src.locationId)?.name || src.locationId;
     sec.classList.add("is-loading");
     setEmpty(null);
     readout.hidden = true;
     hoverHit = null;
 
-    const season = manifest.seasonOf(s.date) ?? manifest.latest?.season ?? manifest.seasons.at(-1)?.id;
     try {
-      const raw = await loadPmf(s.target, season, s.location, { dims: s.dims });
+      const raw = await loadPmf(src.targetId, season, src.locationId, { dims: src.dims, hub: src.hubId || undefined });
       if (destroyed || tToken !== token) return;
       sec.classList.remove("is-loading");
       onReady?.();
       const norm = normalizePmfPayload(raw, manifest);
       if (!norm.rounds.length || !norm.modelIds.length) {
         data = null;
-        setEmpty(`No categorical forecasts for ${place?.name || s.location} in ${season}`);
+        setEmpty(`No categorical forecasts for ${placeName} in ${season}`);
         renderAll();
         return;
       }
@@ -997,10 +1023,11 @@ export function mountPmfView(host, ctx) {
       renderAll();
     } catch {
       if (destroyed || tToken !== token) return;
+      loadedReqKey = "";
       sec.classList.remove("is-loading");
       onReady?.();
       data = null;
-      setEmpty(`Couldn't load categorical forecasts for ${place?.name || s.location}`, loadCurrent);
+      setEmpty(`Couldn't load categorical forecasts for ${placeName}`, () => loadCurrent(true));
       renderAll();
     }
   }
@@ -1028,6 +1055,7 @@ export function mountPmfView(host, ctx) {
 
   return {
     resize: scheduleDraw,
+    update: () => loadCurrent(),
     destroy() {
       destroyed = true;
       token++;

@@ -17,7 +17,7 @@ import { defaultDims } from "./url.js";
 export function buildTargetMenuGroups(catalog, manifest, currentLocationId, activeHubId, currentTargetId) {
   const catTargets = catalog?.targets;
   if (!Array.isArray(catTargets) || !catTargets.length) {
-    return (manifest?.targets || []).map((t) => ({
+    return (manifest?.targets || []).filter((t) => !t.is_categorical).map((t) => ({
       type: "item",
       key: `${activeHubId || ""}::${t.id}`,
       hubId: activeHubId,
@@ -49,6 +49,7 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
   const inPlace = [];
   const otherPlace = [];
   for (const t of catTargets) {
+    if (t.is_categorical) continue;
     const directLoc = directLocByHub.get(t.hub_id);
     const pLoc = !directLoc ? parentLocByHub.get(t.hub_id) : null;
     if (directLoc || pLoc) {

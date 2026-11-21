@@ -744,9 +744,11 @@ export function mountGlobeView(host, ctx) {
   function scheduleDraw() { if (!loopRaf && !destroyed) loopRaf = requestAnimationFrame(tick); }
 
   function draw() {
-    const fit = fitCanvas(canvas);
-    if (!fit) return;
-    const { g, width: W, height: H } = fit;
+    const rect = wrap.getBoundingClientRect();
+    const W = Math.round(rect.width), H = Math.round(rect.height);
+    if (W < 2 || H < 2) return;
+    const g = fitCanvas(canvas, W, H);
+    if (!g) return;
     const isLight = document.documentElement.dataset.theme === "light";
     const paper = cssColor("var(--surface-paper)");
     const accent = cssColor("var(--accent)");

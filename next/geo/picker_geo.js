@@ -37,6 +37,14 @@ const FIPS_BY_ABBR = new Map(
 
 const SUBSTATE_LEVELS = new Set(["hsa", "region", "borough", "metro", "county"]);
 
+const NYC_BOROUGH_COUNTIES = Object.freeze({
+  "36005": { id: "Bronx", abbr: "BX", name: "Bronx, NY" },
+  "36047": { id: "Brooklyn", abbr: "BK", name: "Brooklyn, NY" },
+  "36061": { id: "Manhattan", abbr: "MN", name: "Manhattan, NY" },
+  "36081": { id: "Queens", abbr: "QN", name: "Queens, NY" },
+  "36085": { id: "Staten Island", abbr: "SI", name: "Staten Island, NY" },
+});
+
 function parseFips(loc, byId) {
   if (!loc) return null;
   if (loc.state_fips && /^\d{2}$/.test(String(loc.state_fips))) return String(loc.state_fips);
@@ -154,6 +162,12 @@ export function loadUsGeoCache() {
       for (const [k, v] of rawState2d.entries()) stateLonLatByFips.set(String(k).padStart(2, "0"), v);
       const { metroMesh, metroFeatures, coveredStates } = buildMetroOverlays(usTopo, usArcs, hsasData, decodedUsArcs);
       const metroById = new Map(metroFeatures.map((m) => [m.id, m]));
+      const county2d = extractLonLatFeatures(usTopo, "counties", decodedUsArcs);
+      const nycBoroughs = [];
+      for (const [fips, meta] of Object.entries(NYC_BOROUGH_COUNTIES)) {
+        const rings = county2d.get(fips) || county2d.get(String(Number(fips)));
+        if (rings?.length) nycBoroughs.push({ ...meta, stateFips: "36", lonLatRings: rings });
+      }
       return {
         states,
         stateMesh,
@@ -161,6 +175,7 @@ export function loadUsGeoCache() {
         metroMesh,
         metroFeatures,
         metroById,
+        nycBoroughs,
         coveredStates,
         hsasData,
       };
@@ -171,6 +186,8 @@ export function loadUsGeoCache() {
   }
   return usGeoPromise;
 }
+
+const NYC_BOROUGH_IDS = new Set(Object.values(NYC_BOROUGH_COUNTIES).map((b) => b.id));
 
 /**
  * Render an aspect-corrected interactive SVG map of a state's dissolved MetroCast HSA polygons
@@ -190,20 +207,41 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
     height = 196,
   } = opts;
 
-  const hsas = (usGeo.metroFeatures || []).filter((m) => m.stateFips === stateFips);
+  const isNycBoroughView = stateFips === "36"
+    && usGeo.nycBoroughs?.length
+    && (manifestHsas || []).some((x) => NYC_BOROUGH_IDS.has(x.id));
+  const hsas = isNycBoroughView
+    ? usGeo.nycBoroughs
+    : (usGeo.metroFeatures || []).filter((m) => m.stateFips === stateFips);
   const manifestById = new Map((manifestHsas || []).map((x) => [x.id, x]));
   const bgRings = usGeo.stateLonLatByFips?.get(stateFips) || [];
-  const allRings = [...bgRings, ...hsas.flatMap((m) => m.lonLatRings || [])];
-  if (!allRings.length) return null;
+  const hsaRings = hsas.flatMap((m) => m.lonLatRings || []);
+  if (!bgRings.length && !hsaRings.length) return null;
 
-  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
-  for (const r of allRings) {
-    for (let i = 0; i < r.length; i += 2) {
-      if (r[i] < minLon) minLon = r[i];
-      if (r[i] > maxLon) maxLon = r[i];
-      if (r[i + 1] < minLat) minLat = r[i + 1];
-      if (r[i + 1] > maxLat) maxLat = r[i + 1];
+  const boundsOf = (rings) => {
+    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const r of rings) {
+      for (let i = 0; i < r.length; i += 2) {
+        if (r[i] < minLon) minLon = r[i];
+        if (r[i] > maxLon) maxLon = r[i];
+        if (r[i + 1] < minLat) minLat = r[i + 1];
+        if (r[i + 1] > maxLat) maxLat = r[i + 1];
+      }
     }
+    return { minLon, maxLon, minLat, maxLat };
+  };
+
+  const sb = bgRings.length ? boundsOf(bgRings) : boundsOf(hsaRings);
+  const hb = hsaRings.length ? boundsOf(hsaRings) : sb;
+  const compactSubarea = hsaRings.length > 0 && bgRings.length > 0
+    && ((hb.maxLon - hb.minLon) < (sb.maxLon - sb.minLon) * 0.35 || (hb.maxLat - hb.minLat) < (sb.maxLat - sb.minLat) * 0.35);
+  let { minLon, maxLon, minLat, maxLat } = compactSubarea
+    ? hb
+    : (bgRings.length && hsaRings.length ? boundsOf([...bgRings, ...hsaRings]) : hb);
+  if (compactSubarea) {
+    const px = Math.max(0.05, (maxLon - minLon) * 0.18);
+    const py = Math.max(0.05, (maxLat - minLat) * 0.18);
+    minLon -= px; maxLon += px; minLat -= py; maxLat += py;
   }
 
   const cosLat = Math.max(0.25, Math.cos(((minLat + maxLat) * 0.5) * (Math.PI / 180)));
@@ -224,7 +262,7 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
   }).join(" ");
 
   const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("class", className);
+  svg.setAttribute("class", compactSubarea ? `${className} is-clipped` : className);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("role", "img");
   svg.setAttribute("aria-label", `${US_STATE_META[stateFips]?.name || stateFips} MetroCast HSAs`);

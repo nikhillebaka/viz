@@ -480,6 +480,7 @@ export function loadTrajectories(target, season, location, date, opts = {}) {
 
 export function loadPmf(target, season, location, opts = {}) {
   const q = new URLSearchParams({ target, season, location });
+  if (opts.hub) q.set("workspace", String(opts.hub));
   if (opts.date) q.set("date", opts.date);
   if (opts.models?.length) q.set("models", opts.models.join(","));
   if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));

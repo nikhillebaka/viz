@@ -91,6 +91,7 @@ export function mount(el, ctx) {
   const board = h("div", { class: "sc-board", role: "table", "aria-label": "Leaderboard" });
   const figSvgs = { cal: s("svg", { class: "sc-fig-svg" }), hz: s("svg", { class: "sc-fig-svg" }), anat: s("svg", { class: "sc-fig-svg sc-fig-anat" }) };
   const shareBtn = h("button", { type: "button", class: "sc-fig-toggle", onclick: () => { share = !share; drawFigures(); } });
+  const plusBtn = h("button", { type: "button", class: "sc-plus", "aria-label": "Columns", html: icon.more, onclick: (e) => columnsMenu(e.currentTarget) });
   const figs = h("div", { class: "sc-figs" },
     h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Calibration", h("span", { class: "sc-fig-sub" }, "coverage − nominal, pts")), figSvgs.cal),
     h("figure", { class: "sc-fig" }, h("figcaption", { class: "sc-fig-title" }, "Horizon", h("span", { class: "sc-fig-sub" }, "Rel. WIS by weeks ahead")), figSvgs.hz),
@@ -392,10 +393,9 @@ export function mount(el, ctx) {
     };
     const relHead = h("span", { class: "sc-head-rel" }, head("rel", COLUMNS.rel.label),
       h("span", { class: "sc-axis-ticks mono", "aria-hidden": "true" }, h("i", { style: { "--x": "0%" } }, "0.5"), h("i", { style: { "--x": "50%" } }, "1"), h("i", { style: { "--x": "100%" } }, "2")));
-    const plus = h("button", { type: "button", class: "sc-plus", "aria-label": "Columns", html: icon.more, onclick: (e) => columnsMenu(e.currentTarget) });
     return h("div", { class: "sc-row sc-headrow", role: "row" },
       h("span"), head("name", "Model", "is-left"),
-      ...cols.map((c) => (c === "rel" ? relHead : head(c, COLUMNS[c].label))), plus);
+      ...cols.map((c) => (c === "rel" ? relHead : head(c, COLUMNS[c].label))), plusBtn);
   }
 
   function rowKey(e, r) {

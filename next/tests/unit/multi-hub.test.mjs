@@ -8,6 +8,7 @@ import { scorePmfDistribution, verticalPmfSegments } from "../../features/PmfVie
 import { parseUrl, writeUrl, defaults, targetDimSpecs, defaultDims, isCategoricalTarget } from "../../features/url.js";
 import { buildTargetMenuGroups } from "../../features/TargetMenu.js";
 import { matchCatalogPlaces } from "../../features/LocationPicker.js";
+import { findRateChangeTarget } from "../../sections/rate_change/index.js";
 
 describe("Phase 3 multi-hub frontend helpers", () => {
   it("classifyHubGeo identifies us-states, us-metrocast, eu-countries (UK split), and generic", () => {
@@ -297,5 +298,86 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     assert.equal(bosAbove.length, 1);
     assert.equal(bosAbove[0].hubId, "remote_flu_metrocast");
     assert.equal(bosAbove[0].locationId, "boston");
+  });
+
+  it("buildTargetMenuGroups excludes categorical targets while findRateChangeTarget resolves companion rate change", () => {
+    const man = indexManifest({
+      hub_id: "local_flu",
+      default_target: "wk inc flu hosp",
+      targets: [{ id: "wk inc flu hosp", label: "Flu admissions" }],
+      locations: [{ id: "US" }, { id: "25", abbr: "MA" }],
+      seasons: [{ id: "2025-2026", rounds: ["2025-11-22"] }],
+      models: [{ id: "Ens", abbr: "Ens" }],
+    });
+    const catalog = {
+      hubs: [
+        { id: "local_flu", kind: "local", model_count: 5 },
+        { id: "remote_flusight", kind: "remote", model_count: 20 },
+        { id: "remote_covid19", kind: "remote", model_count: 10 },
+      ],
+      targets: [
+        {
+          key: "local_flu::wk inc flu hosp",
+          hub_id: "local_flu", target_id: "wk inc flu hosp",
+          label: "Flu admissions", pathogen: "influenza", pathogen_label: "Influenza", is_categorical: false,
+        },
+        {
+          key: "remote_flusight::wk flu hosp rate change",
+          hub_id: "remote_flusight", target_id: "wk flu hosp rate change",
+          label: "Hospitalization rate change", pathogen: "influenza", pathogen_label: "Influenza", is_categorical: true,
+        },
+        {
+          key: "remote_covid19::wk inc covid hosp",
+          hub_id: "remote_covid19", target_id: "wk inc covid hosp",
+          label: "COVID admissions", pathogen: "covid19", pathogen_label: "COVID-19", is_categorical: false,
+        },
+      ],
+      places: {
+        "25": {
+          key: "25", name: "Massachusetts", abbr: "MA", level: "state", state_fips: "25", parent_key: "US",
+          hubs: [
+            { hub_id: "local_flu", location_id: "25" },
+            { hub_id: "remote_flusight", location_id: "25" },
+            { hub_id: "remote_covid19", location_id: "25" },
+          ],
+        },
+        boston: {
+          key: "boston", name: "Boston, MA", abbr: "Boston", level: "hsa", state_fips: "25", parent_key: "25",
+          hubs: [{ hub_id: "remote_flu_metrocast", location_id: "boston" }],
+        },
+      },
+    };
+
+    const items = buildTargetMenuGroups(catalog, man, "25", "local_flu", "wk inc flu hosp").filter((e) => e.type === "item");
+    assert.ok(items.every((e) => e.targetId !== "wk flu hosp rate change"));
+
+    const rcDirect = findRateChangeTarget(catalog, man, "wk inc flu hosp", "25");
+    assert.deepEqual(rcDirect?.targetId, "wk flu hosp rate change");
+    assert.equal(rcDirect?.hubId, "remote_flusight");
+    assert.equal(rcDirect?.locationId, "25");
+    assert.equal(rcDirect?.viaParent, false);
+
+    // Via parent state for sub-state Boston
+    const mcMan = indexManifest({
+      hub_id: "remote_flu_metrocast",
+      targets: [{ id: "Flu ED visits pct", label: "Flu ED" }],
+      locations: [{ id: "boston" }],
+      seasons: [{ id: "2025-2026", rounds: ["2025-11-22"] }],
+      models: [{ id: "Ens", abbr: "Ens" }],
+    });
+    catalog.targets.push({
+      key: "remote_flu_metrocast::Flu ED visits pct",
+      hub_id: "remote_flu_metrocast", target_id: "Flu ED visits pct",
+      label: "Flu ED", pathogen: "influenza", pathogen_label: "Influenza", is_categorical: false,
+    });
+    const rcBos = findRateChangeTarget(catalog, mcMan, "Flu ED visits pct", "boston");
+    assert.equal(rcBos?.targetId, "wk flu hosp rate change");
+    assert.equal(rcBos?.locationId, "25");
+    assert.equal(rcBos?.viaParent, true);
+
+    // Non-flu target or null location returns null cleanly
+    const covMan = { ...man, hub_id: "remote_covid19" };
+    assert.equal(findRateChangeTarget(catalog, covMan, "wk inc covid hosp", "25"), null);
+    assert.equal(findRateChangeTarget(catalog, man, "wk inc flu hosp", null), null);
   });
 });

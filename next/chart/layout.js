@@ -113,12 +113,34 @@ export function pointsAt(fan, id, t, level) {
   // only one side has a forecast: it folds into (or unfolds from) its first point, so a model never
   // pops on or off between weeks. k is how open it is: 1 on its own week, 0 on the week without it.
   if (!a || !z) return folded(one, a ? 1 - u : u);
-  if (a.length !== z.length) return one;
-  const pts = new Array(a.length);
-  for (let k = 0; k < a.length; k++) {
-    const p = a[k], q = z[k];
-    pts[k] = { t: p.t + (q.t - p.t) * u, h: p.h, lo: p.lo + (q.lo - p.lo) * u, hi: p.hi + (q.hi - p.hi) * u, med: p.med + (q.med - p.med) * u, anchor: p.anchor };
+
+  const aAnc = a[0]?.anchor ? a[0] : null;
+  const zAnc = z[0]?.anchor ? z[0] : null;
+  const aPts = aAnc ? a.slice(1) : a;
+  const zPts = zAnc ? z.slice(1) : z;
+  const zByH = new Map(zPts.map((q) => [q.h, q]));
+  const pairs = [];
+  for (const p of aPts) {
+    const q = zByH.get(p.h);
+    if (q) pairs.push([p, q]);
   }
+  if (!pairs.length) return u < 0.5 ? a : z;
+
+  const lerpPt = (p, q, isAnchor) => ({
+    t: p.t + (q.t - p.t) * u,
+    h: isAnchor ? -1 : p.h,
+    lo: p.lo + (q.lo - p.lo) * u,
+    hi: p.hi + (q.hi - p.hi) * u,
+    med: p.med + (q.med - p.med) * u,
+    ...(isAnchor ? { anchor: true } : {}),
+  });
+
+  const pts = [];
+  if (aAnc && zAnc) pts.push(lerpPt(aAnc, zAnc, true));
+  else if (aAnc) pts.push(lerpPt(aAnc, pairs[0][1], true));
+  else if (zAnc) pts.push(lerpPt(pairs[0][0], zAnc, true));
+
+  for (const [p, q] of pairs) pts.push(lerpPt(p, q, false));
   return pts;
 }
 

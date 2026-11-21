@@ -1,35 +1,139 @@
-/* The page below the chart: each section is mounted when it nears the viewport. */
-import { h } from "../lib/dom.js";
+/* The page below the chart: a compact /next/ text tab rail switching one section at a time so
+ * the page stays focused and uncluttered, plus conditional companion Rate change when available. */
+import { h, storage } from "../lib/dom.js";
+import { findRateChangeTarget } from "./rate_change/index.js";
 
-const SECTIONS = [
+const TAB_KEY = "viz.section_tab";
+const BASE_SECTIONS = [
   { id: "scores", label: "Scores" },
   { id: "heatmap", label: "Heatmap" },
   { id: "map", label: "Map" },
   { id: "peaks", label: "Peaks" },
+  { id: "rate_change", label: "Rate change", optional: true },
 ];
 
-/** @returns {{ destroy(): void }} */
+/** @returns {{ el: HTMLElement, destroy(): void }} */
 export function mountSections(root, ctx) {
+  const { manifest, store } = ctx;
   const wrap = h("div", { class: "app-sections" });
+  const nav = h("nav", { class: "app-sec-nav", role: "tablist", "aria-label": "Sections" });
+  const bodyWrap = h("div", { class: "app-sec-panels" });
+  wrap.append(nav, bodyWrap);
   root.append(wrap);
-  const live = [];
-  const io = new IntersectionObserver((entries) => {
-    for (const e of entries) {
-      if (!e.isIntersecting) continue;
-      io.unobserve(e.target);
-      const el = e.target;
-      import(`./${el.dataset.section}/index.js`)
-        .then((m) => { el.classList.remove("is-pending"); live.push(m.mount(el, ctx)); })
-        .catch((err) => {
-          console.error(`viz: the ${el.dataset.section} section could not load`, err);
-          el.replaceChildren(h("p", { class: "app-section-error" }, `Can't show ${el.getAttribute("aria-label").toLowerCase()}`));
-        });
+
+  const panels = new Map();
+  const tabs = new Map();
+  const mounted = new Map();
+  const loading = new Map();
+  let gone = false;
+
+  const hasRateChange = () => {
+    const s = store.get();
+    return !!findRateChangeTarget(ctx.catalog, manifest, s.target, s.location);
+  };
+
+  let activeId = storage.get(TAB_KEY, "scores");
+  if (!BASE_SECTIONS.some((s) => s.id === activeId)) activeId = "scores";
+  if (activeId === "rate_change" && !hasRateChange()) activeId = "scores";
+
+  const ensureMounted = (id) => {
+    if (mounted.has(id) || loading.has(id)) return;
+    const panel = panels.get(id);
+    if (!panel) return;
+    const p = import(`./${id}/index.js`)
+      .then((m) => {
+        if (gone) return;
+        panel.classList.remove("is-pending");
+        const inst = m.mount(panel, ctx);
+        mounted.set(id, inst);
+        if (activeId === id) requestAnimationFrame(() => inst?.resize?.());
+      })
+      .catch((err) => {
+        if (gone) return;
+        console.error(`viz: the ${id} section could not load`, err);
+        panel.replaceChildren(h("p", { class: "app-section-error" }, `Can't show ${panel.getAttribute("aria-label").toLowerCase()}`));
+      })
+      .finally(() => loading.delete(id));
+    loading.set(id, p);
+  };
+
+  const syncTabs = () => {
+    const showRc = hasRateChange();
+    if (activeId === "rate_change" && !showRc) activeId = "scores";
+    for (const s of BASE_SECTIONS) {
+      const btn = tabs.get(s.id);
+      const panel = panels.get(s.id);
+      const avail = !s.optional || showRc;
+      const isActive = avail && s.id === activeId;
+      btn.hidden = !avail;
+      btn.setAttribute("aria-selected", String(isActive));
+      btn.classList.toggle("is-active", isActive);
+      panel.hidden = !isActive;
     }
-  }, { rootMargin: "600px 0px" });
-  for (const s of SECTIONS) {
-    const el = h("section", { class: "app-section is-pending", id: s.id, "data-section": s.id, "aria-label": s.label });
-    wrap.append(el);
-    io.observe(el);
+  };
+
+  const selectTab = (id) => {
+    if (!BASE_SECTIONS.some((s) => s.id === id)) return;
+    if (id === "rate_change" && !hasRateChange()) return;
+    activeId = id;
+    storage.set(TAB_KEY, id);
+    syncTabs();
+    ensureMounted(id);
+    const inst = mounted.get(id);
+    requestAnimationFrame(() => inst?.resize?.());
+  };
+
+  for (const s of BASE_SECTIONS) {
+    const tabId = `tab-${s.id}`;
+    const btn = h("button", {
+      type: "button",
+      id: tabId,
+      role: "tab",
+      class: "app-sec-tab",
+      "aria-controls": s.id,
+      "aria-selected": "false",
+      onclick: () => selectTab(s.id),
+    }, s.label);
+    const panel = h("section", {
+      class: "app-section is-pending",
+      id: s.id,
+      role: "tabpanel",
+      "aria-labelledby": tabId,
+      "data-section": s.id,
+      "aria-label": s.label,
+      hidden: true,
+    });
+    nav.append(btn);
+    bodyWrap.append(panel);
+    tabs.set(s.id, btn);
+    panels.set(s.id, panel);
   }
-  return { el: wrap, destroy() { io.disconnect(); live.forEach((l) => l?.destroy?.()); wrap.remove(); } };
+
+  syncTabs();
+
+  // Mount the active panel lazily once sections near the viewport, matching initial load budget
+  const io = new IntersectionObserver((entries) => {
+    if (!entries.some((e) => e.isIntersecting)) return;
+    io.disconnect();
+    if (!gone) ensureMounted(activeId);
+  }, { rootMargin: "600px 0px" });
+  io.observe(wrap);
+
+  const offStore = store.select(["target", "location"], () => {
+    syncTabs();
+    if (activeId === "rate_change") mounted.get("rate_change")?.update?.();
+  });
+
+  return {
+    el: wrap,
+    select: selectTab,
+    destroy() {
+      gone = true;
+      io.disconnect();
+      offStore();
+      mounted.forEach((l) => l?.destroy?.());
+      mounted.clear();
+      wrap.remove();
+    },
+  };
 }

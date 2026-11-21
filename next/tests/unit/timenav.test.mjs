@@ -152,3 +152,46 @@ test("side scroll stops hard at the latest round when no next season exists, whi
   assert.ok(crossNav.pull > 0);
   crossNav.destroy();
 });
+
+test("setSeasonBounds preserves midpoint and allowEdgePan lets live-season side-scroll pan further into past-season range", () => {
+  globalThis.matchMedia = () => ({ matches: false });
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  const handlers = {};
+  const surface = {
+    clientWidth: 1440,
+    style: {},
+    addEventListener: (type, fn) => { (handlers[type] ||= []).push(fn); },
+  };
+  const dates = Array.from({ length: 8 }, (_, i) => S0 + (11 + i) * WEEK);
+  const wheel = (deltaX, opts = {}) => handlers.wheel.forEach((fn) => fn({
+    target: surface, deltaX, deltaY: 0, deltaMode: 0,
+    metaKey: false, ctrlKey: false, shiftKey: false,
+    timeStamp: 100, preventDefault() {},
+    ...opts,
+  }));
+
+  let nav;
+  nav = new TimeNav({
+    surface, dates, index: dates.length - 1, season: [S0, S0 + 22 * WEEK],
+    scale: () => linear(nav.domain(), [64, 1440 - 168]),
+    canCross: () => false,
+  });
+  const midBefore = (nav.domain()[0] + nav.domain()[1]) / 2;
+  nav.allowEdgePan = true;
+  nav.setSeasonBounds([S0, S0 + 42 * WEEK]);
+  const midAfter = (nav.domain()[0] + nav.domain()[1]) / 2;
+  assert.ok(Math.abs(midBefore - midAfter) < 1, "expanding season bounds keeps camera midpoint still");
+
+  wheel(120, { timeStamp: 100 });
+  assert.ok(nav.P > 0, "scrolling right at latest round pans into past-season window");
+  assert.equal(nav.T, dates.length - 1, "reference date stays put while panning right");
+  assert.equal(nav.returning, true);
+
+  wheel(-120, { timeStamp: 120 });
+  wheel(-120, { timeStamp: 140 });
+  assert.equal(nav.P, 0, "scrolling left returns smoothly to home pan=0");
+  assert.equal(nav.returning, false);
+  assert.ok(nav.T < dates.length - 1, "subsequent left scroll resumes scrubbing earlier rounds");
+  nav.destroy();
+});

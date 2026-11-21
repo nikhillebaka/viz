@@ -271,3 +271,40 @@ test("layoutFan clamps scene.ref at the last round even when pulling past the en
   assert.equal(s.ref, fan.dates[lastIdx]);
   assert.equal(s.di, lastIdx);
 });
+
+test("pointsAt morphs smoothly across the boundary where truth anchor drops out", () => {
+  // Week 0 (Nov 22) has observed Nov 15 (7d gap -> anchored, 5 points: h=-1,0,1,2,3)
+  // Week 1 (Dec 06) is 21d after Nov 15 -> unanchored (4 points: h=0,1,2,3)
+  const edgeFan = decodeFan(buildFan({
+    rounds: ["2025-11-22", "2025-12-06"],
+    observed: [["2025-11-15", 800]],
+    models: [spread("m0", (r, h) => 1000 + r * 200 + h * 10)],
+  }));
+  const i0 = edgeFan.indexOf("2025-11-22"); // anchored (len 5)
+  const i1 = edgeFan.indexOf("2025-12-06"); // unanchored (len 4)
+  assert.equal(edgeFan.points("m0", i0, 0.95).length, 5);
+  assert.equal(edgeFan.points("m0", i1, 0.95).length, 4);
+
+  // Adjacent weeks step by 1: create consecutive rounds Nov 22 (anchored at Nov 15) -> Nov 29 (Nov 22 missing -> unanchored)
+  const seqFan = decodeFan(buildFan({
+    rounds: ["2025-11-22", "2025-11-29"],
+    observed: [["2025-11-15", 800]],
+    models: [spread("m0", (r, h) => 1000 + r * 200 + h * 10)],
+  }));
+  const aIdx = seqFan.indexOf("2025-11-22");
+  const zIdx = seqFan.indexOf("2025-11-29");
+  const pA = seqFan.points("m0", aIdx, 0.95);
+  const pZ = seqFan.points("m0", zIdx, 0.95);
+  assert.equal(pA.length, 5);
+  assert.equal(pZ.length, 4);
+
+  const mid = pointsAt(seqFan, "m0", aIdx + 0.5, 0.95);
+  assert.equal(mid.length, 5);
+  assert.equal(mid[0].anchor, true);
+  // Anchor point retracts halfway from pA[0] (Nov 15) toward pZ[0] (Nov 29)
+  assert.equal(mid[0].t, (pA[0].t + pZ[0].t) / 2);
+  assert.ok(Math.abs(mid[0].med - (pA[0].med + pZ[0].med) / 2) < 1e-4);
+  // Horizon h=0 interpolates smoothly from pA[1] to pZ[0]
+  assert.equal(mid[1].h, 0);
+  assert.equal(mid[1].t, (pA[1].t + pZ[0].t) / 2);
+});

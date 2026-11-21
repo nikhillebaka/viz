@@ -130,7 +130,7 @@ export class TimeNav {
    */
   constructor(o) {
     Object.assign(this, {
-      forecastWeeks: 3, minSpan: 6, maxSpan: 20, ignore: () => false, onWeek() {}, onZoom() {}, onFrame() {},
+      forecastWeeks: 3, minSpan: 6, maxSpan: 20, allowEdgePan: false, ignore: () => false, onWeek() {}, onZoom() {}, onFrame() {},
       passWheel: (e) => !!e.target.closest?.(".c-float"),
     }, o);
     this.N = this.dates.length;
@@ -195,6 +195,27 @@ export class TimeNav {
     this.vP = 0;
     this.onWeek(this.tT);
     this.request();
+  }
+  /** Expand or contract season bounds while preserving the viewport midpoint where possible. */
+  setSeasonBounds(season) {
+    if (!season || season.length < 2) return;
+    if (season[0] === this.season[0] && season[1] === this.season[1]) return;
+    const curE = this.span;
+    const targetE = Math.exp(this.tZ);
+    const curMid = this.#c0(curE, this.ref) + this.P * WEEK;
+    const targetRef = this.dates[0] + this.tT * WEEK;
+    const targetMid = this.#c0(targetE, targetRef) + this.tP * WEEK;
+    this.season = season;
+    this.seasonSpan = Math.max(this.minSpan, (season[1] - season[0]) / WEEK);
+    const zmax = Math.log(this.seasonSpan);
+    if (this.Z > zmax) this.Z = zmax;
+    if (this.tZ > zmax) { this.tZ = zmax; this.vZ = 0; }
+    const [lo, hi] = this.panRange(Math.exp(this.Z));
+    this.P = Math.max(lo, Math.min(hi, (curMid - this.#c0(Math.exp(this.Z), this.ref)) / WEEK));
+    const [tlo, thi] = this.panRange(Math.exp(this.tZ));
+    this.tP = Math.max(tlo, Math.min(thi, (targetMid - this.#c0(Math.exp(this.tZ), targetRef)) / WEEK));
+    this.#mode(this.tZ >= zmax - 1e-6 ? "season" : "close");
+    this.#run();
   }
   /** Zoom to a span of E weeks (clamped to minSpan … the season). */
   zoomTo(E, { w = 30, recenter = false } = {}) {
@@ -310,7 +331,13 @@ export class TimeNav {
     // the rest of the gesture scrub. Measuring "home" (P = 0) rather than "visible" makes the hand-off
     // happen at the same place whether you come back from the left or the right.
     if (!this.returning && !this.refVisible()) this.returning = true;
-    if (!this.returning) return scrub(a);
+    if (!this.returning) {
+      if (this.allowEdgePan && a > 0 && this.T >= this.N - 1 - 1e-4 && !this.canCross?.(1)) {
+        const [, p1] = this.panRange();
+        if (p1 > 0.01) { this.returning = true; this.#panBy(a); return "pan"; }
+      }
+      return scrub(a);
+    }
     const P = this.P, next = P + a;
     if (P === 0 || next === 0 || (P < 0) !== (next < 0)) {   // this step reaches home
       clearTimeout(this.panIdle); this.panning = false; this.P = this.tP = 0; this.vP = 0; this.returning = false;

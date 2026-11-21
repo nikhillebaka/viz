@@ -124,7 +124,7 @@ export class FanChart {
     ro.observe(view);
     this.offs = [
       ctx.store.on((st, prev, changed) => this.#onStore(st, prev, changed)),
-      onThemeChange(() => this.request()),
+      onThemeChange(() => { if (!this.ctx.store.get().location) this.#showEmptyLocation(); else this.request(); }),
       // a layer opening or closing moves focus: hover hides or comes back on the next frame
       on(document, "focusin", () => this.request()),
       on(document, "focusout", () => this.request()),
@@ -137,7 +137,9 @@ export class FanChart {
     this.trajectories = new ChartTrajectories(this);
     this.#watchDpr();
     document.fonts?.ready.then(() => { this.#measure(); this.request(); });
-    if (!isCategoricalTarget(ctx.manifest.targetById.get(s.target))) {
+    if (!s.location) {
+      this.#showEmptyLocation();
+    } else if (!isCategoricalTarget(ctx.manifest.targetById.get(s.target))) {
       this.#show(this.#want(s.date));
     }
   }
@@ -323,7 +325,59 @@ export class FanChart {
     this.view.classList.remove("is-loading");
   }
 
+  #showEmptyLocation() {
+    this.#cancel();
+    this.nav?.destroy();
+    this.nav = null;
+    this.bubbles?.destroy();
+    this.bubbles = null;
+    this.layers?.destroy();
+    this.layers = null;
+    this.trajectories?.destroy();
+    this.fan = null;
+    this.scene = null;
+    this.readout?.hide();
+    const w = this.view.clientWidth, h = this.view.clientHeight;
+    if (w > 1 && h > 1) {
+      const dpr = globalThis.devicePixelRatio || 1;
+      const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+      if (this.canvas.width !== bw || this.canvas.height !== bh) { this.canvas.width = bw; this.canvas.height = bh; }
+      const c = this.canvas.getContext("2d");
+      c.setTransform(dpr, 0, 0, dpr, 0, 0);
+      c.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--surface-paper") || "#0b0b0b";
+      c.fillRect(0, 0, w, h);
+      this.empty.textContent = "Choose a location";
+      this.empty.hidden = false;
+      this.empty.style.left = `${w / 2}px`;
+      this.empty.style.top = `${Math.max(this.top + 40, h / 2)}px`;
+      this.emptyKey = `__choose__|${w}|${h}`;
+    } else {
+      this.empty.textContent = "Choose a location";
+      this.empty.hidden = false;
+    }
+    this.view.classList.add("is-ready");
+    this.hooks.onError?.(null);
+    this.hooks.onReady?.();
+  }
+
+  /** Syncs panning bounds when Past seasons is toggled on or off in the current live season. */
+  syncSeasonBounds() {
+    if (!this.fan || !this.nav) return;
+    const pastEnd = this.layers?.seasonEnd?.();
+    if (pastEnd != null && pastEnd > this.fan.window[1]) {
+      const capEnd = Number.isFinite(this.fan.end) ? Math.min(pastEnd, this.fan.end) : pastEnd;
+      if (capEnd > this.fan.window[1]) {
+        this.nav.allowEdgePan = true;
+        this.nav.setSeasonBounds([this.fan.window[0], capEnd]);
+        return;
+      }
+    }
+    this.nav.allowEdgePan = false;
+    this.nav.setSeasonBounds(this.fan.window);
+  }
+
   async #show(want) {
+    if (!want.location) { this.#showEmptyLocation(); return; }
     const token = ++this._token;
     this.loading = true;
     this._pending = want;
@@ -346,6 +400,8 @@ export class FanChart {
 
   #apply(fan, iso) {
     const index = indexFor(fan, iso);
+    this.empty.hidden = true;
+    this.emptyKey = "";
     if (!this.fan) {
       this.fan = fan;
       this.#prepare(false);
@@ -362,6 +418,7 @@ export class FanChart {
       });
       this.bubbles = new ChartBubbles(this, index);
       this.layers = new Layers(this);
+      this.syncSeasonBounds();
       this.trajectories.sync();
       this.#resize();
       this.#onWeek(index);
@@ -381,6 +438,7 @@ export class FanChart {
         this.nav.setTimeline({ dates: fan.dates, season: fan.window, index });
         this.nav.setHeight(1);
         this.layers.sync();
+        this.syncSeasonBounds();
         this.trajectories.sync();
         this.draw(true);
         const settledIso = this.#isoAt(index);
@@ -502,6 +560,10 @@ export class FanChart {
       this.trajectories?.destroy();
       return;
     }
+    if (!s.location) {
+      this.#showEmptyLocation();
+      return;
+    }
     const navDateOnly = changed.size === 1 && changed.has("date") && this.nav && s.date === this.#isoAt(this.nav.week);
     if (!this.fan || changed.has("target") || changed.has("location") || changed.has("dims")) this.#show(this.#want(null));
     else if (changed.has("date") && this.nav && s.date !== this.#isoAt(this.nav.week)) this.goTo(s.date);
@@ -510,7 +572,7 @@ export class FanChart {
     if (changed.has("sel") || changed.has("levels") || changed.has("target")) this.bubbles?.sync(s);
     if (["layers", "sel"].some((k) => changed.has(k)) || (changed.has("date") && this.layers?.on?.size)) this.layers?.sync();
     if (["trajectories", "sel", "date", "dims", "target", "location"].some((k) => changed.has(k))) this.trajectories?.sync();
-    if (changed.has("layers") && !changed.has("sel") && this.fan) this.#axis(true);
+    if (changed.has("layers") && !changed.has("sel") && this.fan) { this.#axis(true); this.syncSeasonBounds(); }
     if (!navDateOnly) this.request();
   }
 
@@ -522,6 +584,7 @@ export class FanChart {
     this._rect = null;
     this.#measure();
     if (this.nav) this.draw(true);
+    else if (!this.ctx.store.get().location) this.#showEmptyLocation();
   }
 
   // a devicePixelRatio change (another display, browser zoom without a resize) redraws at the new density

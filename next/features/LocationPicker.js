@@ -425,9 +425,27 @@ export function openLocationPicker(anchor, ctx) {
           const stateLoc = geoCls.stateByFips.get(mcStateFips);
           const stateName = stateLoc?.name || US_STATE_META[mcStateFips]?.name || mcStateFips;
           const hsas = geoCls.hsasByStateFips.get(mcStateFips) || [];
+          const hasBoroughs = hsas.some((m) => m.level === "borough");
+          const cityLoc = hasBoroughs
+            ? (hsas.find((m) => m.id === "nyc") || hsas.find((m) => m.level === "metro") || null)
+            : null;
+          const chipHsas = hasBoroughs
+            ? hsas.filter((m) => m.id !== "nyc" && m.id !== "NYC" && m.level !== "metro")
+            : hsas;
           const curHsa = hsas.find((m) => m.id === current);
-          const caption = h("p", { class: "lp-hsa-cap" }, curHsa ? curHsa.name : `${hsas.length} MetroCast regions in ${stateName}`);
+          const caption = h("p", { class: "lp-hsa-cap" }, curHsa ? curHsa.name : `${chipHsas.length} MetroCast regions in ${stateName}`);
           const svgWrap = h("div", { class: "lp-hsa-wrap" });
+
+          const scopeActions = [
+            stateLoc ? h("button", {
+              type: "button", class: ["c-link lp-ctx-act", current === stateLoc.id && "is-on"],
+              onclick: () => pick(stateLoc.id),
+            }, "Whole state") : null,
+            cityLoc ? h("button", {
+              type: "button", class: ["c-link lp-ctx-act", (current === cityLoc.id || current === "NYC") && "is-on"],
+              onclick: () => pick(cityLoc.id),
+            }, "Whole city") : null,
+          ].filter(Boolean);
 
           map.replaceChildren(
             h("div", { class: "lp-ctx-bar" },
@@ -437,15 +455,12 @@ export function openLocationPicker(anchor, ctx) {
                   onclick: () => { mcStateFips = null; renderContextual(); },
                 }, `← ${geoCls.coveredStateFips.size} states`) : null,
                 h("span", { class: "lp-ctx-title" }, stateName),
-                stateLoc ? h("button", {
-                  type: "button", class: "c-link",
-                  onclick: () => pick(stateLoc.id),
-                }, "Whole state") : null,
+                scopeActions.length ? h("div", { class: "lp-ctx-actions" }, ...scopeActions) : null,
               ].filter(Boolean)),
             svgWrap,
             caption,
             h("div", { class: "lp-chips", style: { padding: "0" } },
-              ...hsas.map((m) => place(m, ["c-chip", m.id === current && "on"], m.abbr || m.name))),
+              ...chipHsas.map((m) => place(m, ["c-chip", m.id === current && "on"], m.abbr || m.name))),
           );
 
           svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Loading boundaries…"));

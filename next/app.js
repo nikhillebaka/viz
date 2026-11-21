@@ -21,6 +21,7 @@ import { classifyHubGeo } from "./geo/picker_geo.js";
 const root = document.getElementById("app");
 const hubKey = (id, name) => (id ? `viz.h.${id}.${name}` : `viz.${name}`);
 const geoKey = (manifest) => `viz.geo.${classifyHubGeo(manifest).kind}.location`;
+const VALID_SCORE_COLS = new Set(["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3"]);
 
 /* What this browser remembers, validated against the manifest (anything unknown is ignored). */
 function fromStorage(manifest) {
@@ -47,6 +48,11 @@ function fromStorage(manifest) {
   if (typeof rulers === "boolean") out.rulers = rulers;
   const layers = storage.get("viz.layers");
   if (Array.isArray(layers)) out.layers = parseLayers(layers);
+  const scoreCols = storage.get("viz.scores.cols");
+  if (Array.isArray(scoreCols)) {
+    const cols = [...new Set(scoreCols.filter((c) => typeof c === "string" && VALID_SCORE_COLS.has(c)))];
+    if (cols.length) out.scores = { sort: "rel", rev: false, cols, open: [] };
+  }
   return out;
 }
 
@@ -54,7 +60,7 @@ function fromStorage(manifest) {
 function persist(store, manifest) {
   const hubId = manifest.hub_id;
   return store.on((s, prev, changed) => {
-    if (changed.has("location")) {
+    if (changed.has("location") && s.location) {
       storage.set(hubKey(hubId, "location"), s.location);
       storage.set(geoKey(manifest), s.location);
       // recent places, however the place changed (picker, map, a row's link): it first, then the one
@@ -68,6 +74,7 @@ function persist(store, manifest) {
     if (changed.has("rulers")) storage.set("viz.rulers", s.rulers);
     if (changed.has("layers")) storage.set("viz.layers", s.layers);
     if (changed.has("theme")) storage.set("viz.theme", s.theme);
+    if (changed.has("scores")) storage.set("viz.scores.cols", Array.isArray(s.scores?.cols) ? s.scores.cols : []);
   });
 }
 
@@ -140,7 +147,7 @@ function nearestWithin(iso, rounds, maxDays = 21) {
   return bd <= maxDays * DAY ? best : null;
 }
 
-function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc, targetId) {
+function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc) {
   if (explicitLoc && nextMan.locationById.has(explicitLoc)) return explicitLoc;
   const places = catalog?.places || {};
   let prevPlace = null;
@@ -163,13 +170,7 @@ function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitL
     }
   }
   if (prevLocId && nextMan.locationById.has(prevLocId)) return prevLocId;
-  const hubStored = fromStorage(nextMan).location;
-  if (hubStored) return hubStored;
-  const gStored = storage.get(geoKey(nextMan));
-  if (typeof gStored === "string" && nextMan.locationById.has(gStored)) return gStored;
-  const tMeta = targetId && catalog?.targets?.find((t) => (t.hub_id === nextMan.hub_id || !nextMan.hub_id) && t.target_id === targetId);
-  if (typeof tMeta?.default_location === "string" && nextMan.locationById.has(tMeta.default_location)) return tMeta.default_location;
-  return defaults(nextMan).location;
+  return null;
 }
 
 function stripAppQueryParams(oldMan) {
@@ -192,6 +193,9 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
   const def = defaults(manifest);
   const resolvedTarget = stateOverride?.target ?? url.target ?? def.target;
   const initDims = defaultDims(manifest, resolvedTarget);
+  const mergedScores = (stored.scores || url.scores || stateOverride?.scores)
+    ? { sort: "rel", rev: false, cols: [], open: [], ...(stored.scores || {}), ...(url.scores || {}), ...(stateOverride?.scores || {}) }
+    : undefined;
   const state = {
     ...(manifest.hub_id ? { hub: manifest.hub_id } : {}),
     ...def,
@@ -202,6 +206,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
     ...stored,
     ...url,
     ...(stateOverride || {}),
+    ...(mergedScores ? { scores: mergedScores } : {}),
     dims: { ...initDims, ...(url.dims || {}), ...(stateOverride?.dims || {}) },
   };
   if (selFlags && !stateOverride?.sel) {
@@ -271,7 +276,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       }
       if (!resolvedT) resolvedT = nextDef.target;
       if (prev.location && manifest.locationById.has(prev.location)) storage.set(geoKey(manifest), prev.location);
-      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc, resolvedT);
+      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc);
       const nextStored = fromStorage(nextMan);
       const nextSel = nextStored.sel || nextDef.sel;
       const resolvedDate = (date && nearestWithin(date, nextMan.allRounds, 21))
@@ -298,6 +303,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
           levels: prev.levels,
           rulers: prev.rulers,
           layers: prev.layers,
+          scores: prev.scores,
           theme: prev.theme,
           outcome: prev.outcome,
         },
@@ -305,7 +311,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
     },
   };
 
-  const shell = mountShell(root, ctx);
+  const shell = mountShell(root, ctx, { pickLocation: state.location == null });
   const stopUrl = syncUrl(store, manifest);
   const stopPersist = persist(store, manifest);
   activeUnmount = () => {

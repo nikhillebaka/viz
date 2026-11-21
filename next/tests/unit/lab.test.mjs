@@ -313,4 +313,13 @@ describe("next/lab/fixtures.js", () => {
       assert.ok(!JSON.stringify(b).includes("undefined"));
     }
   });
+
+  it("extracts all five NYC borough counties (36005, 36047, 36061, 36081, 36085) from us-counties-10m.json", () => {
+    const usTopo = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "us-counties-10m.json"), "utf8"));
+    const county2d = extractLonLatFeatures(usTopo, "counties");
+    for (const fips of ["36005", "36047", "36061", "36081", "36085"]) {
+      const rings = county2d.get(fips);
+      assert.ok(Array.isArray(rings) && rings.length > 0, `expected rings for NYC county ${fips}`);
+    }
+  });
 });

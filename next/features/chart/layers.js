@@ -138,6 +138,14 @@ export class Layers {
     this.sync();
   }
 
+  /** @returns {number | null} latest timestamp in visible past-season curves, or null when off */
+  seasonEnd() {
+    if (!this.on.has("seasons") || !this.cur?.length) return null;
+    let m = -Infinity;
+    for (const l of this.cur) if (l.n > 0 && l.ts[l.n - 1] > m) m = l.ts[l.n - 1];
+    return Number.isFinite(m) ? m : null;
+  }
+
   /** @returns {number} the highest value a visible layer must keep on the axis (past seasons), else 0 */
   yMax() {
     if (!this.on.has("seasons") || !this.cur) return 0;
@@ -247,7 +255,10 @@ export class Layers {
       this.cur = curves.map((c, i) => makeLine((c.points || []).map((p) => ({ t: w1 + (p.week - 1) * WEEK, v: p.value })),
         { id: `season-${c.season}`, kind: "season", name: seasonLabel(c.season), end: seasonLabel(c.season), c: "var(--ink-tertiary)", alpha: SEASON_ALPHA[i] ?? 0.2 })).filter(Boolean);
       this.#tint();
-      if (this.on.has("seasons")) this.chart.rescale();
+      if (this.on.has("seasons")) {
+        this.chart.rescale();
+        this.chart.syncSeasonBounds?.();
+      }
     });
     this._curP = { sk, p };
     return p;

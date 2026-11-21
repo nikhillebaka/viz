@@ -13,6 +13,8 @@
   padding: 0;
   border-top: 0;
 }
+.pmf-compact.v-section { padding-top: var(--space-16); }
+.pmf-compact .pmf-table-wrap { margin-top: var(--space-20); padding-top: var(--space-12); }
 
 .pmf-fig { position: relative; }
 .pmf-canvas { display: block; width: 100%; cursor: crosshair; }
