@@ -9,6 +9,7 @@ import { parseUrl, writeUrl, defaults, targetDimSpecs, defaultDims, isCategorica
 import { buildTargetMenuGroups } from "../../features/TargetMenu.js";
 import { matchCatalogPlaces } from "../../features/LocationPicker.js";
 import { findRateChangeTarget } from "../../sections/rate_change/index.js";
+import { formatStreamValue } from "../../features/GlobeView.js";
 
 describe("Phase 3 multi-hub frontend helpers", () => {
   it("classifyHubGeo identifies us-states, us-metrocast, eu-countries (UK split), and generic", () => {
@@ -379,5 +380,19 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     const covMan = { ...man, hub_id: "remote_covid19" };
     assert.equal(findRateChangeTarget(catalog, covMan, "wk inc covid hosp", "25"), null);
     assert.equal(findRateChangeTarget(catalog, man, "wk inc flu hosp", null), null);
+  });
+
+  it("formatStreamValue formats rate, percentage, proportion, count, and nullish values safely", () => {
+    assert.equal(formatStreamValue(4.453, { use_rate: true, scale: "count" }), "4.45 /100k");
+    assert.equal(formatStreamValue(12.34, { use_rate: true, scale: "count" }), "12.3 /100k");
+    assert.equal(formatStreamValue(2.11, { use_rate: false, scale: "percentage", unit: "%" }), "2.11%");
+    assert.equal(formatStreamValue(12.34, { use_rate: false, scale: "percentage", unit: "%" }), "12.3%");
+    assert.equal(formatStreamValue(0.033, { use_rate: false, scale: "proportion", unit: "%" }), "3.30%");
+    assert.equal(formatStreamValue(1324.9, { use_rate: false, scale: "rate", unit: "Cases / 100k" }), "1,325 /100k");
+    assert.equal(formatStreamValue(4.567, { use_rate: false, scale: "rate", unit: "Cases / 100k" }), "4.57 /100k");
+    assert.equal(formatStreamValue(1234, { use_rate: false, scale: "count" }), "1,234");
+    assert.equal(formatStreamValue(null, { use_rate: false, scale: "count" }), "–");
+    assert.equal(formatStreamValue(undefined, { use_rate: false, scale: "percentage" }), "–");
+    assert.equal(formatStreamValue(NaN, { use_rate: true, scale: "count" }), "–");
   });
 });

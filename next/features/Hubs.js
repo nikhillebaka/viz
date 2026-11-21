@@ -127,7 +127,7 @@ function finished(x) {
   const j = x.job || {}, s = j.summary || {};
   checks.delete(x.id);
   if (j.status === "done") {
-    const changes = [s.added && `${s.added} new`, s.updated && `${s.updated} updated`, s.removed && `${s.removed} removed`].filter(Boolean).join(" · ") || "no changes";
+    const changes = [s.added && `${s.added} new`, s.updated && `${s.updated} updated`, s.removed && `${s.removed} removed`, s.truth_updated && "truth updated"].filter(Boolean).join(" · ") || "no changes";
     notes.set(x.id, `Synced · ${changes}${s.failed ? ` · ${s.failed} unreadable` : ""}`);
     clearAllCaches();
     activeCtx?.reloadCatalog?.().catch(() => {});

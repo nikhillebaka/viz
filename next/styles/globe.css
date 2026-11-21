@@ -72,11 +72,19 @@
   top: calc(var(--inset) + var(--size-control) + var(--gap));
   right: var(--inset);
   z-index: var(--z-chrome);
+  display: flex;
+  flex-direction: column;
   width: 320px;
   max-width: calc(100vw - 2 * var(--inset));
   max-height: calc(100svh - 2 * var(--inset) - 2 * var(--size-control) - 2 * var(--gap));
-  padding: var(--space-16) var(--space-20);
+  padding: 0;
   border-radius: var(--radius-panel);
+  overflow: hidden;
+}
+.gb-drawer-body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-16) var(--space-20);
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;

@@ -51,6 +51,38 @@ const smoothstep = (e0, e1, x) => {
   return t * t * (3 - 2 * t);
 };
 
+const LEVEL_LABELS = Object.freeze({
+  hsa: "MetroCast HSA",
+  state: "State",
+  country: "Country",
+  borough: "Borough",
+  metro: "Metro",
+});
+
+/**
+ * Format an observed or forecast value for a single Globe stream row or hover readout.
+ * @param {number | null | undefined} val
+ * @param {{ use_rate?: boolean, scale?: string, unit?: string } | null | undefined} stream
+ * @returns {string}
+ */
+export function formatStreamValue(val, stream) {
+  if (typeof val !== "number" || !Number.isFinite(val)) return "–";
+  if (stream?.use_rate) return `${Math.abs(val) >= 10 ? val.toFixed(1) : val.toFixed(2)} /100k`;
+  const scale = stream?.scale || "count";
+  if (scale === "percentage") return `${Math.abs(val) >= 10 ? val.toFixed(1) : val.toFixed(2)}%`;
+  if (scale === "proportion") return valueFormat({ scale: "proportion" }).value(val);
+  if (scale === "rate") {
+    const abs = Math.abs(val);
+    const num = abs >= 100
+      ? Math.round(val).toLocaleString("en-US")
+      : abs >= 10
+        ? val.toFixed(1)
+        : val.toFixed(2);
+    return `${num}${String(stream?.unit || "").includes("100k") ? " /100k" : ""}`;
+  }
+  return valueFormat({ scale: "count" }).value(val);
+}
+
 function parseRgbCss(str, fallback = [245, 245, 245]) {
   const m = String(str || "").match(/[\d.]+/g);
   return m && m.length >= 3 ? [Number(m[0]), Number(m[1]), Number(m[2])] : fallback;
@@ -180,12 +212,6 @@ export function mountGlobeView(host, ctx) {
       if (a > bestAct) { bestAct = a; best = s; }
     }
     return best || reg.streams[0];
-  }
-
-  function formatStreamValue(val, stream) {
-    if (!Number.isFinite(val)) return "–";
-    if (stream?.use_rate) return `${val >= 10 ? val.toFixed(1) : val.toFixed(2)} /100k`;
-    return valueFormat({ scale: stream?.scale || "count", is_rate: stream?.scale && stream.scale !== "count" }).readout(val);
   }
 
   function metricForKey(key, mode = layerId) {
@@ -334,9 +360,11 @@ export function mountGlobeView(host, ctx) {
 
     const loVal = layerId === "forecast" ? (sig?.fc_lo ?? sig?.lo ?? 0) : (sig?.lo ?? 0);
     const hiVal = layerId === "forecast" ? (sig?.fc_hi ?? sig?.hi ?? 1) : (sig?.hi ?? 1);
-    const tLike = { scale: sig?.scale || "count", is_rate: sig?.scale && sig.scale !== "count" };
+    const tLike = { scale: sig?.scale || "count" };
     const fmtBound = (v) => {
-      if (sig?.scale === "proportion" || sig?.scale === "percentage") return valueFormat(tLike).readout(v);
+      if (typeof v !== "number" || !Number.isFinite(v)) return "–";
+      if (sig?.scale === "percentage") return `${Math.abs(v) < 10 && Math.abs(v) >= 1e-6 ? v.toFixed(1) : Math.round(v)}%`;
+      if (sig?.scale === "proportion") return valueFormat({ scale: "proportion" }).value(v);
       if (Math.abs(v) >= 1e3) return valueFormat(tLike).axis(Math.round(v));
       return Math.abs(v) >= 10 || Math.abs(v) < 1e-6 ? String(Math.round(v)) : v.toFixed(1);
     };
@@ -487,10 +515,10 @@ export function mountGlobeView(host, ctx) {
     const allStreams = reg.streams || [];
     const catStreams = reg.categorical_streams || [];
     const totalCount = allStreams.length + catStreams.length;
-    const lvlLabel = reg.level === "hsa" ? "MetroCast HSA" : reg.level === "state" ? "State" : reg.level === "country" ? "Country" : reg.level;
+    const lvlLabel = LEVEL_LABELS[reg.level] || reg.level || null;
     const subParts = [
-      lvlLabel || null,
-      pop > 1 ? `Pop ${pop >= 1e6 ? `${(pop / 1e6).toFixed(1)}M` : `${Math.round(pop / 1e3)}k`}` : null,
+      lvlLabel,
+      Number.isFinite(pop) && pop > 1 ? `Pop ${pop >= 1e6 ? `${(pop / 1e6).toFixed(1)}M` : `${Math.round(pop / 1e3)}k`}` : null,
       totalCount ? `${totalCount} ${totalCount === 1 ? "signal" : "signals"}` : null,
     ].filter(Boolean);
 
@@ -503,11 +531,23 @@ export function mountGlobeView(host, ctx) {
       ? (reg.children || []).map((ck) => regions[ck]).filter(Boolean)
       : [];
 
+    const streamTitle = (st) => {
+      const tShort = st.target_short || st.target_id || "";
+      const pathLabel = st.pathogen_label || "";
+      if (!pathLabel) return tShort;
+      if (!tShort) return pathLabel;
+      const tLower = tShort.toLowerCase();
+      const tokens = pathLabel.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+      const overlaps = tokens.some((tok) => tLower.includes(tok))
+        || (st.pathogen === "influenza" && /\bflu\b/i.test(tShort));
+      return overlaps ? tShort : `${pathLabel} · ${tShort}`;
+    };
+
     const layerNodes = [...drawer.querySelectorAll(":scope > .c-glass-layer")];
-    const content = h("div", null,
+    const content = h("div", { class: "gb-drawer-body" },
       h("header", { class: "gb-drawer-head" },
         h("div", { class: "gb-title-row" },
-          h("h3", { class: "gb-title" }, reg.name || reg.key),
+          h("h3", { class: "gb-title" }, reg.name || reg.key || selectedKey),
           h("button", {
             type: "button", class: "c-btn sm icon", "aria-label": "Close summary", html: icon.close,
             onclick: () => { selectedKey = null; renderDrawer(); scheduleDraw(); },
@@ -518,10 +558,13 @@ export function mountGlobeView(host, ctx) {
       orderedStreams.length ? h("div", { class: "gb-streams" },
         ...orderedStreams.map((st) => {
           const isFocusSig = st.signal_id === signalId;
-          const title = st.pathogen_label && !st.target_short.toLowerCase().includes(st.pathogen_label.toLowerCase().split(" ")[0])
-            ? `${st.pathogen_label} · ${st.target_short}`
-            : st.target_short;
+          const title = streamTitle(st);
           const sourceTag = st.geo_kind === "us-metrocast" ? st.hub_short : null;
+          const rowTitle = sourceTag && title ? `${title} · ${sourceTag}` : (title || sourceTag || "Signal");
+          const obsPart = st.observed != null && Number.isFinite(st.observed) ? `Obs ${formatStreamValue(st.observed, st)}` : null;
+          const fcstPart = st.forecast != null && Number.isFinite(st.forecast) ? `Fcst ${formatStreamValue(st.forecast, st)}` : null;
+          const trendPart = Number.isFinite(st.trend_pct) ? `${st.trend_pct >= 0 ? "+" : ""}${Math.round(st.trend_pct)}%` : null;
+          const numParts = [obsPart, fcstPart, trendPart].filter(Boolean);
           return h("button", {
             type: "button",
             class: ["c-row gb-stream-row", isFocusSig && "on"],
@@ -529,12 +572,9 @@ export function mountGlobeView(host, ctx) {
           },
           h("div", { class: "c-row-text" },
             h("div", { class: "gb-stream-head" },
-              h("span", { class: "c-row-label" }, sourceTag ? `${title} · ${sourceTag}` : title),
+              h("span", { class: "c-row-label" }, rowTitle),
               st.ref_date ? h("span", { class: "c-row-sub mono" }, st.ref_date.slice(5)) : null),
-            h("div", { class: "gb-stream-nums mono" },
-              st.observed != null ? `Obs ${formatStreamValue(st.observed, st)}` : null,
-              st.forecast != null ? `${st.observed != null ? " · " : ""}Fcst ${formatStreamValue(st.forecast, st)}` : null,
-              Number.isFinite(st.trend_pct) ? ` · ${st.trend_pct >= 0 ? "+" : ""}${Math.round(st.trend_pct)}%` : null)),
+            h("div", { class: "gb-stream-nums mono" }, numParts.length ? numParts.join(" · ") : "–")),
           h("span", { class: "gb-stream-go" }, "→"));
         }),
       ) : h("p", { class: "pk-empty", style: { padding: "var(--space-8) 0" } }, "No weekly observations for current round"),
@@ -543,7 +583,7 @@ export function mountGlobeView(host, ctx) {
           type: "button", class: "c-row",
           onclick: () => openStreamInChart(cs.hub_id, cs.target_id, cs.location_id),
         },
-        h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, cs.short), h("span", { class: "c-row-sub" }, cs.hub_short)),
+        h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, cs.short || cs.label || cs.target_id || "Categorical"), h("span", { class: "c-row-sub" }, cs.hub_short || "")),
         h("span", { class: "gb-stream-go" }, "PMF →"))),
       ) : null,
       childHsas.length ? h("div", { class: "gb-metros" },
@@ -554,7 +594,7 @@ export function mountGlobeView(host, ctx) {
             type: "button", class: "c-row",
             onclick: () => focusRegion(hsa.key),
           },
-          h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, hsa.name)),
+          h("span", { class: "c-row-text" }, h("span", { class: "c-row-label" }, hsa.name || hsa.key)),
           h("span", { class: "c-row-sub mono" }, hs ? formatStreamValue(hs.observed ?? hs.forecast, hs) : "–"));
         }),
       ) : null,

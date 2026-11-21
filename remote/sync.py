@@ -58,6 +58,73 @@ def _outdated(entry: Dict[str, Any]) -> bool:
     return int(entry.get("schema", 1)) < FILE_SCHEMA
 
 
+def _is_known_skip(skipped: Dict[str, Any], o: RemoteObject) -> bool:
+    entry = skipped.get(o.key)
+    if not isinstance(entry, dict):
+        return False
+    return (
+        entry.get("etag") == o.etag
+        and int(entry.get("size", -1)) == o.size
+        and not _outdated(entry)
+    )
+
+
+def _resolve_truth_plan(t_objs: Dict[str, RemoteObject]) -> Dict[str, Dict[str, Any]]:
+    """Build canonical manifest descriptors for each supported upstream target-data layout."""
+    plan: Dict[str, Dict[str, Any]] = {}
+    oracle_obj = t_objs.get("target-data/oracle-output.parquet") or t_objs.get("target-data/oracle-output.csv")
+    if oracle_obj is not None:
+        plan["oracle"] = {
+            "key": oracle_obj.key,
+            "etag": oracle_obj.etag,
+            "last_modified": oracle_obj.last_modified,
+            "objs": [oracle_obj],
+            "multi": False,
+        }
+    ts_obj = t_objs.get("target-data/time-series.parquet") or t_objs.get("target-data/time-series.csv")
+    if ts_obj is not None:
+        plan["time_series"] = {
+            "key": ts_obj.key,
+            "etag": ts_obj.etag,
+            "last_modified": ts_obj.last_modified,
+            "objs": [ts_obj],
+            "multi": False,
+        }
+    latest_obj = t_objs.get("target-data/latest-data.parquet") or t_objs.get("target-data/latest-data.csv")
+    if latest_obj is not None:
+        plan["latest"] = {
+            "key": latest_obj.key,
+            "etag": latest_obj.etag,
+            "last_modified": latest_obj.last_modified,
+            "objs": [latest_obj],
+            "multi": False,
+        }
+    else:
+        respi_objs = sorted(
+            (o for k, o in t_objs.items() if k.startswith("target-data/latest-") and k.endswith((".csv", ".parquet"))),
+            key=lambda o: o.key,
+        )
+        if respi_objs:
+            lms = [o.last_modified for o in respi_objs if o.last_modified]
+            plan["latest"] = {
+                "key": ",".join(o.key for o in respi_objs),
+                "etag": "|".join(f"{o.key}:{o.etag}" for o in respi_objs),
+                "last_modified": max(lms) if lms else "",
+                "objs": respi_objs,
+                "multi": True,
+            }
+    adm_obj = t_objs.get("target-data/target-hospital-admissions.csv")
+    if adm_obj is not None:
+        plan["admissions"] = {
+            "key": adm_obj.key,
+            "etag": adm_obj.etag,
+            "last_modified": adm_obj.last_modified,
+            "objs": [adm_obj],
+            "multi": False,
+        }
+    return plan
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -432,6 +499,7 @@ class RemoteManager:
         cal = self._hub_calendar(hub_id, client=client)
         man = self.store.load_manifest(hub_id)
         synced_seasons = set(man.get("seasons", []))
+        skipped_files = man.get("skipped_files") or {}
 
         seasons: Dict[str, Dict[str, Any]] = {}
         new = changed = outdated = 0
@@ -447,6 +515,8 @@ class RemoteManager:
             entry["rounds"][ref] = entry["rounds"].get(ref, 0) + 1
             if s in synced_seasons:
                 listed_keys.add(o.key)
+                if _is_known_skip(skipped_files, o):
+                    continue
                 have = man["files"].get(o.key)
                 if have is None:
                     new += 1
@@ -468,23 +538,16 @@ class RemoteManager:
             except TransportError:
                 t_objs = {}
             man_truth = man.get("truth", {})
-            oracle_obj = t_objs.get("target-data/oracle-output.parquet") or t_objs.get("target-data/oracle-output.csv")
-            adm_obj = t_objs.get("target-data/target-hospital-admissions.csv")
-            ts_obj = t_objs.get("target-data/time-series.parquet") or t_objs.get("target-data/time-series.csv")
-            latest_obj = t_objs.get("target-data/latest-data.parquet") or t_objs.get("target-data/latest-data.csv")
-            if latest_obj is None:
-                latest_cands = sorted(k for k in t_objs if k.startswith("target-data/latest-") and k.endswith(".csv"))
-                if latest_cands:
-                    latest_obj = t_objs[latest_cands[0]]
-            for kind, obj in (("oracle", oracle_obj), ("admissions", adm_obj), ("time_series", ts_obj), ("latest", latest_obj)):
-                if obj is None:
-                    continue
-                if obj.last_modified and (truth_last_modified is None or obj.last_modified > truth_last_modified):
-                    truth_last_modified = obj.last_modified
+            truth_plan = _resolve_truth_plan(t_objs)
+            for kind, t_desc in truth_plan.items():
+                lm = t_desc.get("last_modified")
+                if lm and (truth_last_modified is None or lm > truth_last_modified):
+                    truth_last_modified = lm
                 prev_t = man_truth.get(kind, {})
-                if prev_t and prev_t.get("etag") != obj.etag:
-                    truth_changed = True
-                elif not prev_t and kind == "oracle":
+                if prev_t:
+                    if prev_t.get("etag") != t_desc["etag"]:
+                        truth_changed = True
+                elif kind == "oracle" or not man_truth:
                     truth_changed = True
 
         season_list = []
@@ -670,14 +733,18 @@ class RemoteManager:
                     return False
             return True
 
+        skipped_files = man.setdefault("skipped_files", {})
         to_fetch = [
             (o, src_tag, src_client)
             for k, (o, src_tag, src_client) in wanted.items()
-            if k not in man["files"]
-            or man["files"][k].get("etag") != o.etag
-            or int(man["files"][k].get("size", -1)) != o.size
-            or _outdated(man["files"][k])
-            or not _all_paths_exist(man["files"][k])
+            if not _is_known_skip(skipped_files, o)
+            and (
+                k not in man["files"]
+                or man["files"][k].get("etag") != o.etag
+                or int(man["files"][k].get("size", -1)) != o.size
+                or _outdated(man["files"][k])
+                or not _all_paths_exist(man["files"][k])
+            )
         ]
         removed = [
             k for k, f in man["files"].items()
@@ -703,7 +770,24 @@ class RemoteManager:
                         entry = fut.result()
                     except SyncCancelled:
                         raise
-                    except (TransportError, NormalizationError, OSError, ValueError, pl.exceptions.PolarsError) as exc:
+                    except (NormalizationError, ValueError, pl.exceptions.PolarsError) as exc:
+                        failed += 1
+                        m = FORECAST_KEY_RE.match(o.key)
+                        skipped_files[o.key] = {
+                            "etag": o.etag,
+                            "size": o.size,
+                            "schema": FILE_SCHEMA,
+                            "model": m.group(1),
+                            "reference_date": m.group(2),
+                            "reason": str(exc),
+                        }
+                        man.setdefault("hub_warnings", [])
+                        msg = f"Skipped {m.group(2)}-{m.group(1)}: {exc}"
+                        if msg not in man["hub_warnings"]:
+                            man["hub_warnings"] = (man["hub_warnings"] + [msg])[-50:]
+                        job.advance(o.size)
+                        continue
+                    except (TransportError, OSError) as exc:
                         failed += 1
                         m = FORECAST_KEY_RE.match(o.key)
                         man.setdefault("hub_warnings", [])
@@ -712,6 +796,7 @@ class RemoteManager:
                             man["hub_warnings"] = (man["hub_warnings"] + [msg])[-50:]
                         job.advance(o.size)
                         continue
+                    skipped_files.pop(o.key, None)
                     prev = man["files"].get(o.key)
                     if prev is not None:
                         updated += 1
@@ -749,6 +834,11 @@ class RemoteManager:
                 rel = f.get(p_field)
                 if rel and (hub_dir / rel).exists():
                     (hub_dir / rel).unlink(missing_ok=True)
+        for k in [
+            k for k, sf in skipped_files.items()
+            if sf.get("reference_date") and season_for_date(sf["reference_date"], calendar=cal) in job.seasons and k not in wanted
+        ]:
+            skipped_files.pop(k, None)
 
         # 4. Model metadata for every model we hold
         job.phase = "Model metadata"
@@ -756,13 +846,16 @@ class RemoteManager:
 
         # 5. Truth data across all supported target-data layouts
         job.phase = "Truth data"
-        self._sync_truth(client, spec, man, job, cal=cal, pad_single_digit_fips=hub_geo.uses_us_fips, aux_objs=aux_objs)
+        truth_updated = self._sync_truth(
+            client, spec, man, job, cal=cal, pad_single_digit_fips=hub_geo.uses_us_fips, aux_objs=aux_objs
+        )
 
         man["last_sync"] = _utcnow()
         man["pending"] = {
             "new": 0,
             "changed": 0,
             "removed": 0,
+            "outdated": 0,
             "truth_changed": False,
             "checked_at": man["last_sync"],
             "latest_round": max((f["reference_date"] for f in man["files"].values()), default=None),
@@ -773,6 +866,7 @@ class RemoteManager:
             "removed": len(removed),
             "failed": failed,
             "models_changed": len(changed_models),
+            "truth_updated": bool(truth_updated),
         }
 
     def _fetch_forecast(
@@ -912,104 +1006,66 @@ class RemoteManager:
         cal: CalendarSpec = DEFAULT_FLUSIGHT_CALENDAR,
         pad_single_digit_fips: bool = True,
         aux_objs: Optional[Dict[str, RemoteObject]] = None,
-    ):
+    ) -> bool:
         truth = man.setdefault("truth", {})
         objs = {o.key: o for o in client.list("target-data/")}
         today_iso = _utcnow()[:10]
         null_vals = ["", "NA", "null", "NaN", "None", "NULL"]
+        plan = _resolve_truth_plan(objs)
+        truth_updated = False
 
         def _read_truth_bytes(key: str, data: bytes) -> pl.DataFrame:
             if key.endswith(".parquet"):
                 return read_table(data, ".parquet")
             return pl.read_csv(io.BytesIO(data), infer_schema_length=0, null_values=null_vals)
 
-        # 1. Oracle output
-        oracle_obj = objs.get("target-data/oracle-output.parquet") or objs.get("target-data/oracle-output.csv")
-        dest = self.store.truth_path(spec.id, "oracle")
-        if oracle_obj and (truth.get("oracle", {}).get("etag") != oracle_obj.etag or not dest.exists()):
-            raw = _read_truth_bytes(oracle_obj.key, client.get(oracle_obj.key))
-            fallback = oracle_obj.last_modified[:10] if oracle_obj.last_modified else today_iso
-            oracle = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips)
-            if oracle.is_empty():
-                raise NormalizationError("hub oracle-output has no rows")
-            _atomic_write_parquet(oracle, dest)
-            truth["oracle"] = {
-                "key": oracle_obj.key,
-                "etag": oracle_obj.etag,
-                "last_modified": oracle_obj.last_modified or today_iso,
-                "as_of": oracle.get_column("as_of").max(),
-                "max_date": oracle.get_column("target_end_date").max(),
-                "rows": oracle.height,
+        def _sync_oracle_kind(kind: str, *, required: bool = False) -> bool:
+            entry = plan.get(kind)
+            dest = self.store.truth_path(spec.id, kind)
+            if entry is None or (truth.get(kind, {}).get("etag") == entry["etag"] and dest.exists()):
+                return False
+            if entry["multi"]:
+                frames = []
+                for ro in entry["objs"]:
+                    raw = _read_truth_bytes(ro.key, client.get(ro.key))
+                    stem = Path(ro.key).stem[len("latest-"):].replace("_", " ")
+                    fallback = ro.last_modified[:10] if ro.last_modified else today_iso
+                    ldf = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips, default_target=stem)
+                    if not ldf.is_empty():
+                        frames.append(ldf)
+                if not frames:
+                    return False
+                df = pl.concat(frames, how="diagonal_relaxed")
+            else:
+                obj = entry["objs"][0]
+                raw = _read_truth_bytes(obj.key, client.get(obj.key))
+                fallback = obj.last_modified[:10] if obj.last_modified else today_iso
+                df = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips)
+                if df.is_empty():
+                    if required:
+                        raise NormalizationError("hub oracle-output has no rows" if kind == "oracle" else f"hub {kind} has no rows")
+                    return False
+            _atomic_write_parquet(df, dest)
+            truth[kind] = {
+                "key": entry["key"],
+                "etag": entry["etag"],
+                "last_modified": entry["last_modified"] or today_iso,
+                "as_of": df.get_column("as_of").max(),
+                "max_date": df.get_column("target_end_date").max(),
+                "rows": df.height,
             }
+            return True
 
-        # 2. Hubverse time-series (including MetroCast as_of / observation truth)
-        ts_obj = objs.get("target-data/time-series.parquet") or objs.get("target-data/time-series.csv")
-        ts_dest = self.store.truth_path(spec.id, "time_series")
-        if ts_obj and (truth.get("time_series", {}).get("etag") != ts_obj.etag or not ts_dest.exists()):
-            raw = _read_truth_bytes(ts_obj.key, client.get(ts_obj.key))
-            fallback = ts_obj.last_modified[:10] if ts_obj.last_modified else today_iso
-            ts_df = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips)
-            if not ts_df.is_empty():
-                _atomic_write_parquet(ts_df, ts_dest)
-                truth["time_series"] = {
-                    "key": ts_obj.key,
-                    "etag": ts_obj.etag,
-                    "last_modified": ts_obj.last_modified or today_iso,
-                    "as_of": ts_df.get_column("as_of").max(),
-                    "max_date": ts_df.get_column("target_end_date").max(),
-                    "rows": ts_df.height,
-                }
-
-        # 3. Latest-data or RespiCast `latest-*.csv` snapshots
-        latest_obj = objs.get("target-data/latest-data.parquet") or objs.get("target-data/latest-data.csv")
-        latest_dest = self.store.truth_path(spec.id, "latest")
-        if latest_obj:
-            if truth.get("latest", {}).get("etag") != latest_obj.etag or not latest_dest.exists():
-                raw = _read_truth_bytes(latest_obj.key, client.get(latest_obj.key))
-                fallback = latest_obj.last_modified[:10] if latest_obj.last_modified else today_iso
-                ldf = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips)
-                if not ldf.is_empty():
-                    _atomic_write_parquet(ldf, latest_dest)
-                    truth["latest"] = {
-                        "key": latest_obj.key,
-                        "etag": latest_obj.etag,
-                        "last_modified": latest_obj.last_modified or today_iso,
-                        "as_of": ldf.get_column("as_of").max(),
-                        "max_date": ldf.get_column("target_end_date").max(),
-                        "rows": ldf.height,
-                    }
-        else:
-            respi_objs = sorted(
-                (o for k, o in objs.items() if k.startswith("target-data/latest-") and k.endswith(".csv")),
-                key=lambda o: o.key,
-            )
-            if respi_objs:
-                combined_etag = "|".join(f"{o.key}:{o.etag}" for o in respi_objs)
-                if truth.get("latest", {}).get("etag") != combined_etag or not latest_dest.exists():
-                    frames = []
-                    for ro in respi_objs:
-                        raw = _read_truth_bytes(ro.key, client.get(ro.key))
-                        stem = Path(ro.key).stem[len("latest-"):].replace("_", " ")
-                        fallback = ro.last_modified[:10] if ro.last_modified else today_iso
-                        ldf = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips, default_target=stem)
-                        if not ldf.is_empty():
-                            frames.append(ldf)
-                    if frames:
-                        combined_l = pl.concat(frames, how="diagonal_relaxed")
-                        _atomic_write_parquet(combined_l, latest_dest)
-                        truth["latest"] = {
-                            "key": ",".join(o.key for o in respi_objs),
-                            "etag": combined_etag,
-                            "last_modified": today_iso,
-                            "as_of": combined_l.get_column("as_of").max(),
-                            "max_date": combined_l.get_column("target_end_date").max(),
-                            "rows": combined_l.height,
-                        }
+        # 1-3. Oracle output, time-series, and latest-data / RespiCast `latest-*.csv` snapshots
+        truth_updated |= _sync_oracle_kind("oracle", required=True)
+        truth_updated |= _sync_oracle_kind("time_series")
+        truth_updated |= _sync_oracle_kind("latest")
 
         # 4. Legacy FluSight weekly admissions CSV
-        adm_obj = objs.get("target-data/target-hospital-admissions.csv")
+        adm_entry = plan.get("admissions")
         dest = self.store.truth_path(spec.id, "admissions")
-        if adm_obj and (truth.get("admissions", {}).get("etag") != adm_obj.etag or not dest.exists()):
+        if adm_entry is not None and (truth.get("admissions", {}).get("etag") != adm_entry["etag"] or not dest.exists()):
+            adm_obj = adm_entry["objs"][0]
             raw = pl.read_csv(
                 io.BytesIO(client.get(adm_obj.key)),
                 schema_overrides={"location": pl.String, "value": pl.Float64, "date": pl.String},
@@ -1018,12 +1074,13 @@ class RemoteManager:
             adm = normalize_admissions(raw, ADMISSIONS_TARGET, pad_single_digit_fips=pad_single_digit_fips)
             _atomic_write_parquet(adm, dest)
             truth["admissions"] = {
-                "key": adm_obj.key,
-                "etag": adm_obj.etag,
-                "last_modified": adm_obj.last_modified or today_iso,
+                "key": adm_entry["key"],
+                "etag": adm_entry["etag"],
+                "last_modified": adm_entry["last_modified"] or today_iso,
                 "max_date": adm.get_column("target_end_date").max(),
                 "rows": adm.height,
             }
+            truth_updated = True
 
         # 5. Point-in-time archive snapshots newer than bundled as-of vintages
         local_max = self._local_as_of_max() or ""
@@ -1056,3 +1113,6 @@ class RemoteManager:
             )
             _atomic_write_parquet(snap_df, dest)
             truth["as_of"] = {"snapshots": sorted(have), "as_of": max(have), "max_date": max(have)}
+            truth_updated = True
+
+        return truth_updated

@@ -24,6 +24,7 @@ from viz.remote.hubs import assess_compatibility, hub_id_from_bucket
 from viz.remote.normalize import normalize_forecast
 from viz.remote.s3 import S3Client, validate_bucket_name
 from viz.remote.sync import RemoteManager
+from viz.remote.transports import TransportError
 
 TARGET = "wk inc flu hosp"
 QUANTILES = [0.025, 0.25, 0.5, 0.75, 0.975]
@@ -384,6 +385,91 @@ class TestSyncLifecycle(unittest.TestCase):
         res = self.mgr.add_hub("some-custom-covid-hub")
         self.assertTrue(res["ok"], res)
         self.assertIn(res["hub"]["id"], [s.id for s in self.loader.remote_store.hub_specs()])
+
+    def test_respicast_latest_csv_truth_check_matches_sync_etag(self):
+        self.s3.delete("target-data/oracle-output.csv")
+        self.s3.put(
+            "target-data/latest-ILI_incidence.csv",
+            "location,target_end_date,value\nUS,2026-10-10,120.0\n",
+        )
+        self.s3.put(
+            "target-data/latest-ARI_incidence.csv",
+            "location,target_end_date,value\nUS,2026-10-10,950.0\n",
+        )
+        job1 = self._sync()
+        self.assertEqual(job1["status"], "done", job1.get("error"))
+        self.assertTrue(job1["summary"]["truth_updated"])
+
+        chk1 = self.mgr.check("flusight")["pending"]
+        self.assertFalse(chk1["truth_changed"])
+
+        self.s3.put(
+            "target-data/latest-ARI_incidence.csv",
+            "location,target_end_date,value\nUS,2026-10-10,950.0\nUS,2026-10-17,990.0\n",
+        )
+        chk2 = self.mgr.check("flusight")["pending"]
+        self.assertTrue(chk2["truth_changed"])
+
+        job2 = self._sync()
+        self.assertEqual(job2["status"], "done", job2.get("error"))
+        self.assertTrue(job2["summary"]["truth_updated"])
+        chk3 = self.mgr.check("flusight")["pending"]
+        self.assertFalse(chk3["truth_changed"])
+
+    def test_skipped_unreadable_file_not_reflagged_until_etag_changes(self):
+        key_empty = "model-output/Team-a/2026-10-24-Team-a.csv"
+        self.s3.put(key_empty, "reference_date,target,horizon,location,target_end_date,output_type,output_type_id,value\n")
+
+        job1 = self._sync()
+        self.assertEqual(job1["status"], "done", job1.get("error"))
+        self.assertEqual(job1["summary"]["failed"], 1)
+        man1 = self.mgr.store.load_manifest("flusight")
+        self.assertIn(key_empty, man1.get("skipped_files", {}))
+
+        chk1 = self.mgr.check("flusight")["pending"]
+        self.assertEqual(chk1["new"], 0)
+
+        valid_csv = pl.read_parquet(io.BytesIO(forecast_parquet("Team-a", "2026-10-24"))).write_csv()
+        self.s3.put(key_empty, valid_csv)
+        chk2 = self.mgr.check("flusight")["pending"]
+        self.assertEqual(chk2["new"], 1)
+
+        job2 = self._sync()
+        self.assertEqual(job2["status"], "done", job2.get("error"))
+        self.assertEqual(job2["summary"]["added"], 1)
+        man2 = self.mgr.store.load_manifest("flusight")
+        self.assertNotIn(key_empty, man2.get("skipped_files", {}))
+
+        # Transient TransportError must NOT enter skipped_files so the next check/sync retries
+        key_flaky = "model-output/Team-a/2026-10-31-Team-a.parquet"
+        self.s3.put(key_flaky, forecast_parquet("Team-a", "2026-10-31"))
+        orig_factory = self.mgr._client_factory
+
+        class FlakyClient:
+            def __init__(self, inner):
+                self._inner = inner
+                self.source_name = inner.source_name
+                self.bucket = inner.bucket
+
+            def list(self, prefix, on_page=None):
+                return self._inner.list(prefix, on_page=on_page)
+
+            def get(self, key):
+                if key == key_flaky:
+                    raise TransportError("HTTP 503 service unavailable")
+                return self._inner.get(key)
+
+        self.mgr._client_factory = lambda b, cancel_event=None: FlakyClient(orig_factory(b, cancel_event=cancel_event))
+        try:
+            job3 = self._sync()
+            self.assertEqual(job3["status"], "done", job3.get("error"))
+            self.assertEqual(job3["summary"]["failed"], 1)
+            man3 = self.mgr.store.load_manifest("flusight")
+            self.assertNotIn(key_flaky, man3.get("skipped_files", {}))
+            chk3 = self.mgr.check("flusight")["pending"]
+            self.assertEqual(chk3["new"], 1)
+        finally:
+            self.mgr._client_factory = orig_factory
 
 
 if __name__ == "__main__":
