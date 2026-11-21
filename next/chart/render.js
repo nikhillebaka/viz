@@ -94,6 +94,12 @@ export function drawFan(canvas, scene, { dpr = globalThis.devicePixelRatio || 1 
     };
     tick(S.dates.cut.x, "Data cutoff", S.dates.cut.date, "right", 2);
     tick(S.dates.ref.x, "Reference date", S.dates.ref.date, "left", -2);
+    if (S.dates.origin) {
+      const ox = S.dates.origin.x;
+      vline(ox, ay, ay - 6); stroke(ink3, 1);
+      const flip = ox + 124 > w - 12;
+      text(`Origin date · ${S.dates.origin.date}`, flip ? ox - 4 : ox + 4, ay - 8, F_AXIS, ink3, flip ? "right" : "left");
+    }
   }
 
   // everything inside the plot is clipped at the x-axis

@@ -20,7 +20,7 @@ export const DASH = "–";
  * @returns {{ query: string, full: string | null, quick: string | null, key: string, models: "all" | string[] }}
  *   key identifies the response
  */
-export function metricsRequest(scope, { target, selected, allSeasons }) {
+export function metricsRequest(scope, { target, selected, allSeasons, availableHorizons = HORIZONS }) {
   const p = new URLSearchParams();
   p.set("target", target);
   p.set("location", scope.location);
@@ -36,7 +36,7 @@ export function metricsRequest(scope, { target, selected, allSeasons }) {
   if (scope.baseline) p.set("baseline", scope.baseline);
   if (scope.weeks) p.set("weeks", `${scope.weeks[0]}-${scope.weeks[1]}`);
   if (scope.phase) p.set("phase", scope.phase);
-  const hs = scope.horizons && scope.horizons.length < HORIZONS.length ? [...scope.horizons].sort((a, b) => a - b) : null;
+  const hs = scope.horizons && scope.horizons.length < availableHorizons.length ? [...scope.horizons].sort((a, b) => a - b) : null;
   const full = hs ? p.toString() : null;
   if (hs) p.set("horizons", hs.join(","));
   const query = p.toString();
@@ -77,8 +77,16 @@ export function rowsFrom(resp, { ids, baseline, scale, full = null, wins = resp,
   const eff = resp?.baseline_model || baseline;
   const base = allH.get(full?.baseline_model || eff) || allH.get(baseline);
   const wisKey = log ? "wis_log" : "wis";
+  const hSet = new Set(HORIZONS);
+  for (const entry of allH.values()) {
+    for (const k of Object.keys(entry?.by_horizon || {})) {
+      const n = Number(k);
+      if (Number.isInteger(n)) hSet.add(n);
+    }
+  }
+  const hs = [...hSet].sort((a, b) => a - b);
   const baseH = {};
-  for (const h of HORIZONS) baseH[h] = num(base?.by_horizon?.[h]?.[wisKey]);
+  for (const h of hs) baseH[h] = num(base?.by_horizon?.[h]?.[wisKey]);
 
   const want = [...ids.filter((id) => id !== baseline), baseline].filter((id, i, a) => id && a.indexOf(id) === i);
   return want.map((id) => {
@@ -87,7 +95,7 @@ export function rowsFrom(resp, { ids, baseline, scale, full = null, wins = resp,
     const active = !!(r && r.has_data_in_scope && num(r.wis) != null && r.count > 0);
     const byH = {};
     const rh = allH.get(id);
-    for (const h of HORIZONS) {
+    for (const h of hs) {
       const b = rh?.by_horizon?.[h];
       const w = num(b?.[wisKey]);
       byH[h] = b ? {
@@ -147,6 +155,7 @@ export const SORTS = Object.freeze({
   h1: { get: (r) => r.byH[1]?.rel ?? null, asc: true, score: true },
   h2: { get: (r) => r.byH[2]?.rel ?? null, asc: true, score: true },
   h3: { get: (r) => r.byH[3]?.rel ?? null, asc: true, score: true },
+  h4: { get: (r) => r.byH[4]?.rel ?? null, asc: true, score: true },
 });
 export const DEFAULT_SORT = "rel";
 
@@ -255,9 +264,9 @@ export function datesLabel(scope, seasonLabel, seasonCount) {
   return parts.join(" · ");
 }
 
-/** The Horizons fragment: "0–3 wk", "1–2 wk", "0, 2 wk". */
-export function horizonsLabel(horizons) {
-  const hs = horizons || HORIZONS;
+/** The Horizons fragment: "0–3 wk", "1–4 wk", "0, 2 wk". */
+export function horizonsLabel(horizons, availableHorizons = HORIZONS) {
+  const hs = horizons || availableHorizons;
   const run = hs.every((h, i) => i === 0 || h === hs[i - 1] + 1);
   if (hs.length === 1) return `${hs[0]} wk`;
   return run ? `${hs[0]}–${hs.at(-1)} wk` : `${hs.join(", ")} wk`;

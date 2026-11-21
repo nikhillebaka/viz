@@ -309,6 +309,56 @@ test("pointsAt morphs smoothly across the boundary where truth anchor drops out"
   assert.equal(mid[1].t, (pA[1].t + pZ[0].t) / 2);
 });
 
+test("RespiCast Wed/Sun offset aligns Reference date with FluSight forecast week Sunday and shows Origin date tick", () => {
+  // Standard FluSight (0-offset) keeps scene.dates.origin null and ref on D[di]
+  const usScene = layoutFan(fan, base(), W, H);
+  assert.equal(usScene.dates.origin, null);
+  assert.equal(usScene.ref, parseIso("2025-12-27"));
+
+  // Simulated RespiCast Wed->Sun 1-indexed VZF2 block: origin Wed 2026-11-18, horizon_offset_days=-10
+  // -> h=1 targets Sun 2026-11-15, observed cutoff is Sun 2026-11-08
+  const head = {
+    version: 2,
+    target: "ILI incidence",
+    season: "2026-2027",
+    location: "DE",
+    horizon_offset_days: -10,
+    rounds: ["2026-11-18"],
+    horizons: [1, 2, 3, 4],
+    quantiles: [0.5],
+    start: "2026-09-06",
+    end: "2027-05-02",
+    observed: {
+      dates: ["2026-11-01", "2026-11-08", "2026-11-15"],
+      offset: 0,
+      length: 3,
+    },
+    models: [{ id: "m0", offset: 3, rounds: [0], horizons: [1, 2, 3, 4] }],
+  };
+  const body = new Float32Array([100, 120, 130, 132, 140, 150, 160]);
+  const hb = new TextEncoder().encode(JSON.stringify(head));
+  const padLen = (hb.length + 3) & ~3;
+  const buf = new ArrayBuffer(8 + padLen + body.byteLength);
+  new Uint8Array(buf, 0, 4).set(new TextEncoder().encode("VZF2"));
+  new DataView(buf).setUint32(4, padLen, true);
+  new Uint8Array(buf, 8, padLen).set(hb);
+  new Float32Array(buf, 8 + padLen).set(body);
+
+  const euFan = decodeFan(buf);
+  const s = layoutFan(euFan, base({
+    t: 0, ymax: 250,
+    models: [{ id: "m0", slot: 0, label: "m0" }],
+  }), W, H);
+
+  assert.equal(s.ref, parseIso("2026-11-15"));
+  assert.equal(s.origin, parseIso("2026-11-18"));
+  assert.equal(s.cutoff, parseIso("2026-11-08"));
+  assert.equal(s.dates.cut.date, "Nov 8");
+  assert.equal(s.dates.ref.date, "Nov 15");
+  assert.ok(s.dates.origin && s.dates.origin.date === "Nov 18");
+  assert.ok(s.dates.cut.x < s.dates.ref.x && s.dates.ref.x < s.dates.origin.x);
+});
+
 test("RespiCast 1-indexed Wednesday rounds align cutoff, hoverInfo, and fanEnd with Sunday truth", () => {
   // VZF2 payload builder with Wednesday rounds, Sunday observations, and horizon_offset_days = -10
   const obs = [

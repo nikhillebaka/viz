@@ -163,3 +163,25 @@ test("URL: scope and leaderboard keys round-trip; defaults stay out", () => {
   assert.equal(q, "?ss=2024-2025&wk=4-10&ph=peak&hz=1,2&pl=US&fair=1&bl=m1&rk=sel&sc=log&sort=-wis&cols=wins&open=m1");
   assert.equal(writeUrl({ target: "t", location: "US", date: "2026-01-10", scope: {}, scores: { sort: "rel", rev: false, cols: [], open: [] } }, m), "");
 });
+
+test("rowsFrom and horizonsLabel support extended RespiCast horizons (-1, 4 wk)", () => {
+  const euResp = {
+    rankings: [
+      {
+        model_id: "euEns", has_data_in_scope: true, count: 100, wis: 110, mae: 140, relative_wis: 0.85,
+        by_horizon: { "-1": { wis: 50, count: 20 }, 1: { wis: 100, count: 25 }, 2: { wis: 120, count: 25 }, 3: { wis: 130, count: 25 }, 4: { wis: 150, count: 25 } },
+      },
+      {
+        model_id: "quantileBaseline", has_data_in_scope: true, count: 100, wis: 130, mae: 170, relative_wis: 1,
+        by_horizon: { 1: { wis: 110, count: 25 }, 2: { wis: 130, count: 25 }, 3: { wis: 140, count: 25 }, 4: { wis: 180, count: 25 } },
+      },
+    ],
+  };
+  const rs = rowsFrom(euResp, { ids: ["euEns"], baseline: "quantileBaseline", scale: "natural", label: (x) => x });
+  const r = rs.find((x) => x.id === "euEns");
+  assert.equal(r.byH[-1]?.wis, 50);
+  assert.equal(r.byH[4]?.wis, 150);
+  assert.ok(Math.abs(r.byH[4].rel - 150 / 180) < 1e-9);
+  assert.equal(horizonsLabel(null, [1, 2, 3, 4]), "1–4 wk");
+  assert.equal(horizonsLabel(null, [-1, 0, 1, 2, 3, 4]), "-1–4 wk");
+});

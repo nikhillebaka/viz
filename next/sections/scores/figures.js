@@ -179,16 +179,25 @@ export function calibrationFigure(svg, rows, o) {
   });
 }
 
-/** Horizon: relative WIS at 0–3 weeks ahead, log scale, a line at 1 (the baseline). */
+/** Horizon: relative WIS across scored horizon weeks ahead, log scale, a line at 1 (the baseline). */
 export function horizonFigure(svg, rows, o) {
-  const series = rows.filter((r) => r.active).map((r) => ({
+  const active = rows.filter((r) => r.active);
+  const hSet = new Set();
+  for (const r of active) {
+    for (const [k, cell] of Object.entries(r.byH || {})) {
+      const n = Number(k);
+      if (Number.isInteger(n) && (cell?.wis != null || cell?.rel != null)) hSet.add(n);
+    }
+  }
+  const hs = hSet.size ? [...hSet].sort((a, b) => a - b) : [0, 1, 2, 3];
+  const series = active.map((r) => ({
     id: r.id, label: r.label, dot: r.dot, base: r.baseline,
-    pts: [0, 1, 2, 3].map((hh) => [hh, r.baseline ? 1 : r.byH[hh]?.rel ?? null]),
+    pts: hs.map((hh) => [hh, r.baseline ? 1 : r.byH[hh]?.rel ?? null]),
   }));
   const ax = ratioAxis(series.flatMap((se) => se.pts.map((p) => p[1])));
   lineFigure(svg, {
     ...o, series, ref: 1,
-    x: { domain: [-0.2, 3.2], ticks: [0, 1, 2, 3], fmt: (v) => `${v} wk` },
+    x: { domain: [hs[0] - 0.2, hs.at(-1) + 0.2], ticks: hs, fmt: (v) => `${v} wk` },
     y: { ...ax, log: true, fmt: (v) => String(v) },
   });
 }

@@ -189,6 +189,8 @@
 .sc-tiles {
   display: grid; grid-template-columns: repeat(var(--cols), var(--space-20)); grid-auto-rows: var(--space-20); gap: var(--space-2);
 }
+.sc-tiles.is-eu { grid-template-columns: repeat(var(--cols), var(--space-16)); grid-auto-rows: var(--space-16); }
+.sc-tiles.is-generic { grid-template-columns: repeat(auto-fill, var(--space-20)); max-width: calc(var(--space-56) * 5); }
 .sc-tiles .sc-quiet { grid-column: 1 / -1; grid-row: 1; }
 .sc-tile {
   padding: 0; border: 0; border-radius: var(--radius-check); cursor: pointer;

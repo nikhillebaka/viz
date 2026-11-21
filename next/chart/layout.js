@@ -174,6 +174,36 @@ function firstTargetFor(fan, di, ref, ids) {
   return Math.min(ref, ref + firstH * WEEK + offsetMs);
 }
 
+// the reference forecast week target for timeline week di: equal to origin on 0-offset hubs
+// (FluSight), or the first forecast point ending in the origin week (>= origin - 6d, e.g. Sunday on RespiCast)
+function refTargetFor(fan, di, origin, ids) {
+  if (!fan.horizonOffsetDays) return origin;
+  const minT = origin - 6 * DAY;
+  let best = Infinity;
+  const check = (list) => {
+    for (const id of list) {
+      const pts = fan.points(id, di, 0);
+      const p = pts?.find((q) => !q.anchor && q.t >= minT);
+      if (p && p.t < best) best = p.t;
+    }
+  };
+  if (ids?.length) check(ids);
+  if (!Number.isFinite(best) && fan.present?.size) check(fan.present);
+  return Number.isFinite(best) ? best : firstTargetFor(fan, di, origin, ids);
+}
+
+function refAt(fan, t, origin, whole, ids) {
+  const D = fan.dates;
+  if (!D.length || !fan.horizonOffsetDays) return origin;
+  if (whole) return refTargetFor(fan, clamp(Math.round(t), 0, D.length - 1), origin, ids);
+  const i0 = clamp(Math.floor(t), 0, D.length - 1);
+  const i1 = clamp(Math.ceil(t), 0, D.length - 1);
+  if (i0 === i1) return refTargetFor(fan, i0, D[i0], ids);
+  const frac = clamp(t - i0, 0, 1);
+  const r0 = refTargetFor(fan, i0, D[i0], ids), r1 = refTargetFor(fan, i1, D[i1], ids);
+  return r0 + (r1 - r0) * frac;
+}
+
 // the data cutoff for timeline week di: the last observed week before the first forecast target (else 1 wk before it)
 function cutoffFor(fan, di, ref, ids) {
   const firstTarget = firstTargetFor(fan, di, ref, ids);
@@ -243,19 +273,21 @@ export function layoutFan(fan, opts, w, h) {
   // t: fractional timeline index. Integer t is an ordinary week; in between, everything interpolates.
   const t = opts.t ?? n - 1, di = clamp(Math.round(t), 0, Math.max(0, n - 1)), whole = Math.abs(t - di) < 1e-4;
   const tc = clamp(t, 0, Math.max(0, n - 1));
-  const ref = whole ? D[di] : D[0] + tc * WEEK;
+  const origin = whole ? D[di] : D[0] + tc * WEEK;
   const si = Number.isInteger(opts.settle) ? clamp(opts.settle, 0, Math.max(0, n - 1)) : di;
   const models = opts.models || [];
   const modelIds = models.map((m) => m.id);
+  const ref = refAt(fan, t, origin, whole, modelIds);
   const rulerStep = w < 600 ? 11 : 14;
   // rulers sit in the margin beside the fan and push the labels aside; they never narrow the plot
   const rk = clamp(+opts.rulers || 0, 0, 1);
   const rulerW = 18 + models.length * rulerStep;
-  const x = linear(opts.domain || [ref - 14 * WEEK, ref + lastH * WEEK + offsetMs], [pad.l, w - pad.r]);
+  const horizonEnd = origin + lastH * WEEK + offsetMs;
+  const x = linear(opts.domain || [ref - 14 * WEEK, horizonEnd], [pad.l, w - pad.r]);
   const ay = h - pad.b;
   const ymax = opts.ymax > 0 ? opts.ymax : fan.yMax(modelIds);
   const y = linear([0, ymax], [ay, pad.t]);
-  const cutoff = cutoffAt(fan, t, ref, whole, modelIds);
+  const cutoff = cutoffAt(fan, t, origin, whole, modelIds);
 
   // charted models: those with points here are the series; the rest keep their slot as a dimmed label
   const S = [], missing = [];
@@ -289,9 +321,13 @@ export function layoutFan(fan, opts, w, h) {
     ticks.push({ v, y: ty, text: ty - 6 > topClear + 10 ? axisFmt(v) : null });
   }
 
-  // the cutoff shade, the two date ticks, and the month labels that don't crowd them
-  const xc = x(cutoff), xr = x(ref);
-  const markL = xc - 84, markR = xr + 104;
+  // the cutoff shade, the date ticks, and the month labels that don't crowd them
+  const settledOrigin = D[si];
+  const settledRef = refTargetFor(fan, si, settledOrigin, modelIds);
+  const settledCut = whole && si === di ? cutoff : cutoffFor(fan, si, settledOrigin, modelIds);
+  const showOrigin = Math.abs(origin - ref) >= DAY && Math.abs(settledOrigin - settledRef) >= DAY;
+  const xc = x(cutoff), xr = x(ref), xo = x(origin);
+  const markL = xc - 84, markR = Math.max(xr, showOrigin ? xo : xr) + 104;
   const monthFont = font(500, F.chart, F.sans), cand = [];
   for (const m of monthStarts(x.invert(0), x.invert(w))) {
     const px = x(m);
@@ -299,7 +335,11 @@ export function layoutFan(fan, opts, w, h) {
   }
   const months = fitLabels(cand, (t) => measure(t, monthFont), 10);
   // while between weeks, the labels name the week the chart will settle on (what the stepper shows)
-  const dates = { cut: { x: xc, date: day(whole && si === di ? cutoff : cutoffFor(fan, si, D[si], modelIds)) }, ref: { x: xr, date: day(D[si]) } };
+  const dates = {
+    cut: { x: xc, date: day(settledCut) },
+    ref: { x: xr, date: day(settledRef) },
+    origin: showOrigin ? { x: xo, date: day(settledOrigin) } : null,
+  };
 
   // bands: unfocused first so the focused one sits on top; per model, the levels it has quantiles for
   const BL = [];
@@ -371,7 +411,7 @@ export function layoutFan(fan, opts, w, h) {
   const hot = hotC ? { id: hotC.id, line: hotC.line } : null;
 
   // width rulers beside the fan, at the hovered forecast week (else the last horizon)
-  const fanEnd = x(ref + lastH * WEEK + offsetMs);
+  const fanEnd = x(horizonEnd);
   const rx0 = fanEnd + 18;
   let rulers = null;
   if (rk > 0.001 && B.length) {
@@ -439,7 +479,7 @@ export function layoutFan(fan, opts, w, h) {
   }
 
   return {
-    w, h, pad, ay, topClear, x, y, t, di, settle: si, whole, ref, cutoff, level, levels, lastH, ymax, outcome,
+    w, h, pad, ay, topClear, x, y, t, di, settle: si, whole, ref, origin, cutoff, level, levels, lastH, ymax, outcome,
     focus: hasFocus ? f : null,
     fonts: { label: font(500, F.chart, F.sans), axis: font(400, F.axis, F.mono) },
     ticks, tickX: Math.min(20, pad.l), months, shade: xc, dates,

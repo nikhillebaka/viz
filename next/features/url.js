@@ -245,8 +245,8 @@ function writeViews(p, v) {
 }
 
 const list = (q, k) => (q.get(k) || "").split(",").map((s) => s.trim()).filter(Boolean);
-const SORT_KEYS = ["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name", "h0", "h1", "h2", "h3"];
-const COL_KEYS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3"];
+const SORT_KEYS = ["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name", "h0", "h1", "h2", "h3", "h4"];
+const COL_KEYS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"];
 
 /* the evaluation scope (sections/scope.js), only what differs from its defaults */
 function parseScope(q, manifest) {

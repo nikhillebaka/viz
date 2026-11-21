@@ -47,9 +47,10 @@ const COLUMNS = {
   h1: { label: "1 wk", tip: "Relative WIS at horizon 1 · vs baseline, ratio of means" },
   h2: { label: "2 wk", tip: "Relative WIS at horizon 2 · vs baseline, ratio of means" },
   h3: { label: "3 wk", tip: "Relative WIS at horizon 3 · vs baseline, ratio of means" },
+  h4: { label: "4 wk", tip: "Relative WIS at horizon 4 · vs baseline, ratio of means" },
 };
 const BASE_COLS = ["rel", "wis", "mae", "cov50", "cov95", "n"];
-export const OPTIONAL_COLS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3"];
+export const OPTIONAL_COLS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"];
 const DEFAULT_UI = Object.freeze({ sort: DEFAULT_SORT, rev: false, cols: [], open: [] });
 const uiOf = (st) => ({ ...DEFAULT_UI, ...(st.scores || {}) });
 
@@ -108,12 +109,17 @@ export function mount(el, ctx) {
   let hover = null, share = false, previewed = null, dead = false;
 
   const scope = () => scopeOf(store.get(), manifest);
+  const availH = () => targetHorizons(manifest, store.get().target);
+  const colAvailable = (c, hs = availH()) => {
+    const m = /^h(-?\d+)$/.exec(c);
+    return !m || hs.includes(Number(m[1]));
+  };
   const setUi = (patch) => store.set((st) => ({ scores: { ...uiOf(st), ...patch } }));
 
   function request() {
     const st = store.get(), sc = scope();
     if (!sc.seasons.length) { cur = null; resp = null; respFull = null; respKey = null; render(); return; }
-    const req = (cur = metricsRequest(sc, { target: st.target, selected: st.sel.selected, allSeasons }));
+    const req = (cur = metricsRequest(sc, { target: st.target, selected: st.sel.selected, allSeasons, availableHorizons: availH() }));
     // the quick request follows the selection even when the full-pool query (models=all) does not change
     if (req.quick && req.quick !== quickQ && req.quick !== quickWant) {
       quickWant = req.quick;
@@ -235,7 +241,7 @@ export function mount(el, ctx) {
     fDates.textContent = datesLabel(sc, seasonLabel, allSeasons.length);
     const noneScored = shown && rows.length && rows.every((r) => !r.active);
     fDates.className = ["sc-frag", def(!sc.following || sc.weeks || sc.phase), noneScored && "is-warn"].filter(Boolean).join(" ");
-    fHz.textContent = horizonsLabel(sc.horizons);
+    fHz.textContent = horizonsLabel(sc.horizons, availH());
     fHz.className = ["sc-frag", def(!!sc.horizons)].filter(Boolean).join(" ");
     const defBase = defaultBase(st, sc);
     const eff = shown?.baseline_model;
@@ -264,7 +270,8 @@ export function mount(el, ctx) {
   }
 
   function renderBoard(st, sc, ui) {
-    const cols = [...BASE_COLS, ...OPTIONAL_COLS.filter((c) => ui.cols.includes(c))];
+    const hs = availH();
+    const cols = [...BASE_COLS, ...OPTIONAL_COLS.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
     board.style.setProperty("--sc-grid", gridTemplate(cols));
     const keepFocus = document.activeElement?.closest?.(".sc-row")?.dataset.id;
     const kids = [];
@@ -498,9 +505,10 @@ export function mount(el, ctx) {
   }
   function columnsMenu(a) {
     const ui = uiOf(store.get());
+    const hs = availH();
     openMenu(a, {
       label: "Columns",
-      items: OPTIONAL_COLS.map((c) => ({
+      items: OPTIONAL_COLS.filter((c) => colAvailable(c, hs)).map((c) => ({
         label: COLUMNS[c].tip.split(" · ")[0].replace(/^Relative WIS at horizon (\d)/, "Rel. WIS · $1 wk"), toggle: true, checked: ui.cols.includes(c),
         onSelect: () => { const cur = uiOf(store.get()).cols; setUi({ cols: cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c] }); },
       })),
@@ -582,7 +590,7 @@ export function mount(el, ctx) {
       };
       const fresh = cur && respKey === cur.key && resp;
       if (fresh && resp.rankings?.some((r) => r.model_id === id)) return make(resp, respFull);
-      const req = metricsRequest(sc, { target: st.target, selected: [...new Set([...st.sel.selected, id])], allSeasons });
+      const req = metricsRequest(sc, { target: st.target, selected: [...new Set([...st.sel.selected, id])], allSeasons, availableHorizons: availH() });
       const [j, f] = await Promise.all([getJ(req.query), req.full ? getJ(req.full) : null]);
       return make(j, f);
     },

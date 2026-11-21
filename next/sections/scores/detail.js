@@ -4,6 +4,9 @@ import { h } from "../../lib/dom.js";
 import { linear } from "../../lib/scale.js";
 import { tooltip } from "../../ui/floating.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
+import { classifyHubGeo } from "../../geo/picker_geo.js";
+import { EU_GRID_PROPORTIONED, EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT } from "../../geo/eu_tiles.js";
+import { targetHorizons } from "../scope.js";
 import { LEVELS, fmtScore, fmtRel, relLevel, horizonsLabel } from "./model.js";
 import { loadDetails, loadPlaces } from "./data.js";
 import { s } from "./figures.js";
@@ -26,7 +29,7 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
   const block = (title, ...kids) => h("div", { class: "sc-block" }, h("div", { class: "sc-block-title" }, title), ...kids);
 
   // anatomy by horizon: spread, over, under as one thin bar per horizon
-  const hs = [0, 1, 2, 3].filter((k) => row.byH[k]?.wis != null);
+  const hs = Object.keys(row.byH || {}).map(Number).filter((k) => Number.isFinite(k) && row.byH[k]?.wis != null).sort((a, b) => a - b);
   const tot = (c) => (c.spread || 0) + (c.over || 0) + (c.under || 0);
   const max = Math.max(1e-9, ...hs.map((k) => tot(row.byH[k].comp)));
   const anatomy = h("div", { class: "sc-anat" }, hs.length ? hs.map((k) => {
@@ -45,35 +48,52 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
   const slot = slotOf(ctx.store.get().sel, row.id);
   requestAnimationFrame(() => drawCoverage(cov, row, base, slot == null ? null : seriesColor(slot)));
 
-  const tiles = h("div", { class: "sc-tiles", style: { "--cols": String(COLUMNS) } });
+  const byAbbr = new Map();
+  for (const l of manifest.locations) {
+    const prev = byAbbr.get(l.abbr);
+    if (!prev || (l.level === "state" && prev.level !== "state")) byAbbr.set(l.abbr, l);
+  }
+  const geoCls = classifyHubGeo(manifest);
+  const { tileClass, gridCols, items: tileItems } = buildTileLayout(geoCls, manifest, byAbbr);
+  const tiles = h("div", {
+    class: ["sc-tiles", tileClass],
+    style: gridCols ? { "--cols": String(gridCols) } : undefined,
+  });
   const subs = h("div", { class: "sc-subs" });
   const facts = h("div", { class: "sc-facts" });
 
   el.append(
     block("Anatomy", anatomy, key),
     block("Coverage", h("div", { class: "sc-cov-wrap" }, cov)),
-    block(tilesTitle(scope, manifest), tiles),
+    block(tilesTitle(scope, manifest, store.get().target), tiles),
     h("div", { class: "sc-block sc-wide" }, h("div", { class: "sc-block-title" }, "Submissions"), subs),
     h("div", { class: "sc-block sc-wide" }, facts),
   );
 
-  // per state: the model's mean WIS over the baseline's (a ratio of means, not the pairwise relative WIS),
+  // per location: the model's mean WIS over the baseline's (a ratio of means, not the pairwise relative WIS),
   // the newest scoped season, every week; one horizon when the scope has exactly one (tilesTitle says so)
   const season = scope.seasons[0];
-  const byAbbr = new Map(manifest.locations.map((l) => [l.abbr, l]));
   if (season && !row.baseline) {
     tiles.append(h("span", { class: "sc-quiet" }, "Loading"));
     const horizon = scope.horizons?.length === 1 ? scope.horizons[0] : "all";
     loadPlaces(store.get().target, season, row.id, baseline || scope.baseline, horizon).then(({ model, base: b }) => {
-      tiles.replaceChildren(...Object.entries(TILES).map(([abbr, [cx, cy]]) => {
-        const loc = byAbbr.get(abbr), m = model.get(abbr), bv = b.get(abbr);
+      tiles.replaceChildren(...tileItems.map((it) => {
+        const { loc, key: k, label } = it;
+        const m = loc ? (model.get(loc.abbr) ?? model.get(loc.id) ?? model.get(k)) : null;
+        const bv = loc ? (b.get(loc.abbr) ?? b.get(loc.id) ?? b.get(k)) : null;
         const rel = m != null && bv > 0 ? m / bv : null, lvl = relLevel(rel);
+        const gridStyle = it.col != null
+          ? {
+            gridColumn: it.w > 1 ? `${it.col} / span ${it.w}` : String(it.col),
+            gridRow: it.h > 1 ? `${it.row} / span ${it.h}` : String(it.row),
+          }
+          : {};
         const t = h("button", {
           type: "button", class: ["sc-tile", lvl == null && "is-empty"], disabled: !loc || null,
-          style: { gridColumn: String(cx + 1), gridRow: String(cy + 1), "--c": lvl ? `var(--score-${lvl})` : null },
-          "aria-label": loc?.name || abbr, onclick: () => loc && goTo({ location: loc.id }),
+          style: { ...gridStyle, "--c": lvl ? `var(--score-${lvl})` : null },
+          "aria-label": label, onclick: () => loc && goTo({ location: loc.id }),
         });
-        tooltip(t, `${loc?.name || abbr} · ${rel == null ? "–" : `${fmtRel(rel)}× baseline WIS · WIS ${fmtScore(m)}`}`);
+        tooltip(t, `${label} · ${rel == null ? "–" : `${fmtRel(rel)}× baseline WIS · WIS ${fmtScore(m)}`}`);
         return t;
       }));
     }, () => tiles.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load locations")));
@@ -86,15 +106,47 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
   return el;
 }
 
+/* Adapt mini-map tile grid to the active hub's geography (US states, Europe countries, or generic list). */
+function buildTileLayout(geoCls, manifest, byAbbr) {
+  if (geoCls.kind === "eu-countries") {
+    const spec = geoCls.ukSplitAvailable ? EU_TILES_PROPORTIONED_UK_SPLIT : EU_TILES_PROPORTIONED;
+    return {
+      tileClass: "is-eu",
+      gridCols: EU_GRID_PROPORTIONED.cols,
+      items: Object.entries(spec).map(([id, [c, r, w = 1, hSpan = 1]]) => {
+        const loc = manifest.locationById.get(id) || byAbbr.get(id) || null;
+        return { key: loc?.abbr || id, loc, label: loc?.name || id, col: c, row: r, w, h: hSpan };
+      }),
+    };
+  }
+  if (geoCls.kind === "generic") {
+    return {
+      tileClass: "is-generic",
+      gridCols: null,
+      items: (manifest.locations || [])
+        .filter((l) => l.level !== "country" && l.level !== "national")
+        .map((loc) => ({ key: loc.abbr || loc.id, loc, label: loc.name || loc.id, col: null, row: null, w: 1, h: 1 })),
+    };
+  }
+  return {
+    tileClass: null,
+    gridCols: COLUMNS,
+    items: Object.entries(TILES).map(([abbr, [cx, cy]]) => {
+      const loc = byAbbr.get(abbr) || null;
+      return { key: abbr, loc, label: loc?.name || abbr, col: cx + 1, row: cy + 1, w: 1, h: 1 };
+    }),
+  };
+}
+
 /* "Locations", plus where the tiles' scope is wider than the table's: they cover one season, every week
  * and all horizons (or the one horizon in scope) */
-function tilesTitle(scope, manifest) {
+function tilesTitle(scope, manifest, targetId) {
   const hs = scope.horizons;
   return [
     "Locations",
     scope.seasons.length > 1 && (manifest.seasonById.get(scope.seasons[0])?.label || scope.seasons[0]),
     (scope.weeks || scope.phase) && "whole season",
-    hs && hs.length > 1 && horizonsLabel(null),
+    hs && hs.length > 1 && horizonsLabel(null, targetHorizons(manifest, targetId)),
   ].filter(Boolean).join(" · ");
 }
 

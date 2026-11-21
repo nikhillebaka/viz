@@ -1,9 +1,10 @@
 /* The scores' data: /api/next/metrics, /api/model-details, /api/season-curves and the per-location WIS from
  * /api/heatmap. Responses are cached (FIFO); a metrics request supersedes the one in flight. */
-import { apiUrl } from "../../lib/api.js";
+import { apiUrl, getActiveHub } from "../../lib/api.js";
 
 const LIMIT = 50;
 const caches = { metrics: new Map(), details: new Map(), curves: new Map(), places: new Map() };
+const sk = (key) => `${getActiveHub() || ""}\n${key}`;
 
 function remember(map, key, value) {
   map.set(key, value);
@@ -35,13 +36,13 @@ let inflight = null;
  */
 export function loadMetrics(query, full = null) {
   const wanted = [query, full].filter(Boolean);
-  if (wanted.every((q) => caches.metrics.has(q))) {
-    return Promise.resolve({ resp: caches.metrics.get(query), full: full ? caches.metrics.get(full) : null });
+  if (wanted.every((q) => caches.metrics.has(sk(q)))) {
+    return Promise.resolve({ resp: caches.metrics.get(sk(query)), full: full ? caches.metrics.get(sk(full)) : null });
   }
   inflight?.abort();
   const ctl = (inflight = new AbortController());
-  const one = (q) => (caches.metrics.has(q) ? Promise.resolve(caches.metrics.get(q))
-    : getJson(`/api/next/metrics?${q}`, ctl.signal).then((j) => remember(caches.metrics, q, j)));
+  const one = (q) => (caches.metrics.has(sk(q)) ? Promise.resolve(caches.metrics.get(sk(q)))
+    : getJson(`/api/next/metrics?${q}`, ctl.signal).then((j) => remember(caches.metrics, sk(q), j)));
   return Promise.all(wanted.map(one)).then(([resp, all]) => {
     if (inflight === ctl) inflight = null;
     return { resp, full: full ? all : null };
@@ -56,20 +57,21 @@ let quickInflight = null;
  * @returns {Promise<object>}
  */
 export function loadQuick(query) {
-  if (caches.metrics.has(query)) return Promise.resolve(caches.metrics.get(query));
+  const key = sk(query);
+  if (caches.metrics.has(key)) return Promise.resolve(caches.metrics.get(key));
   quickInflight?.abort();
   const ctl = (quickInflight = new AbortController());
   return getJson(`/api/next/metrics?${query}`, ctl.signal).then((j) => {
     if (quickInflight === ctl) quickInflight = null;
-    return remember(caches.metrics, query, j);
+    return remember(caches.metrics, key, j);
   });
 }
 
 /** True when the metrics for this request are already here (no loading state needed). */
-export const hasMetrics = (query, full = null) => [query, full].filter(Boolean).every((q) => caches.metrics.has(q));
+export const hasMetrics = (query, full = null) => [query, full].filter(Boolean).every((q) => caches.metrics.has(sk(q)));
 
 /** @returns {Promise<object>} /api/model-details for one model */
-export const loadDetails = (id) => cached(caches.details, id, `/api/model-details?model=${encodeURIComponent(id)}`);
+export const loadDetails = (id) => cached(caches.details, sk(id), `/api/model-details?model=${encodeURIComponent(id)}`);
 
 /**
  * Observed season curves on a season-week axis, for the Dates popover.
@@ -77,18 +79,19 @@ export const loadDetails = (id) => cached(caches.details, id, `/api/model-detail
  */
 export function loadCurves(target, location, seasons) {
   const q = new URLSearchParams({ target, location, seasons: seasons.join(",") }).toString();
-  return cached(caches.curves, q, `/api/season-curves?${q}`);
+  return cached(caches.curves, sk(q), `/api/season-curves?${q}`);
 }
 
 /**
- * Mean WIS per state for a model and the baseline in one season (heatmap models × locations).
+ * Mean WIS per state/country for a model and the baseline in one season (heatmap models × locations).
  * @param {number | "all"} [horizon="all"]
  * @returns {Promise<{ model: Map<abbr, number>, base: Map<abbr, number> }>}
  */
 export function loadPlaces(target, season, id, baseline, horizon = "all") {
   const models = [...new Set([id, baseline].filter(Boolean))];
   const q = new URLSearchParams({ rows: "model", cols: "location", target, metric: "wis", location: "states", season, horizon: String(horizon), models: models.join(",") }).toString();
-  if (caches.places.has(q)) return caches.places.get(q);
+  const key = sk(q);
+  if (caches.places.has(key)) return caches.places.get(key);
   const p = getJson(`/api/heatmap?${q}`).then((d) => {
     const row = (mid) => {
       const i = (d.y_keys || []).indexOf(mid), m = new Map();
@@ -97,6 +100,6 @@ export function loadPlaces(target, season, id, baseline, horizon = "all") {
       return m;
     };
     return { model: row(id), base: row(baseline) };
-  }).catch((e) => { caches.places.delete(q); throw e; });
-  return remember(caches.places, q, p);
+  }).catch((e) => { caches.places.delete(key); throw e; });
+  return remember(caches.places, key, p);
 }
