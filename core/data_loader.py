@@ -95,16 +95,6 @@ def _flu_season_for_date_str(date_str: str) -> str:
     return _flu_season_for_date(date_str)
 
 
-def _safe_to_pandas(df: Optional[pl.DataFrame]) -> Any:
-    """Safely convert Polars DataFrame to pandas with explicit dependency error."""
-    if df is None:
-        return None
-    try:
-        return df.to_pandas()
-    except Exception as exc:
-        raise ImportError("Converting to pandas requires both 'pandas' and 'pyarrow' to be installed.") from exc
-
-
 _is_flu_hosp_target = is_flu_hosp_target
 
 
@@ -259,21 +249,19 @@ class SandboxDataLoader:
         self._locations_cache = locations
         return locations
 
-    def get_admissions_ground_truth(self, as_polars: bool = True) -> Any:
+    def get_admissions_ground_truth(self, as_polars: bool = True) -> pl.DataFrame:
         """Load official hospital admissions surveillance ground truth via accelerated Parquet cache."""
         lf = self.cache_mgr.scan_admissions()
         if lf is not None:
-            df = lf.collect()
-            return df if as_polars else _safe_to_pandas(df)
-        return pl.DataFrame() if as_polars else None
+            return lf.collect()
+        return pl.DataFrame()
 
-    def get_oracle(self, as_polars: bool = True) -> Any:
+    def get_oracle(self, as_polars: bool = True) -> pl.DataFrame:
         """Load oracle ground truth via accelerated Parquet cache."""
         lf = self.cache_mgr.scan_oracle()
         if lf is not None:
-            df = lf.collect()
-            return df if as_polars else _safe_to_pandas(df)
-        return pl.DataFrame() if as_polars else None
+            return lf.collect()
+        return pl.DataFrame()
 
     def get_validation_warnings(self, model_ids: Optional[List[str]] = None) -> List[str]:
         """Return captured validation warnings from cache manager and synthetic ensemble engine."""
@@ -1269,14 +1257,14 @@ class SandboxDataLoader:
 
     def load_forecast_file(
         self, model_id: str, reference_date: str, as_polars: bool = True
-    ) -> Optional[Any]:
+    ) -> Optional[pl.DataFrame]:
         """Load single forecast for a given model and date via Parquet cache, Synthetic engine, or CSV."""
         if hasattr(self, "ensemble_mgr") and self.ensemble_mgr.get_config(model_id):
             df = self.ensemble_mgr.get_forecasts(model_id, dates=[reference_date])
             if df is not None and not df.is_empty():
                 sub = df.filter(pl.col("reference_date") == reference_date)
                 if not sub.is_empty():
-                    return sub if as_polars else _safe_to_pandas(sub)
+                    return sub
             return None
 
         raw_id, is_local = self._resolve_model_id_and_local(model_id)
@@ -1285,7 +1273,7 @@ class SandboxDataLoader:
         if lf is not None:
             sub = lf.filter(pl.col("reference_date") == reference_date).collect()
             if not sub.is_empty():
-                return sub if as_polars else _safe_to_pandas(sub)
+                return sub
 
         # Direct file fallback if cache miss (supports CSV, Parquet, hub:, and merged: keys)
         merged = self.cache_mgr.merged_key(raw_id)
@@ -1338,14 +1326,14 @@ class SandboxDataLoader:
             else:
                 df = df.with_columns(pl.col("reference_date").cast(pl.String))
             df = filter_quantile_rows(df)
-            return df if as_polars else _safe_to_pandas(df)
+            return df
         except Exception as exc:
             logger.warning("Error reading %s: %s", file_path, exc)
             return None
 
     def load_combined_forecasts(
         self, model_id: str, dates: Optional[List[str]] = None, as_polars: bool = True
-    ) -> Optional[Any]:
+    ) -> Optional[pl.DataFrame]:
         """Load and concatenate forecasts for a model across specified dates via fast Parquet cache or Synthetic engine."""
         models = self.scan_models()
         if model_id not in models and not model_id.startswith("local:"):
@@ -1361,8 +1349,7 @@ class SandboxDataLoader:
                 return None
             df = self.ensemble_mgr.get_forecasts(model_id, dates=eval_dates)
             if df is not None and not df.is_empty():
-                sub = df.filter(pl.col("reference_date").is_in(eval_dates))
-                return sub if as_polars else _safe_to_pandas(sub)
+                return df.filter(pl.col("reference_date").is_in(eval_dates))
             return None
 
         raw_id, is_local = self._resolve_model_id_and_local(model_id)
@@ -1383,7 +1370,7 @@ class SandboxDataLoader:
         if lf is not None:
             sub = lf.filter(pl.col("reference_date").is_in(eval_dates)).collect()
             if not sub.is_empty():
-                return sub if as_polars else _safe_to_pandas(sub)
+                return sub
 
         # Fallback to loading date files individually
         dfs = []
@@ -1395,8 +1382,7 @@ class SandboxDataLoader:
         if not dfs:
             return None
 
-        combined = pl.concat(dfs, how="diagonal")
-        return combined if as_polars else _safe_to_pandas(combined)
+        return pl.concat(dfs, how="diagonal")
 
     def register_synthetic_ensemble(self, config: SyntheticEnsembleConfig) -> SyntheticEnsembleConfig:
         """Register a new synthetic ensemble and invalidate model cache."""

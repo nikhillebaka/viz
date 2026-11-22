@@ -49,7 +49,7 @@ echo ERROR: Could not locate Python. Run setup.bat first.
 exit /b 1
 
 :found_python
-"%PYTHON_BIN%" -c "import polars, pyarrow, numpy" >nul 2>nul
+"%PYTHON_BIN%" -c "import polars, numpy" >nul 2>nul
 if errorlevel 1 (
     echo ERROR: viz dependencies are not installed for %PYTHON_BIN%.
     echo Run setup.bat first ^(or: pip install -r "%DIR%requirements.txt"^).

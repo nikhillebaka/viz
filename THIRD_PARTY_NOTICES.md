@@ -16,4 +16,4 @@ files, which remain under their own licenses:
 - `next/geo/metrocast_hsas.json` maps Health Service Areas to U.S. Census county FIPS codes derived from [Flu MetroCast](https://github.com/reichlab/flu-metrocast) (`auxiliary-data/locations.csv`).
 - Forecast files, truth tables, and external surveillance feeds synced on demand by the user (`rebuild_surveillance.py`, public Hubverse hubs on S3/GitHub, CDC NWSS/NSSP/NREVSS, CFA, Delphi FluView, ECDC ERVISS, WHO FluNet, UKHSA, and Nextstrain) come from their respective public repositories and APIs and remain subject to their own terms of use.
 
-Python dependencies (`polars`, `pyarrow`, `numpy`) are installed from PyPI into `.venv` and are not bundled.
+Python dependencies (`polars`, `numpy`) are installed from PyPI into `.venv` and are not bundled.
