@@ -2,7 +2,7 @@
  * empirical CRPS & multivariate Energy Score KPIs, nearest-path hover/pin, and drag conditioning gate. */
 import { onThemeChange, cssColor } from "../../lib/dom.js";
 import { fmtDay, valueFormat } from "../../lib/format.js";
-import { parseIso, linear, niceMax, ticks, DAY, WEEK } from "../../lib/scale.js";
+import { parseIso, linear, DAY, WEEK } from "../../lib/scale.js";
 import { loadFan, loadSampleScores } from "../../lib/api.js";
 import { seriesColor } from "../../chart/layout.js";
 import { slotOf } from "../../features/selection.js";
@@ -11,7 +11,7 @@ import { loadRoundTrajectories } from "../../features/chart/trajectories.js";
 import { activeLayer } from "../../ui/floating.js";
 import {
   h, on, linkStyle, frame, fragment, action, setLine, getJson, query,
-  fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange,
+  fitCanvas, perFrame, pointerReadout, readoutContent, sortHeader, onScreen, onDprChange,
 } from "../shared.js";
 import {
   sampleScoresQuery,
@@ -20,6 +20,9 @@ import {
   summarizeTrajectories,
   passesGate,
   gateStats,
+  computeYAxis,
+  SAMPLE_BOARD_SORTS,
+  sortSampleBoardRows,
 } from "./model.js";
 
 const PLOT_HEIGHT = 440;
@@ -119,6 +122,7 @@ export function mount(el, ctx) {
   let boardReqSeq = 0;
   let boardKey = "";
   let boardAbortCtl = null;
+  let boardSort = { key: "rel", rev: false };
 
   let curSum = null;
   let cmpSum = null;
@@ -289,9 +293,8 @@ export function mount(el, ctx) {
   const canvas = h("canvas", { class: "tr-canvas", "aria-label": "Sample trajectories chart" });
   fig.append(canvas);
   const readout = pointerReadout(fig);
-  const foot = h("p", { class: "v-note" }, "Drag vertically over a future week to condition · Swipe or drag horizontally to pan · Pinch to zoom · Click a path to pin");
   const boardWrap = h("div", { class: "tr-board-wrap" });
-  f.body.append(nums, fig, foot, boardWrap);
+  f.body.append(nums, fig, boardWrap);
 
   const boardScopeFrag = fragment({
     label: "Scope",
@@ -333,14 +336,16 @@ export function mount(el, ctx) {
       boardWrap.replaceChildren(boardHead, h("p", { class: "v-note" }, "Sample scores unavailable for this scope."));
       return;
     }
-    const rows = (boardData?.rankings || []).filter((r) => r.has_data_in_scope && r.count > 0);
-    if (!rows.length) {
+    const rawRows = (boardData?.rankings || []).filter((r) => r.has_data_in_scope && r.count > 0);
+    if (!rawRows.length) {
       boardWrap.replaceChildren(boardHead, h("p", { class: "v-note" }, `No realized sample forecasts in ${seasonLabel(season)} for this scope.`));
       return;
     }
     const baseId = boardData?.baseline_model || manifest.baselineFor?.(s.target, season) || null;
+    const rows = sortSampleBoardRows(rawRows, { key: boardSort.key, rev: boardSort.rev, baseId, labelOf: lbl });
     const priColor = resolveModelColor(primaryModel, manifest, s.sel, 0, s.target, season);
     const cmpColor = compareModel ? resolveModelColor(compareModel, manifest, s.sel, 1, s.target, season) : null;
+    const onSort = (next) => { boardSort = next; renderLeaderboard(); };
 
     boardWrap.replaceChildren(
       boardHead,
@@ -349,11 +354,11 @@ export function mount(el, ctx) {
           h("thead", null,
             h("tr", null,
               h("th", null, "Rank"),
-              h("th", null, "Model"),
-              h("th", { class: "num" }, "Rel. CRPS"),
-              h("th", { class: "num" }, "CRPS"),
-              h("th", { class: "num" }, "Energy"),
-              h("th", { class: "num" }, "N"),
+              sortHeader({ key: "model", label: "Model", sort: boardSort, sorts: SAMPLE_BOARD_SORTS, onSort }),
+              sortHeader({ key: "rel", label: "Rel. CRPS", num: true, sort: boardSort, sorts: SAMPLE_BOARD_SORTS, onSort }),
+              sortHeader({ key: "crps", label: "CRPS", num: true, sort: boardSort, sorts: SAMPLE_BOARD_SORTS, onSort }),
+              sortHeader({ key: "energy", label: "Energy", num: true, sort: boardSort, sorts: SAMPLE_BOARD_SORTS, onSort }),
+              sortHeader({ key: "count", label: "N", num: true, sort: boardSort, sorts: SAMPLE_BOARD_SORTS, onSort }),
             )),
           h("tbody", null,
             ...rows.map((r, idx) => {
@@ -395,7 +400,6 @@ export function mount(el, ctx) {
           ),
         ),
       ),
-      h("p", { class: "v-note" }, "Click a row to plot · Shift-click to compare · Click model name for details"),
     );
   }
 
@@ -503,6 +507,32 @@ export function mount(el, ctx) {
     readout.show(sx, sy, readoutContent(head, rows));
   }
 
+  function placePinnedReadout() {
+    if (!pinnedSampleId || !curSum || !hitGeom) { readout.hide(); return; }
+    const samp = curSum.samples.find((sp) => sp.id === pinnedSampleId);
+    if (!samp) { readout.hide(); return; }
+    const { x, y, times, padL, padR, W, plotTop, plotBot, dom } = hitGeom;
+    let idx = -1;
+    if (Number.isFinite(samp.peakT) && samp.peakT >= dom[0] && samp.peakT <= dom[1] && Number.isFinite(samp.values[samp.peakIdx])) {
+      idx = samp.peakIdx;
+    } else {
+      for (let k = 0; k < times.length; k++) {
+        if (times[k] >= dom[0] && times[k] <= dom[1] && Number.isFinite(samp.values[k])) { idx = k; break; }
+      }
+    }
+    if (idx < 0) idx = Number.isInteger(samp.peakIdx) ? samp.peakIdx : 0;
+    const tAt = times[idx];
+    const vAt = samp.values[idx];
+    const inView = Number.isFinite(tAt) && tAt >= dom[0] && tAt <= dom[1] && Number.isFinite(vAt);
+    const ax = inView
+      ? Math.max(padL + 8, Math.min(W - padR - 8, x(tAt)))
+      : Math.max(padL + 8, W - padR - 12);
+    const ay = inView
+      ? Math.max(plotTop + 8, Math.min(plotBot - 8, y(vAt)))
+      : plotTop + 12;
+    updateReadoutFor(ax, ay, idx);
+  }
+
   /* ---------------- Load live data ---------------- */
   async function load() {
     const seq = ++reqSeq;
@@ -530,7 +560,7 @@ export function mount(el, ctx) {
     if (!s.location || !s.target || !season || !s.date) {
       curSum = null; cmpSum = null; hitGeom = null;
       f.loading(false);
-      f.empty("Pick a place and forecast round above to inspect sample trajectories.");
+      f.empty("No round selected.");
       syncLine();
       return;
     }
@@ -662,7 +692,6 @@ export function mount(el, ctx) {
     ];
     const dom = viewDomain || baseDomain;
 
-    const padL = 52;
     const padR = 18;
     const cloudH = showPeakCloud ? 84 : 12;
     const plotTop = showPeakCloud ? cloudH + 18 : 16;
@@ -674,7 +703,11 @@ export function mount(el, ctx) {
     if (cmpSum) for (const sp of cmpSum.samples) for (const v of sp.values) if (Number.isFinite(v)) rawMax = Math.max(rawMax, v);
     for (const rv of curSum.realized) if (Number.isFinite(rv)) rawMax = Math.max(rawMax, rv);
     if (showPastSeasons) for (const pl of pastLines) for (const pt of pl.pts) if (pt.t >= dom[0] && pt.t <= dom[1]) rawMax = Math.max(rawMax, pt.v);
-    const yTop = niceMax(rawMax > 0 ? rawMax * 1.06 : 1, 4);
+    const { yTop, ticks: yTicks } = computeYAxis(rawMax, plotBot - plotTop);
+
+    g.font = `400 10.5px ${fontMono}`;
+    const maxTickW = yTicks.reduce((mx, tv) => Math.max(mx, g.measureText(vf.axis(tv)).width), 0);
+    const padL = Math.max(48, Math.ceil(maxTickW) + 14);
 
     const x = linear(dom, [padL, W - padR]);
     const y = linear([0, yTop], [plotBot, plotTop]);
@@ -689,7 +722,6 @@ export function mount(el, ctx) {
     }
 
     // Horizontal grid & Y ticks
-    const yTicks = ticks(0, yTop, 4);
     g.font = `400 10.5px ${fontMono}`;
     g.textAlign = "right";
     g.textBaseline = "middle";
@@ -945,6 +977,7 @@ export function mount(el, ctx) {
       g.restore();
     }
     g.restore();
+    if (pinnedSampleId && !pointerPos && !dragBrush) placePinnedReadout();
   }
 
   function clampPanDomain([d0, d1], [b0, b1]) {
@@ -1020,7 +1053,8 @@ export function mount(el, ctx) {
       if (sx < padL || sx > W - padR || sy < plotTop - 70 || sy > plotBot + 20) {
         hoverSampleId = null;
         pointerPos = null;
-        if (!pinnedSampleId) readout.hide();
+        if (pinnedSampleId) placePinnedReadout();
+        else readout.hide();
         scheduleDraw();
         return;
       }
@@ -1046,7 +1080,13 @@ export function mount(el, ctx) {
         const wasMode = dragBrush.mode;
         const wasMoved = dragBrush.moved;
         dragBrush = null;
-        if (wasMoved) { syncLine(); if (wasMode === "gate") refreshView(); return; }
+        if (wasMoved) {
+          pointerPos = null;
+          syncLine();
+          if (wasMode === "gate") refreshView();
+          else scheduleDraw();
+          return;
+        }
       }
       if (hoverSampleId) {
         pinnedSampleId = pinnedSampleId === hoverSampleId ? null : hoverSampleId;
@@ -1093,7 +1133,8 @@ export function mount(el, ctx) {
     on(canvas, "pointerleave", () => {
       hoverSampleId = null;
       pointerPos = null;
-      if (!pinnedSampleId) readout.hide();
+      if (pinnedSampleId) placePinnedReadout();
+      else readout.hide();
       scheduleDraw();
     }),
     on(document, "keydown", (e) => {

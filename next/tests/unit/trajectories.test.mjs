@@ -14,6 +14,9 @@ import {
   summarizeTrajectories,
   passesGate,
   gateStats,
+  computeYAxis,
+  SAMPLE_BOARD_SORTS,
+  sortSampleBoardRows,
 } from "../../sections/trajectories/model.js";
 
 describe("next/sections/trajectories/model.js", () => {
@@ -141,5 +144,61 @@ describe("next/sections/trajectories/model.js", () => {
       scopePlace: "all",
     }));
     assert.equal(qAll.get("location"), "all");
+  });
+
+  it("computeYAxis produces non-overlapping nice ticks across scales and compact heights", () => {
+    for (const [rawMax, plotH] of [[0, 390], [0.004, 390], [120, 390], [245000, 390], [1800, 80]]) {
+      const { yTop, ticks } = computeYAxis(rawMax, plotH);
+      assert.ok(yTop > 0 && Number.isFinite(yTop), `positive yTop for rawMax=${rawMax}`);
+      assert.ok(ticks.length >= 2 && ticks.length <= 8, `reasonable tick count (${ticks.length}) for rawMax=${rawMax}, plotH=${plotH}`);
+      for (let i = 1; i < ticks.length; i++) {
+        assert.ok(ticks[i] > ticks[i - 1], "strictly increasing ticks");
+        const pyPrev = plotH * (1 - ticks[i - 1] / yTop);
+        const pyCur = plotH * (1 - ticks[i] / yTop);
+        assert.ok(pyPrev - pyCur >= 18 - 1e-6, `minimum vertical spacing (${pyPrev - pyCur}px) at rawMax=${rawMax}, plotH=${plotH}`);
+      }
+    }
+  });
+
+  it("sortSampleBoardRows sorts each column accurately with missing values last", () => {
+    assert.equal(SAMPLE_BOARD_SORTS.rel.asc, true);
+    assert.equal(SAMPLE_BOARD_SORTS.count.asc, false);
+    const rows = [
+      { model_id: "m-beta", relative_crps: 1.15, crps: 12.0, energy_score: 25.0, count: 10 },
+      { model_id: "m-base", relative_crps: null, crps: 10.5, energy_score: 22.0, count: 14 },
+      { model_id: "m-alpha", relative_crps: 0.85, crps: 8.9, energy_score: null, count: 12 },
+      { model_id: "m-missing", relative_crps: null, crps: NaN, energy_score: 19.0, count: 4 },
+    ];
+    const lbl = (id) => ({ "m-alpha": "Alpha", "m-beta": "Beta", "m-base": "Base", "m-missing": "Zeta" }[id] || id);
+
+    // Default rel asc: Alpha (0.85), Base (1.00 via baseId), Beta (1.15), missing last
+    assert.deepEqual(
+      sortSampleBoardRows(rows, { key: "rel", rev: false, baseId: "m-base", labelOf: lbl }).map((r) => r.model_id),
+      ["m-alpha", "m-base", "m-beta", "m-missing"],
+    );
+    // Reversed rel desc still leaves missing last
+    assert.deepEqual(
+      sortSampleBoardRows(rows, { key: "rel", rev: true, baseId: "m-base", labelOf: lbl }).map((r) => r.model_id),
+      ["m-beta", "m-base", "m-alpha", "m-missing"],
+    );
+    // Count defaults descending
+    assert.deepEqual(
+      sortSampleBoardRows(rows, { key: "count", rev: false, baseId: "m-base", labelOf: lbl }).map((r) => r.model_id),
+      ["m-base", "m-alpha", "m-beta", "m-missing"],
+    );
+    // Model name asc/desc
+    assert.deepEqual(
+      sortSampleBoardRows(rows, { key: "model", rev: false, labelOf: lbl }).map((r) => r.model_id),
+      ["m-alpha", "m-base", "m-beta", "m-missing"],
+    );
+    assert.deepEqual(
+      sortSampleBoardRows(rows, { key: "energy", rev: false, labelOf: lbl }).map((r) => r.model_id),
+      ["m-missing", "m-base", "m-beta", "m-alpha"],
+    );
+    // No-baseline fallback uses CRPS ascending when rel values are null
+    assert.deepEqual(
+      sortSampleBoardRows(rows, { key: "rel", rev: false, baseId: null, labelOf: lbl }).map((r) => r.model_id),
+      ["m-alpha", "m-beta", "m-base", "m-missing"],
+    );
   });
 });

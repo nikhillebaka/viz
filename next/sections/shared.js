@@ -243,12 +243,37 @@ export function pointerReadout(host) {
     show(x, y, content) {
       el.replaceChildren(...content);
       el.hidden = false;
-      const hw = host.clientWidth, w = el.offsetWidth, hh = el.offsetHeight;
-      const left = x + 16 + w > hw ? x - 16 - w : x + 16;
-      el.style.transform = `translate(${Math.max(0, left)}px, ${Math.max(0, y - hh - 12)}px)`;
+      const pad = 6;
+      const hw = host.clientWidth, hhHost = host.clientHeight;
+      const w = el.offsetWidth, hEl = el.offsetHeight;
+      let left = x + 16 + w + pad > hw ? x - 16 - w : x + 16;
+      left = Math.max(pad, Math.min(left, Math.max(pad, hw - w - pad)));
+      let top = y - hEl - 12;
+      if (top < pad) top = y + 14;
+      top = Math.max(pad, Math.min(top, Math.max(pad, hhHost - hEl - pad)));
+      el.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
     },
     hide() { el.hidden = true; },
   };
+}
+
+/**
+ * Clickable sortable `<th>` cell for `.v-table` tables matching Scores' sort affordance.
+ * @param {{ key: string, label: string, num?: boolean, sort: { key: string, rev: boolean }, sorts: Record<string, { asc: boolean }>, onSort: (next: { key: string, rev: boolean }) => void }} o
+ * @returns {HTMLTableCellElement}
+ */
+export function sortHeader({ key, label, num = false, sort, sorts, onSort }) {
+  const active = sort?.key === key;
+  const asc = (sorts?.[key]?.asc ?? true) !== !!sort?.rev;
+  return h("th", {
+    class: num ? "num" : null,
+    "aria-sort": active ? (asc ? "ascending" : "descending") : "none",
+  },
+  h("button", {
+    type: "button",
+    class: ["v-sort", active && "is-active"],
+    onclick: () => onSort(active ? { key, rev: !sort.rev } : { key, rev: false }),
+  }, label, active ? h("span", { class: "v-sort-arrow", "aria-hidden": "true" }, asc ? "↑" : "↓") : null));
 }
 
 /**

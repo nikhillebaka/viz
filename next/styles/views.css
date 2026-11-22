@@ -53,6 +53,15 @@
   border-bottom: var(--stroke-hairline) solid var(--line-hairline);
 }
 .v-table th:first-child, .v-table td:first-child { text-align: left; }
+.v-table th button.v-sort {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  padding: 0; margin: 0; border: 0; background: none; cursor: pointer;
+  font: inherit; color: inherit; white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.v-table th button.v-sort:hover,
+.v-table th button.v-sort.is-active { color: var(--ink-primary); }
+.v-table th button.v-sort .v-sort-arrow { font-family: var(--font-mono); }
 .v-table td { padding: var(--space-6) var(--space-12) var(--space-6) 0; text-align: right; white-space: nowrap; color: var(--ink-primary); border-bottom: var(--stroke-hairline) solid var(--line-hairline); }
 .v-table td.num, .v-table .num { font-family: var(--font-mono); font-size: var(--text-small); font-variant-numeric: tabular-nums; }
 .v-table td.quiet { color: var(--ink-tertiary); }

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { indexManifest } from "../../lib/api.js";
 import { classifyHubGeo } from "../../geo/picker_geo.js";
 import { targetHorizons, scopeOf } from "../../sections/scope.js";
-import { scorePmfDistribution, verticalPmfSegments } from "../../features/PmfView.js";
+import { scorePmfDistribution, verticalPmfSegments, PMF_TABLE_SORTS, sortPmfRows } from "../../features/PmfView.js";
 import { parseUrl, writeUrl, defaults, targetDimSpecs, defaultDims, isCategoricalTarget } from "../../features/url.js";
 import { buildTargetMenuGroups } from "../../features/TargetMenu.js";
 import { matchCatalogPlaces } from "../../features/LocationPicker.js";
@@ -105,6 +105,19 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     assert.equal(segs.length, 5);
     assert.ok(Math.abs(segs[2].y0 + 0.2) < 1e-12 && Math.abs(segs[2].y1 - 0.2) < 1e-12);
     assert.ok(Math.abs(segs[4].y1 - 0.5) < 1e-12 && Math.abs(segs[0].y0 + 0.5) < 1e-12);
+
+    assert.equal(PMF_TABLE_SORTS.hitMode.asc, false);
+    assert.equal(PMF_TABLE_SORTS.logLoss.asc, true);
+    const pmfRows = [
+      { id: "b", name: "Beta", rel: 1.05, rps: 0.12, logLoss: 1.2, brier: 0.52, hitMode: 40, count: 20 },
+      { id: "a", name: "Alpha", rel: 0.9, rps: 0.08, logLoss: 1.4, brier: 0.45, hitMode: 65, count: 25 },
+      { id: "c", name: "Gamma", rel: NaN, rps: NaN, logLoss: 1.1, brier: 0.49, hitMode: 50, count: 10 },
+    ];
+    assert.deepEqual(sortPmfRows(pmfRows, { key: "rps", rev: false }).map((r) => r.id), ["a", "b", "c"]);
+    assert.deepEqual(sortPmfRows(pmfRows, { key: "logLoss", rev: false }).map((r) => r.id), ["c", "b", "a"]);
+    assert.deepEqual(sortPmfRows(pmfRows, { key: "hitMode", rev: false }).map((r) => r.id), ["a", "c", "b"]);
+    assert.deepEqual(sortPmfRows(pmfRows, { key: "hitMode", rev: true }).map((r) => r.id), ["b", "c", "a"]);
+    assert.deepEqual(sortPmfRows(pmfRows, { key: "model", rev: false }).map((r) => r.id), ["a", "b", "c"]);
   });
 
   it("targetDimSpecs, isCategoricalTarget, dims (dim_*), and traj=1 round-trip cleanly in URLs", () => {

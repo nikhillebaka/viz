@@ -563,10 +563,7 @@ export function mountGlobeView(host, ctx) {
     const hasNonMetroStream = orderedStreams.some((s) => s.geo_kind !== "us-metrocast");
     const newestIso = orderedStreams.map((s) => s.obs_date || s.ref_date).filter(Boolean).sort().at(-1) || null;
     const asOfText = newestIso ? fmtDay(parseIso(newestIso)) : null;
-    const footerText = [
-      asOfText && asOfText !== "–" ? `As of ${asOfText}` : null,
-      "Click a row to open chart",
-    ].filter(Boolean).join(" · ");
+    const footerText = asOfText && asOfText !== "–" ? `As of ${asOfText}` : null;
 
     const layerNodes = [...drawer.querySelectorAll(":scope > .c-glass-layer")];
     const content = h("div", { class: "gb-drawer-body" },
@@ -615,7 +612,7 @@ export function mountGlobeView(host, ctx) {
           h("span", { class: "gb-stream-go", "aria-hidden": "true" }, "→"));
         }),
       ) : h("p", { class: "pk-empty", style: { padding: "var(--space-8) 0" } }, "No weekly observations for current round"),
-      orderedStreams.length ? h("p", { class: "gb-drawer-foot" }, footerText) : null,
+      orderedStreams.length && footerText ? h("p", { class: "gb-drawer-foot" }, footerText) : null,
       childHsas.length ? h("div", { class: "gb-metros" },
         h("h4", { class: "gb-metros-title" }, `MetroCast HSAs (${childHsas.length})`),
         ...childHsas.map((hsa) => {

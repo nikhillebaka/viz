@@ -522,7 +522,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     const id = hover?.id;
     const m = id && manifest.modelById.get(id);
     if (!m) {
-      p.replaceChildren(h("div", { class: "mb-pv-empty" }, h("div", { class: "mb-pv-title" }, `${g.shown} models`), h("div", { class: "mb-pv-sub" }, "Hover one for what it is")));
+      p.replaceChildren(h("div", { class: "mb-pv-empty" }, h("div", { class: "mb-pv-title" }, `${g.shown} models`)));
       return;
     }
     const label = g.labels.get(id) || manifest.label(id), picked = sel.selected.includes(id), charted = S.isCharted(sel, id);

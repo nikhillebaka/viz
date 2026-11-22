@@ -27,17 +27,35 @@ export default async function nonquantile(page, t) {
 
     const st = await page.eval(() => {
       const wrap = document.querySelector("#trajectories .tr-board-wrap");
-      const headers = [...(wrap?.querySelectorAll("th") || [])].map((x) => x.textContent.trim());
+      const headers = [...(wrap?.querySelectorAll("th") || [])].map((x) => x.textContent.trim().replace(/[↑↓]/g, "").trim());
+      const trText = document.querySelector("#trajectories")?.textContent || "";
       return {
         hasCanvas: !!document.querySelector("#trajectories .tr-canvas"),
         headers,
         legacyPills: document.querySelectorAll("#trajectories .tr-scope-btn, #trajectories .tr-cmp-btn, #trajectories .tr-board-sub").length,
+        hasHintCopy: /Drag vertically|Click a row to plot/.test(trText),
       };
     });
     t.ok(st.hasCanvas, "trajectories canvas present");
     t.eq(st.legacyPills, 0, "canonical v-subhead and v-table without pill/button clutter");
+    t.eq(st.hasHintCopy, false, "no tutorial/hint copy inside Trajectories section");
     if (st.headers.length) {
       t.ok(st.headers.includes("CRPS") && st.headers.includes("Energy"), `leaderboard headers (${st.headers.join(", ")})`);
+      const crpsSort = await page.eval(() => {
+        const findBtn = () => [...document.querySelectorAll("#trajectories .tr-board-wrap th button.v-sort")]
+          .find((b) => b.textContent.replace(/[↑↓]/g, "").trim() === "CRPS");
+        const b1 = findBtn();
+        if (!b1) return null;
+        b1.click();
+        const first = findBtn()?.closest("th")?.getAttribute("aria-sort");
+        findBtn()?.click();
+        const second = findBtn()?.closest("th")?.getAttribute("aria-sort");
+        return { first, second };
+      });
+      if (crpsSort) {
+        t.eq(crpsSort.first, "ascending", "Trajectories CRPS column sorts ascending on click");
+        t.eq(crpsSort.second, "descending", "Trajectories CRPS column toggles to descending on second click");
+      }
     }
   });
 
@@ -84,6 +102,21 @@ export default async function nonquantile(page, t) {
       }, { timeout: 30000, message: "All-places PMF metrics table did not load" });
       const hdr = await page.text("#rate_change .pmf-table-wrap thead tr");
       t.ok(/Rel\. RPS|Rel\. Log/.test(hdr) && /Mode hit/.test(hdr), `PMF seasonal table headers (${hdr})`);
+      const pmfSort = await page.eval(() => {
+        const findBtn = () => [...document.querySelectorAll("#rate_change .pmf-table-wrap th button.v-sort")]
+          .find((b) => b.textContent.replace(/[↑↓]/g, "").trim() === "Log loss");
+        const b1 = findBtn();
+        if (!b1) return null;
+        b1.click();
+        const first = findBtn()?.closest("th")?.getAttribute("aria-sort");
+        findBtn()?.click();
+        const second = findBtn()?.closest("th")?.getAttribute("aria-sort");
+        return { first, second };
+      });
+      if (pmfSort) {
+        t.eq(pmfSort.first, "ascending", "Rate change Log loss column sorts ascending on click");
+        t.eq(pmfSort.second, "descending", "Rate change Log loss column toggles to descending on second click");
+      }
     }
   });
 

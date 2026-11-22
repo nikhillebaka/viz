@@ -7,7 +7,7 @@ import { h, on, cssColor, onThemeChange } from "../lib/dom.js";
 import { apiUrl, loadPmf, registerCacheClear } from "../lib/api.js";
 import { seriesColor } from "../chart/layout.js";
 import { slotOf } from "./selection.js";
-import { guideLink, fragment, action, setLine, linkStyle, fitCanvas, perFrame, resetColors, onDprChange } from "../sections/shared.js";
+import { guideLink, fragment, action, setLine, linkStyle, fitCanvas, perFrame, resetColors, sortHeader, onDprChange } from "../sections/shared.js";
 
 const CAT_LABELS = {
   large_decrease: { short: "−−", name: "Large dec" },
@@ -76,6 +76,50 @@ export function scorePmfDistribution(probs, obsIdx) {
     brier,
     modeHit: maxCount === 1 && argMax === obsIdx,
   };
+}
+
+/** Default sort directions (`asc: true` => smaller first on first click) for PMF evaluation tables. */
+export const PMF_TABLE_SORTS = Object.freeze({
+  model: { asc: true },
+  rel: { asc: true },
+  rps: { asc: true },
+  logLoss: { asc: true },
+  brier: { asc: true },
+  hitMode: { asc: false },
+  count: { asc: false },
+});
+
+const pmfFin = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/**
+ * Sort normalized PMF table rows by column key and direction, keeping missing values last.
+ * @param {readonly object[]} rows
+ * @param {{ key?: string, rev?: boolean }} [opts]
+ * @returns {object[]}
+ */
+export function sortPmfRows(rows, { key = "rps", rev = false } = {}) {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  const k = Object.hasOwn(PMF_TABLE_SORTS, key) ? key : "rps";
+  const dir = (PMF_TABLE_SORTS[k].asc !== !!rev) ? 1 : -1;
+
+  return list.sort((a, b) => {
+    if (k === "model") {
+      const cmp = String(a.name || "").localeCompare(String(b.name || ""));
+      if (cmp !== 0) return cmp * dir;
+    } else {
+      const va = pmfFin(a[k]);
+      const vb = pmfFin(b[k]);
+      if ((va == null) !== (vb == null)) return va == null ? 1 : -1;
+      if (va != null && va !== vb) return (va - vb) * dir;
+      if (k === "rel") {
+        const sa = pmfFin(a.rps) ?? pmfFin(a.logLoss);
+        const sb = pmfFin(b.rps) ?? pmfFin(b.logLoss);
+        if ((sa == null) !== (sb == null)) return sa == null ? 1 : -1;
+        if (sa != null && sa !== sb) return sa - sb;
+      }
+    }
+    return String(a.name || "").localeCompare(String(b.name || ""));
+  });
 }
 
 /** Stacked diverging vertical segments centered around the middle ordinal bin (Pure). */
@@ -230,6 +274,8 @@ export function mountPmfView(host, ctx) {
   let loadedReqKey = "";
   let currentSrc = null;
   let tableScope = "local"; // "local" | "all"
+  let localSort = { key: "rps", rev: false };
+  let allSort = { key: "rel", rev: false };
   let allScopeData = null;
   let allScopeKey = "";
   let allScopeLoading = false;
@@ -485,32 +531,48 @@ export function mountPmfView(host, ctx) {
       const scored = allScopeData.rankings.filter((r) => r.has_data_in_scope && r.count > 0);
       const idsAll = scored.map((r) => r.model_id);
       const ordinal = allScopeData.ordinal !== false;
+      const effSort = !ordinal && allSort.key === "rps" ? { key: "rel", rev: allSort.rev } : allSort;
+      const baseId = allScopeData.baseline_model;
+      const normAll = sortPmfRows(
+        scored.map((r) => ({
+          raw: r,
+          id: r.model_id,
+          name: manifest.label(r.model_id, idsAll),
+          rel: r.model_id === baseId ? 1.0 : (typeof r.relative_wis === "number" ? r.relative_wis : NaN),
+          rps: typeof r.rps === "number" ? r.rps : NaN,
+          logLoss: typeof r.log_score === "number" ? r.log_score : NaN,
+          brier: typeof r.brier === "number" ? r.brier : NaN,
+          hitMode: typeof r.hit_mode === "number" ? r.hit_mode : NaN,
+          count: typeof r.count === "number" ? r.count : NaN,
+        })),
+        effSort,
+      );
+      const onAllSort = (next) => { allSort = next; renderTable(); };
       tableWrap.replaceChildren(
         tableSubHead,
         h("table", { class: "v-table" },
           h("thead", null,
             h("tr", null,
-              h("th", null, `Model (${allScopeData.scope_dates_count || data.rounds.length} rounds · all places)`),
-              h("th", null, ordinal ? "Rel. RPS" : "Rel. Log"),
-              ordinal ? h("th", null, "RPS") : null,
-              h("th", null, "Log loss"),
-              h("th", null, "Brier"),
-              h("th", null, "Mode hit"),
-              h("th", null, "N"),
+              sortHeader({ key: "model", label: `Model (${allScopeData.scope_dates_count || data.rounds.length} rounds · all places)`, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }),
+              sortHeader({ key: "rel", label: ordinal ? "Rel. RPS" : "Rel. Log", num: true, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }),
+              ordinal ? sortHeader({ key: "rps", label: "RPS", num: true, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }) : null,
+              sortHeader({ key: "logLoss", label: "Log loss", num: true, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }),
+              sortHeader({ key: "brier", label: "Brier", num: true, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }),
+              sortHeader({ key: "hitMode", label: "Mode hit", num: true, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }),
+              sortHeader({ key: "count", label: "N", num: true, sort: effSort, sorts: PMF_TABLE_SORTS, onSort: onAllSort }),
             )),
           h("tbody", null,
-            ...scored.map((r) => {
-              const dc = dotColor(r.model_id);
-              const lbl = manifest.label(r.model_id, idsAll);
+            ...normAll.map(({ raw: r, id, name: lbl }) => {
+              const dc = dotColor(id);
               return h("tr", {
-                "data-model": r.model_id,
-                class: r.model_id === focusModel ? "is-focus" : null,
+                "data-model": id,
+                class: id === focusModel ? "is-focus" : null,
                 onclick: () => {
-                  if (data.modelIds.includes(r.model_id)) { focusModel = r.model_id; renderAll(); }
+                  if (data.modelIds.includes(id)) { focusModel = id; renderAll(); }
                 },
               },
-              h("td", null, h("span", { class: "v-name", "data-model-sheet": r.model_id, title: `${lbl} · details`, style: dc ? { "--c": dc } : null }, h("i"), lbl)),
-              h("td", { class: "num" }, r.model_id === allScopeData.baseline_model ? "1.00" : (typeof r.relative_wis === "number" ? r.relative_wis.toFixed(2) : "–")),
+              h("td", null, h("span", { class: "v-name", "data-model-sheet": id, title: `${lbl} · details`, style: dc ? { "--c": dc } : null }, h("i"), lbl)),
+              h("td", { class: "num" }, id === baseId ? "1.00" : (typeof r.relative_wis === "number" ? r.relative_wis.toFixed(2) : "–")),
               ordinal ? h("td", { class: "num" }, typeof r.rps === "number" ? r.rps.toFixed(3) : "–") : null,
               h("td", { class: "num" }, typeof r.log_score === "number" ? r.log_score.toFixed(2) : "–"),
               h("td", { class: "num" }, typeof r.brier === "number" ? r.brier.toFixed(3) : "–"),
@@ -523,54 +585,53 @@ export function mountPmfView(host, ctx) {
     }
 
     const labelMap = new Map(data.modelIds.map((id) => [id, manifest.label(id, data.modelIds)]));
+    const ordinal = data.ordinal !== false;
+    const effLocalSort = !ordinal && localSort.key === "rps" ? { key: "logLoss", rev: localSort.rev } : localSort;
 
-    const rows = data.modelIds.map((mid) => {
-      let n = 0, rps = 0, logLossSum = 0, brier = 0, hits = 0;
-      for (const d of activeDates) {
-        const rec = data.byRound[d];
-        if (!rec) continue;
-        for (const hVal of targetHzs) {
-          const entry = rec.models[mid]?.[hVal];
-          if (!entry || entry.obsIdx == null || !Number.isFinite(entry.rps)) continue;
-          rps += entry.rps;
-          logLossSum += Number.isFinite(entry.logLoss) ? entry.logLoss : -entry.logScore;
-          brier += entry.brier;
-          if (entry.modeHit) hits++;
-          n++;
+    const rows = sortPmfRows(
+      data.modelIds.map((mid) => {
+        let n = 0, rps = 0, logLossSum = 0, brier = 0, hits = 0;
+        for (const d of activeDates) {
+          const rec = data.byRound[d];
+          if (!rec) continue;
+          for (const hVal of targetHzs) {
+            const entry = rec.models[mid]?.[hVal];
+            if (!entry || entry.obsIdx == null || !Number.isFinite(entry.rps)) continue;
+            rps += entry.rps;
+            logLossSum += Number.isFinite(entry.logLoss) ? entry.logLoss : -entry.logScore;
+            brier += entry.brier;
+            if (entry.modeHit) hits++;
+            n++;
+          }
         }
-      }
-      return {
-        id: mid,
-        name: labelMap.get(mid) || mid,
-        n,
-        rps: n ? rps / n : NaN,
-        logLoss: n ? logLossSum / n : NaN,
-        brier: n ? brier / n : NaN,
-        hitPct: n ? Math.round((hits / n) * 100) : NaN,
-      };
-    });
-
-    rows.sort((a, b) => {
-      const af = Number.isFinite(a.rps), bf = Number.isFinite(b.rps);
-      if (af !== bf) return af ? -1 : 1;
-      if (af && a.rps !== b.rps) return a.rps - b.rps;
-      return a.name.localeCompare(b.name);
-    });
+        return {
+          id: mid,
+          name: labelMap.get(mid) || mid,
+          n,
+          rps: n ? rps / n : NaN,
+          logLoss: n ? logLossSum / n : NaN,
+          brier: n ? brier / n : NaN,
+          hitMode: n ? Math.round((hits / n) * 100) : NaN,
+        };
+      }),
+      effLocalSort,
+    );
 
     const scopeHdr = viewMode === "all"
       ? `Model (${data.rounds.length} rounds · ${horizon} wk)`
       : `Model (${data.rounds[roundIdx]} · all horizons)`;
+    const onLocalSort = (next) => { localSort = next; renderTable(); };
 
     tableWrap.replaceChildren(
       tableSubHead,
       h("table", { class: "v-table" },
         h("thead", null,
           h("tr", null,
-            h("th", null, scopeHdr),
-            h("th", null, "RPS"),
-            h("th", null, "Log loss"),
-            h("th", null, "Brier"),
-            h("th", null, "Mode hit"),
+            sortHeader({ key: "model", label: scopeHdr, sort: effLocalSort, sorts: PMF_TABLE_SORTS, onSort: onLocalSort }),
+            ordinal ? sortHeader({ key: "rps", label: "RPS", num: true, sort: effLocalSort, sorts: PMF_TABLE_SORTS, onSort: onLocalSort }) : null,
+            sortHeader({ key: "logLoss", label: "Log loss", num: true, sort: effLocalSort, sorts: PMF_TABLE_SORTS, onSort: onLocalSort }),
+            sortHeader({ key: "brier", label: "Brier", num: true, sort: effLocalSort, sorts: PMF_TABLE_SORTS, onSort: onLocalSort }),
+            sortHeader({ key: "hitMode", label: "Mode hit", num: true, sort: effLocalSort, sorts: PMF_TABLE_SORTS, onSort: onLocalSort }),
           )),
         h("tbody", null,
           ...rows.map((r) => {
@@ -581,10 +642,10 @@ export function mountPmfView(host, ctx) {
               onclick: () => { focusModel = r.id; renderAll(); },
             },
             h("td", null, h("span", { class: "v-name", "data-model-sheet": r.id, title: `${r.name} · details`, style: dc ? { "--c": dc } : null }, h("i"), r.name)),
-            h("td", { class: "num" }, Number.isFinite(r.rps) ? r.rps.toFixed(3) : "–"),
+            ordinal ? h("td", { class: "num" }, Number.isFinite(r.rps) ? r.rps.toFixed(3) : "–") : null,
             h("td", { class: "num" }, Number.isFinite(r.logLoss) ? r.logLoss.toFixed(2) : "–"),
             h("td", { class: "num" }, Number.isFinite(r.brier) ? r.brier.toFixed(3) : "–"),
-            h("td", { class: "num" }, Number.isFinite(r.hitPct) ? `${r.hitPct}%` : "–"),
+            h("td", { class: "num" }, Number.isFinite(r.hitMode) ? `${r.hitMode}%` : "–"),
             );
           }))),
     );
@@ -1057,7 +1118,7 @@ export function mountPmfView(host, ctx) {
         hitTargets.push({
           key: `strip:${date}`, roundIndex: i,
           x0: padL + i * slotW, x1: padL + (i + 1) * slotW, y0: stripT, y1: stripT + stripH,
-          title: date, sub: `Click to inspect · ${mLabel}`,
+          title: date, sub: `${horizon} wk · ${mLabel}`,
           probs: entry.probs, obsIdx: entry.obsIdx, rps: entry.rps, logScore: entry.logScore,
         });
       });

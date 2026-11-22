@@ -1,7 +1,7 @@
 /* Pure computations for the Sample Trajectories workbench: empirical quantiles,
  * per-horizon CRPS & multivariate Energy Score, peak cloud statistics, and conditioning gates.
  * Zero DOM dependencies. */
-import { DAY } from "../../lib/scale.js";
+import { DAY, niceMax, niceStep, ticks } from "../../lib/scale.js";
 
 /** Build query string for `/api/next/sample-scores`. */
 export function sampleScoresQuery({ target, season, location, scopePlace = "current", horizons = null, dims = null } = {}) {
@@ -246,4 +246,82 @@ export function gateStats(samples, gate) {
     medPeakVal: empiricalQuantile(peakVals, 0.5),
     p90PeakVal: empiricalQuantile(peakVals, 0.9),
   };
+}
+
+/**
+ * Compute non-overlapping Y-axis upper bound and tick values for the trajectories plot.
+ * @param {number} rawMax
+ * @param {number} plotH
+ * @param {{ minGap?: number, maxTicks?: number }} [opts]
+ * @returns {{ yTop: number, ticks: number[] }}
+ */
+export function computeYAxis(rawMax, plotH, { minGap = 20, maxTicks = 6 } = {}) {
+  const safeH = Math.max(1, Number(plotH) || 0);
+  const target = Math.max(2, Math.min(maxTicks, Math.floor(safeH / 56)));
+  const padded = Number.isFinite(rawMax) && rawMax > 0 ? rawMax * 1.06 : 1;
+  const yTop = niceMax(padded, target);
+  const step = niceStep(yTop, target);
+  const raw = step > 0 ? ticks(0, yTop, step) : [0, yTop];
+  const gapPx = Math.max(18, minGap);
+  const filtered = [];
+  let lastPy = Infinity;
+  for (const tv of raw) {
+    const py = safeH * (1 - tv / yTop);
+    if (!filtered.length || Math.abs(lastPy - py) >= gapPx) {
+      filtered.push(tv);
+      lastPy = py;
+    }
+  }
+  return { yTop, ticks: filtered.length ? filtered : [0, yTop] };
+}
+
+/** Default sort directions (`asc: true` => smaller first on first click) for sample leaderboard columns. */
+export const SAMPLE_BOARD_SORTS = Object.freeze({
+  model: { asc: true },
+  rel: { asc: true },
+  crps: { asc: true },
+  energy: { asc: true },
+  count: { asc: false },
+});
+
+const numOrNull = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/**
+ * Sort sample-trajectory leaderboard rows by column key and direction, keeping missing values last.
+ * @param {readonly object[]} rows
+ * @param {{ key?: string, rev?: boolean, baseId?: string | null, labelOf?: (id: string) => string }} [opts]
+ * @returns {object[]}
+ */
+export function sortSampleBoardRows(rows, { key = "rel", rev = false, baseId = null, labelOf = (id) => id } = {}) {
+  const list = Array.isArray(rows) ? [...rows] : [];
+  const k = Object.hasOwn(SAMPLE_BOARD_SORTS, key) ? key : "rel";
+  const dir = (SAMPLE_BOARD_SORTS[k].asc !== !!rev) ? 1 : -1;
+
+  const valOf = (r) => {
+    if (k === "model") return String(labelOf(r.model_id) || r.model_id || "");
+    if (k === "rel") return r.model_id === baseId ? 1.0 : numOrNull(r.relative_crps);
+    if (k === "crps") return numOrNull(r.crps);
+    if (k === "energy") return numOrNull(r.energy_score);
+    if (k === "count") return numOrNull(r.count);
+    return null;
+  };
+
+  return list.sort((a, b) => {
+    if (k === "model") {
+      const cmp = valOf(a).localeCompare(valOf(b));
+      if (cmp !== 0) return cmp * dir;
+    } else {
+      const va = valOf(a);
+      const vb = valOf(b);
+      if ((va == null) !== (vb == null)) return va == null ? 1 : -1;
+      if (va != null && va !== vb) return (va - vb) * dir;
+      if (k === "rel") {
+        const ca = numOrNull(a.crps);
+        const cb = numOrNull(b.crps);
+        if ((ca == null) !== (cb == null)) return ca == null ? 1 : -1;
+        if (ca != null && ca !== cb) return ca - cb;
+      }
+    }
+    return String(labelOf(a.model_id) || a.model_id || "").localeCompare(String(labelOf(b.model_id) || b.model_id || ""));
+  });
 }
