@@ -360,12 +360,15 @@ export class FanChart {
     this.hooks.onReady?.();
   }
 
-  /** Syncs panning bounds when Past seasons is toggled on or off in the current live season. */
+  /** Syncs panning bounds when Past seasons or long-horizon sample trajectories extend beyond the round window. */
   syncSeasonBounds() {
     if (!this.fan || !this.nav) return;
     const pastEnd = this.layers?.seasonEnd?.();
-    if (pastEnd != null && pastEnd > this.fan.window[1]) {
-      const capEnd = Number.isFinite(this.fan.end) ? Math.min(pastEnd, this.fan.end) : pastEnd;
+    const trajEnd = this.trajectories?.maxEnd?.();
+    const candidates = [pastEnd, trajEnd].filter((v) => v != null && Number.isFinite(v));
+    const extraEnd = candidates.length ? Math.max(...candidates) : null;
+    if (extraEnd != null && extraEnd > this.fan.window[1]) {
+      const capEnd = Number.isFinite(this.fan.end) ? Math.min(extraEnd, this.fan.end) : extraEnd;
       if (capEnd > this.fan.window[1]) {
         this.nav.allowEdgePan = true;
         this.nav.setSeasonBounds([this.fan.window[0], capEnd]);
@@ -454,7 +457,8 @@ export class FanChart {
     const fan = this.fan, idle = window.requestIdleCallback ?? ((fn) => setTimeout(fn, 400));
     idle(() => {
       if (this.fan !== fan) return;
-      for (const d of [1, -1]) { const nb = this.neighbour(d); if (nb) prefetchFan(fan.target, nb.id, fan.location); }
+      const dims = this.ctx.store.get().dims;
+      for (const d of [1, -1]) { const nb = this.neighbour(d); if (nb) prefetchFan(fan.target, nb.id, fan.location, { dims }); }
     }, { timeout: 2000 });
   }
 
@@ -565,13 +569,14 @@ export class FanChart {
       return;
     }
     const navDateOnly = changed.size === 1 && changed.has("date") && this.nav && s.date === this.#isoAt(this.nav.week);
-    if (!this.fan || changed.has("target") || changed.has("location") || changed.has("dims")) this.#show(this.#want(null));
+    const reloading = !this.fan || changed.has("target") || changed.has("location") || changed.has("dims");
+    if (reloading) this.#show(this.#want(null));
     else if (changed.has("date") && this.nav && s.date !== this.#isoAt(this.nav.week)) this.goTo(s.date);
     if (changed.has("sel") && this.fan) this.#prepare(true);
     if (changed.has("rulers")) this.rk.set(s.rulers ? 1 : 0, RULER_MS);
     if (changed.has("sel") || changed.has("levels") || changed.has("target")) this.bubbles?.sync(s);
     if (["layers", "sel"].some((k) => changed.has(k)) || (changed.has("date") && this.layers?.on?.size)) this.layers?.sync();
-    if (["trajectories", "sel", "date", "dims", "target", "location"].some((k) => changed.has(k))) this.trajectories?.sync();
+    if (!reloading && ["trajectories", "sel", "date", "dims", "target", "location"].some((k) => changed.has(k))) this.trajectories?.sync();
     if (changed.has("layers") && !changed.has("sel") && this.fan) { this.#axis(true); this.syncSeasonBounds(); }
     if (!navDateOnly) this.request();
   }

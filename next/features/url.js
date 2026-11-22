@@ -85,11 +85,19 @@ export function parseLevels(v) {
  */
 export function defaults(manifest, sel) {
   const target = manifest.targetById.has(manifest.default_target) ? manifest.default_target : manifest.targets?.[0]?.id ?? "";
+  const tMeta = manifest.targetById.get(target);
+  const tLocs = Array.isArray(tMeta?.locations) && tMeta.locations.length ? new Set(tMeta.locations) : null;
+  const okLoc = (id) => !!id && manifest.locationById.has(id) && (!tLocs || tLocs.has(id));
   const pref = manifest.geo?.default_location ?? manifest.default_location;
-  const location = (pref && manifest.locationById.has(pref))
+  const location = okLoc(pref)
     ? pref
-    : (manifest.locationById.has("US") ? "US" : manifest.locations?.[0]?.id ?? "US");
-  const picks = (manifest.recommended || []).filter((id) => id !== manifest.baseline && manifest.modelById.has(id)).slice(0, 3);
+    : okLoc(tMeta?.default_location)
+      ? tMeta.default_location
+      : okLoc("US")
+        ? "US"
+        : (tMeta?.locations?.find((id) => manifest.locationById.has(id)) ?? manifest.locations?.[0]?.id ?? "US");
+  const base = manifest.baselineFor?.(target) ?? manifest.baseline;
+  const picks = (manifest.recommended || []).filter((id) => id !== base && manifest.modelById.has(id)).slice(0, 3);
   const def = create({ selected: picks });
   return { target, location, date: defaultDate(manifest, sel ?? def), sel: def, levels: [...DEFAULT_LEVELS], rulers: false, focus: null };
 }
@@ -278,7 +286,7 @@ function parseScores(q, manifest) {
   return Object.keys(o).length ? o : null;
 }
 
-function writeScope(p, sc, manifest) {
+function writeScope(p, sc, manifest, targetId) {
   if (!sc) return;
   if (Array.isArray(sc.seasons) && sc.seasons.length) p.push(["ss", sc.seasons.join(",")]);
   if (Array.isArray(sc.weeks) && sc.weeks.length === 2) p.push(["wk", `${sc.weeks[0]}-${sc.weeks[1]}`]);
@@ -286,7 +294,8 @@ function writeScope(p, sc, manifest) {
   if (Array.isArray(sc.horizons) && sc.horizons.length && !sameList(sc.horizons, [0, 1, 2, 3])) p.push(["hz", sc.horizons.join(",")]);
   if (sc.place === "US" || sc.place === "current") p.push(["pl", sc.place]);
   if (sc.fair) p.push(["fair", "1"]);
-  if (sc.baseline && sc.baseline !== manifest.baseline) p.push(["bl", sc.baseline]); // the hub's own is the default
+  const base = manifest.baselineFor?.(targetId) ?? manifest.baseline;
+  if (sc.baseline && sc.baseline !== base) p.push(["bl", sc.baseline]); // the target's own is the default
   if (sc.rank === "selected") p.push(["rk", "sel"]);
   if (sc.scale === "log") p.push(["sc", "log"]);
 }
@@ -342,7 +351,7 @@ export function writeUrl(state, manifest, search = "") {
       }
     }
   }
-  writeScope(p, state.scope, manifest);
+  writeScope(p, state.scope, manifest, effectiveTarget);
   writeScores(p, state.scores);
   writeViews(p, state.views);
   const allDimKeys = new Set();
@@ -382,5 +391,12 @@ export function syncUrl(store, manifest) {
   const onHide = () => { if (timer) write(); };
   addEventListener("pagehide", onHide);
   write();
-  return () => { offStore(); removeEventListener("pagehide", onHide); if (timer) write(); };
+  return ({ flush = true } = {}) => {
+    const pending = !!timer;
+    clearTimeout(timer);
+    timer = 0;
+    offStore();
+    removeEventListener("pagehide", onHide);
+    if (flush && pending) write();
+  };
 }

@@ -83,7 +83,9 @@ export function openDates(anchor, ctx) {
       offStore = store.select(["scope", "date", "location", "target"], render);
       render();
       const sc = scopeOf(store.get(), manifest);
-      const loc = sc.place === "current" ? store.get().location : "US";
+      const loc = sc.place === "current"
+        ? store.get().location
+        : (manifest.locationById.has("US") ? "US" : (manifest.default_location || store.get().location));
       loadCurves(store.get().target, loc, seasons).then((d) => { curves = d; if (plot.isConnected) render(); }, () => { curves = { curves: [], failed: true }; if (plot.isConnected) render(); });
     },
   });

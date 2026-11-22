@@ -301,7 +301,13 @@ class SandboxDataLoader:
         """Compute maximum modification time across model directories and forecast files for cache invalidation."""
         mtime = 0.0
         try:
-            for root in (self.model_output_dir, self.local_output_dir):
+            for root in (
+                self.model_output_dir,
+                self.local_output_dir,
+                self.base_dir / "sample-output",
+                self.base_dir / "pmf-output",
+                self.base_dir / "peak-output",
+            ):
                 if not root.exists():
                     continue
                 mtime = max(mtime, root.stat().st_mtime)
@@ -355,12 +361,13 @@ class SandboxDataLoader:
         adm_df: Optional[pl.DataFrame] = None
         use_adm = _is_flu_hosp_target(target)
         if use_adm:
-            lf_adm = self.cache_mgr.scan_admissions()
+            lf_adm = self.cache_mgr.scan_admissions(target=target)
             if lf_adm is not None:
                 adm_names = lf_adm.collect_schema().names()
-                adm_cols = [c for c in ("location", "target_end_date", "oracle_value", "as_of") if c in adm_names]
+                adm_cols = [c for c in ("target", "location", "target_end_date", "oracle_value", "as_of") if c in adm_names]
                 if {"location", "target_end_date", "oracle_value"}.issubset(adm_cols):
-                    adm_df = lf_adm.select(adm_cols).collect()
+                    lf_adm_f = lf_adm.filter(pl.col("target") == target) if "target" in adm_cols else lf_adm
+                    adm_df = lf_adm_f.select(adm_cols).collect()
 
         return reconcile_weekly_series(
             oracle_df,
@@ -378,7 +385,7 @@ class SandboxDataLoader:
         """
         sources = [
             self.cache_mgr.get_oracle_parquet(),
-            self.cache_mgr.get_admissions_parquet() if _is_flu_hosp_target(target) else None,
+            self.cache_mgr.get_admissions_parquet(target=target) if _is_flu_hosp_target(target) else None,
         ]
         stamp = (target,) + tuple((str(p), p.stat().st_mtime) if p and p.exists() else None for p in sources)
         with self._phase_cache_lock:
@@ -1657,7 +1664,9 @@ class SandboxDataLoader:
         }
 
         # Load historical admissions (flu hosp only) or oracle truth for this target
-        lf_adm = self.cache_mgr.scan_admissions() if _is_flu_hosp_target(target) else None
+        lf_adm = self.cache_mgr.scan_admissions(target=target) if _is_flu_hosp_target(target) else None
+        if lf_adm is not None and "target" in lf_adm.collect_schema().names():
+            lf_adm = lf_adm.filter(pl.col("target") == target)
         if lf_adm is None:
             lf_oracle = self.cache_mgr.scan_oracle()
             if lf_oracle is not None:
@@ -1892,7 +1901,7 @@ class SandboxDataLoader:
 
         geo = self.get_geo_graph()
         primary_ids = set(geo.resolve_pool("all") or [l for l in locations if l != "US"])
-        agg_ids = set(geo.aggregate_locations_in_scope()) - {"US"}
+        agg_ids = set(geo.aggregate_locations_in_scope())
         spatial_ids = primary_ids | agg_ids
 
         states_data = {}
@@ -2290,6 +2299,9 @@ class SandboxDataLoader:
             else:
                 raw_mid, is_loc = self._resolve_model_id_and_local(model_id)
                 lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_loc)
+                if lf_m is None and all_models_meta.get(model_id, {}).get("is_synthetic") and scope_dates:
+                    df_syn = self.load_combined_forecasts(model_id, dates=scope_dates, as_polars=True)
+                    lf_m = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
                 lf_o = self.cache_mgr.scan_oracle()
                 df_o_map: Dict[Tuple[str, str], float] = {}
                 target_locs = [loc_id for _, loc_id, _ in state_items]
@@ -2415,28 +2427,29 @@ class SandboxDataLoader:
         # -------------------------------------------------------------
         elif mode == "horizon":
             ref_date = reference_date or (scope_dates[-1] if scope_dates else (self.get_available_dates(target)[-1] if self.get_available_dates(target) else ""))
-            m_target = model_id or (model_ids[0] if model_ids else "FluSight-baseline")
+            def_base = self.config.get_default_baseline(list(all_models_meta.keys()), target=target)
+            m_target = model_id or (model_ids[0] if model_ids else (def_base or (next(iter(all_models_meta.keys()), ""))))
             raw_mid, is_loc = self._resolve_model_id_and_local(m_target)
 
             lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_loc)
+            if lf_m is None and all_models_meta.get(m_target, {}).get("is_synthetic") and ref_date:
+                df_syn = self.load_combined_forecasts(m_target, dates=[ref_date], as_polars=True)
+                lf_m = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
             lf_o = self.cache_mgr.scan_oracle()
 
-            horizons = [0, 1, 2, 3]
-            x_keys = [str(h) for h in horizons]
-            x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in horizons]
-            y_keys = [abbr for abbr, _, _ in state_items]
-            y_labels = [abbr_to_name.get(abbr, abbr) if abbr != "US" else "US National" for abbr in y_keys]
+            def _resolve_h_cols(df_sub: Optional[pl.DataFrame]) -> List[int]:
+                if horizons:
+                    return sorted(set(int(h) for h in horizons))
+                if df_sub is not None and not df_sub.is_empty() and "horizon" in df_sub.columns:
+                    hs = sorted(int(h) for h in df_sub.get_column("horizon").drop_nulls().unique().to_list() if int(h) >= 0)
+                    if hs:
+                        return hs
+                tmeta_h = self.config.get_target_metadata(target).get("horizons") or {}
+                meta_hs = sorted({int(h) for h in (*(tmeta_h.get("required") or ()), *(tmeta_h.get("optional") or ())) if int(h) >= 0})
+                return meta_hs or [0, 1, 2, 3]
 
-            h_grid: Dict[str, Dict[int, Dict[str, Any]]] = {abbr: {} for abbr in y_keys}
-
-            df_o_map: Dict[Tuple[str, str], float] = {}
             target_locs = [loc_id for _, loc_id, _ in state_items]
-            if lf_o is not None:
-                df_o = lf_o.filter((pl.col("target") == target) & (pl.col("target_end_date") >= ref_date) & pl.col("location").is_in(target_locs)).select(["location", "target_end_date", "oracle_value"]).collect()
-                for r in df_o.iter_rows(named=True):
-                    if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
-                        df_o_map[(str(r["location"]), str(r["target_end_date"]))] = float(r["oracle_value"])
-
+            sub = pl.DataFrame()
             if lf_m is not None:
                 sub = (
                     lf_m.filter(
@@ -2447,6 +2460,32 @@ class SandboxDataLoader:
                     )
                     .collect()
                 )
+            eff_horizons = _resolve_h_cols(sub)
+            x_keys = [str(h) for h in eff_horizons]
+            x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in eff_horizons]
+            y_keys = [abbr for abbr, _, _ in state_items]
+            y_labels = [abbr_to_name.get(abbr, abbr) if abbr != "US" else "US National" for abbr in y_keys]
+
+            h_grid: Dict[str, Dict[int, Dict[str, Any]]] = {abbr: {} for abbr in y_keys}
+
+            df_o_map: Dict[Tuple[str, str], float] = {}
+            if lf_o is not None and ref_date:
+                try:
+                    obs_since = (datetime.strptime(ref_date[:10], "%Y-%m-%d").date() + timedelta(days=int(cal.horizon_offset_days) - 7)).isoformat()
+                except ValueError:
+                    obs_since = ref_date
+                o_q = lf_o.filter((pl.col("target") == target) & (pl.col("target_end_date") >= obs_since) & pl.col("location").is_in(target_locs))
+                if "output_type" in o_q.collect_schema().names():
+                    o_q = o_q.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+                df_o = o_q.collect()
+                if not df_o.is_empty():
+                    if "as_of" in df_o.columns:
+                        df_o = df_o.sort("as_of").group_by(["location", "target_end_date"]).last()
+                    for r in df_o.select(["location", "target_end_date", "oracle_value"]).iter_rows(named=True):
+                        if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
+                            df_o_map[(str(r["location"]), str(r["target_end_date"]))] = float(r["oracle_value"])
+
+            if not sub.is_empty():
                 if not sub.is_empty():
                     wis_lookup = self._task_wis_lookup(sub, target)
                     piv = sub.pivot(
@@ -2507,7 +2546,7 @@ class SandboxDataLoader:
                 r_id = STATE_TO_HHS_REGION.get(abbr, 99)
                 reg_name = HHS_REGIONS.get(r_id, {}).get("name", "Other")
 
-                for h in horizons:
+                for h in eff_horizons:
                     c = h_grid.get(abbr, {}).get(h)
                     val = None
                     if c is not None:
@@ -2544,28 +2583,32 @@ class SandboxDataLoader:
         # Mode: Date x Horizon (Timeline Progression Across Horizons)
         # -------------------------------------------------------------
         elif mode == "date_h":
-            m_target = model_id or (model_ids[0] if model_ids else "FluSight-baseline")
+            def_base = self.config.get_default_baseline(list(all_models_meta.keys()), target=target)
+            m_target = model_id or (model_ids[0] if model_ids else (def_base or next(iter(all_models_meta.keys()), "")))
             raw_mid, is_loc = self._resolve_model_id_and_local(m_target)
             fips = state_items[0][1] if state_items else "US"
             abbr = state_items[0][0] if state_items else "US"
             pop = abbr_to_pop.get(abbr, 1) if state_items else 1
 
             lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_loc)
+            if lf_m is None and all_models_meta.get(m_target, {}).get("is_synthetic") and scope_dates:
+                df_syn = self.load_combined_forecasts(m_target, dates=scope_dates, as_polars=True)
+                lf_m = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
             lf_o = self.cache_mgr.scan_oracle()
             df_o_map: Dict[str, float] = {}
             if lf_o is not None:
-                df_o = lf_o.filter((pl.col("target") == target) & (pl.col("location") == fips)).select(["target_end_date", "oracle_value"]).collect()
-                for r in df_o.iter_rows(named=True):
-                    if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
-                        df_o_map[str(r["target_end_date"])] = float(r["oracle_value"])
+                o_q = lf_o.filter((pl.col("target") == target) & (pl.col("location") == fips))
+                if "output_type" in o_q.collect_schema().names():
+                    o_q = o_q.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+                df_o = o_q.collect()
+                if not df_o.is_empty():
+                    if "as_of" in df_o.columns:
+                        df_o = df_o.sort("as_of").group_by("target_end_date").last()
+                    for r in df_o.select(["target_end_date", "oracle_value"]).iter_rows(named=True):
+                        if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
+                            df_o_map[str(r["target_end_date"])] = float(r["oracle_value"])
 
-            horizons = [0, 1, 2, 3]
-            x_keys = [str(h) for h in horizons]
-            x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in horizons]
-            y_keys = scope_dates
-            y_labels = [d for d in scope_dates]
-
-            dh_grid: Dict[str, Dict[int, Dict[str, Any]]] = {d: {} for d in scope_dates}
+            sub = pl.DataFrame()
             if lf_m is not None:
                 sub = (
                     lf_m.filter(
@@ -2576,6 +2619,21 @@ class SandboxDataLoader:
                     )
                     .collect()
                 )
+            if horizons:
+                eff_horizons = sorted(set(int(h) for h in horizons))
+            elif not sub.is_empty() and "horizon" in sub.columns:
+                hs = sorted(int(h) for h in sub.get_column("horizon").drop_nulls().unique().to_list() if int(h) >= 0)
+                eff_horizons = hs or [0, 1, 2, 3]
+            else:
+                tmeta_h = self.config.get_target_metadata(target).get("horizons") or {}
+                eff_horizons = sorted({int(h) for h in (*(tmeta_h.get("required") or ()), *(tmeta_h.get("optional") or ())) if int(h) >= 0}) or [0, 1, 2, 3]
+            x_keys = [str(h) for h in eff_horizons]
+            x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in eff_horizons]
+            y_keys = scope_dates
+            y_labels = [d for d in scope_dates]
+
+            dh_grid: Dict[str, Dict[int, Dict[str, Any]]] = {d: {} for d in scope_dates}
+            if not sub.is_empty():
                 if not sub.is_empty():
                     wis_lookup = self._task_wis_lookup(sub, target)
                     piv = sub.pivot(
@@ -2614,7 +2672,7 @@ class SandboxDataLoader:
             cell_meta = {}
             for rd in y_keys:
                 row_vals = []
-                for h in horizons:
+                for h in eff_horizons:
                     c = dh_grid.get(rd, {}).get(h)
                     val = None
                     if c is not None:
@@ -2648,7 +2706,8 @@ class SandboxDataLoader:
         else:
             cand_mids = model_ids if (model_ids and len(model_ids) > 0) else list(all_models_meta.keys())
             if not cand_mids:
-                cand_mids = ["FluSight-baseline"]
+                def_b = self.config.get_default_baseline(list(all_models_meta.keys()), target=target)
+                cand_mids = [def_b] if def_b else []
 
             oracle = self.get_oracle(as_polars=True)
             pop_map = None if is_rate_target else {loc: info["population"] for loc, info in locations.items() if info.get("population")}
@@ -2661,6 +2720,9 @@ class SandboxDataLoader:
             for mid in cand_mids:
                 raw_id, is_loc = self._resolve_model_id_and_local(mid)
                 lf = self.cache_mgr.scan_model(raw_id, is_local=is_loc)
+                if lf is None and all_models_meta.get(mid, {}).get("is_synthetic") and scope_dates:
+                    df_syn = self.load_combined_forecasts(mid, dates=scope_dates, as_polars=True)
+                    lf = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
                 if lf is None or oracle is None or oracle.is_empty():
                     continue
                 sc = score_forecasts(
@@ -2749,10 +2811,19 @@ class SandboxDataLoader:
                     raw_matrix.append(row_vals)
 
             elif mode == "model_h":
-                # X-axis: Horizons 0..3
-                horizons = [0, 1, 2, 3]
-                x_keys = [str(h) for h in horizons]
-                x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in horizons]
+                if horizons:
+                    eff_horizons = sorted(set(int(h) for h in horizons))
+                else:
+                    obs_hs = sorted({
+                        int(hv)
+                        for tdf in model_task_dfs.values()
+                        if tdf is not None and not tdf.is_empty() and "horizon" in tdf.columns
+                        for hv in tdf.get_column("horizon").drop_nulls().unique().to_list()
+                        if int(hv) >= 0
+                    })
+                    eff_horizons = obs_hs or [0, 1, 2, 3]
+                x_keys = [str(h) for h in eff_horizons]
+                x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in eff_horizons]
 
                 raw_matrix = []
                 cell_meta = {}
@@ -2781,7 +2852,7 @@ class SandboxDataLoader:
                             }
 
                     row_vals = []
-                    for h in horizons:
+                    for h in eff_horizons:
                         m_dict = h_metrics.get(h, {})
                         val = m_dict.get(metric if metric in m_dict else "wis")
                         row_vals.append(val)

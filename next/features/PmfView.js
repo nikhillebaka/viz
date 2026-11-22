@@ -4,8 +4,10 @@
  *   - Flow: calm diverging figure-ground stream anchored on midpoint category (e.g. Stable)
  *   - Bars: discrete 5-bin / K-bin probability histograms with 50% dashed rule */
 import { h, on, cssColor, onThemeChange } from "../lib/dom.js";
-import { apiUrl, loadPmf } from "../lib/api.js";
-import { fragment, action, setLine, linkStyle, fitCanvas, perFrame, resetColors, onDprChange } from "../sections/shared.js";
+import { apiUrl, loadPmf, registerCacheClear } from "../lib/api.js";
+import { seriesColor } from "../chart/layout.js";
+import { slotOf } from "./selection.js";
+import { guideLink, fragment, action, setLine, linkStyle, fitCanvas, perFrame, resetColors, onDprChange } from "../sections/shared.js";
 
 const CAT_LABELS = {
   large_decrease: { short: "−−", name: "Large dec" },
@@ -31,11 +33,11 @@ function catName(key) {
  * Pure categorical scoring metrics for a forecast distribution and realized category index.
  * @param {readonly number[]} probs
  * @param {number} obsIdx
- * @returns {{ rps: number, logScore: number, brier: number, modeHit: boolean }}
+ * @returns {{ rps: number, logScore: number, logLoss: number, brier: number, modeHit: boolean }}
  */
 export function scorePmfDistribution(probs, obsIdx) {
   if (!Array.isArray(probs) || !probs.length || !Number.isInteger(obsIdx) || obsIdx < 0 || obsIdx >= probs.length) {
-    return { rps: NaN, logScore: NaN, brier: NaN, modeHit: false };
+    return { rps: NaN, logScore: NaN, logLoss: NaN, brier: NaN, modeHit: false };
   }
   const K = probs.length;
   let sum = 0;
@@ -65,9 +67,12 @@ export function scorePmfDistribution(probs, obsIdx) {
   let maxCount = 0;
   for (let k = 0; k < K; k++) if (Math.abs(p[k] - maxP) < 1e-9) maxCount++;
 
+  const rawLog = Math.log(Math.max(1e-6, p[obsIdx]));
+  const logLoss = rawLog === 0 ? 0 : -rawLog;
   return {
     rps,
-    logScore: Math.log(Math.max(1e-6, p[obsIdx])),
+    logScore: rawLog,
+    logLoss,
     brier,
     modeHit: maxCount === 1 && argMax === obsIdx,
   };
@@ -121,8 +126,15 @@ function normalizePmfPayload(raw, manifest) {
   const catIdx = new Map(categories.map((c, i) => [c, i]));
   const rounds = Array.isArray(raw?.rounds) ? raw.rounds : [];
   const obsByDate = new Map();
+  const obsByHDate = new Map();
   for (const o of raw?.observed || []) {
-    if (o?.date && catIdx.has(o.category)) obsByDate.set(o.date, catIdx.get(o.category));
+    if (o?.date && catIdx.has(o.category)) {
+      const idx = catIdx.get(o.category);
+      if (o.horizon != null && Number.isInteger(Number(o.horizon))) {
+        obsByHDate.set(`${o.date}|${Number(o.horizon)}`, idx);
+      }
+      obsByDate.set(o.date, idx);
+    }
   }
 
   const modelsObj = raw?.models || {};
@@ -152,10 +164,11 @@ function normalizePmfPayload(raw, manifest) {
         const probs = categories.map((c) => Number(rec?.probs?.[c] ?? 0));
         const sum = probs.reduce((a, b) => a + b, 0);
         const norm = sum > 0 ? probs.map((v) => v / sum) : probs;
-        const obsIdx = rec?.target_end_date && obsByDate.has(rec.target_end_date)
-          ? obsByDate.get(rec.target_end_date)
-          : null;
-        const scores = obsIdx != null ? scorePmfDistribution(norm, obsIdx) : { rps: NaN, logScore: NaN, brier: NaN, modeHit: false };
+        const ted = rec?.target_end_date;
+        const obsIdx = ted && obsByHDate.has(`${ted}|${h}`)
+          ? obsByHDate.get(`${ted}|${h}`)
+          : (ted && obsByDate.has(ted) ? obsByDate.get(ted) : null);
+        const scores = obsIdx != null ? scorePmfDistribution(norm, obsIdx) : { rps: NaN, logScore: NaN, logLoss: NaN, brier: NaN, modeHit: false };
         outH[h] = { targetEndDate: rec?.target_end_date || null, probs: norm, obsIdx, ...scores };
       }
       byRound[r].models[mid] = outH;
@@ -186,6 +199,7 @@ export function mountPmfView(host, ctx) {
 
   const sec = h("section", { class: compact ? "v-section pmf-compact" : "v-section" });
   const line = h("div", { class: "v-line" });
+  const helpBtn = guideLink("pmf", "Rate change in the Guide");
   const titleEl = h("h2", { class: "v-title" });
   const head = h("header", { class: "v-head" }, titleEl, line);
   const progress = h("div", { class: "v-progress", "aria-hidden": "true" });
@@ -221,7 +235,7 @@ export function mountPmfView(host, ctx) {
   let allScopeLoading = false;
   let allScopeErr = false;
   const allScopeCache = new Map();
-  const offs = [];
+  const offs = [registerCacheClear(() => allScopeCache.clear())];
 
   const setEmpty = (text, retry) => {
     emptyEl.hidden = !text;
@@ -318,9 +332,12 @@ export function mountPmfView(host, ctx) {
   function syncLine() {
     Object.values(F).forEach((b) => b.sync());
     const showHoriz = viewMode === "all" && shapeMode !== "bars";
+    const placeNote = currentSrc?.viaParent && currentSrc?.locationName
+      ? h("span", { style: { color: "var(--ink-tertiary)" } }, `${currentSrc.locationName} · state-level`)
+      : null;
     const parts = viewMode === "all"
-      ? [F.shape, F.mode, showHoriz && F.horizon, F.model].filter(Boolean)
-      : [F.shape, F.mode, F.round];
+      ? [F.shape, F.mode, showHoriz && F.horizon, F.model, placeNote].filter(Boolean)
+      : [F.shape, F.mode, F.round, placeNote].filter(Boolean);
     setLine(line, parts);
     if (viewMode === "round" && data?.rounds?.length) {
       F.round.before(prevBtn);
@@ -414,61 +431,62 @@ export function mountPmfView(host, ctx) {
       });
   }
 
+  const tableScopeFrag = fragment({
+    label: "Scope",
+    title: "Skill over",
+    items: () => {
+      const placeName = currentSrc?.locationName || "This place";
+      const sLbl = data?.season ? (manifest.seasonById?.get(data.season)?.label || data.season) : "";
+      return [
+        { value: "local", label: placeName },
+        { value: "all", label: sLbl ? `All places · ${sLbl}` : "All places" },
+      ];
+    },
+    value: () => tableScope,
+    isDefault: () => tableScope === "local",
+    onSelect: (v) => {
+      if (v === tableScope) return;
+      tableScope = v;
+      if (tableScope === "all") {
+        const expectedKey = `${currentSrc?.hubId || ""}|${currentSrc?.targetId}|${data?.season}|${JSON.stringify(currentSrc?.dims || {})}`;
+        if (allScopeKey !== expectedKey || !allScopeData) loadAllScopeMetrics();
+        else renderTable();
+      } else {
+        renderTable();
+      }
+    },
+  });
+  const tableSubLine = h("div", { class: "v-line" });
+  const tableSubHead = h("div", { class: "v-subhead" }, h("h3", { class: "v-subtitle" }, "Season skill"), tableSubLine);
+
   function renderTable() {
     if (!data?.modelIds?.length || !data?.rounds?.length) { tableWrap.replaceChildren(); return; }
     const activeDates = viewMode === "all" ? data.rounds : [data.rounds[roundIdx]];
     const targetHzs = viewMode === "all" && shapeMode !== "bars" ? [horizon] : data.horizons;
-    const placeName = currentSrc?.locationName || "This place";
+    const sel = store.get().sel;
+    const dotColor = (mid) => {
+      if (mid === focusModel) return "var(--accent)";
+      const sl = slotOf(sel, mid);
+      return sl != null ? seriesColor(sl) : null;
+    };
 
-    const scopeBar = h("div", { class: "pmf-table-head" },
-      h("div", { class: "pmf-scope-pills", role: "tablist", "aria-label": "PMF score scope" },
-        h("button", {
-          type: "button", role: "tab",
-          class: ["pmf-scope-btn", tableScope === "local" && "is-active"],
-          "aria-selected": String(tableScope === "local"),
-          onclick: () => { if (tableScope !== "local") { tableScope = "local"; renderTable(); } },
-        }, placeName),
-        h("button", {
-          type: "button", role: "tab",
-          class: ["pmf-scope-btn", tableScope === "all" && "is-active"],
-          "aria-selected": String(tableScope === "all"),
-          onclick: () => {
-            if (tableScope !== "all") {
-              tableScope = "all";
-              const expectedKey = `${currentSrc?.hubId || ""}|${currentSrc?.targetId}|${data.season}|${JSON.stringify(currentSrc?.dims || {})}`;
-              if (allScopeKey !== expectedKey || !allScopeData) loadAllScopeMetrics();
-              else renderTable();
-            }
-          },
-        }, `All places · ${data.season || ""}`),
-      ),
-      h("span", { class: "pmf-scope-note" },
-        tableScope === "all" && allScopeData?.baseline_model ? `vs ${manifest.label(allScopeData.baseline_model)}` : "Lower RPS / Log loss is better",
-        " · ",
-        h("button", {
-          type: "button", class: "c-link",
-          onclick: async (e) => {
-            const { openGuide } = await import("./Guide.js");
-            openGuide("pmf", e.currentTarget);
-          },
-        }, "Guide ↗"),
-      ),
-    );
+    tableScopeFrag.sync();
+    setLine(tableSubLine, [tableScopeFrag]);
 
     if (tableScope === "all") {
       if (allScopeLoading) {
-        tableWrap.replaceChildren(scopeBar, h("p", { class: "pmf-scope-note" }, "Scoring all locations…"));
+        tableWrap.replaceChildren(tableSubHead, h("p", { class: "v-note" }, "Scoring all locations…"));
         return;
       }
       if (allScopeErr || !allScopeData?.rankings?.length) {
-        tableWrap.replaceChildren(scopeBar, h("p", { class: "pmf-scope-note" }, "Seasonal PMF scores unavailable for this slice."));
+        tableWrap.replaceChildren(tableSubHead, h("p", { class: "v-note" }, "Seasonal PMF scores unavailable for this slice."));
         return;
       }
       const scored = allScopeData.rankings.filter((r) => r.has_data_in_scope && r.count > 0);
       const idsAll = scored.map((r) => r.model_id);
       const ordinal = allScopeData.ordinal !== false;
       tableWrap.replaceChildren(
-        scopeBar,
+        tableSubHead,
         h("table", { class: "v-table" },
           h("thead", null,
             h("tr", null,
@@ -481,22 +499,25 @@ export function mountPmfView(host, ctx) {
               h("th", null, "N"),
             )),
           h("tbody", null,
-            ...scored.map((r, idx) =>
-              h("tr", {
+            ...scored.map((r) => {
+              const dc = dotColor(r.model_id);
+              const lbl = manifest.label(r.model_id, idsAll);
+              return h("tr", {
                 "data-model": r.model_id,
                 class: r.model_id === focusModel ? "is-focus" : null,
                 onclick: () => {
                   if (data.modelIds.includes(r.model_id)) { focusModel = r.model_id; renderAll(); }
                 },
               },
-              h("td", null, h("span", { class: "v-name", style: { "--c": r.model_id === focusModel ? "var(--accent)" : `var(--series-${(idx % 5) + 1})` } }, h("i"), manifest.label(r.model_id, idsAll))),
+              h("td", null, h("span", { class: "v-name", "data-model-sheet": r.model_id, title: `${lbl} · details`, style: dc ? { "--c": dc } : null }, h("i"), lbl)),
               h("td", { class: "num" }, r.model_id === allScopeData.baseline_model ? "1.00" : (typeof r.relative_wis === "number" ? r.relative_wis.toFixed(2) : "–")),
               ordinal ? h("td", { class: "num" }, typeof r.rps === "number" ? r.rps.toFixed(3) : "–") : null,
               h("td", { class: "num" }, typeof r.log_score === "number" ? r.log_score.toFixed(2) : "–"),
               h("td", { class: "num" }, typeof r.brier === "number" ? r.brier.toFixed(3) : "–"),
               h("td", { class: "num" }, typeof r.hit_mode === "number" ? `${Math.round(r.hit_mode)}%` : "–"),
               h("td", { class: "num" }, String(r.count ?? 0)),
-              )))),
+              );
+            }))),
       );
       return;
     }
@@ -504,7 +525,7 @@ export function mountPmfView(host, ctx) {
     const labelMap = new Map(data.modelIds.map((id) => [id, manifest.label(id, data.modelIds)]));
 
     const rows = data.modelIds.map((mid) => {
-      let n = 0, rps = 0, logS = 0, brier = 0, hits = 0;
+      let n = 0, rps = 0, logLossSum = 0, brier = 0, hits = 0;
       for (const d of activeDates) {
         const rec = data.byRound[d];
         if (!rec) continue;
@@ -512,7 +533,7 @@ export function mountPmfView(host, ctx) {
           const entry = rec.models[mid]?.[hVal];
           if (!entry || entry.obsIdx == null || !Number.isFinite(entry.rps)) continue;
           rps += entry.rps;
-          logS += entry.logScore;
+          logLossSum += Number.isFinite(entry.logLoss) ? entry.logLoss : -entry.logScore;
           brier += entry.brier;
           if (entry.modeHit) hits++;
           n++;
@@ -523,7 +544,7 @@ export function mountPmfView(host, ctx) {
         name: labelMap.get(mid) || mid,
         n,
         rps: n ? rps / n : NaN,
-        logS: n ? logS / n : NaN,
+        logLoss: n ? logLossSum / n : NaN,
         brier: n ? brier / n : NaN,
         hitPct: n ? Math.round((hits / n) * 100) : NaN,
       };
@@ -541,29 +562,31 @@ export function mountPmfView(host, ctx) {
       : `Model (${data.rounds[roundIdx]} · all horizons)`;
 
     tableWrap.replaceChildren(
-      scopeBar,
+      tableSubHead,
       h("table", { class: "v-table" },
         h("thead", null,
           h("tr", null,
             h("th", null, scopeHdr),
             h("th", null, "RPS"),
-            h("th", null, "Log score"),
+            h("th", null, "Log loss"),
             h("th", null, "Brier"),
             h("th", null, "Mode hit"),
           )),
         h("tbody", null,
-          ...rows.map((r, idx) =>
-            h("tr", {
+          ...rows.map((r) => {
+            const dc = dotColor(r.id);
+            return h("tr", {
               "data-model": r.id,
               class: r.id === focusModel ? "is-focus" : null,
               onclick: () => { focusModel = r.id; renderAll(); },
             },
-            h("td", null, h("span", { class: "v-name", style: { "--c": r.id === focusModel ? "var(--accent)" : `var(--series-${(idx % 5) + 1})` } }, h("i"), r.name)),
+            h("td", null, h("span", { class: "v-name", "data-model-sheet": r.id, title: `${r.name} · details`, style: dc ? { "--c": dc } : null }, h("i"), r.name)),
             h("td", { class: "num" }, Number.isFinite(r.rps) ? r.rps.toFixed(3) : "–"),
-            h("td", { class: "num" }, Number.isFinite(r.logS) ? r.logS.toFixed(2) : "–"),
+            h("td", { class: "num" }, Number.isFinite(r.logLoss) ? r.logLoss.toFixed(2) : "–"),
             h("td", { class: "num" }, Number.isFinite(r.brier) ? r.brier.toFixed(3) : "–"),
             h("td", { class: "num" }, Number.isFinite(r.hitPct) ? `${r.hitPct}%` : "–"),
-            )))),
+            );
+          }))),
     );
   }
 
@@ -603,7 +626,7 @@ export function mountPmfView(host, ctx) {
         h("table", null, h("tbody", null, ...rows)),
         Number.isFinite(hit.rps) ? h("div", { class: "c-readout-foot" },
           h("span", null, `RPS ${hit.rps.toFixed(3)}`),
-          h("span", null, `Log ${hit.logScore.toFixed(2)}`),
+          h("span", null, `Log loss ${(Number.isFinite(hit.logLoss) ? hit.logLoss : -hit.logScore).toFixed(2)}`),
         ) : null,
       );
       readout.hidden = false;
@@ -1111,7 +1134,7 @@ export function mountPmfView(host, ctx) {
       title: manifest.targetById.get(s.target)?.label || manifest.targetById.get(s.target)?.short || s.target,
     };
     const season = manifest.seasonOf(s.date) ?? manifest.latest?.season ?? manifest.seasons.at(-1)?.id;
-    titleEl.textContent = src?.title || "Rate change";
+    titleEl.replaceChildren(src?.title || "Rate change", helpBtn);
 
     if (!src?.targetId || !src?.locationId) {
       currentSrc = src;
@@ -1184,8 +1207,10 @@ export function mountPmfView(host, ctx) {
     }),
     store.select(["sel"], () => {
       if (!data) return;
-      const fromSel = store.get().sel.selected.find((id) => data.modelIds.includes(id));
-      if (fromSel && fromSel !== focusModel) focusModel = fromSel;
+      if (!focusModel || !data.modelIds.includes(focusModel)) {
+        const fromSel = store.get().sel.selected.find((id) => data.modelIds.includes(id));
+        if (fromSel) focusModel = fromSel;
+      }
       renderAll();
     }),
     onThemeChange(() => { resetColors(); renderKey(); scheduleDraw(); }),

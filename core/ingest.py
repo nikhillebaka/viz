@@ -38,6 +38,7 @@ CORE_FORECAST_COLUMNS = [
 REQUIRED_INPUT_COLUMNS = ["target", "location", "output_type", "output_type_id", "value"]
 STANDARD_RAW_COLS = frozenset({
     "model_id",
+    "round_id",
     "reference_date",
     "origin_date",
     "target",

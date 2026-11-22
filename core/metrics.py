@@ -32,6 +32,7 @@ TASK_KEY_COLS = ["reference_date", "location", "horizon"]
 LOG_SCORE_FLOOR = 1e-9
 
 _NON_TASK_COLS = frozenset({
+    "round_id",
     "reference_date",
     "origin_date",
     "target",
@@ -673,9 +674,10 @@ def score_pmf_forecasts(
     okeys = base_okeys + (["horizon"] if use_h_key else [])
     if "as_of" in o.columns:
         o = o.sort("as_of")
+    sort_cols = okeys + (["as_of"] if "as_of" in o.columns else []) + ["oracle_value"]
     o_true = (
         o.filter(pl.col("oracle_value") > 0)
-        .sort(okeys + ["oracle_value"])
+        .sort(sort_cols)
         .group_by(okeys, maintain_order=True)
         .last()
         .select(okeys + ["true_category"])
@@ -883,6 +885,11 @@ def score_sample_forecasts(
         crps_rows.append(row)
 
     task_df = pl.DataFrame(crps_rows)
+    agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
+    is_agg = task_df["location"].is_in(sorted(agg_set)) if agg_set else pl.Series(values=[False] * task_df.height)
+    primary_df = task_df.filter(~is_agg) if (~is_agg).any() else task_df.filter(is_agg)
+    has_primary = bool((~is_agg).any())
+
     mean_energy: Optional[float] = None
     energy_rows: List[Dict[str, Any]] = []
     if compute_energy_score and merged.height > 0:
@@ -914,18 +921,16 @@ def score_sample_forecasts(
             y_vec = np.asarray([obs_by_h[hc] for hc in h_cols], dtype=np.float64)
             es_v = energy_score(mat, y_vec)
             if math.isfinite(es_v):
-                es_vals.append(es_v)
                 rk_tuple = rk_vals if isinstance(rk_vals, tuple) else (rk_vals,)
                 erow = dict(zip(round_keys, rk_tuple))
                 erow["horizon"] = 0
                 erow["energy_score"] = es_v
                 energy_rows.append(erow)
+                if not has_primary or str(erow["location"]) not in agg_set:
+                    es_vals.append(es_v)
         if es_vals:
             mean_energy = float(np.mean(es_vals))
 
-    agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
-    is_agg = task_df["location"].is_in(sorted(agg_set)) if agg_set else pl.Series(values=[False] * task_df.height)
-    primary_df = task_df.filter(~is_agg) if (~is_agg).any() else task_df.filter(is_agg)
     evaluated_dates = sorted(task_df.get_column("reference_date").unique().to_list())
     distinct_locs = sorted(task_df.get_column("location").unique().to_list())
 

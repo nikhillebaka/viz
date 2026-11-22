@@ -64,3 +64,6 @@
 .v-note { margin: var(--space-12) 0 0; font-size: var(--text-small); color: var(--ink-tertiary); }
 .v-note b { font-weight: var(--weight-medium); color: var(--ink-secondary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .v-sub { margin: 0 0 var(--space-8); font-size: var(--text-micro); font-weight: var(--weight-medium); color: var(--ink-tertiary); }
+.v-subhead { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-8) var(--space-12); margin: var(--space-20) 0 var(--space-12); }
+.v-subtitle { margin: 0; font-size: var(--text-control); font-weight: var(--weight-medium); color: var(--ink-primary); white-space: nowrap; }
+.v-subhead .v-line { flex: 1; min-width: 0; }

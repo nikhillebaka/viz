@@ -7,6 +7,7 @@
  * sections/scores/detail.js), then what the model is (methods, team, licence, data details, ensemble
  * members). Scores come from the Scores section when it has them (ctx.scores), else one request of its own. */
 import { h, on } from "../lib/dom.js";
+import { apiUrl, registerCacheClear } from "../lib/api.js";
 import { openPopover, activeLayer, tooltip } from "../ui/floating.js";
 import { icon, slideText, toast } from "../ui/controls.js";
 import { seriesColor } from "../chart/layout.js";
@@ -14,7 +15,18 @@ import { isCharted, slotOf, chart as chartModel, unchart, select, deselect, setB
 import { fmtDay } from "../lib/format.js";
 import { parseIso } from "../lib/scale.js";
 
-let open = null; // { layer, show(id) } while the sheet is open
+let open = null; // { layer, show(id), ctx } while the sheet is open
+const sheetMetricsCache = new Map();
+registerCacheClear(() => sheetMetricsCache.clear());
+const fetchSheetMetrics = (q) => {
+  const url = apiUrl(`/api/next/metrics?${q}`);
+  if (!sheetMetricsCache.has(url)) {
+    const p = fetch(url).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+    p.catch(() => { if (sheetMetricsCache.get(url) === p) sheetMetricsCache.delete(url); });
+    sheetMetricsCache.set(url, p);
+  }
+  return sheetMetricsCache.get(url);
+};
 const DASH = "–";
 const setHash = (id) => history.replaceState(history.state, "", `${location.pathname}${location.search}${id ? `#model/${encodeURIComponent(id)}` : ""}`);
 /** the model a #model/<id> hash names, or null */
@@ -33,7 +45,8 @@ function linkScoresCss() {
  */
 export function openModel(id, ctx) {
   if (!ctx.manifest.modelById.has(id)) { toast("That model isn't in this hub", { tone: "info" }); setHash(null); return null; }
-  if (open) { open.show(id); return open.layer; }
+  if (open && open.ctx === ctx) { open.show(id); return open.layer; }
+  if (open) open.layer.close(false);
   linkScoresCss();
   const anchor = document.querySelector(".app-more") || document.querySelector("[data-zone='tr']");
   if (!anchor) return null;
@@ -45,7 +58,7 @@ export function openModel(id, ctx) {
     content(body) { show = build(body, ctx); },
   });
   if (!layer) return null;
-  open = { layer, show };
+  open = { layer, show, ctx };
   show(id);
   return layer;
 }
@@ -59,6 +72,7 @@ function build(body, ctx) {
   const scroller = h("div", { class: "ms-scroll" }, head, nums, blocks, about);
   body.append(scroller);
   let id = null, token = 0;
+  let fallbackOrder = [];
 
   // ↑ ↓ step through the leaderboard's order (when the sheet has focus and no text field does)
   body.addEventListener("keydown", (e) => {
@@ -66,7 +80,10 @@ function build(body, ctx) {
     e.preventDefault();
     step(e.key === "ArrowDown" ? 1 : -1);
   });
-  const order = () => ctx.scores?.order?.() || [];
+  const order = () => {
+    const live = ctx.scores?.order?.();
+    return live?.length ? live : fallbackOrder;
+  };
   function step(d) {
     const o = order(), i = o.indexOf(id);
     if (i < 0 || !o.length) return;
@@ -90,10 +107,36 @@ function build(body, ctx) {
     nums.replaceChildren(h("p", { class: "ms-quiet" }, "Scoring"));
     blocks.replaceChildren();
     about.replaceChildren();
-    // scores in the leaderboard's scope (the Scores section's response when it has this model)
-    // opened from a link before the Scores section is on the page: wait for it a moment
-    const ready = async () => { for (let i = 0; i < 20 && !ctx.scores?.rowFor; i++) await new Promise((r) => setTimeout(r, 250)); if (!ctx.scores?.rowFor) throw new Error("no scores"); };
-    const ctxRow = ready().then(() => ctx.scores.rowFor(id));
+    // scores in the leaderboard's scope (from Scores section if mounted, else non-aborting direct metrics query)
+    const resolveRow = async () => {
+      if (!ctx.scores?.rowFor) await Promise.resolve();
+      if (ctx.scores?.rowFor) return ctx.scores.rowFor(id);
+      const [{ scopeOf, targetHorizons }, { metricsRequest, rowsFrom, sortRows }] = await Promise.all([
+        import("../sections/scope.js"),
+        import("../sections/scores/model.js"),
+      ]);
+      const st = store.get(), sc = scopeOf(st, manifest);
+      const allSeasons = manifest.seasons.map((x) => x.id);
+      const availH = targetHorizons(manifest, st.target);
+      const selIds = [...new Set([...st.sel.selected, id])];
+      const req = metricsRequest(sc, { target: st.target, selected: selIds, allSeasons, availableHorizons: availH });
+      const [resp, full] = await Promise.all([
+        fetchSheetMetrics(req.query),
+        req.full ? fetchSheetMetrics(req.full) : Promise.resolve(null),
+      ]);
+      const label = (x) => manifest.label(x, [...st.sel.selected, sc.baseline, id]);
+      const team = (x) => { const m = manifest.modelById.get(x); return m && m.team && m.team !== label(x) ? m.team : ""; };
+      const allIds = [...new Set([...selIds, ...(resp?.rankings || []).map((x) => x.model_id)])];
+      const rows = rowsFrom(resp, { ids: allIds, baseline: sc.baseline, full, wins: null, pending: false, scale: sc.scale, label, team });
+      const sortKey = st.scores?.sort || (resp?.is_categorical ? (resp?.ordinal === false ? "logScore" : "rps") : "rel");
+      const { ranked, unranked, ranks } = sortRows(rows, sortKey, !!st.scores?.rev);
+      fallbackOrder = [...ranked, ...unranked].map((r) => r.id);
+      const rank = ranks.get(id) ?? null;
+      const locLabel = sc.place === "current" ? (manifest.locationById.get(st.location)?.name || st.location) : sc.place === "US" ? "US" : "All locations";
+      const sText = [locLabel, sc.seasons.length === allSeasons.length ? "All seasons" : sc.seasons.map((x) => manifest.seasonById.get(x)?.label || x).join(", ")].filter(Boolean).join(" · ");
+      return { row: rows.find((r) => r.id === id), base: rows.find((r) => r.baseline), scope: sc, baseline: resp?.baseline_model || sc.baseline, scopeText: sText, rank, of: rank != null ? ranked.length : null };
+    };
+    const ctxRow = resolveRow();
     ctxRow.then((r) => {
       if (my !== token) return;
       header(); // the leaderboard's order may only now be known (prev / next)
@@ -102,7 +145,7 @@ function build(body, ctx) {
         if (my !== token) return;
         blocks.replaceChildren(detail(r.row, r.base, { ctx, scope: r.scope, baseline: r.baseline, goTo }));
       });
-    }, () => { if (my === token) nums.replaceChildren(h("p", { class: "ms-quiet" }, "Scores show once the Scores section has loaded")); });
+    }, () => { if (my === token) nums.replaceChildren(h("p", { class: "ms-quiet" }, "Can't load scores for this slice")); });
     // what the model is
     import("../sections/scores/data.js").then(({ loadDetails }) => loadDetails(id)).then((d) => { if (my === token) aboutOf(d); },
       () => { if (my === token) about.replaceChildren(h("p", { class: "ms-quiet" }, "Can't load the model's details")); });
@@ -111,7 +154,7 @@ function build(body, ctx) {
   /* ---------------- header: name, line, badges, actions ---------------- */
   function header() {
     const st = store.get(), m = manifest.modelById.get(id) || {};
-    const base = id === manifest.baseline;
+    const base = id === (manifest.baselineFor?.(st.target, st.date) ?? manifest.baseline);
     const drawn = base ? st.sel.baseline : isCharted(st.sel, id);
     const color = !drawn ? null : base ? seriesColor("baseline") : seriesColor(slotOf(st.sel, id));
     const selected = base || st.sel.selected.includes(id);
@@ -168,6 +211,17 @@ function build(body, ctx) {
     // as the table prints them: 3 significant figures under 10, one decimal above
     const f = (v) => (v == null ? DASH : Math.abs(v) < 10 && v !== 0 ? (+v.toPrecision(3)).toString() : v.toFixed(1));
     const cell = (k, v, sub) => h("div", { class: "ms-num" }, h("span", { class: "ms-num-k" }, k), h("span", { class: "ms-num-v mono" }, v), sub ? h("span", { class: "ms-num-s" }, sub) : null);
+    if (row.isCategorical) {
+      nums.replaceChildren(scopeLine, h("div", { class: "ms-num-row" },
+        r.rank != null ? cell("Rank", `${r.rank}`, r.of ? `of ${r.of}` : null) : null,
+        cell(row.ordinal === false ? "Rel. Log" : "Rel. RPS", row.rel == null ? DASH : row.rel.toFixed(2), row.rel == null ? null : row.rel < 1 ? "better than baseline" : row.rel > 1 ? "worse than baseline" : "baseline"),
+        row.ordinal !== false ? cell("RPS", row.rps == null ? DASH : row.rps.toFixed(3)) : null,
+        cell("Log loss", row.logScore == null ? DASH : row.logScore.toFixed(2)),
+        cell("Brier", row.brier == null ? DASH : row.brier.toFixed(3)),
+        cell("Mode hit", row.hitMode == null ? DASH : `${Math.round(row.hitMode)}%`),
+        cell("N", row.n.toLocaleString(), "forecasts")));
+      return;
+    }
     nums.replaceChildren(scopeLine, h("div", { class: "ms-num-row" },
       r.rank != null ? cell("Rank", `${r.rank}`, r.of ? `of ${r.of}` : null) : null,
       cell("Rel. WIS", row.rel == null ? DASH : row.rel.toFixed(2), row.rel == null ? null : row.rel < 1 ? "better than baseline" : row.rel > 1 ? "worse than baseline" : "baseline"),
@@ -239,13 +293,15 @@ function build(body, ctx) {
 
 /* Delegated: anything with data-model-sheet="<id>" opens the sheet (labels in figures, rows elsewhere). */
 let delegated = false;
+let activeLinkCtx = null;
 export function installModelLinks(ctx) {
+  activeLinkCtx = ctx;
   if (delegated) return;
   delegated = true;
   on(document, "click", (e) => {
     const t = e.target.closest?.("[data-model-sheet]");
-    if (!t) return;
+    if (!t || !activeLinkCtx) return;
     e.preventDefault(); e.stopPropagation();
-    openModel(t.dataset.modelSheet, ctx);
+    openModel(t.dataset.modelSheet, activeLinkCtx);
   }, true);
 }

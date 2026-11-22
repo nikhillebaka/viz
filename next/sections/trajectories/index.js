@@ -6,9 +6,11 @@ import { parseIso, linear, niceMax, ticks, DAY, WEEK } from "../../lib/scale.js"
 import { loadFan, loadSampleScores } from "../../lib/api.js";
 import { seriesColor } from "../../chart/layout.js";
 import { slotOf } from "../../features/selection.js";
+import { seasonWeek1 } from "../../features/chart/layers.js";
 import { loadRoundTrajectories } from "../../features/chart/trajectories.js";
+import { activeLayer } from "../../ui/floating.js";
 import {
-  h, on, linkStyle, frame, fragment, action, setLine,
+  h, on, linkStyle, frame, fragment, action, setLine, getJson, query,
   fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange,
 } from "../shared.js";
 import {
@@ -22,11 +24,13 @@ import {
 
 const PLOT_HEIGHT = 440;
 const MAX_HIST_WEEKS = 10;
+const MIN_PAN_SPAN = 4 * WEEK;
 
-function resolveModelColor(id, manifest, sel, fallbackSlot) {
+function resolveModelColor(id, manifest, sel, fallbackSlot, target, season) {
   const slot = slotOf(sel, id);
   if (slot != null) return cssColor(seriesColor(slot));
-  if (manifest && (id === manifest.baseline || sel?.baseline && manifest.baseline === id)) {
+  const base = manifest?.baselineFor?.(target, season) ?? manifest?.baseline;
+  if (id && base && id === base) {
     return cssColor(seriesColor("baseline"));
   }
   return cssColor(seriesColor(fallbackSlot));
@@ -101,6 +105,10 @@ export function mount(el, ctx) {
 
   let primaryModel = null;
   let compareModel = null;
+  let userSeason = null;     // null -> follow active chart season
+  let userRound = null;      // null -> follow chart date (same season) or latest model round
+  let spanMode = "forecast"; // "forecast" | "season"
+  let showPastSeasons = false;
   let showRibbon = true;
   let showPeakCloud = false;
   let userToggledCloud = false;
@@ -110,10 +118,17 @@ export function mount(el, ctx) {
   let boardErr = false;
   let boardReqSeq = 0;
   let boardKey = "";
+  let boardAbortCtl = null;
 
   let curSum = null;
   let cmpSum = null;
   let histObs = [];
+  let allFanObs = [];
+  let fanWindow = null;
+  let fanRounds = [];
+  let pastLines = [];
+  let activeRound = null;
+  let viewDomain = null;     // null | [t0, t1] panned/zoomed viewport
   let targetMeta = null;
   let vf = valueFormat(null);
 
@@ -125,8 +140,23 @@ export function mount(el, ctx) {
   let hitGeom = null;
   let reqSeq = 0;
 
-  const modelList = () => sampleModelsForTarget(manifest, store.get().target);
+  const chartSeason = () => {
+    const s = store.get();
+    return manifest.seasonOf(s.date) ?? manifest.seasons.at(-1)?.id ?? "";
+  };
+  const effSeason = () => userSeason || chartSeason();
+  const seasonLabel = (id) => manifest.seasonById?.get(id)?.label || id;
+  const availableSeasons = () => [...(manifest.seasons || [])].slice().reverse();
+  const modelList = () => sampleModelsForTarget(manifest, store.get().target, effSeason());
   const modelLabel = (id) => manifest.label(id, modelList().map((m) => m.id));
+  const roundOptions = () => {
+    const sId = effSeason();
+    const mInfo = manifest.modelById.get(primaryModel);
+    const mDates = mInfo?.dates?.length ? new Set(mInfo.dates) : null;
+    const base = fanRounds.length ? fanRounds : (manifest.datesOf?.(sId) || []);
+    const filtered = mDates ? base.filter((d) => mDates.has(d)) : base;
+    return filtered.length ? filtered : base;
+  };
 
   const F = {
     model: fragment({
@@ -134,7 +164,7 @@ export function mount(el, ctx) {
       title: "Sample model",
       items: () => modelList().map((m) => ({ value: m.id, label: modelLabel(m.id) })),
       value: () => primaryModel,
-      isDefault: () => primaryModel === pickDefaultSampleModel(modelList(), store.get().sel, manifest),
+      isDefault: () => primaryModel === pickDefaultSampleModel(modelList(), store.get().sel, manifest, store.get().target),
       onSelect: (v) => {
         if (v === primaryModel) return;
         primaryModel = v;
@@ -156,6 +186,57 @@ export function mount(el, ctx) {
       isDefault: () => !compareModel,
       onSelect: (v) => { compareModel = v; load(); },
     }),
+    season: fragment({
+      label: "Season",
+      title: "Season",
+      items: () => availableSeasons().map((se) => ({ value: se.id, label: se.label || se.id })),
+      value: () => effSeason(),
+      isDefault: () => effSeason() === chartSeason(),
+      onSelect: (v) => {
+        const cs = chartSeason();
+        userSeason = v === cs ? null : v;
+        userRound = null;
+        viewDomain = null;
+        gate = null; pinnedSampleId = null; hoverSampleId = null;
+        load();
+        loadLeaderboard(true);
+      },
+    }),
+    round: fragment({
+      label: "Round",
+      title: "Forecast round",
+      items: () => roundOptions().slice().reverse().map((d) => ({ value: d, label: fmtDay(parseIso(d)) })),
+      value: () => activeRound || store.get().date,
+      isDefault: () => effSeason() === chartSeason() && !userRound,
+      onSelect: (v) => {
+        userRound = (effSeason() === chartSeason() && v === store.get().date) ? null : v;
+        viewDomain = null;
+        gate = null; pinnedSampleId = null; hoverSampleId = null;
+        load();
+      },
+    }),
+    span: fragment({
+      label: "Span",
+      title: "Time span",
+      items: () => [
+        { value: "forecast", label: "Forecast", short: "Forecast" },
+        { value: "season", label: "Full season", short: "Full season" },
+      ],
+      value: () => spanMode,
+      isDefault: () => spanMode === "forecast",
+      onSelect: (v) => { spanMode = v; viewDomain = null; refreshView(); },
+    }),
+    past: fragment({
+      label: "Past seasons",
+      title: "Past seasons overlay",
+      items: () => [
+        { value: false, label: "Past seasons off", short: "Past off" },
+        { value: true, label: "Past seasons on", short: "Past on" },
+      ],
+      value: () => showPastSeasons,
+      isDefault: () => !showPastSeasons,
+      onSelect: (v) => { showPastSeasons = v; if (v && !pastLines.length) load(); else refreshView(); },
+    }),
     ribbon: fragment({
       label: "Band",
       title: "Derived quantile band",
@@ -174,6 +255,7 @@ export function mount(el, ctx) {
     }),
   };
 
+  const resetPanBtn = action("Reset pan ×", "Reset horizontal pan and zoom", () => { viewDomain = null; refreshView(); });
   const clearGateBtn = action("Clear gate ×", "Clear conditioning gate", () => { gate = null; refreshView(); });
   const clearPinBtn = action("Unpin ×", "Unpin trajectory", () => {
     pinnedSampleId = null;
@@ -185,11 +267,18 @@ export function mount(el, ctx) {
   function syncLine() {
     Object.values(F).forEach((b) => b.sync());
     const hasCompareOptions = modelList().length > 1;
+    const hasSeasons = availableSeasons().length > 1;
+    const hasRounds = roundOptions().length > 1;
     setLine(f.line, [
       F.model,
       hasCompareOptions && F.compare,
+      hasSeasons && F.season,
+      hasRounds && F.round,
+      F.span,
+      hasSeasons && F.past,
       F.ribbon,
       F.cloud,
+      viewDomain && resetPanBtn,
       gate && clearGateBtn,
       pinnedSampleId && clearPinBtn,
     ]);
@@ -200,10 +289,27 @@ export function mount(el, ctx) {
   const canvas = h("canvas", { class: "tr-canvas", "aria-label": "Sample trajectories chart" });
   fig.append(canvas);
   const readout = pointerReadout(fig);
-  const foot = h("p", { class: "tr-note" }, "Drag vertically over a future week to condition · Click a path to pin");
-  f.body.append(nums, fig, foot);
+  const foot = h("p", { class: "v-note" }, "Drag vertically over a future week to condition · Swipe or drag horizontally to pan · Pinch to zoom · Click a path to pin");
   const boardWrap = h("div", { class: "tr-board-wrap" });
-  el.append(boardWrap);
+  f.body.append(nums, fig, foot, boardWrap);
+
+  const boardScopeFrag = fragment({
+    label: "Scope",
+    title: "Skill over",
+    items: () => {
+      const s = store.get();
+      const locName = manifest.locationById.get(s.location)?.name || s.location || "This place";
+      return [
+        { value: "current", label: locName },
+        { value: "all", label: `All places · ${seasonLabel(effSeason())}` },
+      ];
+    },
+    value: () => scoreScope,
+    isDefault: () => scoreScope === "current",
+    onSelect: (v) => { if (v !== scoreScope) { scoreScope = v; loadLeaderboard(true); } },
+  });
+  const boardLine = h("div", { class: "v-line" });
+  const boardHead = h("div", { class: "v-subhead" }, h("h3", { class: "v-subtitle" }, "Season skill"), boardLine);
 
   function renderLeaderboard() {
     const s = store.get();
@@ -212,51 +318,32 @@ export function mount(el, ctx) {
       boardWrap.replaceChildren();
       return;
     }
-    const season = manifest.seasonOf(s.date) ?? manifest.seasons.at(-1)?.id ?? "";
-    const locName = manifest.locationById.get(s.location)?.name || s.location;
-    const baseId = boardData?.baseline_model || null;
+    const season = effSeason();
+    boardScopeFrag.sync();
+    setLine(boardLine, [boardScopeFrag]);
+
     const allIds = (boardData?.rankings || []).map((r) => r.model_id);
     const lbl = (id) => (allIds.length ? manifest.label(id, allIds) : modelLabel(id));
 
-    const header = h("div", { class: "tr-board-head" },
-      h("div", { class: "tr-board-title" },
-        h("span", { class: "tr-board-label" }, "Sample Leaderboard"),
-        h("div", { class: "tr-scope-pills", role: "tablist", "aria-label": "Sample score scope" },
-          h("button", {
-            type: "button", role: "tab",
-            class: ["tr-scope-btn", scoreScope === "current" && "is-active"],
-            "aria-selected": String(scoreScope === "current"),
-            onclick: () => { if (scoreScope !== "current") { scoreScope = "current"; loadLeaderboard(true); } },
-          }, locName),
-          h("button", {
-            type: "button", role: "tab",
-            class: ["tr-scope-btn", scoreScope === "all" && "is-active"],
-            "aria-selected": String(scoreScope === "all"),
-            onclick: () => { if (scoreScope !== "all") { scoreScope = "all"; loadLeaderboard(true); } },
-          }, `All places · ${season}`),
-        ),
-      ),
-      h("span", { class: "tr-board-sub mono" },
-        baseId ? `Rel. CRPS vs ${lbl(baseId)} · CRPS · Energy score` : "CRPS · Multivariate Energy Score",
-      ),
-    );
-
     if (boardLoading) {
-      boardWrap.replaceChildren(header, h("p", { class: "tr-note" }, "Scoring sample trajectories across season rounds…"));
+      boardWrap.replaceChildren(boardHead, h("p", { class: "v-note" }, "Scoring sample trajectories across season rounds…"));
       return;
     }
     if (boardErr) {
-      boardWrap.replaceChildren(header, h("p", { class: "tr-note" }, "Sample scores unavailable for this scope."));
+      boardWrap.replaceChildren(boardHead, h("p", { class: "v-note" }, "Sample scores unavailable for this scope."));
       return;
     }
     const rows = (boardData?.rankings || []).filter((r) => r.has_data_in_scope && r.count > 0);
     if (!rows.length) {
-      boardWrap.replaceChildren(header, h("p", { class: "tr-note" }, `No realized sample forecasts in ${season} for this scope.`));
+      boardWrap.replaceChildren(boardHead, h("p", { class: "v-note" }, `No realized sample forecasts in ${seasonLabel(season)} for this scope.`));
       return;
     }
+    const baseId = boardData?.baseline_model || manifest.baselineFor?.(s.target, season) || null;
+    const priColor = resolveModelColor(primaryModel, manifest, s.sel, 0, s.target, season);
+    const cmpColor = compareModel ? resolveModelColor(compareModel, manifest, s.sel, 1, s.target, season) : null;
 
     boardWrap.replaceChildren(
-      header,
+      boardHead,
       h("div", { class: "tr-table-scroll" },
         h("table", { class: "v-table" },
           h("thead", null,
@@ -267,15 +354,15 @@ export function mount(el, ctx) {
               h("th", { class: "num" }, "CRPS"),
               h("th", { class: "num" }, "Energy"),
               h("th", { class: "num" }, "N"),
-              models.length > 1 ? h("th", null, "") : null,
             )),
           h("tbody", null,
             ...rows.map((r, idx) => {
               const isPri = r.model_id === primaryModel;
               const isCmp = r.model_id === compareModel;
+              const dotColor = isPri ? priColor : (isCmp ? cmpColor : null);
               return h("tr", {
                 "data-model": r.model_id,
-                class: isPri ? "is-primary" : null,
+                class: isPri ? "is-primary" : (isCmp ? "is-cmp" : null),
                 onclick: (e) => {
                   if (e.shiftKey && r.model_id !== primaryModel) {
                     compareModel = isCmp ? null : r.model_id;
@@ -292,53 +379,50 @@ export function mount(el, ctx) {
                 },
               },
               h("td", { class: "mono" }, String(idx + 1)),
-              h("td", null, lbl(r.model_id)),
+              h("td", null,
+                h("span", {
+                  class: "v-name",
+                  "data-model-sheet": r.model_id,
+                  title: `${lbl(r.model_id)} · details`,
+                  style: dotColor ? { "--c": dotColor } : null,
+                }, h("i"), lbl(r.model_id))),
               h("td", { class: "num mono" }, r.model_id === baseId ? "1.00" : (typeof r.relative_crps === "number" ? r.relative_crps.toFixed(2) : "–")),
               h("td", { class: "num mono" }, typeof r.crps === "number" ? vf.value(r.crps) : "–"),
               h("td", { class: "num mono" }, typeof r.energy_score === "number" ? vf.value(r.energy_score) : "–"),
               h("td", { class: "num mono" }, String(r.count ?? 0)),
-              models.length > 1 ? h("td", { class: "num" },
-                isPri ? h("span", { class: "tr-board-sub" }, "Active") : h("button", {
-                  type: "button",
-                  class: ["tr-cmp-btn", isCmp && "is-on"],
-                  onclick: (ev) => {
-                    ev.stopPropagation();
-                    compareModel = isCmp ? null : r.model_id;
-                    load();
-                    renderLeaderboard();
-                  },
-                }, isCmp ? "Comparing" : "Compare"),
-              ) : null,
               );
             }),
           ),
         ),
       ),
+      h("p", { class: "v-note" }, "Click a row to plot · Shift-click to compare · Click model name for details"),
     );
   }
 
   function loadLeaderboard(force = false) {
     const s = store.get();
     const models = modelList();
-    const season = manifest.seasonOf(s.date) ?? manifest.seasons.at(-1)?.id ?? null;
+    const season = effSeason();
     if (!models.length || !s.target || !s.location || !season) {
       boardKey = "";
       boardData = null;
       renderLeaderboard();
       return;
     }
-    const query = sampleScoresQuery({ target: s.target, season, location: s.location, scopePlace: scoreScope, dims: s.dims });
-    const nextKey = `${manifest.hub_id || ""}|${query}`;
+    const queryStr = sampleScoresQuery({ target: s.target, season, location: s.location, scopePlace: scoreScope, dims: s.dims });
+    const nextKey = `${manifest.hub_id || ""}|${queryStr}`;
     if (!force && nextKey === boardKey && boardData) {
       renderLeaderboard();
       return;
     }
     boardKey = nextKey;
+    boardAbortCtl?.abort();
+    boardAbortCtl = new AbortController();
     const seq = ++boardReqSeq;
     boardLoading = true;
     boardErr = false;
     renderLeaderboard();
-    loadSampleScores(query)
+    loadSampleScores(queryStr, { signal: boardAbortCtl.signal })
       .then((res) => {
         if (seq !== boardReqSeq) return;
         boardLoading = false;
@@ -426,9 +510,10 @@ export function mount(el, ctx) {
     targetMeta = manifest.targetById.get(s.target) || null;
     vf = valueFormat(targetMeta);
 
+    const season = effSeason();
     const models = modelList();
     if (!models.length) {
-      curSum = null; cmpSum = null; hitGeom = null;
+      curSum = null; cmpSum = null; hitGeom = null; allFanObs = []; fanWindow = null; fanRounds = []; pastLines = [];
       f.loading(false);
       f.empty("No models with sample trajectories for this target.");
       syncLine();
@@ -436,13 +521,12 @@ export function mount(el, ctx) {
     }
 
     if (!primaryModel || !models.some((m) => m.id === primaryModel)) {
-      primaryModel = pickDefaultSampleModel(models, s.sel, manifest);
+      primaryModel = pickDefaultSampleModel(models, s.sel, manifest, s.target);
     }
     if (compareModel && (!models.some((m) => m.id === compareModel) || compareModel === primaryModel)) {
       compareModel = null;
     }
 
-    const season = manifest.seasonOf(s.date) ?? manifest.seasons.at(-1)?.id ?? null;
     if (!s.location || !s.target || !season || !s.date) {
       curSum = null; cmpSum = null; hitGeom = null;
       f.loading(false);
@@ -455,23 +539,61 @@ export function mount(el, ctx) {
     f.loading(true);
     f.empty(null);
 
+    const fan = await loadFan(s.target, season, s.location, { dims: s.dims }).catch(() => null);
+    if (seq !== reqSeq) return;
+
+    fanRounds = fan?.rounds || [];
+    fanWindow = fan?.window || null;
+    allFanObs = fan?.observed || [];
+
+    const validRounds = roundOptions();
+    let useRound = s.date;
+    if (season !== chartSeason() || userRound) {
+      if (userRound && validRounds.includes(userRound)) useRound = userRound;
+      else useRound = validRounds.at(-1) || s.date;
+    } else if (validRounds.length && !validRounds.includes(useRound)) {
+      useRound = validRounds.at(-1);
+    }
+    activeRound = useRound;
+
     const reqModels = [primaryModel, compareModel].filter(Boolean);
-    const [fan, traj] = await Promise.all([
-      loadFan(s.target, season, s.location, { dims: s.dims }).catch(() => null),
-      loadRoundTrajectories(s.target, season, s.location, s.date, { models: reqModels, dims: s.dims }).catch(() => null),
+    const otherSeasons = availableSeasons().filter((x) => x.id !== season).slice(0, 4).map((x) => x.id);
+    const [traj, curvesRes] = await Promise.all([
+      loadRoundTrajectories(s.target, season, s.location, useRound, { models: reqModels, dims: s.dims }).catch(() => null),
+      showPastSeasons && otherSeasons.length
+        ? getJson(`/api/season-curves?${query({ target: s.target, location: s.location, seasons: otherSeasons.join(",") })}`).catch(() => null)
+        : Promise.resolve(null),
     ]);
     if (seq !== reqSeq) return;
     f.loading(false);
 
+    if (showPastSeasons && curvesRes?.curves) {
+      const y = Number(String(season).slice(0, 4));
+      const w1 = Number.isFinite(y) ? seasonWeek1(y) : null;
+      pastLines = w1 == null ? [] : curvesRes.curves
+        .filter((c) => c.season !== season)
+        .slice(0, 4)
+        .map((c) => ({
+          season: c.season,
+          pts: (c.points || [])
+            .map((p) => ({ t: w1 + (p.week - 1) * WEEK, v: p.value }))
+            .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v)),
+        }))
+        .filter((l) => l.pts.length >= 2);
+    } else if (!showPastSeasons) {
+      pastLines = [];
+    }
+
     const entry1 = traj?.modelTrajectories?.get(primaryModel);
     if (!entry1?.samples?.length || !entry1?.horizons?.length) {
       curSum = null; cmpSum = null; hitGeom = null;
-      f.empty(`No sample trajectories for ${modelLabel(primaryModel)} on ${fmtDay(parseIso(s.date))}.`);
+      syncLine();
+      f.empty(`No sample trajectories for ${modelLabel(primaryModel)} on ${fmtDay(parseIso(useRound))}.`);
       renderNums();
       return;
     }
 
-    const refT = parseIso(traj.reference_date || s.date);
+    const refT = parseIso(traj.reference_date || useRound);
     const offsetDays = Number(traj.horizon_offset_days ?? fan?.horizonOffsetDays ?? 0);
     const obsByTime = fan?.observed ? new Map(fan.observed.map((o) => [o.t, o.v])) : null;
 
@@ -480,7 +602,7 @@ export function mount(el, ctx) {
     cmpSum = entry2 ? summarizeTrajectories(entry2, { refT, horizonOffsetDays: offsetDays, observedByTime: obsByTime }) : null;
 
     const firstT = curSum?.times?.[0] ?? refT;
-    const priorObs = (fan?.observed || []).filter((o) => o.t < firstT);
+    const priorObs = allFanObs.filter((o) => o.t < firstT);
     histObs = priorObs.slice(-MAX_HIST_WEEKS);
 
     if (!userToggledCloud && curSum) showPeakCloud = curSum.horizons.length >= 6;
@@ -501,6 +623,7 @@ export function mount(el, ctx) {
     if (W < 80) return;
     const g = fitCanvas(canvas, W, H);
     const s = store.get();
+    const season = effSeason();
 
     const inkPrimary = cssColor("var(--ink-primary)");
     const inkSecondary = cssColor("var(--ink-secondary)");
@@ -513,14 +636,32 @@ export function mount(el, ctx) {
     const fontMono = cssColor("var(--font-mono)") || "ui-monospace, monospace";
     const fontSans = cssColor("var(--font-sans)") || "system-ui, sans-serif";
 
-    const color1 = resolveModelColor(primaryModel, manifest, s.sel, 0);
-    const color2 = compareModel ? resolveModelColor(compareModel, manifest, s.sel, 1) : null;
+    const color1 = resolveModelColor(primaryModel, manifest, s.sel, 0, s.target, season);
+    const color2 = compareModel ? resolveModelColor(compareModel, manifest, s.sel, 1, s.target, season) : null;
 
     const futTimes = curSum.times;
-    const firstObs = histObs[0]?.t;
-    const tMinRaw = Number.isFinite(firstObs) ? firstObs : futTimes[0];
-    const tMaxRaw = futTimes.at(-1);
-    const padDomain = tMaxRaw <= tMinRaw ? WEEK : 0;
+    const obsSeries = allFanObs.length ? allFanObs : histObs;
+    const firstRecent = histObs[0]?.t;
+    const winStart = fanWindow?.[0] ?? obsSeries[0]?.t ?? futTimes[0];
+    const winEnd = fanWindow?.[1] ?? futTimes.at(-1);
+    const pastMaxT = showPastSeasons && pastLines.length
+      ? Math.max(...pastLines.map((l) => l.pts.at(-1).t))
+      : -Infinity;
+
+    const tMinBase = spanMode === "season"
+      ? Math.min(winStart, obsSeries[0]?.t ?? winStart, futTimes[0])
+      : (Number.isFinite(firstRecent) ? firstRecent : futTimes[0]);
+    const tMaxBase = spanMode === "season"
+      ? Math.max(winEnd, obsSeries.at(-1)?.t ?? winEnd, futTimes.at(-1), pastMaxT)
+      : futTimes.at(-1);
+    const padDomain = tMaxBase <= tMinBase ? WEEK : 0;
+    const baseDomain = [tMinBase - padDomain, tMaxBase + padDomain];
+    const maxPanBounds = [
+      Math.min(winStart, obsSeries[0]?.t ?? winStart, futTimes[0]) - 2 * WEEK,
+      Math.max(winEnd, obsSeries.at(-1)?.t ?? winEnd, futTimes.at(-1), pastMaxT) + 2 * WEEK,
+    ];
+    const dom = viewDomain || baseDomain;
+
     const padL = 52;
     const padR = 18;
     const cloudH = showPeakCloud ? 84 : 12;
@@ -528,20 +669,24 @@ export function mount(el, ctx) {
     const plotBot = H - 30;
 
     let rawMax = 0;
-    for (const o of histObs) if (Number.isFinite(o.v)) rawMax = Math.max(rawMax, o.v);
+    for (const o of (viewDomain || spanMode === "season" ? obsSeries : histObs)) if (Number.isFinite(o.v)) rawMax = Math.max(rawMax, o.v);
     for (const sp of curSum.samples) for (const v of sp.values) if (Number.isFinite(v)) rawMax = Math.max(rawMax, v);
     if (cmpSum) for (const sp of cmpSum.samples) for (const v of sp.values) if (Number.isFinite(v)) rawMax = Math.max(rawMax, v);
     for (const rv of curSum.realized) if (Number.isFinite(rv)) rawMax = Math.max(rawMax, rv);
+    if (showPastSeasons) for (const pl of pastLines) for (const pt of pl.pts) if (pt.t >= dom[0] && pt.t <= dom[1]) rawMax = Math.max(rawMax, pt.v);
     const yTop = niceMax(rawMax > 0 ? rawMax * 1.06 : 1, 4);
 
-    const x = linear([tMinRaw - padDomain, tMaxRaw + padDomain], [padL, W - padR]);
+    const x = linear(dom, [padL, W - padR]);
     const y = linear([0, yTop], [plotBot, plotTop]);
-    hitGeom = { x, y, times: futTimes, padL, padR, W, plotTop, plotBot };
+    hitGeom = { x, y, times: futTimes, padL, padR, W, plotTop, plotBot, baseDomain, maxPanBounds, dom };
 
-    const xCut = Math.max(padL, Math.min(W - padR, x(futTimes[0] - 3.5 * DAY)));
     const shadeTop = showPeakCloud ? 16 : plotTop;
-    g.fillStyle = shadeForecast;
-    g.fillRect(xCut, shadeTop, Math.max(0, W - padR - xCut), plotBot - shadeTop);
+    const xCutRaw = x(futTimes[0] - 3.5 * DAY);
+    const xCut = Math.max(padL, Math.min(W - padR, xCutRaw));
+    if (xCutRaw < W - padR) {
+      g.fillStyle = shadeForecast;
+      g.fillRect(xCut, shadeTop, Math.max(0, W - padR - xCut), plotBot - shadeTop);
+    }
 
     // Horizontal grid & Y ticks
     const yTicks = ticks(0, yTop, 4);
@@ -561,34 +706,73 @@ export function mount(el, ctx) {
       g.fillText(vf.axis(tv), padL - 8, py);
     }
 
-    // X calendar ticks
+    // X calendar ticks generated smoothly across current pan/zoom viewport
+    const visibleWeeks = Math.max(1, Math.round((dom[1] - dom[0]) / WEEK));
+    const maxLabels = Math.max(3, Math.floor((W - padL - padR) / 86));
+    const stepWeeks = Math.max(1, Math.ceil(visibleWeeks / maxLabels));
+    const anchorT = futTimes[0];
+    const startStep = Math.ceil((dom[0] - anchorT) / (stepWeeks * WEEK));
     const tickTimes = [];
-    const allTimes = [...histObs.map((o) => o.t), ...futTimes];
-    if (allTimes.length) {
-      const targetTicks = Math.max(3, Math.floor((W - padL - padR) / 86));
-      const stride = Math.max(1, Math.ceil(allTimes.length / targetTicks));
-      for (let i = 0; i < allTimes.length; i += stride) tickTimes.push(allTimes[i]);
-      const lastT = allTimes.at(-1);
-      if (lastT - tickTimes.at(-1) > WEEK && x(lastT) - x(tickTimes.at(-1)) > 58) tickTimes.push(lastT);
+    for (let k = startStep; ; k++) {
+      const tVal = anchorT + k * stepWeeks * WEEK;
+      if (tVal > dom[1] + DAY) break;
+      if (tVal >= dom[0] - DAY) tickTimes.push(tVal);
     }
     g.textAlign = "center";
     g.textBaseline = "top";
     for (const tVal of tickTimes) {
       const px = x(tVal);
+      if (px < padL - 12 || px > W - padR + 12) continue;
       g.fillStyle = tVal < futTimes[0] ? inkTertiary : inkSecondary;
       g.fillText(fmtDay(tVal), px, plotBot + 10);
     }
 
-    // Cutoff hairline
+    // Cutoff hairline (when visible inside viewport)
+    if (xCutRaw >= padL && xCutRaw <= W - padR) {
+      g.save();
+      g.beginPath();
+      g.setLineDash([4, 4]);
+      g.moveTo(xCutRaw, shadeTop);
+      g.lineTo(xCutRaw, plotBot);
+      g.strokeStyle = lineAxis;
+      g.lineWidth = 1;
+      g.stroke();
+      g.restore();
+    }
+
+    // Clip dynamic plot lines/bands inside plot rectangle so panning stays tidy
     g.save();
     g.beginPath();
-    g.setLineDash([4, 4]);
-    g.moveTo(xCut, shadeTop);
-    g.lineTo(xCut, plotBot);
-    g.strokeStyle = lineAxis;
-    g.lineWidth = 1;
-    g.stroke();
-    g.restore();
+    g.rect(padL, 0, Math.max(0, W - padL - padR), plotBot + 4);
+    g.clip();
+
+    // Past seasons background reference curves (aligned to active season weeks)
+    if (showPastSeasons && pastLines.length) {
+      pastLines.forEach((pl, idx) => {
+        g.save();
+        g.strokeStyle = inkTertiary;
+        g.globalAlpha = Math.max(0.18, 0.42 - idx * 0.08);
+        g.lineWidth = 1.1;
+        g.setLineDash([3, 3]);
+        g.beginPath();
+        pl.pts.forEach((pt, i) => {
+          const px = x(pt.t), py = y(pt.v);
+          if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+        });
+        g.stroke();
+        const lastPt = pl.pts.at(-1);
+        const lx = x(lastPt.t), ly = y(lastPt.v);
+        if (lx >= padL && lx <= W - padR - 8) {
+          g.setLineDash([]);
+          g.font = `400 10px ${fontMono}`;
+          g.fillStyle = inkTertiary;
+          g.textAlign = "right";
+          g.textBaseline = "bottom";
+          g.fillText(seasonLabel(pl.season), lx - 2, Math.max(plotTop + 12, ly - 3));
+        }
+        g.restore();
+      });
+    }
 
     // Aligned Peak Cloud strip
     if (showPeakCloud) {
@@ -712,19 +896,20 @@ export function mount(el, ctx) {
       }
     }
 
-    // Historical observed line + dots
-    if (histObs.length) {
+    // Historical observed line + dots (draw full season curve so panning left reveals prior weeks)
+    const obsToDraw = allFanObs.length ? allFanObs : histObs;
+    if (obsToDraw.length) {
       g.save();
       g.strokeStyle = inkPrimary;
       g.lineWidth = 2;
       g.beginPath();
-      histObs.forEach((o, i) => {
+      obsToDraw.forEach((o, i) => {
         const px = x(o.t), py = y(o.v);
         if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
       });
       g.stroke();
       g.fillStyle = inkPrimary;
-      for (const o of histObs) {
+      for (const o of obsToDraw) {
         g.beginPath();
         g.arc(x(o.t), y(o.v), 2.4, 0, Math.PI * 2);
         g.fill();
@@ -759,6 +944,15 @@ export function mount(el, ctx) {
       g.stroke();
       g.restore();
     }
+    g.restore();
+  }
+
+  function clampPanDomain([d0, d1], [b0, b1]) {
+    const span = Math.min(d1 - d0, Math.max(MIN_PAN_SPAN, b1 - b0));
+    let s0 = d0, s1 = d0 + span;
+    if (s0 < b0) { s0 = b0; s1 = b0 + span; }
+    if (s1 > b1) { s1 = b1; s0 = Math.max(b0, b1 - span); }
+    return [s0, s1];
   }
 
   /* ---------------- Direct manipulation ---------------- */
@@ -777,23 +971,37 @@ export function mount(el, ctx) {
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
-      const { x, times, padR, W, plotTop, plotBot } = hitGeom;
-      if (sx < x(times[0]) - 12 || sx > W - padR || sy < plotTop || sy > plotBot) return;
+      const { x, times, padL, padR, W, plotTop, plotBot, dom } = hitGeom;
+      if (sx < padL || sx > W - padR || sy < 0 || sy > plotBot) return;
       canvas.setPointerCapture?.(e.pointerId);
       const hIdx = nearestIdxByX(sx, times, x);
-      dragBrush = { hIdx, y0: sy, y1: sy, moved: false };
+      const startInForecast = sx >= x(times[0]) - 12 && sy >= plotTop && sy <= plotBot;
+      dragBrush = { mode: null, hIdx, sx0: sx, y0: sy, y1: sy, startInForecast, shift: e.shiftKey, domain0: [...dom], moved: false };
     }),
     on(canvas, "pointermove", (e) => {
       if (!hitGeom || !curSum) return;
       const rect = canvas.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
-      const { x, y, times, padL, padR, W, plotTop, plotBot } = hitGeom;
+      const { x, y, times, padL, padR, W, plotTop, plotBot, maxPanBounds } = hitGeom;
 
       if (dragBrush) {
-        dragBrush.y1 = Math.max(plotTop, Math.min(plotBot, sy));
-        if (Math.abs(dragBrush.y1 - dragBrush.y0) > 8) dragBrush.moved = true;
-        if (dragBrush.moved) {
+        const dx = sx - dragBrush.sx0;
+        const dy = sy - dragBrush.y0;
+        if (!dragBrush.mode && Math.hypot(dx, dy) > 6) {
+          dragBrush.mode = (!dragBrush.startInForecast || dragBrush.shift || Math.abs(dx) > Math.abs(dy) * 1.25) ? "pan" : "gate";
+          dragBrush.moved = true;
+        }
+        if (dragBrush.mode === "pan") {
+          const plotW = Math.max(1, W - padL - padR);
+          const span = dragBrush.domain0[1] - dragBrush.domain0[0];
+          const dt = -(dx / plotW) * span;
+          viewDomain = clampPanDomain([dragBrush.domain0[0] + dt, dragBrush.domain0[1] + dt], maxPanBounds);
+          scheduleDraw();
+          return;
+        }
+        if (dragBrush.mode === "gate") {
+          dragBrush.y1 = Math.max(plotTop, Math.min(plotBot, sy));
           const va = Math.max(0, y.invert(dragBrush.y0));
           const vb = Math.max(0, y.invert(dragBrush.y1));
           gate = {
@@ -835,9 +1043,10 @@ export function mount(el, ctx) {
     }),
     on(canvas, "pointerup", () => {
       if (dragBrush) {
+        const wasMode = dragBrush.mode;
         const wasMoved = dragBrush.moved;
         dragBrush = null;
-        if (wasMoved) { refreshView(); return; }
+        if (wasMoved) { syncLine(); if (wasMode === "gate") refreshView(); return; }
       }
       if (hoverSampleId) {
         pinnedSampleId = pinnedSampleId === hoverSampleId ? null : hoverSampleId;
@@ -851,6 +1060,36 @@ export function mount(el, ctx) {
         refreshView();
       }
     }),
+    on(canvas, "dblclick", () => {
+      if (viewDomain) { viewDomain = null; refreshView(); }
+    }),
+    on(canvas, "wheel", (e) => {
+      if (!hitGeom || !curSum) return;
+      const { padL, padR, W, dom, maxPanBounds } = hitGeom;
+      const plotW = Math.max(1, W - padL - padR);
+      const span = dom[1] - dom[0];
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const sx = Math.max(padL, Math.min(W - padR, e.clientX - rect.left));
+        const frac = (sx - padL) / plotW;
+        const pivot = dom[0] + frac * span;
+        const factor = Math.exp(e.deltaY * 0.004);
+        const maxSpan = Math.max(MIN_PAN_SPAN, maxPanBounds[1] - maxPanBounds[0]);
+        const nextSpan = Math.min(maxSpan, Math.max(MIN_PAN_SPAN, span * factor));
+        viewDomain = clampPanDomain([pivot - frac * nextSpan, pivot + (1 - frac) * nextSpan], maxPanBounds);
+        syncLine();
+        scheduleDraw();
+        return;
+      }
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) && Math.abs(e.deltaX) > 0.5) {
+        e.preventDefault();
+        const dt = (e.deltaX / plotW) * span;
+        viewDomain = clampPanDomain([dom[0] + dt, dom[1] + dt], maxPanBounds);
+        syncLine();
+        scheduleDraw();
+      }
+    }, { passive: false }),
     on(canvas, "pointerleave", () => {
       hoverSampleId = null;
       pointerPos = null;
@@ -858,7 +1097,13 @@ export function mount(el, ctx) {
       scheduleDraw();
     }),
     on(document, "keydown", (e) => {
-      if (e.key === "Escape" && (gate || pinnedSampleId)) {
+      if (
+        e.key === "Escape"
+        && (gate || pinnedSampleId)
+        && !el.hidden
+        && !activeLayer()
+        && !document.querySelector("#app.is-globe-open, #app.is-briefing-open")
+      ) {
         gate = null;
         pinnedSampleId = null;
         readout.hide();
@@ -869,6 +1114,11 @@ export function mount(el, ctx) {
       if (["target", "location", "date", "dims"].some((k) => changed.has(k))) {
         if (changed.has("target")) {
           userToggledCloud = false;
+          userSeason = null;
+        }
+        if (changed.has("target") || changed.has("location") || changed.has("date")) {
+          userRound = null;
+          viewDomain = null;
           gate = null;
           pinnedSampleId = null;
           hoverSampleId = null;
@@ -876,6 +1126,7 @@ export function mount(el, ctx) {
         screen.run(() => { load(); loadLeaderboard(); });
       } else if (changed.has("sel")) {
         scheduleDraw();
+        renderLeaderboard();
       }
     }),
   ];
@@ -887,6 +1138,7 @@ export function mount(el, ctx) {
     destroy() {
       reqSeq++;
       boardReqSeq++;
+      boardAbortCtl?.abort();
       offs.forEach((off) => off());
     },
   };

@@ -2,12 +2,13 @@
  * Loads draws lazily per (target, season, location, settled round, dims) when toggled on
  * (or automatically on sample-only targets) and lays out faint per-series spaghetti paths
  * underneath the charted medians and above the interval bands. */
-import { getActiveHub, loadTrajectories } from "../../lib/api.js";
+import { getActiveHub, loadTrajectories, registerCacheClear } from "../../lib/api.js";
 import { DAY, parseIso, toIso } from "../../lib/scale.js";
 
 const TRAJ_CACHE = 12;
 const MAX_DRAWS_PER_MODEL = 36;
 const cache = new Map(); // key -> Promise<decoded | null>
+registerCacheClear(() => cache.clear());
 
 function cacheKey(target, season, location, date, modelsKey, dims) {
   const hub = getActiveHub() || "";
@@ -56,12 +57,27 @@ export class ChartTrajectories {
     return !!s.trajectories || isSampleOnlyTarget(tMeta);
   }
 
+  /** Max forecast target-end timestamp (ms) across loaded sample trajectories, or null. */
+  maxEnd() {
+    if (!this.isActive() || !this.data?.modelTrajectories?.size) return null;
+    const refT = parseIso(this.data.reference_date);
+    if (!Number.isFinite(refT)) return null;
+    const offDays = Number(this.data.horizon_offset_days) || 0;
+    let maxH = -Infinity;
+    for (const entry of this.data.modelTrajectories.values()) {
+      for (const h of entry.horizons || []) {
+        if (Number.isFinite(h) && h > maxH) maxH = h;
+      }
+    }
+    return Number.isFinite(maxH) ? refT + (maxH * 7 + offDays) * DAY : null;
+  }
+
   /** Ensures sample trajectories for the currently settled round are loaded when active. */
   sync() {
     const fan = this.chart.fan;
     if (!fan || !this.isActive()) {
       this._token++;
-      if (this.data) { this.data = null; this.loadedKey = ""; this.chart.request(); }
+      if (this.data) { this.data = null; this.loadedKey = ""; this.chart.syncSeasonBounds?.(); this.chart.request(); }
       return;
     }
     const { manifest, store } = this.chart.ctx;
@@ -80,8 +96,8 @@ export class ChartTrajectories {
     });
     if (!eligible.length) {
       this._token++;
-      this.data = null;
-      this.loadedKey = "";
+      if (this.data) { this.data = null; this.loadedKey = ""; this.chart.syncSeasonBounds?.(); this.chart.request(); }
+      else { this.data = null; this.loadedKey = ""; }
       return;
     }
 
@@ -99,6 +115,7 @@ export class ChartTrajectories {
         if (token !== this._token) return;
         this.loadedKey = key;
         this.data = res;
+        this.chart.syncSeasonBounds?.();
         this.chart.request();
       });
   }

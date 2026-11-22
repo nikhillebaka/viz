@@ -22,15 +22,20 @@ export default async function nonquantile(page, t) {
     });
     await page.waitFor(() => {
       const board = document.querySelector("#trajectories .tr-board-wrap");
-      return !!board && (!!board.querySelector(".v-table") || !!board.querySelector(".tr-note"));
+      return !!board && (!!board.querySelector(".v-table") || !!board.querySelector(".v-note"));
     }, { timeout: 30000, message: "Trajectories section or Sample Leaderboard never rendered" });
 
     const st = await page.eval(() => {
       const wrap = document.querySelector("#trajectories .tr-board-wrap");
       const headers = [...(wrap?.querySelectorAll("th") || [])].map((x) => x.textContent.trim());
-      return { hasCanvas: !!document.querySelector("#trajectories .tr-canvas"), headers };
+      return {
+        hasCanvas: !!document.querySelector("#trajectories .tr-canvas"),
+        headers,
+        legacyPills: document.querySelectorAll("#trajectories .tr-scope-btn, #trajectories .tr-cmp-btn, #trajectories .tr-board-sub").length,
+      };
     });
     t.ok(st.hasCanvas, "trajectories canvas present");
+    t.eq(st.legacyPills, 0, "canonical v-subhead and v-table without pill/button clutter");
     if (st.headers.length) {
       t.ok(st.headers.includes("CRPS") && st.headers.includes("Energy"), `leaderboard headers (${st.headers.join(", ")})`);
     }
@@ -58,13 +63,21 @@ export default async function nonquantile(page, t) {
       return (!!c && !!tbl) || !!empty;
     }, { timeout: 30000, message: "Rate change PMF section did not settle" });
 
-    const allBtnExists = await page.eval(() => {
-      const btns = [...document.querySelectorAll("#rate_change .pmf-scope-btn")];
-      const allBtn = btns.find((b) => b.textContent.startsWith("All places"));
-      if (allBtn) { allBtn.click(); return true; }
-      return false;
+    const openedScope = await page.eval(() => {
+      const frag = document.querySelector("#rate_change .pmf-table-wrap .v-subhead .v-frag");
+      if (!frag) return false;
+      frag.click();
+      return true;
     });
-    if (allBtnExists) {
+    if (openedScope) {
+      await page.waitFor(() => [...document.querySelectorAll(".c-menu button")].some((b) => b.textContent.includes("All places")), {
+        timeout: 10000,
+        message: "Rate change scope menu never opened",
+      });
+      await page.eval(() => {
+        const allOpt = [...document.querySelectorAll(".c-menu button")].find((b) => b.textContent.includes("All places"));
+        allOpt?.click();
+      });
       await page.waitFor(() => {
         const hdr = document.querySelector("#rate_change .pmf-table-wrap thead tr")?.textContent || "";
         return /RPS|Log loss/.test(hdr);

@@ -7,7 +7,7 @@ import { h, on, storage } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { icon } from "../ui/controls.js";
 import { prefetchFan } from "../lib/api.js";
-import { EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT, US_STATE_META } from "../geo/eu_tiles.js";
+import { EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT, US_STATE_META, resolveEuLocation } from "../geo/eu_tiles.js";
 import { TILES, COLUMNS, classifyHubGeo, loadUsGeoCache, renderHsaStateSvg } from "../geo/picker_geo.js";
 
 export { TILES, COLUMNS };
@@ -233,7 +233,11 @@ export function openLocationPicker(anchor, ctx) {
         : null;
 
       const season = manifest.seasonOf(store.get().date);
-      const prefetch = (e) => { const b = e.target.closest?.("[data-loc]"); if (b?.dataset.loc && season) prefetchFan(store.get().target, season, b.dataset.loc); };
+      const prefetch = (e) => {
+        const b = e.target.closest?.("[data-loc]");
+        const s = store.get();
+        if (b?.dataset.loc && season) prefetchFan(s.target, season, b.dataset.loc, { dims: s.dims });
+      };
       body.addEventListener("pointerover", prefetch);
       body.addEventListener("focusin", prefetch);
 
@@ -372,9 +376,9 @@ export function openLocationPicker(anchor, ctx) {
           const onGrid = new Set();
           const euTiles = [];
           for (const [id, [col, row, cs = 1, rs = 1]] of Object.entries(tileSpec)) {
-            const loc = manifest.locationById.get(id);
+            const loc = resolveEuLocation(id, manifest.locationById);
             if (!loc) continue;
-            onGrid.add(id);
+            onGrid.add(loc.id);
             const btn = place(loc, ["c-tile", loc.id === current && "on"], loc.abbr || id);
             btn.style.gridColumn = `${col} / span ${cs}`;
             btn.style.gridRow = `${row} / span ${rs}`;

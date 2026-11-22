@@ -1,9 +1,10 @@
 /* The scores' data: /api/next/metrics, /api/next/model-locations, /api/model-details and /api/season-curves.
  * Responses are cached (FIFO); a metrics request supersedes the one in flight. */
-import { apiUrl, getActiveHub } from "../../lib/api.js";
+import { apiUrl, getActiveHub, registerCacheClear } from "../../lib/api.js";
 
 const LIMIT = 50;
 const caches = { metrics: new Map(), details: new Map(), curves: new Map(), places: new Map() };
+registerCacheClear(() => Object.values(caches).forEach((m) => m.clear()));
 const sk = (key) => `${getActiveHub() || ""}\n${key}`;
 
 function remember(map, key, value) {

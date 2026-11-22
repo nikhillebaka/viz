@@ -44,6 +44,10 @@ export function valueFormat(target) {
     const value = guard((v) => { const p = v * 100; return (Math.abs(p) < 10 ? F_PCT2 : F_PCT1).format(p) + "%"; });
     return { value, axis: guard((v) => trim(v * 100) + "%"), compact: value };
   }
+  if (target?.scale === "percentage") {
+    const value = guard((v) => (Math.abs(v) < 10 ? F_PCT2 : F_PCT1).format(v) + "%");
+    return { value, axis: guard((v) => trim(v) + "%"), compact: value };
+  }
   return {
     value: guard((v) => (Math.abs(v) < 10 && !Number.isInteger(v) ? F_ONE : F_INT).format(v)),
     axis: guard((v) => si(v, 12)),

@@ -402,6 +402,18 @@ class TestBaselines(unittest.TestCase):
         self.assertEqual(info["by_target_season"]["wk inc flu hosp"]["2023-2024"], "flusight:FluSight-baseline")
         self.assertEqual(info["by_target_season"]["wk inc flu hosp"]["2026-2027"], "FluSight-baseline")
 
+        # Official FluSight-baseline outranks individual baselines even when individual yml sets baseline_model=true
+        from viz.core.baselines import rank_baselines
+        ranked_base = rank_baselines(
+            {
+                "FluSight-baseline": {"source": "repo", "targets": ["wk inc flu hosp"], "dates": ["2026-10-10", "2026-10-17"]},
+                "BFrimpong-baseline": {"source": "repo", "targets": ["wk inc flu hosp"], "dates": ["2026-10-10", "2026-10-17"]},
+            },
+            model_meta={"FluSight-baseline": {}, "BFrimpong-baseline": {"baseline_model": True}},
+            target="wk inc flu hosp",
+        )
+        self.assertEqual(ranked_base[0], "FluSight-baseline")
+
     def test_evaluation_picks_target_and_season_baseline_without_fallback_warning(self):
         hub = _build_synthetic_hub(
             self.tmp / "multi-target-hub",

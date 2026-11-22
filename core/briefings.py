@@ -64,11 +64,14 @@ def _short_unit(unit: str, per_100k: bool = False) -> str:
     return u
 
 
-def _fmt_date_short(iso: Optional[str]) -> str:
+def _fmt_date_short(iso: Optional[str], ref_iso: Optional[str] = None) -> str:
     if not iso:
         return ""
     try:
         d = date.fromisoformat(str(iso)[:10])
+        ref_d = date.fromisoformat(str(ref_iso)[:10]) if ref_iso else date.today()
+        if abs((ref_d - d).days) > 300:
+            return f"{d.strftime('%b')} {d.day}, {d.year}"
         return f"{d.strftime('%b')} {d.day}"
     except ValueError:
         return str(iso)
@@ -303,6 +306,7 @@ class BriefingBuilder:
         pathogen_label: str,
         concept_id: Optional[str] = None,
         geo_kind: Optional[str] = None,
+        ctxs: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         tm = ctx.config.get_target_metadata(target_id)
         if tm.get("is_categorical"):
@@ -437,45 +441,96 @@ class BriefingBuilder:
         fc_horizon = None
         fc_change_pct = None
         if fan_payload and fan_payload["median"]:
-            # Last non-null forecast median (usually 3- or 4-week horizon)
-            for idx in range(len(fan_payload["median"]) - 1, -1, -1):
-                mv = fan_payload["median"][idx]
-                if _finite(mv):
-                    fc_end_median = mv
-                    fc_end_date = fan_payload["target_end_dates"][idx]
-                    fc_horizon = fan_payload["horizons"][idx]
-                    fc_end_q95 = [fan_payload["q95_lower"][idx], fan_payload["q95_upper"][idx]]
-                    fc_change_pct = _pct_delta(mv, latest_obs)
-                    break
+            horizons_list = fan_payload.get("horizons") or []
+            # Prefer furthest non-null near-term horizon (<= 4 wk) so long-horizon hubs headline near-term outlooks
+            near_idxs = [
+                i for i, mv in enumerate(fan_payload["median"])
+                if _finite(mv) and (i < len(horizons_list) and int(horizons_list[i]) <= 4)
+            ]
+            chosen_idx = (
+                near_idxs[-1]
+                if near_idxs
+                else next(
+                    (i for i in range(len(fan_payload["median"]) - 1, -1, -1) if _finite(fan_payload["median"][i])),
+                    None,
+                )
+            )
+            if chosen_idx is not None:
+                mv = fan_payload["median"][chosen_idx]
+                fc_end_median = mv
+                fc_end_date = fan_payload["target_end_dates"][chosen_idx]
+                fc_horizon = horizons_list[chosen_idx] if chosen_idx < len(horizons_list) else None
+                fc_end_q95 = [fan_payload["q95_lower"][chosen_idx], fan_payload["q95_upper"][chosen_idx]]
+                fc_change_pct = _pct_delta(mv, latest_obs)
 
-        # 3. Matched Rate-Change Categorical PMF from the same hub
+        # 3. Matched Rate-Change Categorical PMF by semantic concept (never attach hosp rate-change to ED %)
         rate_change_pmf: Optional[Dict[str, Any]] = None
-        matched_cats = [c for c in cat_streams if c.get("hub_id") == hub_id]
+        tid_low = str(target_id or "").lower()
+        cid_low = str(concept_id or "").lower()
+        is_ed_prop = is_proportion or ("ed" in tid_low and "hosp" not in tid_low)
+
+        def _cat_matches(c: Dict[str, Any]) -> bool:
+            c_tid = str(c.get("target_id") or "").lower()
+            c_cid = str(c.get("concept_id") or "").lower()
+            if is_ed_prop:
+                return "ed" in c_tid or (c_cid and "ed" in c_cid)
+            if "ed" in c_tid and "hosp" not in tid_low:
+                return False
+            c_path = str(c.get("pathogen") or "").lower()
+            if not c_path:
+                if "flu" in c_tid or "influenza" in c_tid:
+                    c_path = "influenza"
+                elif "covid" in c_tid:
+                    c_path = "covid19"
+                elif "rsv" in c_tid:
+                    c_path = "rsv"
+            if c_path and pathogen and c_path != str(pathogen).lower():
+                return False
+            if c_cid and cid_low:
+                return c_cid.startswith(cid_low) or cid_low in c_cid
+            return ("hosp" in c_tid and "hosp" in tid_low) or (c.get("hub_id") == hub_id and not c_path)
+
+        matched_cats = sorted(
+            [c for c in cat_streams if _cat_matches(c)],
+            key=lambda c: (0 if c.get("hub_id") == hub_id else 1),
+        )
         if matched_cats:
             cat_spec = matched_cats[0]
             try:
-                pmf_models = [model_id] if model_id else None
-                pmf_res = ctx.next_data.pmf(
+                cat_hub_id = cat_spec.get("hub_id") or hub_id
+                pmf_ctx = (ctxs or {}).get(cat_hub_id, ctx)
+                cat_loc = str(cat_spec.get("location_id") or location_id)
+                cat_ref = _pick_latest_round_for_target(pmf_ctx, cat_spec["target_id"], hub_id=cat_hub_id) or ref_date
+                pmf_season = pmf_ctx.loader.get_calendar().season_for_date(cat_ref)
+                pmf_ranked = rank_ensemble_candidates(
+                    pmf_ctx.loader.scan_models(),
                     cat_spec["target_id"],
-                    season,
-                    str(cat_spec.get("location_id") or location_id),
-                    round_date=ref_date,
+                    cat_ref,
+                    get_meta=pmf_ctx.loader.get_model_metadata,
+                    hub_id=cat_hub_id,
+                )
+                pmf_models = [pmf_ranked[0]] if pmf_ranked else None
+                pmf_res = pmf_ctx.next_data.pmf(
+                    cat_spec["target_id"],
+                    pmf_season,
+                    cat_loc,
+                    round_date=cat_ref,
                     models=pmf_models,
                 )
                 m_map = pmf_res.get("models") or {}
                 if not m_map and pmf_models:
-                    pmf_res = ctx.next_data.pmf(
+                    pmf_res = pmf_ctx.next_data.pmf(
                         cat_spec["target_id"],
-                        season,
-                        str(cat_spec.get("location_id") or location_id),
-                        round_date=ref_date,
+                        pmf_season,
+                        cat_loc,
+                        round_date=cat_ref,
                     )
                     m_map = pmf_res.get("models") or {}
                 if m_map:
-                    ranked_pmf = [m for m in ranked_models if m in m_map]
-                    chosen_m = ranked_pmf[0] if ranked_pmf else next(iter(m_map.keys()))
+                    chosen_m = next((m for m in pmf_ranked if m in m_map), next(iter(m_map.keys())))
                     by_ref = m_map.get(chosen_m) or {}
-                    r_map = by_ref.get(ref_date) or (next(iter(by_ref.values())) if by_ref else {})
+                    used_ref = cat_ref if cat_ref in by_ref else (max(by_ref.keys()) if by_ref else None)
+                    r_map = by_ref.get(used_ref, {}) if used_ref else {}
                     if r_map:
                         sorted_hs = sorted(r_map.keys(), key=lambda x: int(x))
                         pref_h = "1" if "1" in r_map else sorted_hs[0]
@@ -483,7 +538,7 @@ class BriefingBuilder:
                         rate_change_pmf = {
                             "target_id": cat_spec["target_id"],
                             "label": cat_spec.get("short") or cat_spec.get("label") or cat_spec["target_id"],
-                            "ref_date": ref_date,
+                            "ref_date": used_ref or cat_ref,
                             "horizon": int(pref_h),
                             "target_end_date": slot.get("target_end_date"),
                             "model_id": display_model_name(chosen_m),
@@ -591,6 +646,8 @@ class BriefingBuilder:
     ) -> Optional[Dict[str, Any]]:
         """Evaluate local forecast skill at this place + target for the current season."""
         try:
+            from viz.core.evaluation import EvaluationParams
+
             res = ctx.eval_engine.evaluate(
                 EvaluationParams(
                     target=signal["target_id"],
@@ -1152,27 +1209,52 @@ class BriefingBuilder:
         subregion_rows: List[Dict[str, Any]] = []
         subregion_label = ""
         if child_keys:
-            # Find shared hub+target that covers child keys (prefer MetroCast if children are non-states)
-            child_sample = places[child_keys[0]]
+            # Find shared non-categorical hub+target covering child keys
             sub_hub = None
             sub_target = None
             sub_unit = ""
             sub_per_100k = False
             sub_is_prop = False
-            if primary_sig and any(h["hub_id"] == primary_sig["hub_id"] for h in child_sample.get("hubs") or []):
+            if primary_sig and any(
+                h["hub_id"] == primary_sig["hub_id"]
+                and any((t.get("target_id") or t.get("id")) == primary_sig["target_id"] for t in (h.get("targets") or []))
+                for ch_k in child_keys
+                for h in (places[ch_k].get("hubs") or [])
+            ):
                 sub_hub = primary_sig["hub_id"]
                 sub_target = primary_sig["target_id"]
                 sub_unit = primary_sig["unit"]
                 sub_per_100k = primary_sig["per_100k"]
                 sub_is_prop = (primary_sig.get("scale") == "proportion") and not sub_per_100k
-            elif child_sample.get("hubs"):
-                h0 = child_sample["hubs"][0]
-                sub_hub = h0["hub_id"]
-                t0 = (h0.get("targets") or [{}])[0]
-                sub_target = t0.get("target_id") or t0.get("id")
-                if sub_hub in ctxs and sub_target:
-                    tm0 = ctxs[sub_hub].config.get_target_metadata(sub_target)
-                    sub_per_100k = bool(tm0.get("per_100k_capable")) and bool(child_sample.get("population"))
+            else:
+                pair_counts: Dict[Tuple[str, str], int] = {}
+                pair_meta: Dict[Tuple[str, str], Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+                for ch_k in child_keys:
+                    ch_p = places[ch_k]
+                    for h_ent in ch_p.get("hubs") or []:
+                        hid = h_ent["hub_id"]
+                        for t_ent in h_ent.get("targets") or []:
+                            tid = t_ent.get("target_id") or t_ent.get("id")
+                            if not tid or hid not in ctxs:
+                                continue
+                            tm0 = ctxs[hid].config.get_target_metadata(tid)
+                            if tm0.get("is_categorical"):
+                                continue
+                            key_pair = (hid, tid)
+                            pair_counts[key_pair] = pair_counts.get(key_pair, 0) + 1
+                            pair_meta.setdefault(key_pair, (tm0, ch_p))
+                if pair_counts:
+                    def _pair_rank(item: Tuple[Tuple[str, str], int]) -> Tuple[Any, ...]:
+                        (hid, tid), cnt = item
+                        tm0, _ = pair_meta[(hid, tid)]
+                        tid_low = tid.lower()
+                        is_prop = tm0.get("scale") == "proportion" and not tm0.get("per_100k_capable")
+                        is_flag = any(w in tid_low for w in ("hosp", "admission", "ili", "ari"))
+                        return (cnt, 0 if is_prop else 1, 1 if is_flag else 0, tid)
+
+                    (sub_hub, sub_target), _ = max(pair_counts.items(), key=_pair_rank)
+                    tm0, sample_p = pair_meta[(sub_hub, sub_target)]
+                    sub_per_100k = bool(tm0.get("per_100k_capable")) and bool(sample_p.get("population"))
                     sub_is_prop = (tm0.get("scale") == "proportion") and not sub_per_100k
                     sub_unit = "%" if sub_is_prop else _short_unit(tm0.get("unit") or "", per_100k=sub_per_100k)
             subregion_rows = _make_peer_rows(child_keys, sub_hub, sub_target, sub_per_100k, is_proportion=sub_is_prop)
@@ -1463,6 +1545,7 @@ class BriefingBuilder:
                     pathogen_label=h_ent["pathogen_label"],
                     concept_id=t_ent.get("concept_id"),
                     geo_kind=hub_geo_kind.get(hid),
+                    ctxs=ctxs,
                 )
                 if s_entry is None:
                     continue
@@ -1506,6 +1589,29 @@ class BriefingBuilder:
 
         signals = list(deduped.values())
 
+        # Filter out archived (>1yr stale) fan-less signals when the place has fresher active signals
+        if len(signals) > 1:
+            obs_dates = [s.get("obs_date") for s in signals if s.get("obs_date")]
+            if obs_dates:
+                try:
+                    newest_obs_d = date.fromisoformat(str(max(obs_dates))[:10])
+                    fresh = []
+                    for s in signals:
+                        if s.get("fan") is None and s.get("obs_date"):
+                            try:
+                                age_days = (newest_obs_d - date.fromisoformat(str(s["obs_date"])[:10])).days
+                                if age_days > 365:
+                                    continue
+                            except ValueError:
+                                pass
+                        fresh.append(s)
+                    if fresh:
+                        signals = fresh
+                except ValueError:
+                    pass
+
+        has_any_fan = any(s.get("fan") is not None for s in signals)
+
         def _pathogen_rank(s: Dict[str, Any]) -> int:
             pl_low = f"{s.get('pathogen','')} {s.get('label','')}".lower()
             if "flu" in pl_low or "influenza" in pl_low:
@@ -1520,6 +1626,7 @@ class BriefingBuilder:
             tid_low = str(s.get("target_id") or "").lower()
             is_flagship = s.get("scale") != "proportion" and any(k in tid_low for k in ("hosp", "admission", "ili", "ari"))
             return (
+                1 if (has_any_fan and s.get("fan") is None) else 0,
                 s.get("latest_obs") is None,
                 0 if is_flagship else (1 if s.get("scale") != "proportion" else 2),
                 _pathogen_rank(s),
@@ -1575,10 +1682,21 @@ class BriefingBuilder:
             ),
         )
 
-        # Determine relevant seasons in WHO vaccine reference (latest season first)
-        current_vacc_season = "2026-27"
-        if signals and signals[0].get("season") and signals[0]["season"] in {"2025-26", "2026-27"}:
-            current_vacc_season = signals[0]["season"]
+        # Determine relevant seasons in WHO vaccine reference (normalize YYYY-YYYY -> YYYY-YY)
+        def _norm_vacc_season(raw_s: Optional[str]) -> Optional[str]:
+            if not raw_s:
+                return None
+            parts = str(raw_s).strip().split("-")
+            if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 4:
+                return f"{parts[0]}-{parts[1][2:]}"
+            return str(raw_s).strip()
+
+        vacc_keys = {entry.get("season") for entry in WHO_NH_VACCINE_REFERENCE if entry.get("season")}
+        current_vacc_season = max(vacc_keys) if vacc_keys else "2026-27"
+        if signals:
+            cand_vs = _norm_vacc_season(signals[0].get("season"))
+            if cand_vs and cand_vs in vacc_keys:
+                current_vacc_season = cand_vs
 
         payload: Dict[str, Any] = {
             "empty": False,

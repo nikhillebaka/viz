@@ -523,6 +523,11 @@ class TestBriefingFeedsAndBuilder(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_fmt_date_short_and_stale_signal_filtering(self):
+        from viz.core.briefings import _fmt_date_short
+        self.assertEqual(_fmt_date_short("2022-10-16", ref_iso="2026-11-21"), "Oct 16, 2022")
+        self.assertEqual(_fmt_date_short("2026-11-14", ref_iso="2026-11-21"), "Nov 14")
+
 
 if __name__ == "__main__":
     unittest.main()

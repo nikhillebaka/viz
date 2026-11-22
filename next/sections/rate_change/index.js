@@ -31,10 +31,14 @@ export function findRateChangeTarget(catalog, manifest, activeTargetId, activeLo
       }
     }
     if (!curPlace && places[activeLocationId]) curPlace = places[activeLocationId];
-    const parentPlace = curPlace?.parent_key ? places[curPlace.parent_key] || null : null;
+    const SUBNATIONAL_LEVELS = new Set(["hsa", "metro", "borough", "region", "subnational"]);
+    const canInherit = SUBNATIONAL_LEVELS.has(String(curPlace?.level || "").toLowerCase());
+    const parentPlace = canInherit && curPlace?.parent_key ? places[curPlace.parent_key] || null : null;
+    const hubAllows = (ent, tid) => !Array.isArray(ent?.targets)
+      || ent.targets.some((x) => (typeof x === "string" ? x : (x.target_id || x.id)) === tid);
 
     for (const cand of cands) {
-      const direct = curPlace?.hubs?.find((ent) => ent.hub_id === cand.hub_id);
+      const direct = curPlace?.hubs?.find((ent) => ent.hub_id === cand.hub_id && hubAllows(ent, cand.target_id));
       if (direct) {
         return {
           hubId: cand.hub_id === activeHubId ? null : cand.hub_id,
@@ -46,7 +50,7 @@ export function findRateChangeTarget(catalog, manifest, activeTargetId, activeLo
           label: cand.label || cand.short || cand.target_id,
         };
       }
-      const via = parentPlace?.hubs?.find((ent) => ent.hub_id === cand.hub_id);
+      const via = parentPlace?.hubs?.find((ent) => ent.hub_id === cand.hub_id && hubAllows(ent, cand.target_id));
       if (via) {
         return {
           hubId: cand.hub_id === activeHubId ? null : cand.hub_id,

@@ -6,6 +6,7 @@
 import { h } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { Segmented, icon, toast } from "../ui/controls.js";
+import { clearAllCaches } from "../lib/api.js";
 import { getJSON, postJSON, reloadSoon } from "./More.js";
 import { select, chartedBySlot } from "./selection.js";
 
@@ -99,9 +100,11 @@ export function openCombine(anchor, { manifest, store }) {
       // selection plus the ensemble (it may have named none, the selection then coming from storage)
       const next = select(store.get().sel, r.ensemble.id);
       const url = new URL(location.href);
+      if (manifest.hub_id) url.searchParams.set("hub", manifest.hub_id);
       url.searchParams.set("models", next.selected.join(","));
       url.searchParams.set("chart", chartedBySlot(next).map((id) => id ?? "").join(","));
       history.replaceState(history.state, "", url);
+      clearAllCaches();
       toast(`Created ${r.ensemble.name}`);
       layer.close(false);
       reloadSoon();
@@ -126,7 +129,7 @@ export function openCombine(anchor, { manifest, store }) {
         }
         clearTimeout(armed.get(e.id));
         del.disabled = true;
-        try { await postJSON("/api/ensemble/delete", { ensemble_id: e.id }); toast(`Deleted ${e.name}`); reloadSoon(); }
+        try { await postJSON("/api/ensemble/delete", { ensemble_id: e.id }); clearAllCaches(); toast(`Deleted ${e.name}`); reloadSoon(); }
         catch (err) { del.disabled = false; del.textContent = "Delete"; toast(`Couldn't delete · ${err.message}`, { tone: "error" }); }
       });
       const keep = e.is_saved ? null : h("button", { type: "button", class: "c-btn filled sm" }, "Save");

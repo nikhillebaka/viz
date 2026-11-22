@@ -252,6 +252,19 @@ export const METROCAST_CITIES = Object.freeze([
   { id: "eu-vienna", abbr: "Vienna", name: "Vienna, AT", level: "city", parentId: "AT", region: "AT", hub: "RespiCast", lat: 48.2082, lon: 16.3738, population: 2005000 },
 ]);
 
+/**
+ * Resolve a European tile id (or GB <-> UK alias) against a `Map<id, location>`.
+ * @param {string} tileId
+ * @param {Map<string, any> | null | undefined} locationById
+ */
+export function resolveEuLocation(tileId, locationById) {
+  if (!tileId || !locationById) return null;
+  if (locationById.has(tileId)) return locationById.get(tileId);
+  if (tileId === "GB") return locationById.get("UK") || null;
+  if (tileId === "UK") return locationById.get("GB") || null;
+  return null;
+}
+
 /** Fast combined metadata lookup for any ID (US national/state, EU country/nation, MetroCast city). */
 export function lookupPlaceMeta(placeId) {
   if (!placeId) return null;

@@ -98,10 +98,10 @@ describe("next/sections/trajectories/model.js", () => {
         { id: "t-pmf", is_categorical: true, output_types: ["pmf"] },
       ],
       models: [
-        { id: "M-no", has_samples: false, targets: ["t-samp"] },
-        { id: "M-ens", has_samples: true, designated: true, targets: ["t-samp"] },
-        { id: "M-long", has_samples: true, targets: ["t-samp"] },
-        { id: "Base-M", has_samples: true, targets: ["t-samp"] },
+        { id: "M-no", has_samples: false, targets: ["t-samp"], seasons: ["2026-2027"] },
+        { id: "M-ens", has_samples: true, designated: true, targets: ["t-samp"], seasons: ["2025-2026", "2026-2027"] },
+        { id: "M-long", has_samples: true, targets: ["t-samp"], seasons: ["2026-2027"] },
+        { id: "Base-M", has_samples: true, targets: ["t-samp"], seasons: ["2025-2026", "2026-2027"] },
       ],
       seasons: [{ id: "2026-2027", rounds: ["2026-11-21"] }],
       locations: [{ id: "US", name: "US" }],
@@ -109,6 +109,7 @@ describe("next/sections/trajectories/model.js", () => {
     assert.equal(hasSampleModels(man, "t-samp"), true);
     assert.equal(hasSampleModels(man, "t-pmf"), false);
     assert.deepEqual(sampleModelsForTarget(man, "t-samp").map((m) => m.id), ["M-ens", "M-long", "Base-M"]);
+    assert.deepEqual(sampleModelsForTarget(man, "t-samp", "2025-2026").map((m) => m.id), ["M-ens", "Base-M"]);
 
     // Picks charted sample model first
     assert.equal(pickDefaultSampleModel(sampleModelsForTarget(man, "t-samp"), { charted: [{ id: "M-long" }], baseline: true }, man), "M-long");

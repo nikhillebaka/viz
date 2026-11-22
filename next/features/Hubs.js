@@ -104,6 +104,13 @@ function startPoll() {
 let activeRemoteHubId = null;
 let activeCtx = null;
 
+/** Keep background sync notifications routed through the live mounted workspace context. */
+export function setHubsContext(ctx) {
+  activeCtx = ctx || null;
+  const hid = ctx?.manifest?.hub_id || null;
+  activeRemoteHubId = hid?.startsWith("remote_") ? hid.slice(7) : null;
+}
+
 function openRemoteHub(remoteId) {
   const wsId = `remote_${remoteId}`;
   if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {

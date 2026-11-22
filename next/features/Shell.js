@@ -46,7 +46,8 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
   const backBtn = pill({ label: "← Chart", className: "app-globe-back" });
   const modelsBtn = pill({ label: "Models", dots: [], chevron: true, className: "app-models" });
   const placeBtn = pill({ label: "Location", chevron: true, className: "app-place" });
-  const showTargetBtn = (ctx.catalog?.targets?.length || 0) > 1 || manifest.targets.length > 1;
+  const quantTargets = manifest.targets.filter((t) => !t.is_categorical);
+  const showTargetBtn = (ctx.catalog?.targets?.filter((t) => !t.is_categorical).length || 0) > 1 || quantTargets.length > 1;
   const targetBtn = showTargetBtn ? pill({ label: "Target", chevron: true, className: "app-target" }) : null;
   const briefingBtn = pill({ label: "Briefing", className: "app-briefing-btn" });
   const themeBtn = pill({ icon: icon.theme, ariaLabel: "Light or dark", className: "app-theme" });
@@ -448,7 +449,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
       globeHost?.remove();
       view.remove();
       fixed.remove();
-      root.classList.remove("is-inset", "is-tucked", "is-globe-open", "is-ready");
+      root.classList.remove("is-inset", "is-tucked", "is-globe-open", "is-briefing-open", "is-ready");
       root.style.removeProperty("--inset-goal");
     },
   };

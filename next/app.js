@@ -12,8 +12,9 @@ import { createStore } from "./lib/store.js";
 import { h, storage } from "./lib/dom.js";
 import { DAY, parseIso } from "./lib/scale.js";
 import { activeLayer } from "./ui/floating.js";
+import { setHubsContext } from "./features/Hubs.js";
 import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted, chart } from "./features/selection.js";
-import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels } from "./features/url.js";
+import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels, isCategoricalTarget } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
 import { classifyHubGeo } from "./geo/picker_geo.js";
@@ -21,7 +22,24 @@ import { classifyHubGeo } from "./geo/picker_geo.js";
 const root = document.getElementById("app");
 const hubKey = (id, name) => (id ? `viz.h.${id}.${name}` : `viz.${name}`);
 const geoKey = (manifest) => `viz.geo.${classifyHubGeo(manifest).kind}.location`;
-const VALID_SCORE_COLS = new Set(["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3"]);
+const VALID_SCORE_COLS = new Set(["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"]);
+const QUANT_SORTS = new Set(["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name", "h0", "h1", "h2", "h3", "h4"]);
+const CAT_SORTS = new Set(["rel", "rps", "logScore", "brier", "hitMode", "n", "name", "h0", "h1", "h2", "h3", "h4"]);
+
+function sanitizeScoresForTarget(scores, manifest, targetId) {
+  if (!scores) return undefined;
+  const cols = Array.isArray(scores.cols) ? scores.cols.filter((c) => VALID_SCORE_COLS.has(c)) : [];
+  const tMeta = manifest.targetById.get(targetId);
+  const allowedSorts = isCategoricalTarget(tMeta) ? CAT_SORTS : QUANT_SORTS;
+  const keepSort = typeof scores.sort === "string" && allowedSorts.has(scores.sort);
+  return {
+    ...scores,
+    sort: keepSort ? scores.sort : "rel",
+    rev: keepSort ? !!scores.rev : false,
+    cols,
+    open: Array.isArray(scores.open) ? scores.open : [],
+  };
+}
 
 /* What this browser remembers, validated against the manifest (anything unknown is ignored). */
 function fromStorage(manifest) {
@@ -147,8 +165,12 @@ function nearestWithin(iso, rounds, maxDays = 21) {
   return bd <= maxDays * DAY ? best : null;
 }
 
-function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc) {
-  if (explicitLoc && nextMan.locationById.has(explicitLoc)) return explicitLoc;
+function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitLoc, targetId = null, nextStored = null) {
+  const tMeta = targetId ? nextMan.targetById.get(targetId) : null;
+  const allowed = Array.isArray(tMeta?.locations) && tMeta.locations.length ? new Set(tMeta.locations) : null;
+  const validLoc = (id) => !!id && nextMan.locationById.has(id) && (!allowed || allowed.has(id));
+
+  if (validLoc(explicitLoc)) return explicitLoc;
   const places = catalog?.places || {};
   let prevPlace = null;
   if (prevLocId) {
@@ -161,16 +183,35 @@ function resolveMappedLocation(nextMan, catalog, prevHubId, prevLocId, explicitL
     if (!prevPlace && places[prevLocId]) prevPlace = places[prevLocId];
   }
   if (prevPlace) {
-    const direct = prevPlace.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && nextMan.locationById.has(ent.location_id));
+    const direct = prevPlace.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && validLoc(ent.location_id));
     if (direct) return direct.location_id;
     for (const childKey of prevPlace.children || []) {
       const child = places[childKey];
-      const childEnt = child?.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && nextMan.locationById.has(ent.location_id));
+      const childEnt = child?.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && validLoc(ent.location_id));
       if (childEnt) return childEnt.location_id;
     }
+    // Walk up parent hierarchy (e.g. Boston -> MA -> US)
+    const seen = new Set([prevPlace.key]);
+    let cur = prevPlace;
+    while (cur?.parent_key && places[cur.parent_key] && !seen.has(cur.parent_key)) {
+      cur = places[cur.parent_key];
+      seen.add(cur.key);
+      const pEnt = cur.hubs?.find((ent) => ent.hub_id === nextMan.hub_id && validLoc(ent.location_id));
+      if (pEnt) return pEnt.location_id;
+    }
   }
-  if (prevLocId && nextMan.locationById.has(prevLocId)) return prevLocId;
-  return null;
+  if (validLoc(prevLocId)) return prevLocId;
+  if (validLoc(nextStored?.location)) return nextStored.location;
+  const geoLoc = storage.get(geoKey(nextMan));
+  if (validLoc(geoLoc)) return geoLoc;
+  const def = defaults(nextMan);
+  if (validLoc(tMeta?.default_location)) return tMeta.default_location;
+  if (validLoc(def.location)) return def.location;
+  if (allowed) {
+    const firstAllowed = tMeta.locations.find((id) => nextMan.locationById.has(id));
+    if (firstAllowed) return firstAllowed;
+  }
+  return nextMan.locations?.[0]?.id ?? null;
 }
 
 function stripAppQueryParams(oldMan) {
@@ -214,7 +255,9 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
     if (selFlags.baseline !== undefined) state.sel = setBaseline(state.sel, selFlags.baseline);
   }
   if (!url.date && !stateOverride?.date) state.date = defaultDate(manifest, state.sel);
-  if (state.focus && !isCharted(state.sel, state.focus) && !(state.focus === manifest.baseline && state.sel.baseline)) state.focus = null;
+  const initBase = manifest.baselineFor?.(state.target, state.date) ?? manifest.baseline;
+  if (state.focus && !isCharted(state.sel, state.focus) && !(state.focus === initBase && state.sel.baseline)) state.focus = null;
+  if (state.scores) state.scores = sanitizeScoresForTarget(state.scores, manifest, state.target);
 
   const store = createStore(state);
   const ctx = {
@@ -233,21 +276,44 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       if (!forceReload && targetHub === manifest.hub_id) {
         const cur = store.get();
         const patch = {};
-        if (target && manifest.targetById.has(target) && target !== cur.target) {
-          patch.target = target;
-          patch.dims = { ...defaultDims(manifest, target), ...(dims || {}) };
+        const nextT = (target && manifest.targetById.has(target) && target !== cur.target) ? target : null;
+        if (nextT) {
+          patch.target = nextT;
+          patch.dims = { ...defaultDims(manifest, nextT), ...(dims || {}) };
+          if (cur.scores) patch.scores = sanitizeScoresForTarget(cur.scores, manifest, nextT);
+          const nextTMeta = manifest.targetById.get(nextT);
+          const checkLoc = (nextLoc && manifest.locationById.has(nextLoc)) ? nextLoc : cur.location;
+          if (Array.isArray(nextTMeta?.locations) && nextTMeta.locations.length && !nextTMeta.locations.includes(checkLoc)) {
+            const mapped = resolveMappedLocation(manifest, ctx.catalog, manifest.hub_id, checkLoc, null, nextT, stored);
+            if (mapped && mapped !== cur.location) patch.location = mapped;
+          }
+          if (cur.scope?.baseline) {
+            const bModel = manifest.modelById.get(cur.scope.baseline);
+            if (!bModel || (bModel.targets?.length && !bModel.targets.includes(nextT))) {
+              patch.scope = { ...(cur.scope || {}), baseline: manifest.baselineFor?.(nextT, cur.date) ?? manifest.baseline ?? null };
+            }
+          }
         } else if (dims) {
           patch.dims = { ...(cur.dims || {}), ...dims };
         }
-        if (nextLoc && manifest.locationById.has(nextLoc) && nextLoc !== cur.location) {
-          patch.location = nextLoc;
+        if (nextLoc && manifest.locationById.has(nextLoc) && nextLoc !== cur.location && !patch.location) {
+          const effT = nextT || cur.target;
+          const effTMeta = manifest.targetById.get(effT);
+          if (!effTMeta?.locations?.length || effTMeta.locations.includes(nextLoc)) {
+            patch.location = nextLoc;
+          } else {
+            const mapped = resolveMappedLocation(manifest, ctx.catalog, manifest.hub_id, nextLoc, null, effT, stored);
+            if (mapped && mapped !== cur.location) patch.location = mapped;
+          }
         }
         if (date) {
           const snapped = nearestWithin(date, manifest.allRounds, 21);
           if (snapped) patch.date = snapped;
         }
         if (model && manifest.modelById.has(model)) {
-          const nextSel = model === manifest.baseline ? setBaseline(cur.sel, true) : chart(cur.sel, model);
+          const effT = nextT || cur.target;
+          const effBase = manifest.baselineFor?.(effT, patch.date || cur.date) ?? manifest.baseline;
+          const nextSel = model === effBase ? setBaseline(cur.sel, true) : chart(cur.sel, model);
           if (nextSel !== cur.sel) patch.sel = nextSel;
         }
         if (Object.keys(patch).length) store.set(patch);
@@ -258,15 +324,22 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       activeLayer()?.close(false);
       const prev = store.get();
       if (forceReload) clearAllCaches();
-      setActiveHub(targetHub);
 
       const prog = document.querySelector(".app-progress") || document.body.appendChild(h("div", { class: "app-progress", role: "progressbar", "aria-label": "Loading" }));
       prog.classList.remove("is-done");
-      const [nextMan, nextCat] = await Promise.all([
-        loadManifest(targetHub),
-        forceReload ? loadCatalog(true).catch(() => ctx.catalog) : Promise.resolve(ctx.catalog),
-      ]);
+      let nextMan, nextCat;
+      try {
+        [nextMan, nextCat] = await Promise.all([
+          loadManifest(targetHub),
+          forceReload ? loadCatalog(true).catch(() => ctx.catalog) : Promise.resolve(ctx.catalog),
+        ]);
+      } catch (err) {
+        prog.classList.add("is-done");
+        throw err;
+      }
       if (seq !== switchSeq) return;
+      activeLayer()?.close(false);
+      setActiveHub(targetHub);
 
       const nextDef = defaults(nextMan);
       let resolvedT = (target && nextMan.targetById.has(target)) ? target : null;
@@ -280,23 +353,24 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       }
       if (!resolvedT) resolvedT = nextDef.target;
       if (prev.location && manifest.locationById.has(prev.location)) storage.set(geoKey(manifest), prev.location);
-      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc);
       const nextStored = fromStorage(nextMan);
+      const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc, resolvedT, nextStored);
       let nextSel = nextStored.sel || nextDef.sel;
-      if (model && nextMan.modelById.has(model)) {
-        nextSel = model === nextMan.baseline ? setBaseline(nextSel, true) : chart(nextSel, model);
-      }
       const resolvedDate = (date && nearestWithin(date, nextMan.allRounds, 21))
         || nearestWithin(prev.date, nextMan.allRounds, 21)
         || defaultDate(nextMan, nextSel);
+      if (model && nextMan.modelById.has(model)) {
+        const nextBase = nextMan.baselineFor?.(resolvedT, resolvedDate) ?? nextMan.baseline;
+        nextSel = model === nextBase ? setBaseline(nextSel, true) : chart(nextSel, model);
+      }
 
       if (keepGlobe && window.location.hash !== "#globe") {
         history.replaceState(history.state, "", `${window.location.pathname}${window.location.search}#globe`);
       } else if (!keepGlobe && window.location.hash === "#globe") {
         history.replaceState(history.state, "", `${window.location.pathname}${window.location.search}`);
       }
+      activeUnmount?.({ flush: false });
       stripAppQueryParams(manifest);
-      activeUnmount?.();
 
       mountContext(nextMan, {
         catalog: nextCat,
@@ -310,7 +384,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
           levels: prev.levels,
           rulers: prev.rulers,
           layers: prev.layers,
-          scores: prev.scores,
+          scores: sanitizeScoresForTarget(prev.scores, nextMan, resolvedT),
           theme: prev.theme,
           outcome: prev.outcome,
         },
@@ -318,11 +392,12 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
     },
   };
 
+  setHubsContext(ctx);
   const shell = mountShell(root, ctx, { pickLocation: state.location == null });
   const stopUrl = syncUrl(store, manifest);
   const stopPersist = persist(store, manifest);
-  activeUnmount = () => {
-    stopUrl();
+  activeUnmount = ({ flush = true } = {}) => {
+    stopUrl({ flush });
     stopPersist();
     shell.destroy();
     activeUnmount = null;

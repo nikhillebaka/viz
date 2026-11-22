@@ -6,6 +6,7 @@ Fully thread-safe with atomic file writes to prevent race conditions.
 """
 
 from collections import defaultdict
+import hashlib
 import json
 import logging
 import os
@@ -901,6 +902,7 @@ class ParquetCacheManager:
         cache_name: str,
         source_files: List[Path],
         builder_fn: Any,
+        extra_meta: Optional[Dict[str, Any]] = None,
     ) -> Optional[Path]:
         """
         Thread-safe, atomic builder for cached Parquet tables.
@@ -917,6 +919,7 @@ class ParquetCacheManager:
         fp = {
             **self._compute_dir_fingerprint(existing_sources),
             "paths": [str(f) for f in existing_sources],
+            **(extra_meta or {}),
         }
         if self._is_cache_fresh(pq_path, meta_path, fp):
             return pq_path
@@ -1132,10 +1135,12 @@ class ParquetCacheManager:
 
     def get_admissions_parquet(self, target: Optional[str] = None) -> Optional[Path]:
         """Reconcile admissions surveillance across repo target-data, surveillance archives, S3 hubs, and sibling hubs."""
+        from viz.core.config import VizConfig
+        cfg = VizConfig(self.base_dir)
         if not target:
-            from viz.core.config import VizConfig
-            target = VizConfig(self.base_dir).get_default_target()
+            target = next((t for t in cfg.get_weekly_targets() if is_flu_hosp_target(t)), None) or cfg.get_default_target()
 
+        _, allowed_locations = self._allowed_scope()
         sources: List[TruthSource] = []
         repo_adm = self._first_existing([
             self.target_data_dir / "admissions.parquet",
@@ -1171,7 +1176,7 @@ class ParquetCacheManager:
                 ))
 
         bundled_adm = self.surveillance_dir / "target-hospital-admissions.csv"
-        if is_flu_hosp_target(target) and bundled_adm.is_file():
+        if is_flu_hosp_target(target) and (not allowed_locations or "US" in allowed_locations) and bundled_adm.is_file():
             sources.append(TruthSource(source_id="bundled_surv", label="surveillance", kind="admissions", priority=PRIORITY_ARCHIVE, path=bundled_adm))
 
         # Graceful fallback when no admissions CSV exists anywhere: synthesize from repo truth tables
@@ -1194,9 +1199,10 @@ class ParquetCacheManager:
             return None
 
         has_external = any(s.priority in (PRIORITY_REMOTE, PRIORITY_PEER) for s in sources)
-        cache_name = "admissions_hub" if has_external else "admissions"
+        base_name = "admissions_hub" if has_external else "admissions"
+        default_flu_hosp = next((t for t in cfg.get_weekly_targets() if is_flu_hosp_target(t)), None) or "wk inc flu hosp"
+        cache_name = base_name if target == default_flu_hosp else f"{base_name}_{hashlib.sha1(target.encode('utf-8')).hexdigest()[:8]}"
         file_paths = [s.path for s in sources if s.path is not None]
-        _, allowed_locations = self._allowed_scope()
 
         def _build_merged_admissions() -> Optional[pl.DataFrame]:
             pairs: List[Tuple[TruthSource, pl.DataFrame]] = []
@@ -1227,7 +1233,7 @@ class ParquetCacheManager:
             keep_cols = [c for c in ("target", "location", "target_end_date", "horizon", "oracle_value", "as_of") if c in out.columns]
             return out.select(keep_cols)
 
-        return self._build_cached_table(cache_name, file_paths, _build_merged_admissions)
+        return self._build_cached_table(cache_name, file_paths, _build_merged_admissions, extra_meta={"target": target})
 
     def get_initial_admissions_parquet(self, target: Optional[str] = None) -> Optional[Path]:
         """Get or create cached Parquet for initial-hospital-admissions.csv atomically."""
@@ -1406,9 +1412,9 @@ class ParquetCacheManager:
             return pl.scan_parquet(pq_path)
         return None
 
-    def scan_admissions(self) -> Optional[pl.LazyFrame]:
+    def scan_admissions(self, target: Optional[str] = None) -> Optional[pl.LazyFrame]:
         """Return a Polars LazyFrame for admissions surveillance truth."""
-        pq_path = self.get_admissions_parquet()
+        pq_path = self.get_admissions_parquet(target=target)
         if pq_path and pq_path.exists():
             return pl.scan_parquet(pq_path)
         return None

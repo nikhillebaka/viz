@@ -50,13 +50,35 @@ class PeakService:
 
     def _declared_peak_targets(self) -> Set[str]:
         store = self.loader.remote_store
-        stamp = store.state_mtime() if self.loader.include_remote else 0.0
+        stamp = (
+            store.state_mtime() if self.loader.include_remote else 0.0,
+            self.loader._compute_models_mtime(),
+        )
         cached = getattr(self, "_declared_cache", None)
         if cached is not None and cached[0] == stamp:
             return cached[1]
         declared = set(self.loader.config.get_targets())
+        # Discover sample-derived peak targets present in local/cached peak-output parquets
+        for mid, info in (self.loader.scan_models() or {}).items():
+            for p_col_target in info.get("peak_targets") or []:
+                declared.add(str(p_col_target))
+        cm = self.loader.cache_mgr
+        for root_dir in (cm.models_cache_dir, cm.local_models_cache_dir):
+            if not root_dir.is_dir():
+                continue
+            try:
+                for pq_file in root_dir.glob("*.peak.parquet"):
+                    try:
+                        ts = pl.scan_parquet(pq_file).select("target").unique().collect().get_column("target").to_list()
+                        for t in ts:
+                            if t:
+                                declared.add(str(t))
+                    except Exception:
+                        pass
+            except OSError:
+                pass
         if self.loader.include_remote:
-            for h in store.active_hub_ids():
+            for h in store.compatible_hub_ids():
                 for f in store.load_manifest(h).get("files", {}).values():
                     declared.update(f.get("peak_targets", []))
         self._declared_cache = (stamp, declared)

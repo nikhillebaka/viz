@@ -1,6 +1,7 @@
 /* The page below the chart: a compact /next/ text tab rail switching one section at a time so
  * the page stays focused and uncluttered, plus conditional companion Rate change when available. */
 import { h, storage } from "../lib/dom.js";
+import { isCategoricalTarget } from "../features/url.js";
 import { findRateChangeTarget } from "./rate_change/index.js";
 import { hasSampleModels } from "./trajectories/model.js";
 
@@ -31,7 +32,7 @@ export function mountSections(root, ctx) {
 
   const isAvailable = (id) => {
     const s = store.get();
-    if (manifest.targetById.get(s.target)?.is_categorical) return id === "scores";
+    if (isCategoricalTarget(manifest.targetById.get(s.target))) return id === "scores";
     if (id === "rate_change") return !!findRateChangeTarget(ctx.catalog, manifest, s.target, s.location);
     if (id === "trajectories") return hasSampleModels(manifest, s.target);
     return true;
@@ -70,7 +71,7 @@ export function mountSections(root, ctx) {
     for (const s of BASE_SECTIONS) {
       const btn = tabs.get(s.id);
       const panel = panels.get(s.id);
-      const avail = !s.optional || isAvailable(s.id);
+      const avail = isAvailable(s.id);
       const isActive = avail && s.id === activeId;
       btn.hidden = !avail;
       btn.setAttribute("aria-selected", String(isActive));
@@ -127,7 +128,6 @@ export function mountSections(root, ctx) {
 
   const offStore = store.select(["target", "location"], () => {
     syncTabs();
-    if (activeId === "rate_change") mounted.get("rate_change")?.update?.();
   });
 
   return {

@@ -184,16 +184,17 @@ class WindowFilter:
             return False
         return self._allowed_dates is None or d in self._allowed_dates
 
-    def round_in_window(self, reference_date: str) -> bool:
-        """A round is in scope if any of its forecast weeks (horizons -1..3) is in the window."""
+    def round_in_window(self, reference_date: str, horizons: Optional[Iterable[int]] = None) -> bool:
+        """A round is in scope if any of its forecast weeks is in the window."""
         try:
             ref = datetime.strptime(reference_date, "%Y-%m-%d")
         except ValueError:
             return True
         offset_days = int(self.calendar.horizon_offset_days) if self.calendar is not None else 0
+        hs = list(horizons) if horizons is not None else list(range(-1, 5))
         return any(
-            self.target_in_window((ref + timedelta(weeks=h, days=offset_days)).strftime("%Y-%m-%d"))
-            for h in range(-1, 4)
+            self.target_in_window((ref + timedelta(weeks=int(h), days=offset_days)).strftime("%Y-%m-%d"))
+            for h in hs
         )
 
     def apply(self, df: pl.DataFrame) -> pl.DataFrame:
@@ -375,7 +376,12 @@ class EvaluationEngine:
                 else:
                     raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
                 pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
-                mtimes.append(f"{mid}:{pq.stat().st_mtime if pq and pq.exists() else 0.0}")
+                pq_s = self.loader.cache_mgr.get_model_samples_parquet(raw_id, is_local=is_local)
+                pq_p = self.loader.cache_mgr.get_model_pmf_parquet(raw_id, is_local=is_local)
+                q_m = pq.stat().st_mtime if pq and pq.exists() else 0.0
+                s_m = pq_s.stat().st_mtime if pq_s and pq_s.exists() else 0.0
+                p_m = pq_p.stat().st_mtime if pq_p and pq_p.exists() else 0.0
+                mtimes.append(f"{mid}:{q_m}:{s_m}:{p_m}")
 
         dims_key = tuple(sorted((str(k), str(v)) for k, v in (params.dims or {}).items()))
         raw = (
@@ -829,10 +835,12 @@ class EvaluationEngine:
                 dates_filter = self.loader.get_dates_for_season("all")
 
         window_filter = self._build_window_filter(target, params.weeks, params.phase, calendar=cal)
-        if window_filter is not None and dates_filter:
-            dates_filter = [d for d in dates_filter if window_filter.round_in_window(d)]
-
         target_meta = self.config.get_target_metadata(target)
+        if window_filter is not None and dates_filter:
+            hm_meta = target_meta.get("horizons") or {}
+            win_hs = sorted({int(x) for x in (*(hm_meta.get("required") or ()), *(hm_meta.get("optional") or ()))})
+            dates_filter = [d for d in dates_filter if window_filter.round_in_window(d, horizons=win_hs or None)]
+
         is_pmf_target = bool(
             target_meta.get("is_categorical")
             and "quantile" not in (target_meta.get("output_types") or [])

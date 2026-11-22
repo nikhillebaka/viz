@@ -66,9 +66,10 @@ export function mount(el, ctx) {
   };
   const counts = () => {
     const t = target();
-    return !t?.is_rate && t?.scale !== "proportion";
+    return !t?.is_rate && t?.scale !== "proportion" && t?.per_100k_capable !== false;
   };
   const vf = () => valueFormat(target());
+  const baseId = () => { const s = store.get(); return manifest.baselineFor?.(s.target, s.date) ?? manifest.baseline; };
   const layers = () => LAYERS.filter((l) => counts() || !l.counts);
   const layerOf = () => layers().find((l) => l.id === layer) || layers()[0];
   const minH = () => layerOf().minHorizon || 0;
@@ -80,8 +81,8 @@ export function mount(el, ctx) {
   const save = () => vs.write({ layer, horizon }, layer === LAYERS[0].id && horizon === 1);
 
   const candidates = () => {
-    const s = store.get(), ids = [...s.sel.selected];
-    if (manifest.baseline && !ids.includes(manifest.baseline)) ids.push(manifest.baseline);
+    const s = store.get(), ids = [...s.sel.selected], base = baseId();
+    if (base && !ids.includes(base)) ids.push(base);
     return ids;
   };
   const locRecord = (id) => {
@@ -435,7 +436,7 @@ export function mount(el, ctx) {
   let glance = [];
   function overview() {
     const s = store.get(), sl = slotOf(s.sel, model);
-    const dot = model === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
+    const dot = model === baseId() ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
     const scopeTitle = geoCls.kind === "eu-countries"
       ? "All countries"
       : geoCls.kind === "us-metrocast"

@@ -3,7 +3,7 @@
  * cancellation, the score color ramps, HHS regions, canvas sizing, and on-screen / DPR watching. */
 export { fitLabels } from "../lib/labels.js";
 import { h, on, cssColor, storage } from "../lib/dom.js";
-import { apiUrl } from "../lib/api.js";
+import { apiUrl, registerCacheClear } from "../lib/api.js";
 import { openMenu } from "../ui/floating.js";
 
 /* ---------------------------------------------------------------- styles */
@@ -110,6 +110,7 @@ export function setLine(line, parts) {
 
 /* ---------------------------------------------------------------- data */
 const cache = new Map();
+registerCacheClear(() => cache.clear());
 /**
  * GET JSON with a small cache (32 responses) and cancellation. A newer call with the same `slot`
  * aborts the older one (its promise then rejects with an AbortError, which callers ignore).

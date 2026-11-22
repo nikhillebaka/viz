@@ -15,7 +15,7 @@
  * list what exists here); responses are cached. Everything that doesn't depend on the view is prepared
  * once per response; a frame only maps prepared points through the scene's scales into reused buffers. */
 import { h, on, tokenNum } from "../../lib/dom.js";
-import { apiUrl } from "../../lib/api.js";
+import { apiUrl, registerCacheClear } from "../../lib/api.js";
 import { WEEK, DAY, parseIso, niceStep } from "../../lib/scale.js";
 import { glass } from "../../ui/glass.js";
 import { openMenu, activeLayer } from "../../ui/floating.js";
@@ -76,6 +76,7 @@ const seasonLabel = (id) => { const y = +String(id).slice(0, 4); return Number.i
 
 /* ---------------- data: cached JSON, in-flight requests shared ---------------- */
 const cache = new Map();
+registerCacheClear(() => cache.clear());
 function getJson(path, params) {
   const url = apiUrl(`${path}?${new URLSearchParams(params)}`);
   let p = cache.get(url);

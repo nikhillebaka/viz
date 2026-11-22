@@ -102,16 +102,21 @@ class NextData:
         self._fan_cache: "OrderedDict[Tuple, Tuple[Tuple, bytes]]" = OrderedDict()
         self._fan_inflight: Dict[Tuple, threading.Event] = {}
         self._fan_cache_size = fan_cache_size
+        self._traj_cache: "OrderedDict[Tuple, Tuple[Tuple, bytes]]" = OrderedDict()
+        self._traj_cache_size = 32
         self._meta_cache: Dict[str, Dict[str, Any]] = {}
         self._meta_stamp: Optional[float] = None
         self._truth_cache: Dict[str, Tuple[Tuple, Dict[str, Tuple[List[str], List[float]]]]] = {}
+        self._vlocs_cache: Dict[str, Tuple[Tuple, set]] = {}
 
     # ------------------------------------------------------------------ stamps
     def invalidate(self):
         """Drop all cached Next payloads and metadata after truth or model inventory updates."""
         with self._lock:
             self._fan_cache.clear()
+            self._traj_cache.clear()
             self._truth_cache.clear()
+            self._vlocs_cache.clear()
             self._meta_cache.clear()
             self._meta_stamp = None
 
@@ -208,10 +213,12 @@ class NextData:
         cal = loader.get_calendar()
         geo = loader.get_geo_graph()
 
+        all_locs_set = set(loader.get_locations().keys())
         target_meta = []
         for t in config.get_weekly_targets():
             m = config.get_target_metadata(t)
-            target_meta.append({
+            vlocs = self.valid_locations_for_target(t)
+            t_obj = {
                 "id": t,
                 "label": m.get("display_name") or t,
                 "short": m.get("short_name") or (m.get("display_name") or t),
@@ -225,7 +232,12 @@ class NextData:
                 "categories": list(m.get("categories") or []),
                 "dimensions": m.get("dimensions") or {},
                 "horizons": m.get("horizons") or {"required": [], "optional": []},
-            })
+            }
+            if vlocs and len(vlocs) < len(all_locs_set):
+                t_obj["locations"] = sorted(vlocs)
+            elif not vlocs:
+                t_obj["locations"] = []
+            target_meta.append(t_obj)
 
         hub_seasons = loader.get_hub_seasons()
         seasons = []
@@ -407,6 +419,73 @@ class NextData:
                 self._truth_cache.clear()
             self._truth_cache[target] = (stamp, out)
         return out
+
+    def valid_locations_for_target(self, target: str) -> set[str]:
+        """Return hub location IDs actually valid/covered for `target`."""
+        stamp = self._stamp()
+        with self._lock:
+            cached = self._vlocs_cache.get(target)
+            if cached is not None and cached[0] == stamp:
+                return set(cached[1])
+
+        hub_locs = set(self.loader.get_locations().keys())
+        task_locs = set()
+        if hasattr(self.config, "get_target_locations"):
+            task_locs = set(self.config.get_target_locations(target)) & hub_locs
+
+        tm = self.config.get_target_metadata(target)
+        obs_locs: set[str] = set()
+        if tm.get("is_categorical"):
+            lf_o = self.loader.cache_mgr.scan_oracle()
+            if lf_o is not None:
+                try:
+                    cols = lf_o.collect_schema().names()
+                    q = lf_o.filter(pl.col("target") == target)
+                    if "output_type" in cols and not q.filter(pl.col("output_type") == "pmf").collect().is_empty():
+                        q = q.filter(pl.col("output_type") == "pmf")
+                    obs_locs = {
+                        str(x) for x in q.select(pl.col("location").cast(pl.String)).unique().collect().get_column("location").to_list()
+                        if x and str(x) in hub_locs
+                    }
+                except Exception:
+                    obs_locs = set()
+            if not obs_locs:
+                models = self.loader.scan_models()
+                for mid, info in models.items():
+                    if info.get("targets") and target not in info["targets"]:
+                        continue
+                    lf_p = self.loader.cache_mgr.scan_model_pmf(info.get("raw_name", mid), is_local=info.get("is_local", False))
+                    if lf_p is None:
+                        continue
+                    try:
+                        obs_locs.update(
+                            str(x)
+                            for x in lf_p.filter(pl.col("target") == target).select(pl.col("location").cast(pl.String)).unique().collect().get_column("location").to_list()
+                            if x and str(x) in hub_locs
+                        )
+                    except Exception:
+                        pass
+        else:
+            obs_locs = {k for k in self._observed(target).keys() if k in hub_locs}
+
+        if obs_locs:
+            valid = (obs_locs & task_locs) if task_locs else obs_locs
+        else:
+            models = self.loader.scan_models()
+            has_fc = any(
+                (info.get("dates") and (not info.get("targets") or target in info["targets"]))
+                for info in models.values()
+            )
+            if has_fc:
+                valid = task_locs if task_locs else hub_locs
+            else:
+                valid = set()
+
+        with self._lock:
+            if len(self._vlocs_cache) >= 64:
+                self._vlocs_cache.clear()
+            self._vlocs_cache[target] = (stamp, set(valid))
+        return valid
 
     # ------------------------------------------------------------------ fan (VZF1 & VZF2)
     def asof(self, target: str, season: str, location: str) -> Dict[str, Any]:
@@ -676,7 +755,7 @@ class NextData:
     def trajectories(
         self,
         target: str,
-        season: str,
+        season: Optional[str],
         location: str,
         round_date: str,
         *,
@@ -690,9 +769,18 @@ class NextData:
         """
         loader = self.loader
         cal = loader.get_calendar()
+        eff_season = season or cal.season_for_date(round_date)
         resolved_dims = self._resolve_dims(target, dims)
         all_models = loader.scan_models()
         candidate_ids = [m for m in (models or list(all_models.keys())) if m in all_models]
+        cap = max(1, int(max_samples))
+        stamp = self._stamp()
+        tkey = (target, eff_season, str(location), round_date, tuple(sorted(candidate_ids)), _dims_cache_key(resolved_dims), cap)
+        with self._lock:
+            hit = self._traj_cache.get(tkey)
+            if hit is not None and hit[0] == stamp:
+                self._traj_cache.move_to_end(tkey)
+                return hit[1]
 
         ids, frames = [], []
         for mid in candidate_ids:
@@ -730,10 +818,13 @@ class NextData:
         body: List[np.ndarray] = []
         offset = 0
         header_models: List[Dict[str, Any]] = []
-        cap = max(1, int(max_samples))
+
+        def _sid_key(s: Any) -> Tuple[int, Any]:
+            sv = str(s).strip()
+            return (0, int(sv)) if sv.isdigit() else (1, sv)
 
         for mid, df in present:
-            sample_ids = sorted(df.get_column("sid").unique().to_list())[:cap]
+            sample_ids = sorted(df.get_column("sid").unique().to_list(), key=_sid_key)[:cap]
             m_horizons = sorted(h for h in df.get_column("horizon").unique().to_list() if h is not None)
             s_idx = {s: i for i, s in enumerate(sample_ids)}
             h_idx = {h: i for i, h in enumerate(m_horizons)}
@@ -756,7 +847,7 @@ class NextData:
         header = {
             "version": 1,
             "target": target,
-            "season": season,
+            "season": eff_season,
             "location": str(location),
             "reference_date": round_date,
             "horizon_offset_days": resolved_offset,
@@ -767,7 +858,13 @@ class NextData:
         head = json.dumps(header, separators=(",", ":")).encode("utf-8")
         head += b" " * (-len(head) % 4)
         arr = np.concatenate(body) if body else np.empty(0, dtype="<f4")
-        return TRAJ_MAGIC + struct.pack("<I", len(head)) + head + arr.tobytes()
+        payload = TRAJ_MAGIC + struct.pack("<I", len(head)) + head + arr.tobytes()
+        with self._lock:
+            self._traj_cache[tkey] = (stamp, payload)
+            self._traj_cache.move_to_end(tkey)
+            while len(self._traj_cache) > self._traj_cache_size:
+                self._traj_cache.popitem(last=False)
+        return payload
 
     # ------------------------------------------------------------------ categorical PMF
     def pmf(
@@ -839,7 +936,7 @@ class NextData:
         if not categories:
             categories = sorted(seen_cats)
 
-        # Extract observed categorical outcomes in season window
+        # Extract observed categorical outcomes in season window (preserving horizon when oracle varies by horizon)
         start, end = cal.season_bounds(season)
         observed_list: List[Dict[str, Any]] = []
         lf_o = loader.cache_mgr.scan_oracle()
@@ -856,18 +953,34 @@ class NextData:
                 for dcol, dval in resolved_dims.items():
                     if dcol in o_names:
                         oq = oq.filter(pl.col(dcol).cast(pl.String) == dval)
-                odf = oq.select([
+                has_h = "horizon" in o_names
+                sel_cols = [
                     pl.col("target_end_date").cast(pl.String),
                     pl.col("output_type_id").cast(pl.String),
                     pl.col("oracle_value").cast(pl.Float64),
-                ] + ([pl.col("as_of").cast(pl.String)] if "as_of" in o_names else [])).collect()
+                ]
+                if has_h:
+                    sel_cols.append(pl.col("horizon").cast(pl.Int32))
+                if "as_of" in o_names:
+                    sel_cols.append(pl.col("as_of").cast(pl.String))
+                odf = oq.select(sel_cols).collect()
                 if not odf.is_empty():
+                    use_h = has_h and not odf.filter(pl.col("horizon").is_not_null()).is_empty()
+                    gkeys = ["target_end_date", "horizon"] if use_h else ["target_end_date"]
                     if "as_of" in odf.columns:
-                        odf = odf.sort("as_of").group_by("target_end_date").last()
+                        odf = odf.sort(["as_of", "oracle_value"]).group_by(gkeys).last()
                     else:
-                        odf = odf.sort("oracle_value").group_by("target_end_date").last()
-                    for ted, cat, val in odf.sort("target_end_date").select(["target_end_date", "output_type_id", "oracle_value"]).iter_rows():
-                        observed_list.append({"date": str(ted), "category": str(cat), "value": float(val)})
+                        odf = odf.sort("oracle_value").group_by(gkeys).last()
+                    out_cols = ["target_end_date", "output_type_id", "oracle_value"] + (["horizon"] if use_h else [])
+                    for rec_o in odf.sort(gkeys).select(out_cols).iter_rows(named=True):
+                        item: Dict[str, Any] = {
+                            "date": str(rec_o["target_end_date"]),
+                            "category": str(rec_o["output_type_id"]),
+                            "value": float(rec_o["oracle_value"]),
+                        }
+                        if use_h and rec_o.get("horizon") is not None:
+                            item["horizon"] = int(rec_o["horizon"])
+                        observed_list.append(item)
 
         return {
             "target": target,

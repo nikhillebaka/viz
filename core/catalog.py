@@ -118,18 +118,34 @@ def infer_pathogen(
     targets: Optional[Iterable[str]] = None,
 ) -> Tuple[str, str]:
     """Infer canonical `(pathogen_key, pathogen_label)` from a HubSpec, targets, or hub label."""
+    def _match_explicit(text: str) -> Optional[Tuple[str, str]]:
+        if not text:
+            return None
+        if "covid" in text or "sars" in text:
+            return ("covid19", "COVID-19")
+        if re.search(r"(?<![a-z])rsv(?![a-z])", text):
+            return ("rsv", "RSV")
+        if _RE_ILI.search(text) or _RE_ARI.search(text) or "syndromic" in text:
+            return ("syndromic", "ILI / ARI")
+        if re.search(r"(?<![a-z])(flu|influenza)(?![a-z])|flusight", text):
+            return ("influenza", "Influenza")
+        return None
+
+    # Explicit pathogen names in target IDs beat hub spec/folder slugs
+    t_hay = " ".join(str(t) for t in (targets or [])).lower()
+    if m := _match_explicit(t_hay):
+        return m
+
     raw_p = str(getattr(spec, "pathogen", "") or "").strip().lower()
     if raw_p in PATHOGEN_LABELS:
         return PATHOGEN_LABELS[raw_p]
 
-    hay = " ".join([str(hub_id), str(label), *(str(t) for t in (targets or []))]).lower()
-    if "covid" in hay or "sars" in hay:
-        return ("covid19", "COVID-19")
-    if "rsv" in hay:
-        return ("rsv", "RSV")
-    if "ili" in hay or "ari" in hay or "syndromic" in hay:
-        return ("syndromic", "ILI / ARI")
-    if "flu" in hay or "ed visits" in hay or "hosp" in hay:
+    h_hay = " ".join([str(label), str(hub_id)]).lower()
+    if m := _match_explicit(h_hay):
+        return m
+
+    combined = f"{t_hay} {h_hay}"
+    if "ed visits" in combined or "hosp" in combined:
         return ("influenza", "Influenza")
     clean = str(getattr(spec, "short_label", "") or label or hub_id).strip()
     return (clean.lower() or "other", clean or "Forecasts")
@@ -449,30 +465,37 @@ class WorkspaceCatalog:
                 except Exception:
                     season_start = None
             hub_target_entries: List[Dict[str, Any]] = []
+            valid_locs_by_target: Dict[str, Set[str]] = {}
             for tid in weekly:
                 tm = ctx.config.get_target_metadata(tid)
                 t_path, t_path_label = infer_pathogen(hub_id, ctx.display_label, spec=spec, targets=[tid])
                 cid, clabel, ambig = canonical_target_concept(
                     tid, tm, t_path, user_aliases=user_aliases, hub_id=hub_id
                 )
+                valid_locs = ctx.next_data.valid_locations_for_target(tid)
+                if not valid_locs:
+                    continue
+                valid_locs_by_target[tid] = valid_locs
                 obs_by_loc = ctx.next_data._observed(tid)
                 target_def_loc = hub_def_loc
+                if target_def_loc not in valid_locs:
+                    target_def_loc = next(iter(sorted(valid_locs)))
                 if obs_by_loc:
-                    def_dates = obs_by_loc.get(hub_def_loc, ([], []))[0]
+                    def_dates = obs_by_loc.get(target_def_loc, ([], []))[0]
                     has_active_def = bool(def_dates) and (
                         any(d >= season_start for d in def_dates) if season_start else True
                     )
                     if not has_active_def:
                         candidates = []
                         for lid, (dates, _) in obs_by_loc.items():
-                            if dates and lid in locs:
+                            if dates and lid in valid_locs:
                                 recent = sum(1 for d in dates if d >= season_start) if season_start else len(dates)
                                 if recent:
                                     pop = locs[lid].get("population") or 0
                                     candidates.append((1, pop, recent, lid))
                         if not candidates:
                             for lid, (dates, _) in obs_by_loc.items():
-                                if dates and lid in locs:
+                                if dates and lid in valid_locs:
                                     pop = locs[lid].get("population") or 0
                                     candidates.append((0, pop, len(dates), lid))
                         if candidates:
@@ -502,7 +525,7 @@ class WorkspaceCatalog:
                     "unit": tm.get("unit") or "",
                     "per_100k_capable": bool(tm.get("per_100k_capable", False)),
                     "dimensions": tm.get("dimensions") or {},
-                    "location_count": len(locs),
+                    "location_count": len(valid_locs),
                 }
                 targets_out.append(t_rec)
                 hub_target_entries.append({
@@ -517,6 +540,12 @@ class WorkspaceCatalog:
                 })
 
             for lid, ldict in locs.items():
+                loc_targets = [
+                    te for te in hub_target_entries
+                    if lid in valid_locs_by_target.get(te["target_id"], ())
+                ]
+                if not loc_targets:
+                    continue
                 pkey, sfips, parent_key = canonical_place_key(hub_id, lid, ldict, geo_kind)
                 if parent_key and parent_key != pkey:
                     children_by_parent.setdefault(parent_key, set()).add(pkey)
@@ -570,7 +599,7 @@ class WorkspaceCatalog:
                         "pathogen": pathogen,
                         "pathogen_label": pathogen_label,
                         "region_label": region_label,
-                        "targets": hub_target_entries,
+                        "targets": loc_targets,
                     })
 
         for parent_k, kids in children_by_parent.items():
@@ -645,6 +674,7 @@ class WorkspaceCatalog:
         for tid in weekly:
             tm = ctx.config.get_target_metadata(tid)
             if tm.get("is_categorical"):
+                vlocs = ctx.next_data.valid_locations_for_target(tid)
                 cat_targets.append({
                     "hub_id": hub_id,
                     "hub_short": short_label,
@@ -652,6 +682,7 @@ class WorkspaceCatalog:
                     "short": tm.get("short_name") or tm.get("display_name") or tid,
                     "label": tm.get("display_name") or tid,
                     "is_categorical": True,
+                    "_valid_locs": set(vlocs) if vlocs else None,
                 })
                 continue
             if not latest_round:
@@ -741,8 +772,8 @@ class WorkspaceCatalog:
                     {
                         "is_agg": is_agg,
                         "sfips": sfips,
-                        "observed": round(obs_val, 3) if obs_val is not None else None,
-                        "forecast": round(fc_val, 3) if fc_val is not None else None,
+                        "observed": round(obs_val, 5 if (tm.get("scale") == "proportion" and not use_rate) else 3) if obs_val is not None else None,
+                        "forecast": round(fc_val, 5 if (tm.get("scale") == "proportion" and not use_rate) else 3) if fc_val is not None else None,
                         "trend_pct": round(trend_pct, 2) if trend_pct is not None else None,
                         "use_rate": use_rate,
                         "ref_date": ref_date,
@@ -922,16 +953,29 @@ class WorkspaceCatalog:
                     reg["streams"].extend(streams)
             stamp_parts.append(f"{prov['id']}:{len(sl['signals'])}")
 
-        # Attach categorical targets per region via catalog place hubs
+        # Attach categorical targets per region via catalog place hubs (scoped to valid locations)
+        cat_meta_lookup = {
+            (t.get("hub_id"), t.get("target_id") or t.get("id")): t
+            for t in (cat.get("targets") or [])
+            if t.get("is_categorical")
+        }
         for pkey, pinfo in cat["places"].items():
             reg = regions[pkey]
             for h_ent in pinfo.get("hubs") or []:
                 hid = h_ent["hub_id"]
+                lid = str(h_ent["location_id"])
                 for ct in cat_by_hub.get(hid, []):
-                    reg["categorical_streams"].append({
-                        **ct,
-                        "location_id": h_ent["location_id"],
-                    })
+                    vlocs = ct.get("_valid_locs")
+                    if vlocs is not None and lid not in vlocs:
+                        continue
+                    tmeta_cat = cat_meta_lookup.get((hid, ct["target_id"])) or {}
+                    entry = {k: v for k, v in ct.items() if k != "_valid_locs"}
+                    entry["location_id"] = lid
+                    if tmeta_cat.get("concept_id"):
+                        entry["concept_id"] = tmeta_cat["concept_id"]
+                    if tmeta_cat.get("pathogen"):
+                        entry["pathogen"] = tmeta_cat["pathogen"]
+                    reg["categorical_streams"].append(entry)
 
         # Compute composite relative activity (max across connected streams at the region)
         for reg in regions.values():

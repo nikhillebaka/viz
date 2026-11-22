@@ -44,6 +44,7 @@ class VizConfig:
         self._user_config: Dict[str, Any] = self._load_user_config()
         self._tasks_config: Optional[Dict[str, Any]] = self._load_tasks_config()
         self._target_specs_cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._target_locations_cache: Optional[Dict[str, Set[str]]] = None
         self._calendar_cache: Optional[CalendarSpec] = None
 
     @staticmethod
@@ -97,6 +98,12 @@ class VizConfig:
                 tgts = [str(x).strip() for x in self._task_list(tids.get("target")) if str(x).strip()]
                 if not tgts:
                     continue
+                loc_vals = [str(x).strip() for x in self._task_list(tids.get("location")) if x is not None and str(x).strip()]
+                if loc_vals:
+                    tloc_map = self._target_locations_cache if self._target_locations_cache is not None else {}
+                    for t in tgts:
+                        tloc_map.setdefault(t, set()).update(loc_vals)
+                    self._target_locations_cache = tloc_map
 
                 ot_map = mt.get("output_type") or {}
                 ot_names = [str(k).strip() for k in ot_map.keys() if isinstance(k, str)]
@@ -178,7 +185,15 @@ class VizConfig:
                                 ent[k] = tm[k]
 
         self._target_specs_cache = specs
+        if self._target_locations_cache is None:
+            self._target_locations_cache = {}
         return specs
+
+    def get_target_locations(self, target: str) -> Set[str]:
+        """Return declared task_ids.location values for `target` from tasks.json (empty if unrestricted)."""
+        self._parse_target_specs()
+        locs = (self._target_locations_cache or {}).get(str(target))
+        return set(locs) if locs else set()
 
     def get_calendar(
         self,

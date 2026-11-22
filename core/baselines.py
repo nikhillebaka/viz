@@ -15,6 +15,25 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 _VARIANT_SUFFIX_RE = re.compile(r"(?:_cat|_test|_alt|_v\d+|_old|_experimental)$", re.IGNORECASE)
 _SOURCE_RANK = {"repo": 3, "hub": 2, "local": 1, "synthetic": 0}
+_OFFICIAL_HUB_BASELINE_PREFIXES = frozenset({
+    "flusight", "covidhub", "covid19hub", "covid", "rsvhub", "rsv",
+    "metrocast", "respicast", "hub", "cdc", "ecdc", "quantilebaseline",
+})
+
+
+def _is_official_hub_baseline(model_id: str) -> bool:
+    """True for hub-designated baseline IDs such as 'FluSight-baseline' or 'quantileBaseline'."""
+    bare = _bare_model_id(model_id).strip().lower()
+    if _VARIANT_SUFFIX_RE.search(bare):
+        return False
+    if bare in ("baseline", "quantilebaseline", "hubbaseline", "hub-baseline", "hub_baseline", "baseline_model"):
+        return True
+    for sep in ("-", "_"):
+        if bare.endswith(f"{sep}baseline"):
+            prefix = bare[: -(len(sep) + len("baseline"))]
+            if prefix in _OFFICIAL_HUB_BASELINE_PREFIXES:
+                return True
+    return False
 
 
 def _bare_model_id(model_id: str) -> str:
@@ -76,6 +95,7 @@ def rank_baselines(
 
     date_set = {str(d) for d in dates if d} if dates is not None else None
     meta_map = model_meta or {}
+    max_rounds = max((len(info.get("dates") or []) for info in models.values()), default=1) or 1
     scored: List[tuple] = []
 
     for mid, info in models.items():
@@ -101,15 +121,17 @@ def rank_baselines(
         elif season:
             m_seasons = set(info.get("seasons") or [])
             has_scope = 1 if season in m_seasons else 0
-            coverage = float(has_scope)
+            coverage = (len(info.get("dates") or []) / max_rounds) if has_scope else 0.0
         else:
+            m_dates = info.get("dates") or []
             has_scope = 1
-            coverage = 1.0
+            coverage = len(m_dates) / max_rounds
 
-        full_enough = 1 if coverage >= 0.85 else 0
+        full_enough = (1 if coverage >= 0.85 else 0) if date_set else has_scope
+        is_official = 1 if (tier >= 5 or _is_official_hub_baseline(mid)) else 0
         src = info.get("source") or ("local" if info.get("is_local") else "repo")
         src_rank = _SOURCE_RANK.get(src, 0)
-        scored.append((-has_scope, -full_enough, -tier, -src_rank, -coverage, mid))
+        scored.append((-has_scope, -full_enough, -(tier == 5), -is_official, -tier, -src_rank, -coverage, mid))
 
     scored.sort()
     return [row[-1] for row in scored]

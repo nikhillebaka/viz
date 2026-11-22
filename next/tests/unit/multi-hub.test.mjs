@@ -85,17 +85,20 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     assert.equal(perf.rps, 0);
     assert.equal(perf.brier, 0);
     assert.equal(perf.logScore, 0);
+    assert.equal(perf.logLoss, 0);
     assert.equal(perf.modeHit, true);
 
     const unif = scorePmfDistribution([0.2, 0.2, 0.2, 0.2, 0.2], 2);
     assert.ok(Math.abs(unif.rps - 0.1) < 1e-12);
     assert.ok(Math.abs(unif.brier - 0.8) < 1e-12);
     assert.ok(Math.abs(unif.logScore - Math.log(0.2)) < 1e-12);
+    assert.ok(Math.abs(unif.logLoss + Math.log(0.2)) < 1e-12);
     assert.equal(unif.modeHit, false);
 
     const zero = scorePmfDistribution([0, 0, 0, 0, 1], 0);
     assert.ok(Number.isFinite(zero.logScore));
     assert.ok(zero.logScore < -10);
+    assert.ok(zero.logLoss > 10);
     assert.equal(zero.rps, 1);
 
     const segs = verticalPmfSegments([0.1, 0.2, 0.4, 0.2, 0.1]);
@@ -191,21 +194,28 @@ describe("Phase 3 multi-hub frontend helpers", () => {
       },
     };
 
-    // At Massachusetts ("25"): Influenza + COVID-19 appear above sep, Europe below sep
+    // At Massachusetts ("25"): only MA targets appear, with per-location targets respected and no Europe leak
     const maMenu = buildTargetMenuGroups(catalog, man, "25", "local_flu", "wk inc flu hosp");
-    const sepIdx = maMenu.findIndex((e) => e.type === "sep");
-    assert.ok(sepIdx > 0);
-    const above = maMenu.slice(0, sepIdx).filter((e) => e.type === "item");
-    const below = maMenu.slice(sepIdx + 1).filter((e) => e.type === "item");
-    assert.equal(above.length, 3);
-    assert.equal(above[1].shortcut, "MetroCast");
-    assert.equal(below.length, 1);
-    assert.equal(below[0].targetId, "ILI incidence");
+    assert.equal(maMenu.findIndex((e) => e.type === "sep"), -1);
+    const maItems = maMenu.filter((e) => e.type === "item");
+    assert.equal(maItems.length, 3);
+    assert.equal(maItems[1].shortcut, "MetroCast");
+    assert.ok(maItems.every((e) => e.targetId !== "ILI incidence"));
 
-    // At Boston HSA: inherits parent Massachusetts state targets via parent_key="25"
+    // Per-location h_ent.targets filtering excludes targets not valid at that location, and US country targets don't leak onto state "25"
+    const scopedCat = structuredClone(catalog);
+    scopedCat.places.US = {
+      key: "US", name: "United States", abbr: "US", level: "country",
+      hubs: [{ hub_id: "remote_respicast_syndromic", location_id: "US", targets: [{ target_id: "ILI incidence", id: "ILI incidence" }] }],
+    };
+    scopedCat.places["25"].hubs[1].targets = []; // MetroCast has zero targets at state "25" (e.g. MA only has ED% at HSAs)
+    const strictMa = buildTargetMenuGroups(scopedCat, man, "25", "local_flu", "wk inc flu hosp").filter((e) => e.type === "item");
+    assert.deepEqual(strictMa.map((x) => x.targetId).sort(), ["wk inc covid hosp", "wk inc flu hosp"]);
+
+    // At Boston HSA (subnational): inherits parent Massachusetts state targets via parent_key="25"
     const bosMenu = buildTargetMenuGroups(catalog, man, "boston", "remote_flu_metrocast", "Flu ED visits pct");
-    const bosAbove = bosMenu.slice(0, bosMenu.findIndex((e) => e.type === "sep")).filter((e) => e.type === "item");
-    assert.equal(bosAbove.find((e) => e.hubId === "remote_covid19")?.shortcut, "MA");
+    const bosItems = bosMenu.filter((e) => e.type === "item");
+    assert.equal(bosItems.find((e) => e.hubId === "remote_covid19")?.shortcut, "MA");
 
     // Cross-hub place search while viewing US FluSight
     const frHits = matchCatalogPlaces(catalog, man, "france", "local_flu");
@@ -284,21 +294,18 @@ describe("Phase 3 multi-hub frontend helpers", () => {
     };
 
     const maMenu = buildTargetMenuGroups(catalog, man, "25", "local_flu", "proportion of ed visits due to flu");
-    const sepIdx = maMenu.findIndex((e) => e.type === "sep");
-    const above = maMenu.slice(0, sepIdx).filter((e) => e.type === "item");
-    const below = maMenu.slice(sepIdx + 1).filter((e) => e.type === "item");
-    assert.equal(above.length, 1);
-    assert.equal(above[0].hubId, "local_flu");
-    assert.equal(above[0].label, "Influenza ED visits share");
-    assert.equal(below.length, 1);
-    assert.equal(below[0].locationId, null);
+    assert.equal(maMenu.findIndex((e) => e.type === "sep"), -1);
+    const maItems = maMenu.filter((e) => e.type === "item");
+    assert.equal(maItems.length, 1);
+    assert.equal(maItems[0].hubId, "local_flu");
+    assert.equal(maItems[0].label, "Influenza ED visits share");
 
     // Inside Boston HSA, active direct MetroCast match wins over parent FluSight match
     const bosMenu = buildTargetMenuGroups(catalog, man, "boston", "remote_flu_metrocast", "Flu ED visits pct");
-    const bosAbove = bosMenu.slice(0, bosMenu.findIndex((e) => e.type === "sep")).filter((e) => e.type === "item");
-    assert.equal(bosAbove.length, 1);
-    assert.equal(bosAbove[0].hubId, "remote_flu_metrocast");
-    assert.equal(bosAbove[0].locationId, "boston");
+    const bosItems = bosMenu.filter((e) => e.type === "item");
+    assert.equal(bosItems.length, 1);
+    assert.equal(bosItems[0].hubId, "remote_flu_metrocast");
+    assert.equal(bosItems[0].locationId, "boston");
   });
 
   it("buildTargetMenuGroups excludes categorical targets while findRateChangeTarget resolves companion rate change", () => {

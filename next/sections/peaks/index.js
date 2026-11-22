@@ -117,7 +117,8 @@ export function mount(el, ctx) {
   /* The selected models (and the baseline); when none of them forecast peaks this round, the server
    * answers for every model in the same request (fallback=all). A server from before that ignores it,
    * so then a second ask follows (models=all, or the ids for one older still). */
-  const mine = () => [...new Set([...store.get().sel.selected, manifest.baseline].filter(Boolean))];
+  const baseId = () => { const s = store.get(); return manifest.baselineFor?.(s.target, s.date) ?? manifest.baseline; };
+  const mine = () => [...new Set([...store.get().sel.selected, baseId()].filter(Boolean))];
   const forecasts = (j) => (j?.models || []).some((m) => m.has_round && (m.timing || m.size));
   function load(force) {
     force = force === true;
@@ -189,9 +190,9 @@ export function mount(el, ctx) {
 
   /* Which models: the selected ones that forecast peaks this round; when none do, every model that does. */
   function choose() {
-    const s = store.get();
+    const s = store.get(), base = baseId();
     const here = (resp?.models || []).filter((m) => m.has_round && (m.timing || m.size)).map((m) => m.model_id);
-    const sel = new Set([...s.sel.selected, manifest.baseline]);
+    const sel = new Set([...s.sel.selected, base]);
     const mineHere = here.filter((id) => sel.has(id));
     shown = mineHere.length ? mineHere : here;
     shown.fallback = !mineHere.length && here.length > 0;
@@ -201,11 +202,11 @@ export function mount(el, ctx) {
   }
 
   // ---------------------------------------------------------------- colors
-  const isDrawn = (id) => { const s = store.get(); return id === manifest.baseline ? !!s.sel.baseline : isCharted(s.sel, id); };
+  const isDrawn = (id) => { const s = store.get(); return id === baseId() ? !!s.sel.baseline : isCharted(s.sel, id); };
   /** the series color when the model is on the fan chart, else null */
   function seriesOf(id) {
     if (!id || !isDrawn(id)) return null;
-    return cssColor(id === manifest.baseline ? seriesColor("baseline") : seriesColor(slotOf(store.get().sel, id)));
+    return cssColor(id === baseId() ? seriesColor("baseline") : seriesColor(slotOf(store.get().sel, id)));
   }
   const alpha = (rgb, a) => rgb.replace(/^rgba?\(([^,]+),([^,]+),([^,)]+)(?:,[^)]*)?\)$/, `rgba($1,$2,$3, ${a})`);
   const ink = (n) => cssColor(`var(--ink-${n})`);

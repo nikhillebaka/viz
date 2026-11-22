@@ -37,9 +37,10 @@ export function mount(el, ctx) {
   // ---------------------------------------------------------------- the control line
   const save = () => vs.write(view, JSON.stringify(view) === JSON.stringify(normalizeView(DEFAULT_VIEW, counts())));
   const setView = (patch) => { view = normalizeView({ ...view, ...patch }, counts()); save(); syncLine(); load(); };
+  const baseId = () => { const s = store.get(); return manifest.baselineFor?.(s.target, s.date) ?? manifest.baseline; };
   const modelChoices = () => {
-    const s = store.get(), ids = [...s.sel.selected];
-    if (manifest.baseline && !ids.includes(manifest.baseline)) ids.push(manifest.baseline);
+    const s = store.get(), ids = [...s.sel.selected], base = baseId();
+    if (base && !ids.includes(base)) ids.push(base);
     return [{ value: "truth", label: "Observed" }, ...ids.map((id) => ({ value: id, label: manifest.label(id, ids) }))];
   };
   const axisItems = (axes) => axes.map((a) => ({ value: a, label: AXIS_LABEL[a] }));
@@ -144,7 +145,7 @@ export function mount(el, ctx) {
   }
   // a date's week of its own season, so a week window applies to every scoped season
   const weekOf = (iso) => { const id = manifest.seasonOf(iso); return id ? seasonWeekOf(startYearOf(id), parseIso(iso)) : NaN; };
-  const withBaseline = (ids) => (ids.length ? [...new Set([...ids, manifest.baseline].filter(Boolean))] : null);
+  const withBaseline = (ids) => { const b = baseId(); return ids.length ? [...new Set([...ids, b].filter(Boolean))] : null; };
 
   function regionOf(key) {
     const loc = P.byAbbr.get(key) || manifest.locationById.get(key);
@@ -163,7 +164,7 @@ export function mount(el, ctx) {
     const ids = [...(resp.y_keys || []), ...(resp.x_keys || [])];
     hover = null; cursor.hidden = true; readout.hide();
     grid = buildGrid(resp, view, {
-      baseline: manifest.baseline, weeks: sc.weeks, weekOf, horizons: sc.horizons,
+      baseline: sc.baseline || baseId(), weeks: sc.weeks, weekOf, horizons: sc.horizons,
       region: regionOf,
       population: (a) => (P.byAbbr.get(a) || manifest.locationById.get(a))?.population,
       season: (iso) => manifest.seasonOf(iso),
@@ -285,7 +286,7 @@ export function mount(el, ctx) {
       let x = L.reg;
       if (view.rows === "model") {
         const sl = slotOf(s.sel, row.key);
-        const color = row.key === manifest.baseline ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
+        const color = row.key === baseId() ? "var(--series-baseline)" : sl == null ? null : `var(--series-${(sl % COLORS) + 1})`;
         if (color) { g.fillStyle = cssColor(color); g.beginPath(); g.arc(x + 4, y, 3.5, 0, Math.PI * 2); g.fill(); }
         x += 14;
       }
@@ -427,7 +428,7 @@ export function mount(el, ctx) {
     if (keys.date) { const iso = nearestRound(keys.date, manifest); if (iso) patch.date = iso; }
     const model = keys.model ?? (view.model !== "truth" ? view.model : null);
     if (model) {
-      if (model === manifest.baseline) patch.sel = setBaseline(s.sel, true);
+      if (model === baseId()) patch.sel = setBaseline(s.sel, true);
       else if (manifest.modelById.has(model)) patch.sel = chartModel(s.sel, model);
       patch.focus = model;
     }

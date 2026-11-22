@@ -469,6 +469,8 @@ def reconcile_weekly_series(
 
     if include_admissions and admissions_df is not None and not admissions_df.is_empty():
         adm = admissions_df
+        if "target" in adm.columns:
+            adm = adm.filter(pl.col("target") == target)
         if dims:
             for dcol, dval in dims.items():
                 if dcol in adm.columns and dval is not None:

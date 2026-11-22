@@ -676,6 +676,14 @@ class TestUnifiedCatalogAndGlobe(unittest.TestCase):
             # Persisted in workspace.json across HubManager reload
             m2_reloaded = HubManager(mode="local", data_dir=d2, cli_hubs=[fork], include_enclosing=False)
             self.assertEqual(m2_reloaded.registry.get_target_aliases()[local_hid]["my custom signal"], "flu_hosp")
+
+            # Places only advertise targets actually present at that location (DE has ARI only, FR has ILI only)
+            de_hub = next((h for h in cat["places"]["DE"]["hubs"] if h["hub_id"] == "remote_respicast_syndromic"), None)
+            fr_hub = next((h for h in cat["places"]["FR"]["hubs"] if h["hub_id"] == "remote_respicast_syndromic"), None)
+            self.assertIsNotNone(de_hub)
+            self.assertIsNotNone(fr_hub)
+            self.assertEqual([t["target_id"] for t in de_hub["targets"]], ["ARI incidence"])
+            self.assertEqual([t["target_id"] for t in fr_hub["targets"]], ["ILI incidence"])
         finally:
             shutil.rmtree(fork, ignore_errors=True)
             shutil.rmtree(d2, ignore_errors=True)

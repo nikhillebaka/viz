@@ -28,8 +28,13 @@ export function openDatePicker(anchor, { manifest, store, chart }) {
   return openPopover(anchor, {
     width: WIDTH, placement: "top", className: "dp", title: "",
     content(body, layer) {
-      let shown = current().season;
+      let shown = seasons.some((s) => s.id === current().season) ? current().season : (seasons.at(-1)?.id ?? "");
       const pick = (iso) => { layer.close(true); store.set({ date: iso }); };
+
+      if (!seasons.length) {
+        body.append(h("p", { class: "pk-empty" }, "No forecast dates available"));
+        return;
+      }
 
       const chips = h("div", { class: "dp-seasons", role: "group", "aria-label": "Season" });
       const grid = h("div", { class: "dp-grid", role: "grid" });
@@ -44,8 +49,8 @@ export function openDatePicker(anchor, { manifest, store, chart }) {
           type: "button", class: ["c-chip", s.id === shown && "on"], "aria-pressed": String(s.id === shown),
           onclick: () => { if (shown !== s.id) { shown = s.id; paint(); } },
         }, s.label || s.id)));
-        const season = seasons.find((s) => s.id === shown);
-        grid.setAttribute("aria-label", `${season?.label ?? shown} forecast dates`);
+        const season = seasons.find((s) => s.id === shown) || seasons.at(-1);
+        grid.setAttribute("aria-label", `${season?.label ?? shown ?? ""} forecast dates`);
         const months = new Map();
         for (const iso of season?.rounds ?? []) {
           const k = iso.slice(0, 7);

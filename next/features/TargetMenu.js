@@ -17,15 +17,17 @@ import { defaultDims } from "./url.js";
 export function buildTargetMenuGroups(catalog, manifest, currentLocationId, activeHubId, currentTargetId) {
   const catTargets = catalog?.targets;
   if (!Array.isArray(catTargets) || !catTargets.length) {
-    return (manifest?.targets || []).filter((t) => !t.is_categorical).map((t) => ({
-      type: "item",
-      key: `${activeHubId || ""}::${t.id}`,
-      hubId: activeHubId,
-      targetId: t.id,
-      locationId: currentLocationId,
-      label: t.label || t.short || t.id,
-      checked: t.id === currentTargetId,
-    }));
+    return (manifest?.targets || [])
+      .filter((t) => !t.is_categorical && (!Array.isArray(t.locations) || !currentLocationId || t.locations.includes(currentLocationId)))
+      .map((t) => ({
+        type: "item",
+        key: `${activeHubId || ""}::${t.id}`,
+        hubId: activeHubId,
+        targetId: t.id,
+        locationId: currentLocationId,
+        label: t.label || t.short || t.id,
+        checked: t.id === currentTargetId,
+      }));
   }
 
   const places = catalog.places || {};
@@ -41,24 +43,39 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
   if (!curPlace && currentLocationId && places[currentLocationId]) {
     curPlace = places[currentLocationId];
   }
-  const parentPlace = curPlace?.parent_key ? places[curPlace.parent_key] || null : null;
+  const SUBNATIONAL_LEVELS = new Set(["hsa", "metro", "borough", "region", "subnational"]);
+  const canInheritParent = SUBNATIONAL_LEVELS.has(String(curPlace?.level || "").toLowerCase());
+  const parentPlace = canInheritParent && curPlace?.parent_key ? places[curPlace.parent_key] || null : null;
 
-  const directLocByHub = new Map((curPlace?.hubs || []).map((h) => [h.hub_id, h.location_id]));
-  const parentLocByHub = new Map((parentPlace?.hubs || []).map((h) => [h.hub_id, h.location_id]));
+  const targetIdsOf = (hubEntry) => {
+    if (!Array.isArray(hubEntry?.targets)) return null;
+    return new Set(hubEntry.targets.map((x) => (typeof x === "string" ? x : (x.target_id || x.id))).filter(Boolean));
+  };
+
+  const directHubByHub = new Map((curPlace?.hubs || []).map((h) => [h.hub_id, { loc: h.location_id, targets: targetIdsOf(h) }]));
+  const parentHubByHub = new Map((parentPlace?.hubs || []).map((h) => [h.hub_id, { loc: h.location_id, targets: targetIdsOf(h) }]));
 
   const inPlace = [];
   const otherPlace = [];
   for (const t of catTargets) {
     if (t.is_categorical) continue;
-    const directLoc = directLocByHub.get(t.hub_id);
-    const pLoc = !directLoc ? parentLocByHub.get(t.hub_id) : null;
-    if (directLoc || pLoc) {
+    const direct = directHubByHub.get(t.hub_id);
+    const parent = !direct ? parentHubByHub.get(t.hub_id) : null;
+    const directAllowed = direct && (!direct.targets || direct.targets.has(t.target_id));
+    const parentAllowed = parent && (!parent.targets || parent.targets.has(t.target_id));
+    if (directAllowed) {
       inPlace.push({
         t,
-        locationId: directLoc || pLoc,
-        viaParent: !directLoc && !!pLoc,
+        locationId: direct.loc,
+        viaParent: false,
       });
-    } else {
+    } else if (parentAllowed) {
+      inPlace.push({
+        t,
+        locationId: parent.loc,
+        viaParent: true,
+      });
+    } else if (!direct && !parent) {
       otherPlace.push({
         t,
         locationId: null,
@@ -89,7 +106,9 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
   };
 
   const uniqInPlace = dedupEntries(inPlace, (ent) => ent.t.concept_id || ent.t.key);
-  const uniqOtherPlace = dedupEntries(otherPlace, (ent) => (ent.t.concept_id ? `${ent.t.region_label || "Other"}::${ent.t.concept_id}` : ent.t.key));
+  const uniqOtherPlace = uniqInPlace.length
+    ? []
+    : dedupEntries(otherPlace, (ent) => (ent.t.concept_id ? `${ent.t.region_label || "Other"}::${ent.t.concept_id}` : ent.t.key));
   const allShown = [...uniqInPlace, ...uniqOtherPlace];
 
   // Disambiguate when multiple hubs share the same pathogen across remaining items

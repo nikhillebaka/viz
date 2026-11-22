@@ -20,12 +20,15 @@ export function sampleScoresQuery({ target, season, location, scopePlace = "curr
   return q.toString();
 }
 
-/** Return all manifest models that carry sample trajectories for `targetId`. */
-export function sampleModelsForTarget(manifest, targetId) {
+/** Return all manifest models that carry sample trajectories for `targetId` (and optionally `season`). */
+export function sampleModelsForTarget(manifest, targetId, season = null) {
   if (!manifest?.models?.length) return [];
-  return manifest.models.filter((m) => (
+  const base = manifest.models.filter((m) => (
     !!m.has_samples && (!targetId || !m.targets?.length || m.targets.includes(targetId))
   ));
+  if (!season) return base;
+  const inSeason = base.filter((m) => !m.seasons?.length || m.seasons.includes(season));
+  return inSeason.length ? inSeason : base;
 }
 
 /** True when a target/hub has at least one model with sample trajectories (or sample output type). */
@@ -36,14 +39,15 @@ export function hasSampleModels(manifest, targetId) {
 }
 
 /** Choose the initial sample model: first currently charted/baseline sample model, else best default. */
-export function pickDefaultSampleModel(sampleModels, sel, manifest) {
+export function pickDefaultSampleModel(sampleModels, sel, manifest, targetId = null) {
   if (!sampleModels?.length) return null;
   const ids = new Set(sampleModels.map((m) => m.id));
   for (const c of sel?.charted || []) {
     if (ids.has(c.id)) return c.id;
   }
-  if (sel?.baseline && manifest?.baseline && ids.has(manifest.baseline)) {
-    return manifest.baseline;
+  const base = manifest?.baselineFor?.(targetId) ?? manifest?.baseline;
+  if (sel?.baseline && base && ids.has(base)) {
+    return base;
   }
   const preferred = sampleModels.find((m) => /ensemble_long/i.test(m.id))
     || sampleModels.find((m) => /ensemble/i.test(m.id))

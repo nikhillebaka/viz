@@ -30,6 +30,13 @@ export function setActiveHub(id) {
 const briefingCache = new Map();
 const sampleScoreCache = new Map();
 const SAMPLE_SCORE_CACHE = 32;
+const cacheClearers = new Set();
+
+/** Register a module-level cache reset callback invoked by `clearAllCaches()`. */
+export function registerCacheClear(fn) {
+  if (typeof fn === "function") cacheClearers.add(fn);
+  return () => cacheClearers.delete(fn);
+}
 
 /** Drop every cached manifest, catalog, globe, briefing, and fan response (e.g. after data sync or refresh). */
 export function clearAllCaches() {
@@ -39,6 +46,9 @@ export function clearAllCaches() {
   briefingCache.clear();
   sampleScoreCache.clear();
   fans.clear();
+  for (const fn of cacheClearers) {
+    try { fn(); } catch { /* ignore listener errors during teardown */ }
+  }
 }
 
 /**
@@ -528,10 +538,10 @@ export function loadSampleScores(query, { signal } = {}) {
 
 /**
  * Starts loading a fan (e.g. on hover) without waiting; errors are swallowed.
- * @param {string} target @param {string} season @param {string} location
+ * @param {string} target @param {string} season @param {string} location @param {object} [opts]
  */
-export function prefetchFan(target, season, location) {
-  loadFan(target, season, location).catch(() => {});
+export function prefetchFan(target, season, location, opts = {}) {
+  loadFan(target, season, location, opts).catch(() => {});
 }
 
 export function invalidateBriefingCache() {

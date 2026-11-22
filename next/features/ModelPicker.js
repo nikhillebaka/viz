@@ -16,6 +16,7 @@
 import { h, on, tokenNum } from "../lib/dom.js";
 import { openPopover, revealInList } from "../ui/floating.js";
 import { icon, slideText } from "../ui/controls.js";
+import { registerCacheClear } from "../lib/api.js";
 import { toIso } from "../lib/scale.js";
 import { fmtDay } from "../lib/format.js";
 import * as S from "./selection.js";
@@ -61,7 +62,8 @@ export function catalog(manifest, target) {
   let c = byTarget.get(target);
   if (c) return c;
 
-  const listed = (manifest.models || []).filter((m) => m.id !== manifest.baseline && (!m.targets?.length || m.targets.includes(target)));
+  const targetBaseline = manifest.baselineFor?.(target) ?? manifest.baseline;
+  const listed = (manifest.models || []).filter((m) => m.id !== targetBaseline && (!m.targets?.length || m.targets.includes(target)));
   const ids = listed.map((m) => m.id);
   const labels = new Map(ids.map((id) => [id, manifest.label(id, ids)]));
   const facets = new Map(listed.map((m) => [m.id, facetsOf(manifest, m)]));
@@ -307,6 +309,16 @@ const parts0 = new Map(); // a line's chosen name parts, for the session
 const open0 = new Set(); // lines opened, for the session
 const rail0 = Object.fromEntries(RAIL.map((f) => [f.key, new Set()]));
 const state0 = { set: "all", when: "season", awayOpen: false };
+let lastPickerHub = null;
+
+function resetPickerSession() {
+  details.clear();
+  parts0.clear();
+  open0.clear();
+  for (const s of Object.values(rail0)) s.clear();
+  state0.set = "all"; state0.when = "season"; state0.awayOpen = false;
+}
+registerCacheClear(() => { lastPickerHub = null; resetPickerSession(); });
 
 /**
  * Open the model picker from the Models bubble (or close it, if it is open from there).
@@ -315,6 +327,9 @@ const state0 = { set: "all", when: "season", awayOpen: false };
  * @returns {object | null} the layer, or null when this call closed it
  */
 export function openModelPicker(anchor, { manifest, store, chart = null }) {
+  const hubKey = manifest?.hub_id || "";
+  if (lastPickerHub !== null && lastPickerHub !== hubKey) resetPickerSession();
+  lastPickerHub = hubKey;
   const inset = () => tokenNum("--inset", 16);
   const seasonNow = () => manifest.seasonOf(store.get().date);
   let season = seasonNow(), query = "", g = null, hover = null, roundKey = "", lastClicked = null, order = [];
@@ -351,8 +366,9 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
         import("./Ensemble.js").then((x) => x.openCombine(anchor, { manifest, store })).catch((err) => console.error("viz: Combine could not open", err));
       } }, "Combine…");
       const reset = h("button", { type: "button", class: "c-link", onclick: () => {
-        const sel = store.get().sel;
-        const picks = (manifest.recommended || []).filter((id) => id !== manifest.baseline && manifest.modelById.has(id)).slice(0, 3);
+        const st = store.get(), sel = st.sel;
+        const baseId = manifest.baselineFor?.(st.target, season) ?? manifest.baseline;
+        const picks = (manifest.recommended || []).filter((id) => id !== baseId && manifest.modelById.has(id)).slice(0, 3);
         setSel(S.create({ selected: picks, showAll: sel.showAll, baseline: sel.baseline }));
       } }, "Reset");
       const foot = h("div", { class: "pk-foot" }, tray, h("div", { class: "pk-foot-line" }, count, h("span", { class: "pk-acts" }, combine, reset)));

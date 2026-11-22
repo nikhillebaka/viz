@@ -586,7 +586,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_bytes(payload, "application/octet-stream", etag=fan_etag)
         elif name == "trajectories":
             target = query.get("target", [ctx.config.get_default_target()])[0]
-            season = query.get("season", [ctx.loader.get_latest_season()])[0]
+            season = query.get("season", [""])[0].strip() or None
             location = query.get("location", [def_loc])[0] or def_loc
             ref_date = query.get("date", [""])[0].strip()
             if not ref_date:
