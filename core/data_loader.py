@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Dict, List, Optional, Any, Set, Tuple, Union
 
 import numpy as np
@@ -166,8 +167,10 @@ class SandboxDataLoader:
         self._tasks_mtime: float = -1.0
         self._hub_seasons_sig: Optional[Tuple[Any, ...]] = None
         self._model_details_cache: Dict[str, Dict[str, Any]] = {}
+        self._model_metadata_cache: Dict[str, Tuple[Optional[Path], float, Dict[str, Any]]] = {}
         self._models_cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._models_cache_mtime: float = -1.0
+        self._models_dir_sig: Optional[Tuple[Any, ...]] = None
         self._models_cache_lock = threading.Lock()
         self._dedup_lock = threading.Lock()
         self._phase_cache: Dict[str, Tuple[Tuple[Any, ...], pl.DataFrame]] = {}
@@ -280,10 +283,61 @@ class SandboxDataLoader:
                         )
         return sorted(list(set(warnings)))
 
+    def _compute_models_dir_sig(self) -> Tuple[Any, ...]:
+        """Fast top-level directory signature (1-level scandir, no file walk) to detect newly added/removed/touched model dirs."""
+        manifest_file = self.base_dir / "manifest.json"
+        synth_dir = self.ensemble_mgr.synthetic_dir
+        try:
+            synth_m = synth_dir.stat().st_mtime_ns if synth_dir.exists() else 0
+        except OSError:
+            synth_m = 0
+        if not self.include_remote and manifest_file.is_file():
+            try:
+                man_m = manifest_file.stat().st_mtime_ns
+            except OSError:
+                man_m = 0
+            return ("manifest", man_m, synth_m)
+        parts: List[Any] = [synth_m]
+        if self.include_remote:
+            parts.append(self.remote_store.state_mtime())
+        for root in (
+            self.model_output_dir,
+            self.local_output_dir,
+            self.base_dir / "sample-output",
+            self.base_dir / "pmf-output",
+            self.base_dir / "peak-output",
+        ):
+            try:
+                if not root.exists():
+                    parts.append(None)
+                    continue
+                parts.append(root.stat().st_mtime_ns)
+                subdirs = []
+                with os.scandir(root) as it:
+                    for ent in it:
+                        if ent.name.startswith(".") or (root == self.local_output_dir and ent.name == "synthetic"):
+                            continue
+                        if ent.is_dir():
+                            subdirs.append((ent.name, ent.stat().st_mtime_ns))
+                subdirs.sort()
+                parts.append(tuple(subdirs))
+            except OSError:
+                parts.append(None)
+        return tuple(parts)
+
     def _compute_models_mtime(self) -> float:
         """Compute maximum modification time across model directories and forecast files for cache invalidation."""
         mtime = 0.0
         try:
+            manifest_file = self.base_dir / "manifest.json"
+            # Standalone synced remote hubs record their complete file inventory in manifest.json
+            if not self.include_remote and manifest_file.is_file():
+                mtime = max(mtime, manifest_file.stat().st_mtime)
+                synth_dir = self.ensemble_mgr.synthetic_dir
+                if synth_dir.exists():
+                    mtime = max(mtime, synth_dir.stat().st_mtime)
+                return mtime
+
             for root in (
                 self.model_output_dir,
                 self.local_output_dir,
@@ -316,7 +370,6 @@ class SandboxDataLoader:
                 mtime = max(mtime, synth_dir.stat().st_mtime)
             if self.include_remote:
                 mtime = max(mtime, self.remote_store.state_mtime())
-            manifest_file = self.base_dir / "manifest.json"
             if manifest_file.is_file():
                 mtime = max(mtime, manifest_file.stat().st_mtime)
         except Exception:
@@ -547,7 +600,9 @@ class SandboxDataLoader:
                     self.cache_mgr.warning_registry.clear(key)
             self._models_cache = None
             self._models_cache_mtime = -1.0
+            self._models_dir_sig = None
         self._model_details_cache.clear()
+        self._model_metadata_cache.clear()
         self._hub_seasons_cache = None
         self._raw_hub_seasons_cache = None
         self._tasks_mtime = -1.0
@@ -1057,9 +1112,22 @@ class SandboxDataLoader:
         Returns dict of model_id -> metadata. Cached by directory mtime for high performance.
         Disambiguates name collisions between local and production models.
         """
+        dir_sig = self._compute_models_dir_sig()
+        if (
+            not force_refresh
+            and self._models_cache is not None
+            and self._models_dir_sig == dir_sig
+        ):
+            return self._models_cache
+
         current_mtime = self._compute_models_mtime()
         with self._models_cache_lock:
-            if not force_refresh and self._models_cache is not None and self._models_cache_mtime == current_mtime:
+            if (
+                not force_refresh
+                and self._models_cache is not None
+                and self._models_cache_mtime == current_mtime
+                and self._models_dir_sig == dir_sig
+            ):
                 return self._models_cache
 
             cal = self.get_calendar()
@@ -1202,11 +1270,12 @@ class SandboxDataLoader:
 
             self._models_cache = models
             self._models_cache_mtime = current_mtime
+            self._models_dir_sig = dir_sig
             return models
 
     def _resolve_model_id_and_local(self, model_id: str) -> Tuple[str, bool]:
         """Resolve model ID and whether it is a local run, handling 'local:' namespace."""
-        models = self.scan_models()
+        models = self._models_cache if self._models_cache is not None else self.scan_models()
         if model_id in models:
             info = models[model_id]
             return info.get("raw_name", model_id), info.get("is_local", False)
@@ -1390,6 +1459,7 @@ class SandboxDataLoader:
         with self._models_cache_lock:
             self._models_cache = None
             self._models_cache_mtime = -1.0
+            self._models_dir_sig = None
         return res
 
     def remove_synthetic_ensemble(self, ensemble_id: str) -> bool:
@@ -1398,6 +1468,7 @@ class SandboxDataLoader:
         with self._models_cache_lock:
             self._models_cache = None
             self._models_cache_mtime = -1.0
+            self._models_dir_sig = None
         return res
 
     def save_synthetic_ensemble(self, ensemble_id: str) -> Dict[str, Any]:
@@ -1406,6 +1477,7 @@ class SandboxDataLoader:
         with self._models_cache_lock:
             self._models_cache = None
             self._models_cache_mtime = -1.0
+            self._models_dir_sig = None
         return res
 
     def get_ground_truth_series(
@@ -3390,12 +3462,13 @@ class SandboxDataLoader:
         if include_future:
             return {s: list(ds) for s, ds in raw.items()}
 
-        sig = (self._tasks_mtime, self._compute_models_mtime(), self._truth_sig())
+        all_models = self.scan_models()
+        sig = (self._tasks_mtime, self._models_cache_mtime, self._truth_sig())
         if self._hub_seasons_cache is not None and self._hub_seasons_sig == sig:
             return {s: list(ds) for s, ds in self._hub_seasons_cache.items()}
 
         forecast_dates: Set[str] = set()
-        for m in self.scan_models().values():
+        for m in all_models.values():
             forecast_dates.update(str(d) for d in (m.get("dates") or []) if d)
         latest_forecast = max(forecast_dates) if forecast_dates else None
         latest_truth = self._latest_truth_date()
@@ -3591,6 +3664,13 @@ class SandboxDataLoader:
 
         if meta_file is not None:
             try:
+                file_mtime = meta_file.stat().st_mtime
+                cached_entry = self._model_metadata_cache.get(raw_id)
+                if cached_entry is not None and cached_entry[0] == meta_file and cached_entry[1] == file_mtime:
+                    return dict(cached_entry[2])
+            except OSError:
+                file_mtime = -1.0
+            try:
                 raw_text = meta_file.read_text(encoding="utf-8")
                 data = self._parse_simple_yaml(raw_text)
 
@@ -3612,6 +3692,7 @@ class SandboxDataLoader:
                 for key in ["methods", "methods_long", "data_inputs", "team_name", "model_name", "license"]:
                     if isinstance(data.get(key), str):
                         data[key] = data[key].strip()
+                self._model_metadata_cache[raw_id] = (meta_file, file_mtime, dict(data))
                 return data
             except Exception as exc:
                 logger.warning("Error parsing %s: %s", meta_file, exc)

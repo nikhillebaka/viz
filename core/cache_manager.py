@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
 import polars as pl
@@ -171,6 +172,8 @@ class ParquetCacheManager:
         self._target_locks = LockRegistry()
         self.warning_registry = WarningRegistry()
         self._missing_logged: set = set()
+        self._fresh_lock = threading.Lock()
+        self._fresh_pq_cache: Dict[str, Tuple[Optional[Path], int]] = {}
 
         self._ensure_dirs()
 
@@ -264,11 +267,20 @@ class ParquetCacheManager:
         """Remote S3 hubs enabled AND compatible with the active hub's targets/locations."""
         if not self.include_remote:
             return []
+        stamp = self.remote_store.state_mtime()
+        with self._fresh_lock:
+            hit = self._fresh_pq_cache.get("__active_remote_hub_ids__")
+        if hit is not None and hit[1] == stamp:  # type: ignore[comparison-overlap]
+            return list(hit[0])  # type: ignore[arg-type]
         targets = self._allowed_targets_provider() if self._allowed_targets_provider else None
         locations = self._allowed_locations_provider() if self._allowed_locations_provider else None
         if targets or locations:
-            return self.remote_store.compatible_hub_ids(targets=targets, locations=locations)
-        return self.remote_store.active_hub_ids()
+            res = self.remote_store.compatible_hub_ids(targets=targets, locations=locations)
+        else:
+            res = self.remote_store.active_hub_ids()
+        with self._fresh_lock:
+            self._fresh_pq_cache["__active_remote_hub_ids__"] = (tuple(res), stamp)  # type: ignore[assignment]
+        return res
 
     def hub_key(self, model_id: str) -> Optional[Tuple[str, str]]:
         """Split a hub model key like 'flusight:UMass-flusion' into (hub_id, model). None for other models."""
@@ -485,6 +497,8 @@ class ParquetCacheManager:
         """
         from viz.core.ingest import NormalizationError, normalize_forecast_frame
 
+        fast_key = f"q::{int(bool(is_local))}::{model_id}"
+
         merged = self.merged_key(model_id)
         if merged is not None:
             return self._get_merged_artifact(
@@ -495,6 +509,24 @@ class ParquetCacheManager:
         if resolved is None:
             return None
         source_dir, dest_dir, file_stem, hub, is_local = resolved
+        try:
+            dir_mtime_ns = source_dir.stat().st_mtime_ns
+        except OSError:
+            dir_mtime_ns = -1
+
+        with self._fresh_lock:
+            hit = self._fresh_pq_cache.get(fast_key)
+        if hit is not None and dir_mtime_ns >= 0 and hit[1] == dir_mtime_ns:
+            p = hit[0]
+            if p is None or p.exists():
+                return p
+
+        def _memo(p: Optional[Path]) -> Optional[Path]:
+            if dir_mtime_ns >= 0:
+                with self._fresh_lock:
+                    self._fresh_pq_cache[fast_key] = (p, dir_mtime_ns)
+            return p
+
         is_remote_dir = (hub is not None) or (not is_local and (self.base_dir / "manifest.json").is_file())
 
         pq_path = dest_dir / f"{file_stem}.parquet"
@@ -510,7 +542,7 @@ class ParquetCacheManager:
 
         # Quick check before lock (if meta is fresh and marks quantile-empty, skip rebuild cleanly)
         if self._is_cache_fresh(pq_path, meta_path, fp):
-            return pq_path
+            return _memo(pq_path)
         if not pq_path.exists() and meta_path.exists():
             try:
                 saved = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -520,7 +552,7 @@ class ParquetCacheManager:
                     and saved.get("total_size") == fp["total_size"]
                     and abs(saved.get("max_mtime", 0.0) - fp["max_mtime"]) < 1e-3
                 ):
-                    return None
+                    return _memo(None)
             except Exception:
                 pass
 
@@ -528,7 +560,7 @@ class ParquetCacheManager:
         lock = self._model_locks.get(lock_key)
         with lock:
             if self._is_cache_fresh(pq_path, meta_path, fp):
-                return pq_path
+                return _memo(pq_path)
 
             cal = self._calendar()
             geo = self._geo()
@@ -663,7 +695,7 @@ class ParquetCacheManager:
                 with open(tmp_meta, "w", encoding="utf-8") as f_meta:
                     json.dump(meta_payload, f_meta)
                 os.replace(tmp_meta, meta_path)
-                return pq_path if q_dfs else None
+                return _memo(pq_path if q_dfs else None)
             except Exception as exc:
                 logger.error("Failed to write parquet cache for model %s: %s", model_id, exc)
                 return None
@@ -1564,6 +1596,8 @@ class ParquetCacheManager:
 
     def clear_cache(self, model_id: Optional[str] = None):
         """Remove cached parquet and metadata files to force regeneration."""
+        with self._fresh_lock:
+            self._fresh_pq_cache.clear()
         suffixes = (".parquet", ".meta.json", ".peak.parquet", ".peak.meta.json", ".samples.parquet", ".samples.meta.json", ".pmf.parquet", ".pmf.meta.json")
         if model_id:
             merged = self.merged_key(model_id)

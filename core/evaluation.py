@@ -352,7 +352,7 @@ class EvaluationEngine:
         with self._sample_eval_cache_lock:
             self._sample_eval_cache.clear()
 
-    def _compute_cache_key(self, params: EvaluationParams) -> str:
+    def _compute_cache_key(self, params: EvaluationParams, *, mode: str = "auto") -> str:
         oracle_pq = self.loader.cache_mgr.get_oracle_parquet()
         oracle_mtime = oracle_pq.stat().st_mtime if oracle_pq and oracle_pq.exists() else 0.0
 
@@ -360,6 +360,15 @@ class EvaluationEngine:
         models = params.models or []
         if not models or "all" in [m.lower() for m in models]:
             models = list(all_models.keys())
+        if mode == "auto":
+            target_meta_for_key = self.config.get_target_metadata(params.target or self.config.get_default_target())
+            is_pmf_key = bool(
+                target_meta_for_key.get("is_categorical")
+                and "quantile" not in (target_meta_for_key.get("output_types") or [])
+            )
+            eff_mode = "pmf" if is_pmf_key else "quantile"
+        else:
+            eff_mode = mode
         mtimes = []
         for mid in sorted(models):
             if hasattr(self.loader, "ensemble_mgr") and self.loader.ensemble_mgr.get_config(mid):
@@ -375,13 +384,29 @@ class EvaluationEngine:
                     is_local = bool(info.get("is_local", False))
                 else:
                     raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
-                pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
-                pq_s = self.loader.cache_mgr.get_model_samples_parquet(raw_id, is_local=is_local)
-                pq_p = self.loader.cache_mgr.get_model_pmf_parquet(raw_id, is_local=is_local)
-                q_m = pq.stat().st_mtime if pq and pq.exists() else 0.0
-                s_m = pq_s.stat().st_mtime if pq_s and pq_s.exists() else 0.0
-                p_m = pq_p.stat().st_mtime if pq_p and pq_p.exists() else 0.0
-                mtimes.append(f"{mid}:{q_m}:{s_m}:{p_m}")
+                if eff_mode == "samples":
+                    if not (
+                        (info or {}).get("has_samples")
+                        or "sample" in ((info or {}).get("output_types") or [])
+                    ):
+                        continue
+                    pq_s = self.loader.cache_mgr.get_model_samples_parquet(raw_id, is_local=is_local)
+                    s_m = pq_s.stat().st_mtime if pq_s and pq_s.exists() else 0.0
+                    mtimes.append(f"{mid}:samp:{s_m}")
+                elif eff_mode == "pmf":
+                    ots = (info or {}).get("output_types") or []
+                    if ots and "pmf" not in ots:
+                        continue
+                    pq_p = self.loader.cache_mgr.get_model_pmf_parquet(raw_id, is_local=is_local)
+                    p_m = pq_p.stat().st_mtime if pq_p and pq_p.exists() else 0.0
+                    mtimes.append(f"{mid}:pmf:{p_m}")
+                else:
+                    ots = (info or {}).get("output_types") or []
+                    if ots and "quantile" not in ots:
+                        continue
+                    pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
+                    q_m = pq.stat().st_mtime if pq and pq.exists() else 0.0
+                    mtimes.append(f"{mid}:{q_m}")
 
         dims_key = tuple(sorted((str(k), str(v)) for k, v in (params.dims or {}).items()))
         raw = (
@@ -1008,7 +1033,19 @@ class EvaluationEngine:
             )
 
         # 6. Pre-score fast path for persistent quantile models + fallback load for synthetic / uncached models
-        load_mids = [mid for mid, _ in to_load]
+        def _model_supports_quantile_target(mid: str) -> bool:
+            info = all_models.get(mid) or {}
+            if info.get("is_synthetic"):
+                return True
+            ots = info.get("output_types") or []
+            if ots and "quantile" not in ots:
+                return False
+            tgts = info.get("targets") or []
+            if tgts and target not in tgts:
+                return False
+            return True
+
+        load_mids = [mid for mid, _ in to_load if _model_supports_quantile_target(mid)]
         prescored = self.prescore.get_model_task_scores(
             target,
             load_mids,
@@ -1019,7 +1056,11 @@ class EvaluationEngine:
         )
 
         # Models NOT covered by prescore (e.g. synthetic ensembles or custom non-parquet mocks)
-        fallback_items = [(mid, ds) for mid, ds in to_load if mid not in prescored]
+        fallback_items = [
+            (mid, ds)
+            for mid, ds in to_load
+            if mid not in prescored and _model_supports_quantile_target(mid)
+        ]
         need_keys_for_prescored = fair_flag or window_filter is not None or horizon_set is not None
 
         def _load_raw(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
@@ -1309,22 +1350,26 @@ class EvaluationEngine:
             pending_truth = False
             no_location = False
             if has_data and sc is None and common_task_status != "empty_disjoint":
-                m_df = model_dfs.get(mid)
-                if m_df is None and mid in submitted_keys:
-                    m_df = submitted_keys[mid]
-                elif m_df is None:
-                    # Lightweight check only when a model returned 0 scored tasks
-                    eval_ds = m_stat.get("available_scope_dates", [])
-                    m_df = _load_raw((mid, eval_ds)) if eval_ds else None
-                in_scope = m_df is not None and not m_df.is_empty()
-                if in_scope:
-                    if "target" in m_df.columns:
-                        m_df = m_df.filter(pl.col("target") == target)
-                    if locations_filter:
-                        m_df = m_df.filter(pl.col("location").cast(pl.String).is_in(locations_filter))
-                    in_scope = not m_df.is_empty()
-                pending_truth = in_scope
-                no_location = not in_scope
+                if not _model_supports_quantile_target(mid):
+                    pending_truth = False
+                    no_location = True
+                else:
+                    m_df = model_dfs.get(mid)
+                    if m_df is None and mid in submitted_keys:
+                        m_df = submitted_keys[mid]
+                    elif m_df is None:
+                        # Lightweight check only when a model returned 0 scored tasks
+                        eval_ds = m_stat.get("available_scope_dates", [])
+                        m_df = _load_raw((mid, eval_ds)) if eval_ds else None
+                    in_scope = m_df is not None and not m_df.is_empty()
+                    if in_scope:
+                        if "target" in m_df.columns:
+                            m_df = m_df.filter(pl.col("target") == target)
+                        if locations_filter:
+                            m_df = m_df.filter(pl.col("location").cast(pl.String).is_in(locations_filter))
+                        in_scope = not m_df.is_empty()
+                    pending_truth = in_scope
+                    no_location = not in_scope
 
             if not has_data or sc is None:
                 seasons_str = ", ".join(selected_seasons) if selected_seasons else "selected scope"
@@ -1778,7 +1823,7 @@ class EvaluationEngine:
 
     def evaluate_samples(self, params: EvaluationParams) -> Dict[str, Any]:
         """Evaluate sample-trajectory forecasts using exact empirical CRPS and multi-horizon Energy Score."""
-        cache_key = "samp|" + self._compute_cache_key(params)
+        cache_key = "samp|" + self._compute_cache_key(params, mode="samples")
         with self._sample_eval_cache_lock:
             hit = self._sample_eval_cache.get(cache_key)
             if hit is not None:

@@ -72,6 +72,7 @@ class RemoteStore:
         self.registry_path = self.root / "hubs.json"
         self._active_cache: Optional[tuple] = None
         self._tasks_meta_cache: Dict[str, tuple] = {}
+        self._manifest_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
     # ---- registry -------------------------------------------------------------------------------------
 
@@ -134,6 +135,7 @@ class RemoteStore:
     def remove_hub(self, hub_id: str):
         """Delete a hub's copied data (and its registration if it was user-added)."""
         with _write_lock:
+            self._manifest_cache.pop(hub_id, None)
             d = self.hub_dir(hub_id)
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
@@ -264,16 +266,29 @@ class RemoteStore:
     # ---- manifest ---------------------------------------------------------------------------------------
 
     def load_manifest(self, hub_id: str) -> Dict[str, Any]:
-        m = _read_json(self.manifest_path(hub_id), {})
+        p = self.manifest_path(hub_id)
+        mtime = -1.0
+        try:
+            if p.exists():
+                mtime = p.stat().st_mtime
+                cached = self._manifest_cache.get(hub_id)
+                if cached is not None and cached[0] == mtime:
+                    return cached[1]
+        except OSError:
+            pass
+        m = _read_json(p, {})
         if not isinstance(m, dict):
             m = {}
         m.setdefault("files", {})
         m.setdefault("metadata", {})
         m.setdefault("truth", {})
         m.setdefault("seasons", [])
+        if mtime >= 0:
+            self._manifest_cache[hub_id] = (mtime, m)
         return m
 
     def save_manifest(self, hub_id: str, manifest: Dict[str, Any]):
+        self._manifest_cache.pop(hub_id, None)
         _atomic_write_json(self.manifest_path(hub_id), manifest)
 
     def state_mtime(self) -> float:
