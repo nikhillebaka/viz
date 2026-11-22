@@ -5,13 +5,15 @@ from pathlib import Path
 import sys
 from typing import Optional
 
-_VIZ_DIR = Path(__file__).resolve().parent.parent
-if str(_VIZ_DIR) not in sys.path:
-    sys.path.insert(0, str(_VIZ_DIR))
+_TESTS_DIR = Path(__file__).resolve().parent
+_VIZ_DIR = _TESTS_DIR.parent
+for _p in (str(_TESTS_DIR), str(_VIZ_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-import _bootstrap  # noqa: E402
+from core._bootstrap import ensure_viz_package  # noqa: E402
 
-APP_DIR = _bootstrap.ensure_viz_package()
+APP_DIR = ensure_viz_package()
 
 from viz.core.paths import detect_enclosing_hub  # noqa: E402
 

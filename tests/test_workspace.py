@@ -160,7 +160,8 @@ class TestPathsAndRegistry(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_bootstrap_and_flu_target_guard(self):
-        self.assertTrue((APP_DIR / "__init__.py").is_file())
+        from core._bootstrap import ensure_viz_package
+        self.assertEqual(ensure_viz_package(), APP_DIR)
         self.assertTrue(_is_flu_hosp_target("wk inc flu hosp"))
         self.assertFalse(_is_flu_hosp_target("wk inc covid hosp"))
         self.assertFalse(_is_flu_hosp_target("wk inc rsv hosp"))
@@ -455,6 +456,30 @@ class TestHubManagerAndHttpIsolation(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_remote_default_hub_persists_across_restarts(self):
+        mgr = HubManager(data_dir=self.data_dir, mode="local", include_enclosing=False)
+        self.assertIsNone(mgr.default_hub_id())
+        for rid in ("flusight", "flu_metrocast"):
+            mgr.remote_store.hub_dir(rid).mkdir(parents=True, exist_ok=True)
+            mgr.remote_store.save_manifest(rid, {"files": {}, "seasons": ["2025-2026"]})
+
+        # the first hub synced with nothing open becomes the startup hub
+        mgr._on_remote_inventory_change("flusight", [])
+        self.assertEqual(mgr.default_hub_id(), "remote_flusight")
+
+        # opening another remote hub makes it the default, and a fresh server keeps it
+        mgr.activate_hub("remote_flu_metrocast")
+        restarted = HubManager(data_dir=self.data_dir, mode="local", include_enclosing=False)
+        self.assertEqual(restarted.default_hub_id(), "remote_flu_metrocast")
+        self.assertEqual(restarted.workspace_summary()["default_hub"], "remote_flu_metrocast")
+
+        # removing the default's data falls back to the other synced hub
+        shutil.rmtree(restarted.remote_store.hub_dir("flu_metrocast"))
+        restarted._on_remote_inventory_change("flu_metrocast", [])
+        self.assertEqual(restarted.default_hub_id(), "remote_flusight")
+        with self.assertRaises(KeyError):
+            restarted.activate_hub("remote_unknown")
 
     def test_score_cli_external_hub_without_writing_into_hub(self):
         before = _snapshot_tree(self.covid_hub)

@@ -1,6 +1,6 @@
 /* European & U.S. geographic metadata, Proportioned European Squircle Tile Layouts,
  * ISO numeric mapping, and MetroCast/European hub point catalogs.
- * Zero external dependencies; designed for reuse between /next/lab/ and /next/. */
+ * Zero external dependencies; used across Map, Peaks, Globe, and LocationPicker in next/. */
 
 /** Proportioned Europe tile map: 12 cols × 11 rows; [col, row, colSpan, rowSpan] (1-based). */
 export const EU_GRID_PROPORTIONED = Object.freeze({ cols: 12, rows: 11 });

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 import polars as pl
+import conftest  # noqa: F401
 from viz.core.cache_manager import ParquetCacheManager
 
 

@@ -11,7 +11,7 @@ __pycache__/
 # ILINet / FluSurv-NET history it cannot recreate is tracked read-only in data/seed/.
 data/surveillance/
 
-# Per-user environment and settings (setup.sh creates .venv; copy config.example.json to config.json)
+# Per-user environment and settings (setup.sh creates .venv; copy docs/config.example.json to config.json)
 .venv/
 config.json
 config.toml

@@ -79,7 +79,7 @@ if defined IS_HUB (
     echo Setup complete. Start the dashboard with:  "%DIR%\run.bat"
 ) else (
     echo Setup complete ^(standalone mode^).
-    echo Start the dashboard and connect any local Hubverse hub in the UI:
+    echo Start the dashboard, then connect a local Hubverse folder or sync a public hub ^(FluSight, MetroCast, ...^) in the UI:
     echo   "%DIR%\run.bat"
     echo Or launch directly against a local hub folder:
     echo   "%DIR%\run.bat" --hub C:\path\to\your-hub

@@ -725,6 +725,20 @@ class RemoteManager:
                 continue
             if season_for_date(m.group(2), calendar=cal) in job.seasons:
                 wanted[o.key] = (o, src_tag, src_client or client)
+        if not wanted and not man.get("files"):
+            avail_seasons = sorted({
+                s for o, _, _ in combined
+                for m in [FORECAST_KEY_RE.match(o.key)]
+                if m and (s := season_for_date(m.group(2), calendar=cal))
+            })
+            if avail_seasons:
+                latest_season = avail_seasons[-1]
+                job.seasons = [latest_season]
+                man["seasons"] = sorted(set(man.get("seasons", [])) | {latest_season})
+                for o, src_tag, src_client in combined:
+                    m = FORECAST_KEY_RE.match(o.key)
+                    if m and season_for_date(m.group(2), calendar=cal) == latest_season:
+                        wanted[o.key] = (o, src_tag, src_client or client)
 
         def _all_paths_exist(entry: Dict[str, Any]) -> bool:
             for p_field in ("path", "samples_path", "pmf_path", "peak_path"):

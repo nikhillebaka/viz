@@ -8,6 +8,7 @@ import unittest
 import polars as pl
 import numpy as np
 
+import conftest  # noqa: F401
 from viz.core.metrics import (
     compute_pinball_loss,
     score_forecasts,

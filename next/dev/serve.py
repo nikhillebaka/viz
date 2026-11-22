@@ -13,9 +13,9 @@ HERE = Path(__file__).resolve().parents[2]  # this copy of viz
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-import _bootstrap
+from core._bootstrap import ensure_viz_package
 
-_bootstrap.ensure_viz_package()
+ensure_viz_package()
 
 from viz import server  # noqa: E402
 

@@ -26,7 +26,7 @@ viz\setup.bat
 viz\run.bat
 ```
 
-Open **http://127.0.0.1:8501**.
+Open **http://127.0.0.1:8501**. On first launch with no local hub, either add a local Hubverse folder or sync a public hub (CDC FluSight, Flu MetroCast, COVID-19, RSV, RespiCast) in one click. Whichever hub you open last is saved and opens automatically on every later launch.
 
 `setup` creates `viz/.venv` (or uses an active virtualenv), installs Python dependencies, and builds local surveillance files when run inside a Hubverse checkout (adding `viz/` and `local-output/` to `.git/info/exclude`).
 
@@ -34,7 +34,11 @@ Open **http://127.0.0.1:8501**.
 
 ## Running
 
-When placed inside a Hubverse repository (or pointed via `--hub <path>` / `VIZ_HUB_DIR`), viz reads the standard hub layout:
+**Standalone** (cloned anywhere): `./viz/run.sh`, then pick a public hub or connect a local folder from **Data sources** (the `⋯` menu).
+
+**Pointed at a local hub:** `./viz/run.sh --hub /path/to/your-hub` (or `VIZ_HUB_DIR=/path/to/your-hub`). Cloning viz inside the hub repository works too: `./viz/setup.sh && ./viz/run.sh` opens that hub directly.
+
+A local hub follows the standard layout:
 
 ```text
 your-hub/
@@ -57,8 +61,8 @@ Custom port, data directory, or read-only web mode:
 Headless CLI scoring:
 
 ```bash
-PYTHONPATH=. viz/.venv/bin/python viz/score_cli.py --models all --season 2024-2025 --location states
-PYTHONPATH=. viz/.venv/bin/python viz/score_cli.py --models all --season current --format csv --out scores.csv
+./viz/.venv/bin/python viz/score_cli.py --models all --season 2024-2025 --location states
+./viz/.venv/bin/python viz/score_cli.py --models all --season current --format csv --out scores.csv
 ```
 
 ---

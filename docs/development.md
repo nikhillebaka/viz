@@ -3,12 +3,10 @@
 ## Automated Tests
 
 ### Python Unit & Integration Tests
-Run the Python suite with either `pytest` or `unittest` (with the parent workspace directory on `PYTHONPATH`):
+Run the Python suite with `unittest` (or `pytest`):
 
 ```bash
-PYTHONPATH=.. viz/.venv/bin/python -m unittest discover -s viz/tests
-# or with pytest:
-PYTHONPATH=.. viz/.venv/bin/python -m pytest viz/tests -v
+./.venv/bin/python -m unittest discover -s tests
 ```
 
 ### Frontend Unit Tests (Node >= 20, zero external packages)
@@ -66,7 +64,7 @@ viz/
 │   ├── geo/                   #   Offline TopoJSON atlases (world 1:50m, US counties, MetroCast HSAs)
 │   └── tests/                 #   Node unit tests & Chromium CDP E2E tests
 ├── tests/                     # Python unittest suite
-├── docs/                      # Reference documentation
-├── LICENSE / THIRD_PARTY_NOTICES.md
+├── docs/                      # Reference documentation & config.example.json
+├── LICENSE / README.md / THIRD_PARTY_NOTICES.md
 └── .cache/                    # (Generated) Parquet & remote hub caches
 ```

@@ -11,6 +11,7 @@ import unittest
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
 from viz.core.evaluation import EvaluationEngine, EvaluationParams, parse_phase, parse_week_range
 

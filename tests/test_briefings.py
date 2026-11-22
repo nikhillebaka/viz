@@ -16,6 +16,7 @@ import unittest
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.briefing_feeds import (
     FEED_SPECS,
     US_FIPS_TO_HHS,

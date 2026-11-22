@@ -3,7 +3,7 @@
 Everything works without a config file: targets, baseline, and locations are discovered from the hub (`hub-config/tasks.json`, `auxiliary-data/locations.csv`). To override defaults, copy the example and edit it:
 
 ```bash
-cp viz/config.example.json viz/config.json
+cp viz/docs/config.example.json viz/config.json
 ```
 
 `viz/config.json` (or `viz/config.toml`) is git-ignored, so your settings survive `git pull`. A `config.json` at the hub root with a top-level `"viz"` key also works.

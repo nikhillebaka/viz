@@ -16,6 +16,7 @@ import urllib.parse
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.data_loader import SandboxDataLoader
 from viz.remote.hubs import HubSpec
 from viz.remote.sync import RemoteManager

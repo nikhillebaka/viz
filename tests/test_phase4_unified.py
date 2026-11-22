@@ -18,6 +18,7 @@ from pathlib import Path
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.workspace import HubManager
 import viz.server as viz_server
 

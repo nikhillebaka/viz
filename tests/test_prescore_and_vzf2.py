@@ -21,6 +21,7 @@ import tempfile
 import numpy as np
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams
 from viz.core.metrics import crps_ensemble_1d, energy_score, score_forecasts, score_pmf_forecasts, score_sample_forecasts

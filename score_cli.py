@@ -52,9 +52,9 @@ except ModuleNotFoundError:
 
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-import _bootstrap
+from core._bootstrap import ensure_viz_package
 
-APP_DIR = _bootstrap.ensure_viz_package()
+APP_DIR = ensure_viz_package()
 
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams

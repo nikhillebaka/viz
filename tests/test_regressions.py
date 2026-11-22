@@ -17,6 +17,7 @@ import urllib.request
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams
 from viz.core.metrics import compute_pairwise_relative_wis, score_forecasts

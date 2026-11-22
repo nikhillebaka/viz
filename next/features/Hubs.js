@@ -111,8 +111,14 @@ export function setHubsContext(ctx) {
   activeRemoteHubId = hid?.startsWith("remote_") ? hid.slice(7) : null;
 }
 
-function openRemoteHub(remoteId) {
+/** Make a workspace hub the one the server opens on every launch (best effort; ?hub= still works without). */
+async function setStartupHub(wsId) {
+  try { await postJSON("/api/workspace/activate", { id: wsId }); } catch { /* same-tab ?hub= works directly */ }
+}
+
+async function openRemoteHub(remoteId) {
   const wsId = `remote_${remoteId}`;
+  await setStartupHub(wsId);
   if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
     activeCtx.switchContext({ hub: wsId });
     return;
@@ -138,7 +144,11 @@ function finished(x) {
     notes.set(x.id, `Synced · ${changes}${s.failed ? ` · ${s.failed} unreadable` : ""}`);
     clearAllCaches();
     activeCtx?.reloadCatalog?.().catch(() => {});
-    if (x.compatible !== false || x.id === activeRemoteHubId) {
+    if (!activeCtx?.manifest?.hub_id) {
+      // nothing was open yet (first run): the hub just synced becomes the startup hub and opens
+      toast(`${x.label} synced · ${changes}`);
+      openRemoteHub(x.id);
+    } else if (x.compatible !== false || x.id === activeRemoteHubId) {
       toast(`${x.label} synced · ${changes}`);
       if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
         setTimeout(() => applyWorkspaceUpdate(), 900);
@@ -174,7 +184,7 @@ async function loadBrowse(path = "") {
 }
 
 async function openLocalHub(id) {
-  try { await postJSON("/api/workspace/activate", { id }); } catch { /* same-tab ?hub= works directly */ }
+  await setStartupHub(id);
   if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
     activeCtx.switchContext({ hub: id });
     return;
@@ -549,7 +559,7 @@ export async function openHubs(anchor, ctx = {}) {
     }
   }
 
-  if (workspace?.mode === "local" && (workspace.hubs || []).length === 0) {
+  if (ctx.openBrowse && workspace?.mode === "local" && (workspace.hubs || []).length === 0) {
     browserOpen = true;
     await loadBrowse("").catch(() => {});
   }
@@ -794,6 +804,84 @@ async function remove(x) {
     if (activeRemoteHubId === x.id) location.assign("/next/");
     else await applyWorkspaceUpdate();
   } catch (err) { notes.set(x.id, `Couldn't remove · ${err.message}`); render?.(); }
+}
+
+/* ---------------------------------------------------------------- first run */
+
+/**
+ * The public hubs as one-click rows for the first-run screen: Sync downloads the hub's newest season, then
+ * the hub opens and becomes the one every later launch starts on. A sync already running is followed.
+ * @param {HTMLElement} host
+ * @returns {Promise<{ destroy(): void }>}
+ */
+export async function mountPublicHubs(host) {
+  const rows = h("div", { class: "app-welcome-hubs" });
+  host.replaceChildren(rows);
+  let list = [], timer = 0, gone = false;
+  const failedNotes = new Map();
+
+  const draw = () => {
+    const live = list.some(running);
+    rows.replaceChildren(...list.map((x) => {
+      const busy = running(x), j = x.job || {};
+      const meta = busy
+        ? [j.phase || "Starting", j.files_total ? `${j.files_done || 0} / ${j.files_total} files` : null].filter(Boolean).join(" · ")
+        : failedNotes.get(x.id) || [x.geography, x.synced ? `${plural(x.models || 0, "model")} synced` : null].filter(Boolean).join(" · ");
+      const act = busy
+        ? h("button", { type: "button", class: "c-btn filled sm", onclick: () => postJSON("/api/remote/cancel", { hub: x.id }).catch(() => {}) }, "Cancel")
+        : x.synced
+          ? h("button", { type: "button", class: "c-btn sm mo-primary", onclick: () => openRemoteHub(x.id) }, "Open")
+          : h("button", { type: "button", class: "c-btn sm mo-primary", disabled: live, onclick: () => start(x) }, "Sync");
+      return h("div", { class: "app-welcome-hub", "data-hub": x.id },
+        h("div", { class: "app-welcome-hub-text" },
+          h("span", { class: "app-welcome-hub-name" }, x.label),
+          h("span", { class: ["app-welcome-hub-meta", failedNotes.has(x.id) && "is-error"] }, meta)),
+        act);
+    }));
+  };
+
+  const poll = () => {
+    if (timer || gone) return;
+    const tick = async () => {
+      timer = 0;
+      const busy = list.filter(running);
+      await Promise.all(busy.map(async (x) => {
+        try {
+          const r = await getJSON(`/api/remote/job?hub=${encodeURIComponent(x.id)}`);
+          const next = { ...(r.hub || x), job: r.job };
+          list = list.map((y) => (y.id === x.id ? next : y));
+          if (!running(next)) {
+            if (next.job?.status === "done" && next.synced !== false) { await openRemoteHub(next.id); return; }
+            if (next.job?.status === "error") failedNotes.set(next.id, `Sync failed · ${next.job.error || "unknown error"}`);
+          }
+        } catch { /* a missed poll is retried on the next tick */ }
+      }));
+      if (gone) return;
+      draw();
+      if (list.some(running)) timer = setTimeout(tick, POLL_MS);
+    };
+    timer = setTimeout(tick, POLL_MS);
+  };
+
+  async function start(x) {
+    failedNotes.delete(x.id);
+    try {
+      const r = await postJSON("/api/remote/sync", { hub: x.id, seasons: [] });
+      list = list.map((y) => (y.id === x.id ? { ...y, job: r.job } : y));
+      poll();
+    } catch (err) { failedNotes.set(x.id, `Couldn't start · ${err.message}`); }
+    draw();
+  }
+
+  try {
+    list = (await getJSON("/api/remote/hubs")).hubs || [];
+  } catch (err) {
+    rows.replaceChildren(h("div", { class: "mo-note" }, `Couldn't load hubs · ${err.message}`));
+    return { destroy() { gone = true; } };
+  }
+  draw();
+  if (list.some(running)) poll();
+  return { destroy() { gone = true; clearTimeout(timer); } };
 }
 
 /* ---------------------------------------------------------------- warnings */

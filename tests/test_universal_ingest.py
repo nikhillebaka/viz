@@ -10,6 +10,7 @@ import unittest
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.calendar import CalendarSpec
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.geo import build_geo_graph

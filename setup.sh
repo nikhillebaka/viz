@@ -74,7 +74,7 @@ if is_hub "$ROOT_DIR"; then
     echo "Setup complete. Start the dashboard with:  \"$DIR/run.sh\""
 else
     echo "Setup complete (standalone mode)."
-    echo "Start the dashboard and connect any local Hubverse hub in the UI:"
+    echo "Start the dashboard, then connect a local Hubverse folder or sync a public hub (FluSight, MetroCast, ...) in the UI:"
     echo "  \"$DIR/run.sh\""
     echo "Or launch directly against a local hub folder:"
     echo "  \"$DIR/run.sh\" --hub /path/to/your-hub"

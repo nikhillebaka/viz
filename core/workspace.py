@@ -226,7 +226,7 @@ class WorkspaceRegistry:
         with self._lock:
             return self._read_unlocked().get("active_hub")
 
-    def set_active(self, hub_id: Optional[str]) -> bool:
+    def set_active(self, hub_id: Optional[str], *, allow_remote: bool = False) -> bool:
         with self._lock:
             raw = self._read_unlocked()
             if hub_id is None:
@@ -240,7 +240,7 @@ class WorkspaceRegistry:
                     item["last_opened"] = now
                     found = True
                     break
-            if not found:
+            if not found and not (allow_remote and str(hub_id).startswith(REMOTE_HUB_PREFIX)):
                 return False
             raw["active_hub"] = hub_id
             _atomic_write_json(self.path, raw)
@@ -623,13 +623,24 @@ class HubManager:
                 self.registry.add_hub(enclosing, auto_detected=True, activate=True)
             else:
                 active_id = self.registry.get_active_id()
-                active_rec = self.registry.get_hub(active_id) if active_id else None
-                if not active_rec or not is_hub_dir(Path(active_rec.path)):
+                if not self._is_valid_hub_id(active_id):
                     fallback = next(
-                        (r for r in self.registry.list_hubs() if is_hub_dir(Path(r.path))),
+                        (r.id for r in self.registry.list_hubs() if is_hub_dir(Path(r.path))),
                         None,
                     )
-                    self.registry.set_active(fallback.id if fallback else None)
+                    if fallback is None:
+                        fallback = next(
+                            (
+                                f"{REMOTE_HUB_PREFIX}{rid}"
+                                for rid in self.remote_store.synced_hub_ids()
+                                if Path(self.remote_store.hub_dir(rid)).is_dir()
+                            ),
+                            None,
+                        )
+                    self.registry.set_active(
+                        fallback,
+                        allow_remote=bool(fallback and fallback.startswith(REMOTE_HUB_PREFIX)),
+                    )
 
         from viz.core.catalog import WorkspaceCatalog
         from viz.core.briefing_feeds import BriefingFeedStore
@@ -643,6 +654,15 @@ class HubManager:
             self.catalog.invalidate()
         if hasattr(self, "briefings"):
             self.briefings.invalidate()
+
+    def _is_valid_hub_id(self, hub_id: Optional[str]) -> bool:
+        if not hub_id:
+            return False
+        rec = self.registry.get_hub(hub_id)
+        if rec is not None:
+            return is_hub_dir(Path(rec.path))
+        remote_rec = self._remote_hub_record(hub_id)
+        return remote_rec is not None and Path(remote_rec.path).is_dir()
 
     def _remote_hub_record(self, hub_id: str) -> Optional[LocalHubRecord]:
         """Synthetic workspace record for a synced remote hub opened standalone (`remote_<id>`)."""
@@ -738,7 +758,7 @@ class HubManager:
         if ctx is not None:
             cfg = ctx.config.get_server_config()
         else:
-            rec = self.registry.get_hub(default_id)
+            rec = self.registry.get_hub(default_id) or self._remote_hub_record(default_id)
             if rec is None or not Path(rec.path).is_dir():
                 return None
             cfg = VizConfig(Path(rec.path), app_dir=APP_DIR).get_server_config()
@@ -780,6 +800,16 @@ class HubManager:
     def _on_remote_inventory_change(self, hub_id: str, changed_models: List[str]):
         remote_ws_id = f"{REMOTE_HUB_PREFIX}{hub_id}"
         self._invalidate_catalog()
+        if self.remote_store.has_data(hub_id):
+            if not self._is_valid_hub_id(self.registry.get_active_id()):
+                self.registry.set_active(remote_ws_id, allow_remote=True)
+                self._refresh_cached_server_config()
+        elif self.registry.get_active_id() == remote_ws_id:
+            self.registry.set_active(None)
+            next_id = self.default_hub_id()
+            if next_id:
+                self.registry.set_active(next_id, allow_remote=next_id.startswith(REMOTE_HUB_PREFIX))
+            self._refresh_cached_server_config()
         with self._lock:
             self._contexts.pop(remote_ws_id, None)
             loaded = list(self._contexts.values())
@@ -855,12 +885,13 @@ class HubManager:
 
     def activate_hub(self, hub_id: str) -> Dict[str, Any]:
         self._ensure_local_mode()
-        rec = self.registry.get_hub(hub_id)
+        is_remote = str(hub_id).startswith(REMOTE_HUB_PREFIX)
+        rec = self._remote_hub_record(hub_id) if is_remote else self.registry.get_hub(hub_id)
         if rec is None:
             raise KeyError(f"Unknown hub '{hub_id}'")
         if not Path(rec.path).is_dir():
             raise ValueError(f"Hub folder no longer exists: {rec.path}")
-        self.registry.set_active(hub_id)
+        self.registry.set_active(hub_id, allow_remote=is_remote)
         self._invalidate_catalog()
         self._refresh_cached_server_config()
         return {
@@ -947,11 +978,17 @@ class HubManager:
 
     def workspace_summary(self, requested_hub_id: Optional[str] = None) -> Dict[str, Any]:
         records = self.registry.list_hubs()
-        active_id = requested_hub_id if (requested_hub_id and any(r.id == requested_hub_id for r in records)) else self.default_hub_id()
+        default_id = self.default_hub_id()
+        has_requested = requested_hub_id and (
+            any(r.id == requested_hub_id for r in records)
+            or self._remote_hub_record(requested_hub_id) is not None
+        )
+        active_id = requested_hub_id if has_requested else default_id
         hubs = [self._hub_entry(r, active_id) for r in records]
         return {
             "mode": self.mode,
             "active_hub": active_id,
+            "default_hub": default_id,
             "hubs": hubs,
             "native_picker_available": native_picker_available() if self.mode == "local" else False,
             "home_dir": str(Path.home()) if self.mode == "local" else None,

@@ -40,9 +40,9 @@ import polars as pl
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-import _bootstrap
+from core._bootstrap import ensure_viz_package
 
-APP_DIR = _bootstrap.ensure_viz_package()
+APP_DIR = ensure_viz_package()
 
 from viz.core.cache_manager import ParquetCacheManager
 from viz.core.data_loader import date_to_season_and_week

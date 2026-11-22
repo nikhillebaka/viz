@@ -23,6 +23,7 @@ from unittest import mock
 
 import polars as pl
 
+import conftest  # noqa: F401
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams, _shared_task_wis
 from viz.core.metrics import (

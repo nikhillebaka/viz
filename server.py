@@ -19,9 +19,9 @@ import threading
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
-import _bootstrap
+from core._bootstrap import ensure_viz_package
 
-APP_DIR = _bootstrap.ensure_viz_package()
+APP_DIR = ensure_viz_package()
 
 from viz.core.config import VizConfig
 from viz.core.paths import is_hub_dir

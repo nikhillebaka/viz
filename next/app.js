@@ -113,7 +113,7 @@ async function renderWelcome(manifest) {
   document.querySelector(".app-progress")?.classList.add("is-done");
   root.className = "app is-ready";
 
-  const [{ glass }, { pill, icon }, { mountMore }, { openHubs }] = await Promise.all([
+  const [{ glass }, { pill, icon }, { mountMore }, { openHubs, mountPublicHubs }] = await Promise.all([
     import("./ui/glass.js"),
     import("./ui/controls.js"),
     import("./features/More.js"),
@@ -136,20 +136,30 @@ async function renderWelcome(manifest) {
   const actionBtn = localMode
     ? h("button", {
       type: "button", class: "c-btn mo-primary",
-      onclick: () => openHubs(actionBtn, moreCtx),
+      onclick: () => openHubs(actionBtn, { ...moreCtx, openBrowse: true }),
     }, hubless ? "Add local hub" : "Data sources")
     : null;
 
-  const welcome = h("main", { class: "app-welcome" },
-    h("div", { class: "app-welcome-card" },
-      h("h1", { class: "app-welcome-title" }, hubless ? "No local hub connected" : (manifest.hub || "Connected hub")),
-      h("p", { class: "app-welcome-sub" }, hubless
-        ? (localMode
-          ? "Point viz at a local Hubverse folder to inspect forecasts and scores."
-          : "No hub is currently available on this server.")
-        : "No forecast rounds found in this hub yet."),
-      actionBtn ? h("div", { class: "app-welcome-actions" }, actionBtn) : null,
-      hubless && localMode ? h("code", { class: "app-welcome-cmd" }, "./run.sh --hub /path/to/hub") : null));
+  const welcomeBits = [
+    h("h1", { class: "app-welcome-title" }, hubless ? "Connect a hub" : (manifest.hub || "Connected hub")),
+    h("p", { class: "app-welcome-sub" }, hubless
+      ? (localMode
+        ? "Open a local Hubverse folder or sync a public hub."
+        : "No hub is currently available on this server.")
+      : "No forecast rounds found in this hub yet."),
+  ];
+  if (actionBtn) {
+    welcomeBits.push(h("div", { class: "app-welcome-section" },
+      hubless ? h("span", { class: "app-welcome-label" }, "Local hub") : null,
+      h("div", { class: "app-welcome-actions" }, actionBtn),
+      hubless ? h("code", { class: "app-welcome-cmd" }, "./run.sh --hub /path/to/hub") : null));
+  }
+  if (hubless && localMode) {
+    const listHost = h("div", { class: "app-welcome-hubs" });
+    welcomeBits.push(h("div", { class: "app-welcome-section" }, h("span", { class: "app-welcome-label" }, "Public hubs"), listHost));
+    mountPublicHubs(listHost);
+  }
+  const welcome = h("main", { class: "app-welcome" }, h("div", { class: "app-welcome-card" }, ...welcomeBits));
 
   root.replaceChildren(welcome, fixed);
 }
