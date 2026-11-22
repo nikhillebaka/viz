@@ -126,9 +126,9 @@ export function buildOutlookGeometry(
   signal,
   {
     showPrior = false,
-    width = 680,
-    height = 248,
-    pad = { t: 16, r: 16, b: 28, l: 48 },
+    width = 760,
+    height = 264,
+    pad = { t: 16, r: 18, b: 28, l: 48 },
   } = {},
 ) {
   const obsRaw = Array.isArray(signal?.observed) ? signal.observed : [];
@@ -375,19 +375,21 @@ export function buildStackedSegments(items) {
 
 export function buildCladeTimelineGeometry(
   cladeObj,
-  { width = 560, height = 136, pad = { t: 8, r: 8, b: 22, l: 34 } } = {},
+  { width = 820, height = 252, pad = { t: 12, r: 158, b: 26, l: 40 } } = {},
 ) {
   const dates = Array.isArray(cladeObj?.dates) ? cladeObj.dates : [];
   const clades = Array.isArray(cladeObj?.clades) ? cladeObj.clades : [];
   const byClade = cladeObj?.series_by_clade || {};
-  if (dates.length < 2 || !clades.length) return { areas: [], xTicks: [], yTicks: [] };
+  if (dates.length < 2 || !clades.length) {
+    return { width, height, pad, innerW: 0, innerH: 0, areas: [], rightLabels: [], columns: [], xTicks: [], yTicks: [] };
+  }
 
   const innerW = Math.max(1, width - pad.l - pad.r);
   const innerH = Math.max(1, height - pad.t - pad.b);
   const xAt = (i) => Number((pad.l + (i / (dates.length - 1)) * innerW).toFixed(2));
   const yAt = (pct) => Number((pad.t + (1 - Math.max(0, Math.min(100, pct)) / 100) * innerH).toFixed(2));
 
-  // Stack clade shares chronologically (normalized per date slice to 100% max)
+  // Normalize clade proportions per date slice to 100%
   const colTotals = dates.map((_, di) => {
     let sum = 0;
     for (const c of clades) sum += Math.max(0, Number(byClade[c]?.[di]) || 0);
@@ -395,6 +397,7 @@ export function buildCladeTimelineGeometry(
   });
 
   const cumLower = dates.map(() => 0);
+  const bandPositions = [];
   const areas = clades.map((c, idx) => {
     const arr = byClade[c] || [];
     const upper = dates.map((_, di) => {
@@ -405,23 +408,168 @@ export function buildCladeTimelineGeometry(
     const yLo = cumLower.map((v) => yAt(v));
     const yHi = upper.map((v) => yAt(v));
     const path = buildPolygonPath(xs, yHi, yLo); // note SVG y goes down so upper pct has smaller y
+    const lastIdx = dates.length - 1;
+    const midY = (yHi[lastIdx] + yLo[lastIdx]) / 2;
+    const latestPct = Number(((Math.max(0, Number(arr[lastIdx]) || 0) / colTotals[lastIdx]) * 100).toFixed(1));
+    const colorVar = c === "Other" ? "--ink-faint" : `--series-${(idx % 8) + 1}`;
+    bandPositions.push({ clade: c, pct: latestPct, anchorY: Number(midY.toFixed(2)), colorVar });
     for (let di = 0; di < dates.length; di++) cumLower[di] = upper[di];
     return {
       clade: c,
-      colorVar: c === "Other" ? "--ink-faint" : `--series-${(idx % 8) + 1}`,
+      colorVar,
       path,
-      latestPct: Number(arr[dates.length - 1] ?? 0),
+      latestPct,
     };
   });
 
-  const tickIndices = dates.length <= 4
+  // Resolve right-margin direct label collisions (sort top-to-bottom by anchorY)
+  const visibleLabels = bandPositions
+    .filter((b) => b.pct >= 2.0)
+    .sort((a, b) => a.anchorY - b.anchorY);
+  const minGap = 17;
+  const topBound = pad.t + 7;
+  const botBound = height - pad.b - 6;
+  let prevY = topBound - minGap;
+  for (const lb of visibleLabels) {
+    lb.labelY = Math.max(lb.anchorY, prevY + minGap);
+    prevY = lb.labelY;
+  }
+  // Backward pass so bottom labels stay within plot bottom bound
+  let nextLimit = botBound;
+  for (let i = visibleLabels.length - 1; i >= 0; i--) {
+    if (visibleLabels[i].labelY > nextLimit) {
+      visibleLabels[i].labelY = nextLimit;
+    }
+    nextLimit = visibleLabels[i].labelY - minGap;
+  }
+  const rightLabels = visibleLabels.map((lb) => ({
+    ...lb,
+    labelY: Number(Math.max(topBound, Math.min(botBound, lb.labelY)).toFixed(2)),
+    xEdge: Number((pad.l + innerW).toFixed(2)),
+    xText: Number((pad.l + innerW + 10).toFixed(2)),
+  }));
+
+  const tickIndices = dates.length <= 5
     ? dates.map((_, i) => i)
-    : [0, Math.floor((dates.length - 1) / 2), dates.length - 1];
+    : [0, Math.floor((dates.length - 1) / 3), Math.floor(((dates.length - 1) * 2) / 3), dates.length - 1];
   const xTicks = [...new Set(tickIndices)].map((i) => ({
     x: xAt(i),
     label: formatIsoShort(dates[i]),
   }));
   const yTicks = [0, 50, 100].map((v) => ({ value: v, y: yAt(v), label: `${v}%` }));
 
-  return { width, height, pad, innerW, innerH, areas, xTicks, yTicks };
+  const columns = dates.map((dt, di) => ({
+    date: dt,
+    x: xAt(di),
+    shares: clades
+      .map((c) => ({
+        clade: c,
+        pct: Number(((Math.max(0, Number(byClade[c]?.[di]) || 0) / colTotals[di]) * 100).toFixed(1)),
+      }))
+      .filter((s) => s.pct >= 1.0)
+      .sort((a, b) => b.pct - a.pct),
+  }));
+
+  return { width, height, pad, innerW, innerH, areas, rightLabels, columns, xTicks, yTicks };
+}
+
+const SUBTYPE_SERIES_SPEC = [
+  { key: "ah1n1pdm09", label: "A(H1N1)pdm09", colorVar: "--series-2" },
+  { key: "ah3n2", label: "A(H3N2)", colorVar: "--series-3" },
+  { key: "a_unsub_rem", label: "A (unsubtyped)", colorVar: "--ink-tertiary" },
+  { key: "inf_b", label: "Influenza B", colorVar: "--series-4" },
+];
+
+export function buildSubtypeTimelineGeometry(
+  series,
+  { width = 820, height = 196, pad = { t: 12, r: 16, b: 28, l: 46 } } = {},
+) {
+  const rows = (Array.isArray(series) ? series : [])
+    .filter((r) => r?.date)
+    .slice(-16)
+    .map((r) => {
+      const h1 = Math.max(0, Number(r.ah1n1pdm09) || 0);
+      const h3 = Math.max(0, Number(r.ah3n2) || 0);
+      const infA = Math.max(0, Number(r.inf_a) || 0);
+      const unsub = infA > h1 + h3 ? infA - h1 - h3 : Math.max(0, Number(r.a_unsubtyped) || 0);
+      const infB = Math.max(0, Number(r.inf_b) || 0);
+      const total = h1 + h3 + unsub + infB;
+      return {
+        date: String(r.date).slice(0, 10),
+        specimens: Number(r.spec_processed ?? r.specimens) || 0,
+        ah1n1pdm09: h1,
+        ah3n2: h3,
+        a_unsub_rem: unsub,
+        inf_b: infB,
+        total,
+      };
+    });
+
+  if (!rows.length) {
+    return { width, height, pad, innerW: 0, innerH: 0, bars: [], legend: [], xTicks: [], yTicks: [] };
+  }
+
+  const maxTotalRaw = Math.max(1, ...rows.map((r) => r.total));
+  const step = niceStep(maxTotalRaw * 1.05, 4);
+  const yMax = Math.max(step, Math.ceil((maxTotalRaw * 1.05) / step) * step);
+  const innerW = Math.max(1, width - pad.l - pad.r);
+  const innerH = Math.max(1, height - pad.t - pad.b);
+  const slotW = innerW / rows.length;
+  const barW = Number(Math.max(4, Math.min(34, slotW * 0.68)).toFixed(2));
+  const yAt = (val) => Number((pad.t + (1 - Math.max(0, Math.min(yMax, val)) / yMax) * innerH).toFixed(2));
+  const baseY = Number((pad.t + innerH).toFixed(2));
+
+  const seenKeys = new Set();
+  const bars = rows.map((row, idx) => {
+    const cx = pad.l + (idx + 0.5) * slotW;
+    const x = Number((cx - barW / 2).toFixed(2));
+    let cumVal = 0;
+    const segments = [];
+    for (const sp of SUBTYPE_SERIES_SPEC) {
+      const val = row[sp.key] || 0;
+      if (val <= 0) continue;
+      seenKeys.add(sp.key);
+      const yBot = yAt(cumVal);
+      cumVal += val;
+      const yTop = yAt(cumVal);
+      const pct = row.total > 0 ? Number(((val / row.total) * 100).toFixed(1)) : 0;
+      segments.push({
+        key: sp.key,
+        label: sp.label,
+        value: val,
+        pct,
+        x,
+        w: barW,
+        y: yTop,
+        h: Number(Math.max(0.8, yBot - yTop).toFixed(2)),
+        colorVar: sp.colorVar,
+      });
+    }
+    return {
+      date: row.date,
+      cx: Number(cx.toFixed(2)),
+      x,
+      w: barW,
+      total: row.total,
+      specimens: row.specimens,
+      baseY,
+      segments,
+    };
+  });
+
+  const yTicks = [];
+  for (let v = 0; v <= yMax + step * 1e-6; v += step) {
+    const cv = Number(v.toFixed(6));
+    yTicks.push({ value: cv, y: yAt(cv), label: formatAxisTick(cv, false) });
+  }
+  const tickIdxs = rows.length <= 5
+    ? rows.map((_, i) => i)
+    : [0, Math.floor((rows.length - 1) / 3), Math.floor(((rows.length - 1) * 2) / 3), rows.length - 1];
+  const xTicks = [...new Set(tickIdxs)].map((i) => ({
+    x: bars[i].cx,
+    label: formatIsoShort(rows[i].date),
+  }));
+  const legend = SUBTYPE_SERIES_SPEC.filter((sp) => seenKeys.has(sp.key));
+
+  return { width, height, pad, innerW, innerH, yMax, bars, legend, xTicks, yTicks };
 }

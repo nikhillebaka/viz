@@ -22,6 +22,7 @@ from viz.core.briefing_feeds import (
     WHO_NH_VACCINE_REFERENCE,
     BriefingFeedStore,
 )
+from viz.core.catalog import display_model_name, rank_ensemble_candidates
 from viz.core.workspace import HubManager
 from viz.server import SandboxRequestHandler
 
@@ -302,6 +303,29 @@ class TestBriefingFeedsAndBuilder(unittest.TestCase):
         self.assertIn("2026-27", seasons)
         self.assertIn("2025-26", seasons)
 
+    def test_rank_ensemble_candidates_prefers_official_hub_ensemble(self):
+        models = {
+            "flusight:CADPH-FluCAT_Ensemble": {"designated": True, "targets": ["wk inc flu hosp"], "dates": ["2026-11-21"] * 90},
+            "flusight:FluSight-HJudge_ensemble": {"designated": False, "targets": ["wk inc flu hosp"], "dates": ["2026-11-21"] * 35},
+            "flusight:FluSight-lop_norm": {"designated": False, "targets": ["wk inc flu hosp"], "dates": ["2026-11-21"] * 92},
+            "flusight:FluSight-baseline": {"designated": False, "is_baseline": True, "targets": ["wk inc flu hosp"], "dates": ["2026-11-21"] * 92},
+            "flusight:FluSight-ensemble": {"designated": False, "targets": ["wk inc flu hosp"], "dates": ["2026-11-21"] * 92},
+        }
+        meta = {
+            "flusight:FluSight-ensemble": {"ensemble_of_hub_models": True},
+            "flusight:CADPH-FluCAT_Ensemble": {"ensemble_of_hub_models": False},
+        }
+        ranked = rank_ensemble_candidates(
+            models,
+            "wk inc flu hosp",
+            "2026-11-21",
+            get_meta=lambda m: meta.get(m, {}),
+            hub_id="reich_lab_forecasting_testbed_for",
+        )
+        self.assertEqual(ranked[0], "flusight:FluSight-ensemble")
+        self.assertEqual(display_model_name(ranked[0]), "FluSight-ensemble")
+        self.assertNotIn("flusight:FluSight-baseline", ranked)
+
     def test_all_eight_feeds_fetch_cache_ttl_and_partial_failure(self):
         store = BriefingFeedStore(self.data_dir, fetcher=_fixture_router())
         st0 = store.get_status()
@@ -369,30 +393,25 @@ class TestBriefingFeedsAndBuilder(unittest.TestCase):
         self.assertGreaterEqual(len(ma["signals"]), 1)
         sig0 = ma["signals"][0]
         self.assertIsNotNone(sig0["fan"])
+        self.assertEqual(sig0["model_display"], "FluSight-ensemble")
         self.assertIsNotNone(sig0["rate_change_pmf"])
         self.assertEqual(len(ma["virology"]["wastewater"]), 2)
         self.assertEqual(len(ma["virology"]["cfa_rt"]), 1)
         self.assertIsNotNone(ma["virology"]["flu_subtypes"])
         self.assertGreaterEqual(len(ma["virology"]["clades"]), 2)
+        self.assertEqual(ma["calibration"], [])
         # Ensure strict factual prose (no loaded adjectives/medical advice)
         prose = " ".join(ma["summary"]["paragraphs"]).lower()
         for banned in ("alarming", "surge", "crisis", "panic", "you should"):
             self.assertNotIn(banned, prose)
-        # Ensure cov50/cov95 are already on 0..100 scale, never double-multiplied
-        for cal_item in ma["calibration"]:
-            for m in cal_item["models"]:
-                if m["cov50"] is not None:
-                    self.assertLessEqual(m["cov50"], 100.0)
-                if m["cov95"] is not None:
-                    self.assertLessEqual(m["cov95"], 100.0)
 
-        # Sub-state HSA must explicitly disclose state/HHS surveillance scope
-        # (Use a MetroCast-typed child by checking parent or direct lookup)
+        # Poland has no sub-regions so peers section should be empty
         pl_brief = mgr.briefings.build_briefing("PL")
         self.assertEqual(pl_brief["place"]["key"], "PL")
         self.assertEqual(pl_brief["place"]["clade_region"], "Europe")
         self.assertIsNotNone(pl_brief["virology"]["flu_subtypes"])
         self.assertEqual(pl_brief["virology"]["wastewater"], [])  # zero US-only mock panels for Poland
+        self.assertEqual(pl_brief["peers"]["rows"], [])
 
     def test_briefing_http_endpoints(self):
         mgr = _build_us_and_eu_workspace(self.tmp_root, self.data_dir)

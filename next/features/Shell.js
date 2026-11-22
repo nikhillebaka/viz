@@ -239,7 +239,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
       document.body.style.overflow = "hidden";
       markReady();
       gBack.update();
-      globeHost = h("section", { class: "app-globe", "aria-label": "Interactive monochrome globe" });
+      globeHost = h("section", { class: "app-globe", "aria-label": "Globe" });
       root.append(globeHost);
       const tok = ++globeToken;
       import("./GlobeView.js").then((m) => {
@@ -305,7 +305,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
       gBack.update();
       root.classList.add("is-briefing-open");
       if (!briefingHost) {
-        briefingHost = h("section", { class: "app-briefing", "aria-label": "Place epidemiological briefing" });
+        briefingHost = h("section", { class: "app-briefing", "aria-label": "Briefing" });
         root.append(briefingHost);
       }
       if (!briefingInst) {

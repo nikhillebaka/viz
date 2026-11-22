@@ -1,4 +1,4 @@
-/* Place-First Live Briefing view — multi-hub synthesis + live external surveillance & virology. */
+/* Place-First Live Briefing view — multi-hub forecasts + live external surveillance & virology. */
 
 import { h } from "../lib/dom.js";
 import {
@@ -12,7 +12,7 @@ import {
   buildCladeTimelineGeometry,
   buildOutlookGeometry,
   buildSparklineGeometry,
-  buildStackedSegments,
+  buildSubtypeTimelineGeometry,
   formatIsoShort,
   formatMetricValue,
   formatSignedPct,
@@ -46,7 +46,7 @@ function deltaClass(val) {
   return val > 0 ? "br-delta-up" : "br-delta-dn";
 }
 
-function renderSparklineSvg(values, { width = 92, height = 22, tone = "var(--ink-secondary)" } = {}) {
+function renderSparklineSvg(values, { width = 104, height = 24, tone = "var(--ink-secondary)" } = {}) {
   const geom = buildSparklineGeometry(values, width, height, 2);
   if (!geom.path) return h("span", { class: "br-delta-flat" }, "—");
   return svgEl("svg", {
@@ -56,8 +56,8 @@ function renderSparklineSvg(values, { width = 92, height = 22, tone = "var(--ink
     class: "br-spark",
     "aria-hidden": "true",
   },
-  svgEl("path", { d: geom.path, fill: "none", stroke: tone, "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round" }),
-  svgEl("circle", { cx: geom.lastX, cy: geom.lastY, r: 2, fill: tone }));
+  svgEl("path", { d: geom.path, fill: "none", stroke: tone, "stroke-width": 1.6, "stroke-linecap": "round", "stroke-linejoin": "round" }),
+  svgEl("circle", { cx: geom.lastX, cy: geom.lastY, r: 2.1, fill: tone }));
 }
 
 function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
@@ -70,20 +70,18 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
     "aria-label": `${signal.label} observed trajectory and ensemble forecast`,
   });
 
-  // Grid & Y ticks
   for (const t of g.yTicks) {
     svg.appendChild(svgEl("line", {
       x1: g.pad.l, x2: g.width - g.pad.r, y1: t.y, y2: t.y,
       class: "br-grid-line",
     }));
     svg.appendChild(svgEl("text", {
-      x: g.pad.l - 6, y: t.y + 3,
+      x: g.pad.l - 8, y: t.y + 3.5,
       "text-anchor": "end",
       class: "br-axis-text",
     }, t.label));
   }
 
-  // Forecast shading region
   if (g.fan && g.fan.shadeRect.w > 0) {
     svg.appendChild(svgEl("rect", {
       x: g.fan.shadeRect.x,
@@ -97,13 +95,12 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
       stroke: "var(--line-axis)", "stroke-width": 1, "stroke-dasharray": "3 3",
     }));
     svg.appendChild(svgEl("text", {
-      x: Math.min(g.width - g.pad.r - 4, g.fan.refX + 5),
-      y: g.pad.t + 10,
+      x: Math.min(g.width - g.pad.r - 4, g.fan.refX + 6),
+      y: g.pad.t + 11,
       class: "br-axis-text",
-    }, `Forecast (${formatIsoShort(g.fan.refDate)})`));
+    }, `Forecast · ${formatIsoShort(g.fan.refDate)}`));
   }
 
-  // Optional prior season waves (season week aligned)
   for (const ps of g.priorSeries) {
     svg.appendChild(svgEl("path", {
       d: ps.path,
@@ -115,7 +112,6 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
     }));
   }
 
-  // Forecast intervals + median
   if (g.fan) {
     if (g.fan.q95Path) svg.appendChild(svgEl("path", { d: g.fan.q95Path, fill: "var(--series-1)", opacity: 0.12 }));
     if (g.fan.q80Path) svg.appendChild(svgEl("path", { d: g.fan.q80Path, fill: "var(--series-1)", opacity: 0.2 }));
@@ -125,7 +121,7 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
         d: g.fan.medianPath,
         fill: "none",
         stroke: "var(--series-1)",
-        "stroke-width": 2.2,
+        "stroke-width": 2.25,
         "stroke-linecap": "round",
       }));
     }
@@ -134,7 +130,6 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
     }
   }
 
-  // Observed line & vertices
   if (g.observedPath) {
     svg.appendChild(svgEl("path", {
       d: g.observedPath,
@@ -145,11 +140,10 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
       "stroke-linejoin": "round",
     }));
     for (const pt of g.observedPoints) {
-      svg.appendChild(svgEl("circle", { cx: pt.x, cy: pt.y, r: 2.3, fill: "var(--ink-primary)" }));
+      svg.appendChild(svgEl("circle", { cx: pt.x, cy: pt.y, r: 2.4, fill: "var(--ink-primary)" }));
     }
   }
 
-  // X ticks
   for (const xt of g.xTicks) {
     svg.appendChild(svgEl("text", {
       x: xt.x, y: g.height - 8,
@@ -158,7 +152,6 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
     }, xt.label));
   }
 
-  // Interactive hover crosshair & overlay
   const hoverLine = svgEl("line", {
     x1: 0, x2: 0, y1: g.pad.t, y2: g.height - g.pad.b,
     stroke: "var(--ink-tertiary)", "stroke-width": 1, opacity: 0,
@@ -198,11 +191,11 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
       hoverDot.setAttribute("cy", best.y);
       hoverDot.setAttribute("opacity", "1");
       if (best.kind === "obs") {
-        onReadout(`${formatIsoShort(best.date, true)} · Observed: ${fmt(best.value)}${unitLbl}`);
+        onReadout(`${formatIsoShort(best.date, true)} · Observed ${fmt(best.value)}${unitLbl}`);
       } else {
         const q = best.q95;
         const band = q && q[0] != null && q[1] != null ? ` (95% PI ${fmt(q[0])}–${fmt(q[1])})` : "";
-        onReadout(`${formatIsoShort(best.date, true)} · Forecast median (h${best.horizon}): ${fmt(best.median)}${unitLbl}${band}`);
+        onReadout(`${formatIsoShort(best.date, true)} · Median (${signal.model_display || signal.model_id}, h${best.horizon}): ${fmt(best.median)}${unitLbl}${band}`);
       }
     });
     hitRect.addEventListener("pointerleave", () => {
@@ -216,33 +209,158 @@ function renderOutlookSvg(signal, { showPrior = false, onReadout }) {
   return svg;
 }
 
-function renderCladeTimelineSvg(cladeObj) {
+function renderLargeCladeSvg(cladeObj, onReadout) {
   const g = buildCladeTimelineGeometry(cladeObj);
   if (!g.areas.length) return null;
   const svg = svgEl("svg", {
     viewBox: `0 0 ${g.width} ${g.height}`,
     class: "br-svg",
     role: "img",
-    "aria-label": `${cladeObj.subtype} clade prevalence over time`,
+    "aria-label": `${cladeObj.subtype} circulating clades over time`,
   });
+
   for (const yt of g.yTicks) {
-    svg.appendChild(svgEl("line", { x1: g.pad.l, x2: g.width - g.pad.r, y1: yt.y, y2: yt.y, class: "br-grid-line" }));
-    svg.appendChild(svgEl("text", { x: g.pad.l - 5, y: yt.y + 3, "text-anchor": "end", class: "br-axis-text" }, yt.label));
+    svg.appendChild(svgEl("line", { x1: g.pad.l, x2: g.pad.l + g.innerW, y1: yt.y, y2: yt.y, class: "br-grid-line" }));
+    svg.appendChild(svgEl("text", { x: g.pad.l - 8, y: yt.y + 3.5, "text-anchor": "end", class: "br-axis-text" }, yt.label));
   }
+
   for (const a of g.areas) {
     if (!a.path) continue;
     svg.appendChild(svgEl("path", {
       d: a.path,
       fill: `var(${a.colorVar})`,
-      "fill-opacity": 0.85,
+      "fill-opacity": 0.86,
       stroke: "var(--surface-paper)",
-      "stroke-width": 0.8,
-    }, svgEl("title", null, `${a.clade}: ${a.latestPct}% latest`)));
+      "stroke-width": 1,
+    }));
   }
+
+  // Direct collision-resolved right-margin labels + leader ticks
+  for (const lb of g.rightLabels) {
+    svg.appendChild(svgEl("line", {
+      x1: lb.xEdge,
+      y1: lb.anchorY,
+      x2: lb.xText - 4,
+      y2: lb.labelY - 3,
+      stroke: `var(${lb.colorVar})`,
+      "stroke-width": 1.25,
+      opacity: 0.9,
+    }));
+    svg.appendChild(svgEl("circle", { cx: lb.xEdge, cy: lb.anchorY, r: 2.2, fill: `var(${lb.colorVar})` }));
+    const txtEl = svgEl("text", { x: lb.xText, y: lb.labelY, class: "br-direct-label" },
+      lb.clade, " ",
+      svgEl("tspan", { class: "br-direct-pct" }, `${lb.pct.toFixed(0)}%`),
+    );
+    svg.appendChild(txtEl);
+  }
+
   for (const xt of g.xTicks) {
     svg.appendChild(svgEl("text", { x: xt.x, y: g.height - 6, "text-anchor": "middle", class: "br-axis-text" }, xt.label));
   }
+
+  const hoverLine = svgEl("line", {
+    x1: 0, x2: 0, y1: g.pad.t, y2: g.height - g.pad.b,
+    stroke: "var(--ink-primary)", "stroke-width": 1, opacity: 0,
+  });
+  svg.appendChild(hoverLine);
+
+  if (g.columns.length && onReadout) {
+    const hitRect = svgEl("rect", {
+      x: g.pad.l, y: g.pad.t, width: g.innerW, height: g.innerH,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    hitRect.addEventListener("pointermove", (ev) => {
+      const r = svg.getBoundingClientRect();
+      if (!r.width) return;
+      const sx = ((ev.clientX - r.left) / r.width) * g.width;
+      let best = g.columns[0];
+      let bestD = Math.abs(sx - best.x);
+      for (const col of g.columns) {
+        const d = Math.abs(sx - col.x);
+        if (d < bestD) { best = col; bestD = d; }
+      }
+      hoverLine.setAttribute("x1", best.x);
+      hoverLine.setAttribute("x2", best.x);
+      hoverLine.setAttribute("opacity", "0.75");
+      const summary = best.shares.slice(0, 4).map((s) => `${s.clade} ${s.pct.toFixed(1)}%`).join(" · ");
+      onReadout(`${formatIsoShort(best.date, true)} · ${summary}`);
+    });
+    hitRect.addEventListener("pointerleave", () => {
+      hoverLine.setAttribute("opacity", "0");
+      onReadout("");
+    });
+    svg.appendChild(hitRect);
+  }
+
   return svg;
+}
+
+function renderLargeSubtypeSvg(series, onReadout) {
+  const g = buildSubtypeTimelineGeometry(series);
+  if (!g.bars.length) return null;
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${g.width} ${g.height}`,
+    class: "br-svg",
+    role: "img",
+    "aria-label": "Weekly influenza subtype detections over time",
+  });
+
+  for (const yt of g.yTicks) {
+    svg.appendChild(svgEl("line", { x1: g.pad.l, x2: g.width - g.pad.r, y1: yt.y, y2: yt.y, class: "br-grid-line" }));
+    svg.appendChild(svgEl("text", { x: g.pad.l - 8, y: yt.y + 3.5, "text-anchor": "end", class: "br-axis-text" }, yt.label));
+  }
+
+  for (const bar of g.bars) {
+    for (const seg of bar.segments) {
+      svg.appendChild(svgEl("rect", {
+        x: seg.x,
+        y: seg.y,
+        width: seg.w,
+        height: seg.h,
+        fill: `var(${seg.colorVar})`,
+        rx: 1,
+      }));
+    }
+  }
+
+  for (const xt of g.xTicks) {
+    svg.appendChild(svgEl("text", { x: xt.x, y: g.height - 6, "text-anchor": "middle", class: "br-axis-text" }, xt.label));
+  }
+
+  if (onReadout) {
+    const hoverBox = svgEl("rect", {
+      x: 0, y: g.pad.t, width: 1, height: g.innerH,
+      fill: "var(--ink-primary)", opacity: 0,
+    });
+    svg.appendChild(hoverBox);
+    const hitRect = svgEl("rect", {
+      x: g.pad.l, y: g.pad.t, width: g.innerW, height: g.innerH,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    hitRect.addEventListener("pointermove", (ev) => {
+      const r = svg.getBoundingClientRect();
+      if (!r.width) return;
+      const sx = ((ev.clientX - r.left) / r.width) * g.width;
+      let best = g.bars[0];
+      let bestD = Math.abs(sx - best.cx);
+      for (const b of g.bars) {
+        const d = Math.abs(sx - b.cx);
+        if (d < bestD) { best = b; bestD = d; }
+      }
+      hoverBox.setAttribute("x", best.x - 1);
+      hoverBox.setAttribute("width", best.w + 2);
+      hoverBox.setAttribute("opacity", "0.08");
+      const parts = best.segments.map((s) => `${s.label} ${s.value.toLocaleString("en-US")} (${s.pct}%)`).join(" · ");
+      onReadout(`${formatIsoShort(best.date, true)} · Total positive: ${best.total.toLocaleString("en-US")}${parts ? ` · ${parts}` : ""}`);
+    });
+    hitRect.addEventListener("pointerleave", () => {
+      hoverBox.setAttribute("opacity", "0");
+      onReadout("");
+    });
+    svg.appendChild(hitRect);
+  }
+
+  return { svg, legend: g.legend };
 }
 
 function renderRtMiniChart(rtItem) {
@@ -252,7 +370,7 @@ function renderRtMiniChart(rtItem) {
   const lo = Math.min(0.6, ...vals);
   const hi = Math.max(1.4, ...vals);
   const span = Math.max(0.2, hi - lo);
-  const width = 270;
+  const width = 260;
   const height = 42;
   const pad = 4;
   const yOf = (v) => Number((pad + (1 - (v - lo) / span) * (height - pad * 2)).toFixed(2));
@@ -278,13 +396,13 @@ export function mountBriefing(
     placeKey = null,
     onPlaceChange = null,
     onOpenChart = null,
-    onOpenScores = null,
     onOpenGlobe = null,
   } = {},
 ) {
   let currentPlace = placeKey || null;
   let data = null;
   let activeSignalIdx = 0;
+  let activeCladeIdx = 0;
   let showPriorSeasons = false;
   let loadToken = 0;
   let pollTimer = null;
@@ -309,7 +427,7 @@ export function mountBriefing(
           return;
         }
         invalidateBriefingCache();
-        await fetchAndRender(currentPlace, { bust: true, preserveSignal: true });
+        await fetchAndRender(currentPlace, { bust: true, preserveTabs: true });
       } catch {
         refreshing = false;
         render();
@@ -328,7 +446,7 @@ export function mountBriefing(
         startPoll();
       } else {
         invalidateBriefingCache();
-        await fetchAndRender(currentPlace, { bust: true, preserveSignal: true });
+        await fetchAndRender(currentPlace, { bust: true, preserveTabs: true });
       }
     } catch (e) {
       refreshing = false;
@@ -337,23 +455,29 @@ export function mountBriefing(
     }
   }
 
-  async function fetchAndRender(targetPlace, { bust = false, preserveSignal = false } = {}) {
+  async function fetchAndRender(targetPlace, { bust = false, preserveTabs = false } = {}) {
     const token = ++loadToken;
     errorMsg = null;
     if (!data) renderLoading();
     try {
       const res = await loadBriefing(targetPlace || "", { bust });
       if (token !== loadToken) return;
-      const prevSigId = preserveSignal ? data?.signals?.[activeSignalIdx]?.signal_id : null;
+      const prevSigId = preserveTabs ? data?.signals?.[activeSignalIdx]?.signal_id : null;
+      const prevSubtype = preserveTabs ? data?.virology?.clades?.[activeCladeIdx]?.subtype : null;
       data = res;
       currentPlace = res?.place?.key || targetPlace || null;
       refreshing = !!res?.feed_status?.refreshing;
       if (refreshing) startPoll();
+
+      activeSignalIdx = 0;
       if (prevSigId && Array.isArray(res?.signals)) {
         const idx = res.signals.findIndex((s) => s.signal_id === prevSigId);
-        activeSignalIdx = idx >= 0 ? idx : 0;
-      } else {
-        activeSignalIdx = 0;
+        if (idx >= 0) activeSignalIdx = idx;
+      }
+      activeCladeIdx = 0;
+      if (prevSubtype && Array.isArray(res?.virology?.clades)) {
+        const cIdx = res.virology.clades.findIndex((c) => c.subtype === prevSubtype);
+        if (cIdx >= 0) activeCladeIdx = cIdx;
       }
       onPlaceChange?.(currentPlace);
       render();
@@ -365,12 +489,10 @@ export function mountBriefing(
   }
 
   function renderLoading() {
-    host.replaceChildren();
-    host.appendChild(
+    host.replaceChildren(
       h("div", { class: "br-page" },
         h("header", { class: "br-masthead" },
-          h("span", { class: "br-kicker" }, "Place Briefing"),
-          h("h1", { class: "br-h1" }, "Loading briefing…"),
+          h("h1", { class: "br-h1" }, "Loading…"),
         ),
       ),
     );
@@ -385,29 +507,27 @@ export function mountBriefing(
     };
     const makeGroup = (label, list) =>
       list.length
-        ? h("optgroup", { label }, list.map((c) => h("option", { value: c.key, selected: c.key === currentPlace }, `${c.name} (${c.abbr})`)))
+        ? h("optgroup", { label }, list.map((c) => h("option", { value: c.key }, c.key === currentPlace ? `${c.name} (current)` : c.name)))
         : null;
 
-    const sel = h("select", {
+    return h("select", {
       class: "br-select",
-      "aria-label": "Jump to location briefing",
+      "aria-label": "Switch location",
       onchange: (e) => {
         const nextKey = e.target.value;
+        e.target.value = "";
         if (nextKey && nextKey !== currentPlace) fetchAndRender(nextKey);
       },
     },
-    makeGroup("National & Countries", groups.national),
-    makeGroup("States & Territories", groups.states),
-    makeGroup("Cities, Regions & HSAs", groups.substate),
-    );
-    return sel;
+    h("option", { value: "", selected: true, disabled: true, hidden: true }, "Switch place"),
+    makeGroup("Countries", groups.national),
+    makeGroup("States", groups.states),
+    makeGroup("Regions & Cities", groups.substate));
   }
 
-  function openSignalInChart(sig, goScores = false) {
+  function openSignalInChart(sig) {
     if (!sig) return;
-    if (goScores && onOpenScores) {
-      onOpenScores(sig);
-    } else if (onOpenChart) {
+    if (onOpenChart) {
       onOpenChart(sig);
     } else if (ctx?.switchContext) {
       ctx.switchContext({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date });
@@ -417,9 +537,8 @@ export function mountBriefing(
   function render() {
     host.replaceChildren();
     if (!data && errorMsg) {
-      host.appendChild(h("div", { class: "br-page" },
+      host.append(h("div", { class: "br-page" },
         h("header", { class: "br-masthead" },
-          h("span", { class: "br-kicker" }, "Place Briefing"),
           h("h1", { class: "br-h1" }, "Unable to load briefing"),
           h("p", { class: "br-prose" }, errorMsg),
           h("div", { class: "br-actions" },
@@ -433,13 +552,12 @@ export function mountBriefing(
 
     const place = data.place;
     if (data.empty || !place) {
-      host.appendChild(h("div", { class: "br-page" },
+      host.append(h("div", { class: "br-page" },
         h("header", { class: "br-masthead" },
-          h("span", { class: "br-kicker" }, "Place Briefing"),
           h("h1", { class: "br-h1" }, "No synced forecast hubs"),
-          h("p", { class: "br-prose" }, "Connect or sync a local or remote forecast hub from Data Sources or Globe to inspect place-first briefings."),
+          h("p", { class: "br-prose" }, "Sync a forecast hub from Data Sources or Globe to inspect live briefings."),
           h("div", { class: "br-actions" },
-            onOpenGlobe ? h("button", { type: "button", class: "br-btn", onclick: () => onOpenGlobe() }, "Open Globe") : null,
+            onOpenGlobe ? h("button", { type: "button", class: "br-btn", onclick: () => onOpenGlobe() }, "Globe") : null,
           ),
         ),
       ));
@@ -450,13 +568,12 @@ export function mountBriefing(
     const activeSig = signals[activeSignalIdx] || signals[0] || null;
     const virology = data.virology || {};
     const peers = data.peers || {};
-    const calibrations = data.calibration || [];
     const sources = data.sources || {};
     const repWeek = data.meta?.reporting_week;
 
     const page = h("div", { class: "br-page" });
 
-    // 1. MASTHEAD
+    // 1. MASTHEAD — clean hierarchy without duplicate labels or metadata boilerplate
     const crumbBits = [];
     if (place.parent) {
       crumbBits.push(
@@ -465,45 +582,33 @@ export function mountBriefing(
           class: "br-link-btn",
           onclick: () => fetchAndRender(place.parent.key),
         }, place.parent.name),
-        h("span", { "aria-hidden": "true" }, "›"),
       );
+      if (place.hhs_region_label) {
+        crumbBits.push(h("span", { "aria-hidden": "true" }, "·"), h("span", null, `HHS ${place.hhs_region_label}`));
+      }
     }
-    crumbBits.push(h("span", null, place.name));
-    if (place.hhs_region_label) {
-      crumbBits.push(h("span", { "aria-hidden": "true" }, "·"), h("span", null, `HHS ${place.hhs_region_label}`));
-    }
-
-    const subtitleParts = [
-      place.level ? place.level.replace(/_/g, " ") : null,
-      place.population ? `Pop. ${Number(place.population).toLocaleString("en-US")}` : null,
-      `${sources.hubs?.length || 0} connected hub${(sources.hubs?.length || 0) === 1 ? "" : "s"}`,
-    ].filter(Boolean);
 
     const refreshBtn = h("button", {
       type: "button",
       class: "br-btn",
       disabled: refreshing,
       onclick: triggerRefresh,
-    }, refreshing ? "Refreshing feeds…" : "Refresh feeds");
+    }, refreshing ? "Refreshing…" : "Refresh feeds");
 
     page.appendChild(h("header", { class: "br-masthead" },
-      h("div", { class: "br-crumb-row" },
-        h("nav", { class: "br-crumb", "aria-label": "Place hierarchy" }, crumbBits),
-        repWeek ? h("span", { class: "br-mono" }, `Reporting week · ${formatIsoShort(repWeek, true)}`) : null,
-      ),
+      (crumbBits.length || repWeek) ? h("div", { class: "br-crumb-row" },
+        h("nav", { class: "br-crumb", "aria-label": "Location hierarchy" }, crumbBits),
+        repWeek ? h("span", { class: "br-mono" }, formatIsoShort(repWeek, true)) : null,
+      ) : null,
       h("div", { class: "br-title-bar" },
-        h("div", { class: "br-title-block" },
-          h("span", { class: "br-kicker" }, "Epidemiological Briefing"),
-          h("h1", { class: "br-h1" }, place.name),
-          h("p", { class: "br-subtitle" }, subtitleParts.join(" · ")),
-        ),
+        h("h1", { class: "br-h1" }, place.name),
         h("div", { class: "br-actions" },
           buildChooserSelect(),
           onOpenGlobe ? h("button", { type: "button", class: "br-btn", onclick: () => onOpenGlobe() }, "Globe") : null,
           activeSig ? h("button", {
             type: "button",
             class: "br-btn",
-            onclick: () => openSignalInChart(activeSig, false),
+            onclick: () => openSignalInChart(activeSig),
           }, "Chart ", h("span", { html: icon.open })) : null,
           h("button", { type: "button", class: "br-btn", onclick: () => window.print() }, "Print / PDF"),
           refreshBtn,
@@ -512,42 +617,44 @@ export function mountBriefing(
       errorMsg ? h("p", { class: "br-scope-note", style: { color: "var(--status-error)" } }, errorMsg) : null,
     ));
 
-    // 2. SUMMARY & ADAPTIVE KPIS
-    const summaryEl = h("section", { class: "br-summary-wrap", "aria-label": "Situation summary" },
-      (data.summary?.paragraphs || []).map((p) => h("p", { class: "br-prose" }, p)),
-      data.summary?.scope_note ? h("p", { class: "br-scope-note" }, data.summary.scope_note) : null,
-    );
-    if (data.kpis?.length) {
-      summaryEl.appendChild(h("div", { class: "br-kpi-strip" },
-        data.kpis.map((k) => h("div", { class: "br-kpi" },
-          h("span", { class: "br-kpi-label", title: k.label }, k.label),
-          h("div", { class: "br-kpi-val" },
-            h("span", null, k.value),
-            k.unit ? h("span", { class: "br-kpi-unit" }, k.unit) : null,
-          ),
-          k.sub ? h("span", { class: "br-kpi-sub" }, k.sub) : null,
-        )),
-      ));
+    // 2. CONCISE SUMMARY & 4-CARD METRIC STRIP
+    if ((data.summary?.paragraphs || []).length || data.kpis?.length) {
+      const summaryEl = h("section", { class: "br-summary-wrap", "aria-label": "Summary" },
+        (data.summary?.paragraphs || []).map((p) => h("p", { class: "br-prose" }, p)),
+        data.summary?.scope_note ? h("p", { class: "br-scope-note" }, data.summary.scope_note) : null,
+      );
+      if (data.kpis?.length) {
+        summaryEl.appendChild(h("div", { class: "br-kpi-strip" },
+          data.kpis.map((k) => h("div", { class: "br-kpi" },
+            h("span", { class: "br-kpi-label" }, k.label),
+            h("div", { class: "br-kpi-val" },
+              h("span", null, k.value),
+              k.unit ? h("span", { class: "br-kpi-unit" }, k.unit) : null,
+            ),
+            k.sub ? h("span", { class: "br-kpi-sub" }, k.sub) : null,
+          )),
+        ));
+      }
+      page.appendChild(summaryEl);
     }
-    page.appendChild(summaryEl);
 
-    // 3. ACTIVITY & FORECAST OUTLOOK
+    // 3. FORECAST OUTLOOK
     if (signals.length && activeSig) {
-      const outSec = h("section", { class: "br-section", "aria-label": "Activity and forecast outlook" });
+      const outSec = h("section", { class: "br-section", "aria-label": "Forecast outlook" });
       outSec.appendChild(h("div", { class: "br-section-head" },
-        h("h2", { class: "br-h2" }, "Activity & Forecast Outlook"),
+        h("h2", { class: "br-h2" }, "Forecast Outlook"),
         h("div", { class: "br-head-meta" },
-          h("span", null, `${activeSig.hub_label} · Season ${activeSig.season}`),
+          h("span", null, `${activeSig.hub_label} · ${activeSig.season}`),
           h("button", {
             type: "button",
             class: "br-link-btn is-accent",
-            onclick: () => openSignalInChart(activeSig, false),
+            onclick: () => openSignalInChart(activeSig),
           }, "Open in Chart ", h("span", { html: icon.open })),
         ),
       ));
 
       if (signals.length > 1) {
-        outSec.appendChild(h("div", { class: "br-tabs", role: "tablist", "aria-label": "Connected forecast signals" },
+        outSec.appendChild(h("div", { class: "br-tabs", role: "tablist", "aria-label": "Forecast indicators" },
           signals.map((sig, idx) => h("button", {
             type: "button",
             role: "tab",
@@ -573,7 +680,7 @@ export function mountBriefing(
                 render();
               },
             }),
-            `Show ${activeSig.prior_seasons.length} prior season${activeSig.prior_seasons.length > 1 ? "s" : ""}`,
+            `Compare prior ${activeSig.prior_seasons.length} season${activeSig.prior_seasons.length > 1 ? "s" : ""}`,
           )
         : null;
 
@@ -582,9 +689,10 @@ export function mountBriefing(
         onReadout: (txt) => { readoutEl.textContent = txt; },
       });
 
+      const modelLabel = activeSig.fan?.model_display || activeSig.model_display || activeSig.model_id;
       const legendItems = [
         h("span", { class: "br-legend-item" }, h("span", { class: "br-swatch", style: { background: "var(--ink-primary)" } }), "Observed"),
-        activeSig.fan ? h("span", { class: "br-legend-item" }, h("span", { class: "br-swatch", style: { background: "var(--series-1)" } }), `${activeSig.fan.model_id} median + 50/80/95% PI`) : null,
+        activeSig.fan ? h("span", { class: "br-legend-item" }, h("span", { class: "br-swatch", style: { background: "var(--series-1)" } }), `${modelLabel} median · 50 / 80 / 95% intervals`) : null,
       ];
       if (showPriorSeasons && hasPrior) {
         activeSig.prior_seasons.forEach((ps, i) => {
@@ -597,7 +705,7 @@ export function mountBriefing(
 
       const chartCol = h("div", { class: "br-chart-card" },
         h("div", { class: "br-chart-toolbar" },
-          h("span", null, `${activeSig.target_short}${activeSig.unit ? ` (${activeSig.unit})` : ""} · Ref. ${formatIsoShort(activeSig.ref_date, true)}`),
+          h("span", null, `${activeSig.label}${activeSig.unit ? ` (${activeSig.unit})` : ""} · Issued ${formatIsoShort(activeSig.ref_date, true)}`),
           priorCheckbox,
         ),
         h("div", { class: "br-svg-wrap" }, svgChart),
@@ -605,8 +713,10 @@ export function mountBriefing(
         h("div", { class: "br-legend-row" }, legendItems),
       );
 
-      // Right rail: PMF, Peak Outlook, matched CFA Rt
-      const matchedRt = (virology.cfa_rt || []).find((r) => r.pathogen === activeSig.pathogen) || (virology.cfa_rt?.[0] ?? null);
+      const normPath = String(activeSig.pathogen || "").toLowerCase().includes("flu")
+        ? "flu"
+        : (String(activeSig.pathogen || "").toLowerCase().includes("covid") ? "covid-19" : String(activeSig.pathogen || "").toLowerCase());
+      const matchedRt = (virology.cfa_rt || []).find((r) => r.pathogen === normPath) || null;
       const pmfBars = normalizeRateChangePmf(activeSig.rate_change_pmf);
       const pk = activeSig.peak_outlook;
       const railBlocks = [];
@@ -615,7 +725,7 @@ export function mountBriefing(
         const pmfMeta = activeSig.rate_change_pmf;
         railBlocks.push(h("div", { class: "br-rail-block" },
           h("div", { class: "br-rail-title" },
-            h("span", null, pmfMeta.label || "Weekly Rate Change"),
+            h("span", null, pmfMeta.label || "Weekly rate change odds"),
             pmfMeta.target_end_date ? h("span", { class: "br-mono" }, formatIsoShort(pmfMeta.target_end_date)) : null,
           ),
           h("div", { class: "br-pmf-rows" },
@@ -627,7 +737,6 @@ export function mountBriefing(
               h("span", { class: "br-mono", style: { textAlign: "right" } }, `${b.pct.toFixed(0)}%`),
             )),
           ),
-          h("span", { class: "br-scope-note" }, `${pmfMeta.model_id} · horizon h${pmfMeta.horizon}`),
         ));
       }
 
@@ -644,7 +753,7 @@ export function mountBriefing(
           rows.push(h("div", { class: "br-kv-row" }, h("span", null, pk.observed.final ? "Observed peak" : "Peak to date"), h("span", { class: "br-mono" }, fmtPk(pk.observed.value))));
         }
         railBlocks.push(h("div", { class: "br-rail-block" },
-          h("div", { class: "br-rail-title" }, h("span", null, "Season Peak Outlook"), h("span", null, pk.model_id)),
+          h("div", { class: "br-rail-title" }, h("span", null, "Season peak"), h("span", null, pk.model_id)),
           h("div", { class: "br-kv-list" }, rows),
         ));
       }
@@ -658,11 +767,11 @@ export function mountBriefing(
           ),
           h("div", { class: "br-kv-list" },
             h("div", { class: "br-kv-row" },
-              h("span", null, "Median Rt (95% CrI)"),
+              h("span", null, "Median (95% CrI)"),
               h("span", { class: "br-mono" }, `${lat.median.toFixed(2)}${lat.lower != null && lat.upper != null ? ` (${lat.lower.toFixed(2)}–${lat.upper.toFixed(2)})` : ""}`),
             ),
             h("div", { class: "br-kv-row" },
-              h("span", null, "Category / P(grow)"),
+              h("span", null, "Status"),
               h("span", { class: "br-mono" }, `${lat.category || "—"}${lat.p_growing != null ? ` · ${Math.round(lat.p_growing * 100)}%` : ""}`),
             ),
           ),
@@ -672,58 +781,53 @@ export function mountBriefing(
 
       outSec.appendChild(
         railBlocks.length
-          ? h("div", { class: "br-outlook-grid" }, chartCol, h("aside", { class: "br-rail", "aria-label": "Secondary indicators" }, railBlocks))
+          ? h("div", { class: "br-outlook-grid" }, chartCol, h("aside", { class: "br-rail", "aria-label": "Forecast details" }, railBlocks))
           : chartCol,
       );
       page.appendChild(outSec);
     }
 
-    // 4. WHERE IT IS SPREADING
+    // 4. SUB-REGIONS ONLY (By State or Within State — never neighbor country lists)
     if (peers?.rows?.length) {
       const showRtCol = peers.rows.some((r) => r.rt?.median != null);
-      const showWhoCol = peers.rows.some((r) => r.who_pct_pos != null);
       const unitCol = peers.unit ? `Latest (${peers.unit})` : "Latest";
 
-      const peerSec = h("section", { class: "br-section", "aria-label": "Geographic distribution" },
+      const peerSec = h("section", { class: "br-section", "aria-label": peers.title || "Sub-regions" },
         h("div", { class: "br-section-head" },
-          h("h2", { class: "br-h2" }, "Where It Is Spreading"),
+          h("h2", { class: "br-h2" }, peers.title),
           h("div", { class: "br-head-meta" },
-            h("span", null, `${peers.title} · showing ${peers.rows.length}${peers.total_count > peers.rows.length ? ` of ${peers.total_count}` : ""}`),
+            h("span", null, `${peers.rows.length}${peers.total_count > peers.rows.length ? ` of ${peers.total_count}` : ""} areas`),
           ),
         ),
         h("div", { class: "br-table-wrap" },
           h("table", { class: "br-table" },
             h("thead", null, h("tr", null,
-              h("th", null, "Jurisdiction"),
+              h("th", null, "Area"),
               h("th", { class: "num" }, unitCol),
-              h("th", { class: "num" }, "1-wk Change"),
-              h("th", null, "10-wk Trend"),
-              showRtCol ? h("th", { class: "num" }, "Rt (CFA)") : null,
-              showWhoCol ? h("th", { class: "num" }, "Flu % Pos") : null,
+              h("th", { class: "num" }, "1-wk change"),
+              h("th", null, "10-wk trend"),
+              showRtCol ? h("th", { class: "num" }, "Rt") : null,
             )),
             h("tbody", null,
               peers.rows.map((row) => {
-                const isFocal = row.key === peers.focal_key;
                 const valTxt = formatMetricValue(row.value, { unit: peers.unit, per100k: String(peers.unit).includes("100k") });
-                const tr = h("tr", {
-                  class: ["is-clickable", isFocal && "is-focal"],
+                return h("tr", {
+                  class: "is-clickable",
                   tabindex: "0",
-                  onclick: () => { if (!isFocal) fetchAndRender(row.key); },
+                  onclick: () => fetchAndRender(row.key),
                   onkeydown: (e) => {
-                    if ((e.key === "Enter" || e.key === " ") && !isFocal) {
+                    if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
                       fetchAndRender(row.key);
                     }
                   },
                 },
-                h("td", null, row.name, isFocal ? h("span", { class: "br-scope-note" }, " · current") : null),
+                h("td", null, row.name),
                 h("td", { class: "num br-mono" }, valTxt),
                 h("td", { class: ["num br-mono", deltaClass(row.pct_1wk)] }, formatSignedPct(row.pct_1wk)),
                 h("td", null, renderSparklineSvg(row.sparkline)),
-                showRtCol ? h("td", { class: "num br-mono" }, row.rt?.median != null ? `${row.rt.median.toFixed(2)} ${row.rt.category || ""}`.trim() : "—") : null,
-                showWhoCol ? h("td", { class: "num br-mono" }, row.who_pct_pos != null ? `${row.who_pct_pos.toFixed(1)}%` : "—") : null,
+                showRtCol ? h("td", { class: "num br-mono" }, row.rt?.median != null ? row.rt.median.toFixed(2) : "—") : null,
                 );
-                return tr;
               }),
             ),
           ),
@@ -732,12 +836,12 @@ export function mountBriefing(
       page.appendChild(peerSec);
     }
 
-    // 5. VIROLOGY, VARIANTS & VACCINE MATCH
-    const virSec = h("section", { class: "br-section", "aria-label": "Virology and vaccine composition" },
+    // 5. SURVEILLANCE INDICATORS & LARGE FULL-WIDTH VARIANT / SUBTYPE CHARTS
+    const virSec = h("section", { class: "br-section", "aria-label": "Surveillance and circulating strains" },
       h("div", { class: "br-section-head" },
-        h("h2", { class: "br-h2" }, "Virology, Variants & Vaccine Reference"),
+        h("h2", { class: "br-h2" }, "Surveillance & Circulating Strains"),
         h("div", { class: "br-head-meta" },
-          h("span", null, place.clade_region ? `Regional genomics: ${place.clade_region}` : "Reference composition"),
+          h("span", null, place.clade_region || ""),
         ),
       ),
     );
@@ -745,178 +849,152 @@ export function mountBriefing(
     if (!virology.feeds_cached) {
       virSec.appendChild(h("div", { class: "br-cta-banner" },
         h("div", { class: "br-cta-copy" },
-          h("strong", null, "Live surveillance & virology feeds are not yet cached locally."),
-          h("span", null, "Fetch open CDC NWSS wastewater, CFA Rt, NSSP ED visits, NREVSS/Delphi clinical labs, WHO FluNet, UKHSA, and Nextstrain clade feeds to populate this section."),
+          h("strong", null, "External surveillance and genomic feeds are not yet cached locally."),
+          h("span", null, "Fetch CDC wastewater, ED visits, lab positivity, WHO FluNet subtypes, UKHSA, and Nextstrain clades."),
         ),
         h("button", {
           type: "button",
           class: "br-btn is-primary",
           disabled: refreshing,
           onclick: triggerRefresh,
-        }, refreshing ? "Fetching feeds…" : "Fetch live surveillance & virology feeds"),
+        }, refreshing ? "Fetching…" : "Fetch live surveillance feeds"),
       ));
     }
 
-    const virPanels = [];
+    // 5a. Clean combined surveillance table (Wastewater, ED Visits %, PCR Positivity)
+    const survRows = [];
+    for (const w of virology.wastewater || []) {
+      survRows.push({
+        metric: `${w.label} wastewater`,
+        source: `CDC NWSS · ${w.geo_scope}`,
+        value: `${w.latest_wval.toFixed(1)} WVAL`,
+        delta: w.pct_1wk,
+        date: formatIsoShort(w.latest_date),
+        spark: w.series.map((p) => p.value),
+      });
+    }
+    for (const ed of virology.ed_visits || []) {
+      survRows.push({
+        metric: `${ed.label} ED visits`,
+        source: `CDC NSSP · ${ed.geo_scope}`,
+        value: `${ed.latest_pct.toFixed(1)}%`,
+        delta: ed.pct_1wk,
+        date: formatIsoShort(ed.latest_date),
+        spark: ed.series.map((p) => p.value),
+      });
+    }
+    for (const nr of virology.nrevss_positivity || []) {
+      survRows.push({
+        metric: `${nr.label} lab positivity`,
+        source: `CDC NREVSS · ${nr.geo_scope}`,
+        value: `${nr.latest_pct.toFixed(1)}%`,
+        delta: nr.pct_1wk,
+        date: formatIsoShort(nr.latest_date),
+        spark: nr.series.map((p) => p.value),
+      });
+    }
+    for (const uk of virology.ukhsa_positivity || []) {
+      survRows.push({
+        metric: `${uk.label} PCR positivity`,
+        source: `UKHSA · ${uk.geo_scope}`,
+        value: `${uk.latest_pct.toFixed(1)}%`,
+        delta: uk.pct_1wk,
+        date: formatIsoShort(uk.latest_date),
+        spark: uk.series.map((p) => p.value),
+      });
+    }
 
-    // 5a. Wastewater (US/State)
-    if (virology.wastewater?.length) {
-      virPanels.push(h("div", { class: "br-vir-panel" },
-        h("div", { class: "br-rail-title" },
-          h("span", null, "Wastewater Viral Activity (CDC NWSS)"),
-          h("span", null, virology.wastewater[0].geo_scope),
-        ),
+    if (survRows.length) {
+      virSec.appendChild(h("div", { class: "br-table-wrap" },
         h("table", { class: "br-table" },
           h("thead", null, h("tr", null,
-            h("th", null, "Pathogen"),
-            h("th", { class: "num" }, "WVAL"),
+            h("th", null, "Indicator"),
+            h("th", { class: "num" }, "Latest"),
             h("th", { class: "num" }, "1-wk"),
             h("th", null, "Trend"),
+            h("th", { class: "num" }, "As of"),
           )),
-          h("tbody", null, virology.wastewater.map((w) => h("tr", null,
-            h("td", null, w.label, h("div", { class: "br-scope-note" }, `${w.sites} sites · ${formatIsoShort(w.latest_date)}`)),
-            h("td", { class: "num br-mono" }, w.latest_wval.toFixed(2)),
-            h("td", { class: ["num br-mono", deltaClass(w.pct_1wk)] }, formatSignedPct(w.pct_1wk)),
-            h("td", null, renderSparklineSvg(w.series.map((p) => p.value))),
+          h("tbody", null, survRows.map((r) => h("tr", null,
+            h("td", null, r.metric, h("div", { class: "br-scope-note" }, r.source)),
+            h("td", { class: "num br-mono" }, r.value),
+            h("td", { class: ["num br-mono", deltaClass(r.delta)] }, formatSignedPct(r.delta)),
+            h("td", null, renderSparklineSvg(r.spark)),
+            h("td", { class: "num br-mono" }, r.date),
           ))),
         ),
       ));
     }
 
-    // 5b. Emergency Dept Visits (US/State)
-    if (virology.ed_visits?.length) {
-      virPanels.push(h("div", { class: "br-vir-panel" },
-        h("div", { class: "br-rail-title" },
-          h("span", null, "Emergency Dept. Visits % (CDC NSSP)"),
-          h("span", null, virology.ed_visits[0].geo_scope),
+    // 5b. Full-width Large Circulating Clades Chart (Nextstrain)
+    const clades = virology.clades || [];
+    if (clades.length) {
+      const cladeObj = clades[activeCladeIdx] || clades[0];
+      const cladeReadout = h("div", { class: "br-hover-readout", "aria-live": "polite" }, "");
+      const cladeSvg = renderLargeCladeSvg(cladeObj, (txt) => { cladeReadout.textContent = txt; });
+
+      virSec.appendChild(h("div", { class: "br-subpanel" },
+        h("div", { class: "br-subhead" },
+          h("h3", { class: "br-h3" }, "Circulating Variants"),
+          h("span", { class: "br-scope-note" }, `Nextstrain ${cladeObj.region} · through ${formatIsoShort(cladeObj.latest_date, true)}`),
         ),
-        h("table", { class: "br-table" },
-          h("thead", null, h("tr", null,
-            h("th", null, "Pathogen"),
-            h("th", { class: "num" }, "% ED"),
-            h("th", { class: "num" }, "1-wk"),
-            h("th", null, "Trend"),
-          )),
-          h("tbody", null, virology.ed_visits.map((ed) => h("tr", null,
-            h("td", null, ed.label, h("div", { class: "br-scope-note" }, formatIsoShort(ed.latest_date))),
-            h("td", { class: "num br-mono" }, `${ed.latest_pct.toFixed(1)}%`),
-            h("td", { class: ["num br-mono", deltaClass(ed.pct_1wk)] }, formatSignedPct(ed.pct_1wk)),
-            h("td", null, renderSparklineSvg(ed.series.map((p) => p.value))),
-          ))),
-        ),
+        clades.length > 1 ? h("div", { class: "br-tabs", role: "tablist", "aria-label": "Variant lineage" },
+          clades.map((c, idx) => h("button", {
+            type: "button",
+            role: "tab",
+            class: "br-tab",
+            "aria-selected": String(idx === activeCladeIdx),
+            onclick: () => {
+              activeCladeIdx = idx;
+              render();
+            },
+          }, c.subtype)),
+        ) : null,
+        cladeSvg ? h("div", { class: "br-svg-wrap" }, cladeSvg) : null,
+        cladeReadout,
       ));
     }
 
-    // 5c. Lab Positivity (NREVSS or UKHSA)
-    const labRows = [
-      ...(virology.nrevss_positivity || []).map((x) => ({ ...x, sourceTag: "NREVSS" })),
-      ...(virology.ukhsa_positivity || []).map((x) => ({ ...x, sourceTag: "UKHSA" })),
-    ];
-    if (labRows.length) {
-      virPanels.push(h("div", { class: "br-vir-panel" },
-        h("div", { class: "br-rail-title" },
-          h("span", null, "Sentinel PCR Test Positivity"),
-          h("span", null, labRows[0].geo_scope),
-        ),
-        h("table", { class: "br-table" },
-          h("thead", null, h("tr", null,
-            h("th", null, "Pathogen"),
-            h("th", { class: "num" }, "% Pos"),
-            h("th", { class: "num" }, "1-wk"),
-            h("th", null, "Trend"),
-          )),
-          h("tbody", null, labRows.map((lb) => h("tr", null,
-            h("td", null, lb.label, h("div", { class: "br-scope-note" }, `${lb.sourceTag} · ${formatIsoShort(lb.latest_date)}`)),
-            h("td", { class: "num br-mono" }, `${lb.latest_pct.toFixed(1)}%`),
-            h("td", { class: ["num br-mono", deltaClass(lb.pct_1wk)] }, formatSignedPct(lb.pct_1wk)),
-            h("td", null, renderSparklineSvg(lb.series.map((p) => p.value))),
-          ))),
-        ),
-      ));
-    }
-
-    // 5d. Influenza Subtypes (Delphi + WHO FluNet)
-    if (virology.flu_subtypes?.latest_counts) {
-      const fs = virology.flu_subtypes;
-      const c = fs.latest_counts;
-      const segs = buildStackedSegments([
-        { label: "A(H1N1)pdm09", value: c.ah1n1pdm09, colorVar: "--series-2" },
-        { label: "A(H3N2)", value: c.ah3n2, colorVar: "--series-3" },
-        { label: "A (unsubtyped)", value: Math.max(0, (c.inf_a || 0) - (c.ah1n1pdm09 || 0) - (c.ah3n2 || 0)) || c.a_unsubtyped, colorVar: "--ink-tertiary" },
-        { label: "Influenza B", value: c.inf_b, colorVar: "--series-4" },
-      ]);
-      virPanels.push(h("div", { class: "br-vir-panel" },
-        h("div", { class: "br-rail-title" },
-          h("span", null, "Influenza Subtype Composition"),
-          h("span", null, fs.subtyping_geo_scope || fs.geo_scope),
-        ),
-        h("div", { class: "br-kv-list" },
-          fs.percent_positive != null ? h("div", { class: "br-kv-row" },
-            h("span", null, `Clinical % positivity (${fs.geo_scope})`),
-            h("span", { class: "br-mono" }, `${fs.percent_positive.toFixed(1)}%${fs.total_specimens ? ` of ${fs.total_specimens.toLocaleString("en-US")}` : ""}`),
-          ) : null,
-          h("div", { class: "br-kv-row" },
-            h("span", null, "Subtyped week"),
-            h("span", { class: "br-mono" }, formatIsoShort(c.date, true)),
+    // 5c. Full-width Large Multi-Week Influenza Subtypes Chart (WHO FluNet / Delphi)
+    const fluSub = virology.flu_subtypes;
+    if (fluSub?.series?.length) {
+      const subReadout = h("div", { class: "br-hover-readout", "aria-live": "polite" }, "");
+      const rendered = renderLargeSubtypeSvg(fluSub.series, (txt) => { subReadout.textContent = txt; });
+      if (rendered) {
+        const metaParts = [
+          fluSub.subtyping_geo_scope || fluSub.geo_scope,
+          fluSub.percent_positive != null ? `${fluSub.percent_positive.toFixed(1)}% clinical positivity${fluSub.geo_scope && fluSub.geo_scope !== fluSub.subtyping_geo_scope ? ` (${fluSub.geo_scope})` : ""}` : null,
+        ].filter(Boolean);
+        virSec.appendChild(h("div", { class: "br-subpanel" },
+          h("div", { class: "br-subhead" },
+            h("h3", { class: "br-h3" }, "Weekly Influenza Subtype Detections"),
+            h("span", { class: "br-scope-note" }, metaParts.join(" · ")),
           ),
-        ),
-        segs.length
-          ? [
-              h("div", { class: "br-stacked-bar", role: "img", "aria-label": "Influenza subtype proportions" },
-                segs.map((s) => h("div", { style: { width: `${s.widthPct}%`, background: `var(${s.colorVar})` }, title: `${s.label}: ${s.pct}% (${s.value})` })),
-              ),
-              h("div", { class: "br-stacked-chips" },
-                segs.map((s) => h("span", null, h("span", { class: "br-chip-dot", style: { background: `var(${s.colorVar})` } }), `${s.label} ${s.pct}%`)),
-              ),
-            ]
-          : h("p", { class: "br-scope-note" }, "No positive influenza specimens reported in the most recent week."),
-      ));
+          h("div", { class: "br-svg-wrap" }, rendered.svg),
+          subReadout,
+          h("div", { class: "br-legend-row" },
+            rendered.legend.map((sp) => h("span", { class: "br-legend-item" },
+              h("span", { class: "br-swatch-sq", style: { background: `var(${sp.colorVar})` } }),
+              sp.label,
+            )),
+          ),
+        ));
+      }
     }
 
-    // 5e. Nextstrain Clades
-    for (const cl of virology.clades || []) {
-      const segs = buildStackedSegments(
-        (cl.latest_shares || []).map((s, idx) => ({
-          label: s.clade,
-          value: s.pct,
-          colorVar: s.clade === "Other" ? "--ink-faint" : `--series-${(idx % 8) + 1}`,
-        })),
-      );
-      virPanels.push(h("div", { class: "br-vir-panel" },
-        h("div", { class: "br-rail-title" },
-          h("span", null, `${cl.subtype} Clades (Nextstrain)`),
-          h("span", null, `${cl.region} · ${formatIsoShort(cl.latest_date)}`),
-        ),
-        segs.length
-          ? [
-              h("div", { class: "br-stacked-bar", role: "img", "aria-label": `${cl.subtype} latest clade breakdown` },
-                segs.map((s) => h("div", { style: { width: `${s.widthPct}%`, background: `var(${s.colorVar})` }, title: `${s.label}: ${s.pct}%` })),
-              ),
-              h("div", { class: "br-stacked-chips" },
-                segs.map((s) => h("span", null, h("span", { class: "br-chip-dot", style: { background: `var(${s.colorVar})` } }), `${s.label} ${s.pct}%`)),
-              ),
-              renderCladeTimelineSvg(cl),
-            ]
-          : h("p", { class: "br-scope-note" }, "No clade frequency estimates available."),
-      ));
-    }
-
-    if (virPanels.length) virSec.appendChild(h("div", { class: "br-vir-grid" }, virPanels));
-
-    // 5f. WHO Northern Hemisphere Vaccine Reference Table (strictly factual strain reference)
+    // 5d. Vaccine Reference Strains (compact collapsible)
     const vaccRows = virology.vaccine_reference || [];
     if (vaccRows.length) {
       const curSeason = virology.vaccine_season || "2026-27";
       const curRows = vaccRows.filter((r) => r.season === curSeason);
       const prevRows = vaccRows.filter((r) => r.season !== curSeason);
-      const renderVaccTable = (rows) => h("div", { class: "br-table-wrap" },
+      const renderVaccTable = (rows) => h("div", { class: "br-table-wrap", style: { marginTop: "10px" } },
         h("table", { class: "br-table" },
           h("thead", null, h("tr", null,
             h("th", null, "Season"),
-            h("th", null, "Target / Subtype"),
-            h("th", null, "Egg / Primary Antigen"),
+            h("th", null, "Subtype"),
+            h("th", null, "Egg / Primary"),
             h("th", null, "Cell / Recombinant"),
-            h("th", null, "Authority"),
+            h("th", null, "Source"),
           )),
           h("tbody", null, rows.map((r) => h("tr", null,
             h("td", { class: "br-mono" }, r.season),
@@ -927,104 +1005,48 @@ export function mountBriefing(
           ))),
         ),
       );
-      virSec.appendChild(h("div", { class: "br-vir-panel" },
-        h("div", { class: "br-rail-title" },
+      virSec.appendChild(h("details", { class: "br-details" },
+        h("summary", null,
           h("span", null, `Northern Hemisphere Reference Vaccine Strains (${curSeason})`),
-          h("span", null, "Reference strains vs circulating clades above"),
+          h("span", { class: "br-mono" }, "WHO / FDA"),
         ),
-        renderVaccTable(curRows.length ? curRows : vaccRows),
-        prevRows.length
-          ? h("details", { class: "br-details" },
-              h("summary", null, "Prior season reference strains"),
-              renderVaccTable(prevRows),
-            )
-          : null,
+        renderVaccTable(curRows.length ? [...curRows, ...prevRows] : vaccRows),
       ));
     }
+
     page.appendChild(virSec);
 
-    // 6. LOCAL FORECAST CALIBRATION
-    if (calibrations.length) {
-      const calSec = h("section", { class: "br-section", "aria-label": "Local forecast calibration" },
-        h("div", { class: "br-section-head" },
-          h("h2", { class: "br-h2" }, "Local Forecast Calibration"),
-          h("div", { class: "br-head-meta" }, h("span", null, `Location-specific season scores in ${place.name}`)),
-        ),
-      );
-      for (const calItem of calibrations) {
-        const matchSig = signals.find((s) => s.signal_id === calItem.signal_id) || activeSig;
-        calSec.appendChild(h("div", { class: "br-vir-panel" },
-          h("div", { class: "br-rail-title" },
-            h("span", null, `${calItem.signal_label} (${calItem.season}) · Baseline: ${calItem.baseline_model || "—"}`),
-            matchSig ? h("button", {
-              type: "button",
-              class: "br-link-btn is-accent",
-              onclick: () => openSignalInChart(matchSig, true),
-            }, "Open Scores ", h("span", { html: icon.open })) : null,
-          ),
-          h("div", { class: "br-table-wrap" },
-            h("table", { class: "br-table" },
-              h("thead", null, h("tr", null,
-                h("th", null, "#"),
-                h("th", null, "Model"),
-                h("th", { class: "num" }, "Rel. WIS"),
-                h("th", { class: "num" }, "WIS"),
-                h("th", { class: "num" }, "MAE"),
-                h("th", { class: "num" }, "50% Cov"),
-                h("th", { class: "num" }, "95% Cov"),
-                h("th", { class: "num" }, "N"),
-              )),
-              h("tbody", null, calItem.models.map((m) => h("tr", {
-                class: m.model_id === matchSig?.model_id ? "is-focal" : null,
-              },
-              h("td", { class: "br-mono" }, String(m.rank)),
-              h("td", null, m.model_id),
-              h("td", { class: "num br-mono" }, m.relative_wis != null ? m.relative_wis.toFixed(2) : "—"),
-              h("td", { class: "num br-mono" }, m.wis != null ? m.wis.toFixed(2) : "—"),
-              h("td", { class: "num br-mono" }, m.mae != null ? m.mae.toFixed(2) : "—"),
-              h("td", { class: "num br-mono" }, m.cov50 != null ? `${m.cov50.toFixed(0)}%` : "—"),
-              h("td", { class: "num br-mono" }, m.cov95 != null ? `${m.cov95.toFixed(0)}%` : "—"),
-              h("td", { class: "num br-mono" }, String(m.count)),
-              ))),
-            ),
-          ),
-        ));
-      }
-      page.appendChild(calSec);
-    }
-
-    // 7. DATA SOURCES & FRESHNESS AUDIT
+    // 6. COLLAPSIBLE DATA SOURCES AUDIT
     const feedList = sources.feeds || [];
     const cachedCount = feedList.filter((f) => f.cached).length;
     const hubList = sources.hubs || [];
     const auditSec = h("details", { class: "br-details" },
       h("summary", null,
-        h("span", null, "Data Sources & Freshness Audit"),
-        h("span", { class: "br-mono" }, `${hubList.length} hub${hubList.length === 1 ? "" : "s"} · ${cachedCount}/${feedList.length} live feeds cached`),
+        h("span", null, "Data Sources"),
+        h("span", { class: "br-mono" }, `${hubList.length} hub${hubList.length === 1 ? "" : "s"} · ${cachedCount}/${feedList.length} feeds cached`),
       ),
       h("div", { class: "br-table-wrap", style: { marginTop: "12px" } },
         h("table", { class: "br-table" },
           h("thead", null, h("tr", null,
             h("th", null, "Source"),
             h("th", null, "Scope"),
-            h("th", null, "Latest Data"),
+            h("th", null, "Latest"),
             h("th", { class: "num" }, "Rows"),
             h("th", null, "Fetched"),
             h("th", null, "Status"),
           )),
           h("tbody", null,
             ...hubList.map((hb) => h("tr", null,
-              h("td", null, hb.label, h("div", { class: "br-scope-note" }, `Hubverse · ${hb.pathogen}`)),
+              h("td", null, hb.label),
               h("td", null, hb.location_id),
               h("td", { class: "br-mono" }, hb.latest_obs_date || hb.latest_ref_date || "—"),
               h("td", { class: "num br-mono" }, "Hub"),
-              h("td", { class: "br-mono" }, hb.latest_ref_date ? `Ref ${hb.latest_ref_date}` : "Local/Remote"),
-              h("td", null, "Synced"),
+              h("td", { class: "br-mono" }, hb.latest_ref_date ? `Ref ${hb.latest_ref_date}` : "Synced"),
+              h("td", null, "Ready"),
             )),
             ...feedList.map((f) => h("tr", null,
               h("td", null,
                 h("a", { href: f.source_url, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, f.label, " ↗"),
-                h("div", { class: "br-scope-note" }, f.description),
               ),
               h("td", null, f.scope),
               h("td", { class: "br-mono" }, f.latest_week || "—"),
@@ -1052,7 +1074,7 @@ export function mountBriefing(
     },
     refresh() {
       invalidateBriefingCache();
-      return fetchAndRender(currentPlace, { bust: true, preserveSignal: true });
+      return fetchAndRender(currentPlace, { bust: true, preserveTabs: true });
     },
     destroy() {
       stopPoll();

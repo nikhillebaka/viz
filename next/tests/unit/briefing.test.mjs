@@ -6,6 +6,7 @@ import {
   buildOutlookGeometry,
   buildSparklineGeometry,
   buildStackedSegments,
+  buildSubtypeTimelineGeometry,
   formatIsoShort,
   formatMetricValue,
   formatSignedPct,
@@ -133,10 +134,28 @@ test("normalizeRateChangePmf, buildStackedSegments, and buildCladeTimelineGeomet
 
   const cg = buildCladeTimelineGeometry({
     dates: ["2026-09-15", "2026-10-15", "2026-11-15"],
-    clades: ["XFG", "LP.8.1"],
-    series_by_clade: { XFG: [40, 65, 85], "LP.8.1": [60, 35, 15] },
+    clades: ["XFG", "LP.8.1", "BA.3.2", "XFJ"],
+    series_by_clade: {
+      XFG: [40, 65, 86],
+      "LP.8.1": [50, 25, 6],
+      "BA.3.2": [5, 5, 4],
+      XFJ: [5, 5, 4],
+    },
   });
-  assert.equal(cg.areas.length, 2);
+  assert.equal(cg.areas.length, 4);
   assert.ok(cg.areas[0].path.startsWith("M") && cg.areas[0].path.endsWith("Z"));
   assert.equal(cg.yTicks.length, 3);
+  assert.equal(cg.rightLabels.length, 4);
+  for (let i = 1; i < cg.rightLabels.length; i++) {
+    assert.ok(cg.rightLabels[i].labelY - cg.rightLabels[i - 1].labelY >= 16.9, "Right-margin labels must not overlap");
+  }
+
+  const sg = buildSubtypeTimelineGeometry([
+    { date: "2026-11-02", spec_processed: 1000, ah1n1pdm09: 20, ah3n2: 10, a_unsubtyped: 5, inf_a: 35, inf_b: 5 },
+    { date: "2026-11-09", spec_processed: 1200, ah1n1pdm09: 30, ah3n2: 20, a_unsubtyped: 10, inf_a: 60, inf_b: 10 },
+  ]);
+  assert.equal(sg.bars.length, 2);
+  assert.equal(sg.bars[1].total, 70);
+  assert.equal(sg.bars[1].segments.length, 4);
+  assert.ok(sg.legend.length >= 3);
 });

@@ -9,7 +9,7 @@ feeds into a strictly factual, place-first JSON payload served at
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import logging
 import math
@@ -23,7 +23,7 @@ from viz.core.briefing_feeds import (
     WHO_NH_VACCINE_REFERENCE,
     BriefingFeedStore,
 )
-from viz.core.evaluation import EvaluationParams
+from viz.core.catalog import display_model_name, rank_ensemble_candidates
 from viz.core.geo import EUROPE_REF, HHS_REGIONS, US_STATES_REF
 
 logger = logging.getLogger("viz.briefings")
@@ -56,55 +56,71 @@ def _fmt_num(val: Optional[float], unit: str = "", per_100k: bool = False) -> st
 
 def _short_unit(unit: str, per_100k: bool = False) -> str:
     u = (unit or "").strip()
-    if per_100k:
-        if "per 100" in u.lower():
-            return u
-        return f"{u} per 100k".strip()
+    low = u.lower()
+    if per_100k or "per 100" in low:
+        return "per 100k"
+    if "%" in u or low == "proportion":
+        return "%"
     return u
 
 
-def _pick_representative_model(ctx: Any, target_id: str, ref_date: Optional[str]) -> Optional[str]:
-    models = ctx.loader.scan_models()
-    candidates: List[Tuple[int, str]] = []
-    for mid, info in models.items():
-        t_list = info.get("targets") or []
-        if t_list and target_id not in t_list:
-            continue
-        dates = info.get("dates") or []
-        if ref_date and dates and ref_date not in dates:
-            continue
-        low = mid.lower()
-        tier = 4
-        if info.get("designated") and "ensemble" in low:
-            tier = 0
-        elif "ensemble" in low:
-            tier = 1
-        elif info.get("designated"):
-            tier = 2
-        elif info.get("is_baseline"):
-            tier = 5
-        candidates.append((tier, mid))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: (x[0], x[1].lower()))
-    return candidates[0][1]
+def _fmt_date_short(iso: Optional[str]) -> str:
+    if not iso:
+        return ""
+    try:
+        d = date.fromisoformat(str(iso)[:10])
+        return f"{d.strftime('%b')} {d.day}"
+    except ValueError:
+        return str(iso)
 
 
-def _pick_latest_round_for_target(ctx: Any, target_id: str) -> Optional[str]:
+def _clean_signal_label(t_short: str, pathogen_label: str, pathogen: str) -> str:
+    s = (t_short or "").strip()
+    low = s.lower()
+    if any(k in low for k in ("flu", "covid", "rsv", "ili", "ari")):
+        return s
+    p = (pathogen_label or pathogen or "").strip()
+    if not p or p.lower() in low:
+        return s or p
+    return f"{p} {s[0].lower() + s[1:]}" if len(s) > 1 else f"{p} {s}".strip()
+
+
+def _pick_representative_model(
+    ctx: Any,
+    target_id: str,
+    ref_date: Optional[str],
+    *,
+    hub_id: Optional[str] = None,
+) -> Optional[str]:
     models = ctx.loader.scan_models()
-    ens_dates: List[str] = []
-    all_dates: List[str] = []
-    for mid, info in models.items():
-        t_list = info.get("targets") or []
-        if not t_list or target_id in t_list:
-            m_dates = info.get("dates") or []
-            all_dates.extend(m_dates)
-            if info.get("designated") or "ensemble" in mid.lower():
-                ens_dates.extend(m_dates)
-    if ens_dates:
-        return max(ens_dates)
-    if all_dates:
-        return max(all_dates)
+    ranked = rank_ensemble_candidates(
+        models,
+        target_id,
+        ref_date,
+        get_meta=ctx.loader.get_model_metadata,
+        hub_id=hub_id,
+    )
+    return ranked[0] if ranked else None
+
+
+def _pick_latest_round_for_target(
+    ctx: Any,
+    target_id: str,
+    *,
+    hub_id: Optional[str] = None,
+) -> Optional[str]:
+    models = ctx.loader.scan_models()
+    ranked = rank_ensemble_candidates(
+        models,
+        target_id,
+        None,
+        get_meta=ctx.loader.get_model_metadata,
+        hub_id=hub_id,
+    )
+    for mid in ranked:
+        dates = (models.get(mid) or {}).get("dates") or []
+        if dates:
+            return max(dates)
     for s in sorted(ctx.loader.get_forecast_seasons() or [], reverse=True):
         rs = ctx.loader.get_dates_for_season(s)
         if rs:
@@ -285,12 +301,14 @@ class BriefingBuilder:
         cat_streams: List[Dict[str, Any]],
         pathogen: str,
         pathogen_label: str,
+        concept_id: Optional[str] = None,
+        geo_kind: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         tm = ctx.config.get_target_metadata(target_id)
         if tm.get("is_categorical"):
             return None
 
-        ref_date = _pick_latest_round_for_target(ctx, target_id) or (stream_summary or {}).get("ref_date")
+        ref_date = _pick_latest_round_for_target(ctx, target_id, hub_id=hub_id) or (stream_summary or {}).get("ref_date")
         if not ref_date:
             return None
         cal = ctx.loader.get_calendar()
@@ -302,7 +320,14 @@ class BriefingBuilder:
         is_proportion = (tm.get("scale") == "proportion") and not per_100k
         scale_factor = (1e5 / float(population)) if per_100k else (100.0 if is_proportion else 1.0)
         unit = "%" if is_proportion else _short_unit(tm.get("unit") or "", per_100k=per_100k)
-        model_id = _pick_representative_model(ctx, target_id, ref_date)
+        ranked_models = rank_ensemble_candidates(
+            ctx.loader.scan_models(),
+            target_id,
+            ref_date,
+            get_meta=ctx.loader.get_model_metadata,
+            hub_id=hub_id,
+        )
+        model_id = ranked_models[0] if ranked_models else None
 
         # 1. Observed + Prior Seasons via get_season_curves
         observed: List[Dict[str, Any]] = []
@@ -370,17 +395,19 @@ class BriefingBuilder:
             except Exception:
                 pass
 
-        # 2. Representative Ensemble Forecast Fan
+        # 2. Representative Official Ensemble Forecast Fan (fall through ranked candidates if top lacks this location)
         fan_payload: Optional[Dict[str, Any]] = None
-        if model_id:
+        for cand_mid in ranked_models[:12]:
             try:
-                raw_fan = ctx.loader.get_model_fan_data(model_id, target_id, location_id, ref_date)
-                if raw_fan and raw_fan.get("target_end_dates"):
+                raw_fan = ctx.loader.get_model_fan_data(cand_mid, target_id, location_id, ref_date)
+                if raw_fan and raw_fan.get("target_end_dates") and any(_finite(x) for x in (raw_fan.get("median") or [])):
+                    model_id = cand_mid
                     def _scale_arr(arr: List[Optional[float]]) -> List[Optional[float]]:
                         return [round(float(x) * scale_factor, 3) if _finite(x) else None for x in arr]
 
                     fan_payload = {
-                        "model_id": model_id,
+                        "model_id": cand_mid,
+                        "model_display": display_model_name(cand_mid),
                         "ref_date": ref_date,
                         "horizons": raw_fan["horizons"],
                         "target_end_dates": [str(d)[:10] for d in raw_fan["target_end_dates"]],
@@ -392,8 +419,9 @@ class BriefingBuilder:
                         "q95_lower": _scale_arr(raw_fan["q95_lower"]),
                         "q95_upper": _scale_arr(raw_fan["q95_upper"]),
                     }
+                    break
             except Exception as exc:
-                logger.debug("Fan fetch failed for %s/%s: %s", model_id, location_id, exc)
+                logger.debug("Fan fetch failed for %s/%s: %s", cand_mid, location_id, exc)
 
         # Latest observation & forecast summary stats
         latest_obs_pt = observed[-1] if observed else None
@@ -444,7 +472,8 @@ class BriefingBuilder:
                     )
                     m_map = pmf_res.get("models") or {}
                 if m_map:
-                    chosen_m = next(iter(m_map.keys()))
+                    ranked_pmf = [m for m in ranked_models if m in m_map]
+                    chosen_m = ranked_pmf[0] if ranked_pmf else next(iter(m_map.keys()))
                     by_ref = m_map.get(chosen_m) or {}
                     r_map = by_ref.get(ref_date) or (next(iter(by_ref.values())) if by_ref else {})
                     if r_map:
@@ -457,7 +486,7 @@ class BriefingBuilder:
                             "ref_date": ref_date,
                             "horizon": int(pref_h),
                             "target_end_date": slot.get("target_end_date"),
-                            "model_id": chosen_m,
+                            "model_id": display_model_name(chosen_m),
                             "categories": pmf_res.get("categories") or list((slot.get("probs") or {}).keys()),
                             "probs": slot.get("probs") or {},
                         }
@@ -490,7 +519,7 @@ class BriefingBuilder:
                             return [_scale_val(pair[0]), _scale_val(pair[1])]
 
                         peak_outlook = {
-                            "model_id": model_id,
+                            "model_id": display_model_name(model_id),
                             "timing": {
                                 "median": timing.get("median"),
                                 "mode": timing.get("mode"),
@@ -514,14 +543,16 @@ class BriefingBuilder:
                 logger.debug("Peak outlook failed for %s/%s: %s", target_id, location_id, exc)
 
         t_short = tm.get("short_name") or tm.get("display_name") or target_id
-        label = f"{pathogen_label} · {t_short}" if pathogen_label.lower() not in t_short.lower() else t_short
+        label = _clean_signal_label(t_short, pathogen_label, pathogen)
         return {
             "signal_id": f"{hub_id}::{target_id}",
             "hub_id": hub_id,
             "hub_label": hub_label,
             "hub_short": hub_short,
+            "geo_kind": geo_kind or (stream_summary or {}).get("geo_kind"),
+            "concept_id": concept_id,
             "target_id": target_id,
-            "target_short": t_short,
+            "target_short": label,
             "label": label,
             "pathogen": pathogen,
             "pathogen_label": pathogen_label,
@@ -535,6 +566,7 @@ class BriefingBuilder:
             "raw_unit": tm.get("unit") or "",
             "per_100k": per_100k,
             "model_id": model_id,
+            "model_display": display_model_name(model_id),
             "latest_obs": latest_obs,
             "prev_obs": prev_obs,
             "pct_change_1wk": pct_change_1wk,
@@ -1065,9 +1097,9 @@ class BriefingBuilder:
                     sub_unit = "%" if sub_is_prop else _short_unit(tm0.get("unit") or "", per_100k=sub_per_100k)
             subregion_rows = _make_peer_rows(child_keys, sub_hub, sub_target, sub_per_100k, is_proportion=sub_is_prop)
             if pkey == "US":
-                subregion_label = "US States & Jurisdictions"
+                subregion_label = "By State"
             else:
-                subregion_label = f"Sub-regions within {place_info['name']}"
+                subregion_label = f"Within {place_info['name']}"
             return {
                 "title": subregion_label,
                 "unit": sub_unit,
@@ -1076,46 +1108,8 @@ class BriefingBuilder:
                 "total_count": len(subregion_rows),
             }
 
-        # Group 2: Peer states in same HHS region or European neighbor countries
-        peer_keys: List[str] = []
-        peer_title = ""
-        if juris["jurisdiction_scope"] == "us" and juris["hhs_region"]:
-            hhs_num = juris["hhs_region"]
-            peer_keys = [
-                k for k, info in places.items()
-                if US_FIPS_TO_HHS.get(k) == hhs_num and info.get("level") == "state"
-            ]
-            peer_title = f"HHS {HHS_REGIONS[hhs_num]['name']}"
-        elif juris["jurisdiction_scope"] in ("eu", "gb"):
-            peer_keys = [
-                k for k, info in places.items()
-                if info.get("geo_kind") in ("eu-countries", "uk-nations") and info.get("level") == "country"
-            ]
-            if not peer_keys:
-                peer_keys = [k for k, info in places.items() if info.get("geo_kind") in ("eu-countries", "uk-nations")]
-            peer_title = "European & UK Peer Jurisdictions"
-
-        if peer_keys and pkey not in peer_keys:
-            peer_keys.append(pkey)
-
-        if peer_keys and primary_sig:
-            peer_is_prop = (primary_sig.get("scale") == "proportion") and not primary_sig.get("per_100k")
-            peer_rows = _make_peer_rows(
-                peer_keys,
-                primary_sig["hub_id"],
-                primary_sig["target_id"],
-                primary_sig["per_100k"],
-                is_proportion=peer_is_prop,
-            )
-            return {
-                "title": peer_title or "Regional Comparison",
-                "unit": primary_sig["unit"],
-                "focal_key": pkey,
-                "rows": peer_rows[:20],
-                "total_count": len(peer_rows),
-            }
-
-        return {"title": "Regional Comparison", "unit": "", "focal_key": pkey, "rows": [], "total_count": 0}
+        # Only show spatial breakdown when the current place actually contains child sub-regions.
+        return {"title": "", "unit": "", "focal_key": pkey, "rows": [], "total_count": 0}
 
     @staticmethod
     def _compose_summary(
@@ -1124,75 +1118,63 @@ class BriefingBuilder:
         signals: List[Dict[str, Any]],
         ext: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Generate strictly factual, non-opinionated plain-English epidemiological notes."""
+        """Generate one concise, plain-English factual summary without boilerplate."""
         name = place_info["name"]
         sentences: List[str] = []
 
-        if signals:
-            lead = signals[0]
-            obs_str = _fmt_num(lead.get("latest_obs"), lead.get("unit") or "", lead.get("per_100k", False))
-            unit_str = f" {lead['unit']}" if lead.get("unit") and "%" not in lead["unit"] else ""
-            date_clause = f" in the week ending {lead['obs_date']}" if lead.get("obs_date") else ""
+        lead = next((s for s in signals if _finite(s.get("latest_obs"))), signals[0] if signals else None)
+        if lead and _finite(lead.get("latest_obs")):
+            u = lead.get("unit") or ""
+            obs_str = _fmt_num(lead.get("latest_obs"), u, lead.get("per_100k", False))
+            unit_phrase = "of ED visits" if (u == "%" and "ed" in lead["label"].lower()) else (f" {u}".strip() if u and "%" not in u else "")
+            if unit_phrase == "of ED visits":
+                obs_phrase = f"{obs_str} of ED visits"
+            elif unit_phrase:
+                obs_phrase = f"{obs_str} {unit_phrase}"
+            else:
+                obs_phrase = obs_str
+            date_clause = f" as of {_fmt_date_short(lead['obs_date'])}" if lead.get("obs_date") else ""
             delta = lead.get("pct_change_1wk")
             if delta is not None:
-                dir_word = "higher" if delta > 0 else ("lower" if delta < 0 else "unchanged")
-                delta_str = f" ({abs(delta):.1f}% {dir_word} than the prior week)" if delta != 0 else " (unchanged from the prior week)"
+                if abs(delta) < 0.05:
+                    delta_str = " (unchanged from the prior week)"
+                else:
+                    delta_str = f" ({delta:+.1f}% vs. prior week)"
             else:
                 delta_str = ""
-            sentences.append(
-                f"In {name}, {lead['label']} stood at {obs_str}{unit_str}{date_clause}{delta_str}."
-            )
 
-            other_sigs = [s for s in signals[1:] if _finite(s.get("latest_obs"))][:2]
-            if other_sigs:
-                others = []
-                for s in other_sigs:
-                    val_s = _fmt_num(s.get("latest_obs"), s.get("unit") or "", s.get("per_100k", False))
-                    u_s = f" {s['unit']}" if s.get("unit") and "%" not in s["unit"] else ""
-                    others.append(f"{s['label']} at {val_s}{u_s}")
-                sentences.append(f"Other connected indicators for {name} report " + " and ".join(others) + ".")
-
+            fc_tail = ""
             if _finite(lead.get("forecast_end_median")) and lead.get("forecast_end_date"):
-                fc_str = _fmt_num(lead["forecast_end_median"], lead.get("unit") or "", lead.get("per_100k", False))
-                q95 = lead.get("forecast_end_q95") or [None, None]
-                band = ""
-                if _finite(q95[0]) and _finite(q95[1]):
-                    lo_s = _fmt_num(q95[0], lead.get("unit") or "", lead.get("per_100k", False))
-                    hi_s = _fmt_num(q95[1], lead.get("unit") or "", lead.get("per_100k", False))
-                    band = f" (95% interval {lo_s}–{hi_s})"
-                sentences.append(
-                    f"The {lead.get('model_id') or 'hub ensemble'} median projection for {lead['forecast_end_date']} is {fc_str}{unit_str}{band}."
-                )
-        else:
-            sentences.append(f"{name} has no quantitative hub forecast streams currently synced.")
+                fc_str = _fmt_num(lead["forecast_end_median"], u, lead.get("per_100k", False))
+                fc_u = f" {unit_phrase}" if unit_phrase and unit_phrase != "of ED visits" else ""
+                m_name = lead.get("model_display") or lead.get("model_id") or "The hub ensemble"
+                fc_tail = f"; {m_name} projects {fc_str}{fc_u} by {_fmt_date_short(lead['forecast_end_date'])}."
+            else:
+                fc_tail = "."
 
-        # Factual Rt & virological context if cached
-        rt_parts: List[str] = []
-        for item in ext.get("cfa_rt") or []:
-            lat = item.get("latest") or {}
-            if _finite(lat.get("median")):
-                pg = f", Pr(growing) {int(round(lat['p_growing'] * 100))}%" if _finite(lat.get("p_growing")) else ""
-                rt_parts.append(f"{item['label']} Rt = {lat['median']:.2f} ({lat.get('category') or 'estimated'}{pg})")
-        if rt_parts:
-            sentences.append(f"CDC CFA estimates indicate " + "; ".join(rt_parts) + ".")
+            sentences.append(f"{lead['label']} in {name} stood at {obs_phrase}{date_clause}{delta_str}{fc_tail}")
 
-        sub_info = ext.get("flu_subtypes")
-        if sub_info and sub_info.get("latest_counts"):
-            c = sub_info["latest_counts"]
-            tot_a_sub = (c.get("ah1n1pdm09") or 0) + (c.get("ah3n2") or 0)
-            if tot_a_sub > 0:
-                h3_pct = round((c.get("ah3n2", 0) / tot_a_sub) * 100)
-                h1_pct = 100 - h3_pct
-                sentences.append(
-                    f"Among subtyped Influenza A specimens in {sub_info.get('subtyping_geo_scope')}, "
-                    f"A(H3N2) accounted for {h3_pct}% and A(H1N1)pdm09 for {h1_pct}% in the week of {c.get('date')}."
-                )
+            other = next(
+                (s for s in signals if s is not lead and _finite(s.get("latest_obs")) and s.get("scale") != "proportion"),
+                None,
+            )
+            rt_bits = [
+                f"{item['label']} Rt {item['latest']['median']:.2f}"
+                for item in (ext.get("cfa_rt") or [])[:3]
+                if _finite((item.get("latest") or {}).get("median"))
+            ]
+            if other and rt_bits:
+                ov = _fmt_num(other["latest_obs"], other.get("unit") or "", other.get("per_100k", False))
+                ou = f" {other['unit']}" if other.get("unit") and "%" not in other["unit"] else ""
+                sentences.append(f"{other['label']}: {ov}{ou}; CFA estimates {', '.join(rt_bits)}.")
+            elif rt_bits:
+                sentences.append(f"CDC CFA estimates {', '.join(rt_bits)}.")
 
         return {
-            "headline": f"{name} — Respiratory Activity & Forecast Summary",
+            "headline": name,
             "paragraphs": sentences,
             "scope_note": (
-                f"Sub-state indicators reflect state ({juris['us_feed_loc_name']}) or {juris['hhs_region_label']} surveillance where local laboratory feeds are aggregated."
+                f"Wastewater, ED visits, and Rt reflect {juris['us_feed_loc_name']} or {juris['hhs_region_short']} surveillance."
                 if place_info.get("level") not in ("state", "country", "nation") and juris["jurisdiction_scope"] == "us"
                 else None
             ),
@@ -1205,96 +1187,80 @@ class BriefingBuilder:
         ext: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         kpis: List[Dict[str, Any]] = []
-        if signals:
-            lead = signals[0]
+        lead = next((s for s in signals if _finite(s.get("latest_obs"))), signals[0] if signals else None)
+        if lead and _finite(lead.get("latest_obs")):
             u = lead.get("unit") or ""
             p100 = lead.get("per_100k", False)
             d1 = lead.get("pct_change_1wk")
-            delta_str = f"{d1:+.1f}% wk/wk" if d1 is not None else "latest obs"
+            obs_dt = _fmt_date_short(lead.get("obs_date"))
+            sub = " · ".join(x for x in [f"{d1:+.1f}% vs prior wk" if d1 is not None else None, obs_dt] if x)
             kpis.append({
-                "label": lead["target_short"],
+                "label": lead["label"],
                 "value": _fmt_num(lead.get("latest_obs"), u, p100),
                 "unit": u if "%" not in u else "",
-                "sub": f"{delta_str} · {lead.get('obs_date') or ''}".strip(" ·"),
+                "sub": sub,
             })
-            if _finite(lead.get("forecast_end_median")):
+            if _finite(lead.get("forecast_end_median")) and lead.get("forecast_end_date"):
                 fd = lead.get("forecast_change_pct")
+                fc_dt = _fmt_date_short(lead["forecast_end_date"])
+                m_disp = lead.get("model_display") or "Ensemble"
                 kpis.append({
-                    "label": f"Ensemble ({lead.get('forecast_end_date')})",
+                    "label": f"{m_disp} · {fc_dt}",
                     "value": _fmt_num(lead["forecast_end_median"], u, p100),
                     "unit": u if "%" not in u else "",
-                    "sub": (f"{fd:+.1f}% vs latest" if fd is not None else lead.get("model_id") or "Projection"),
+                    "sub": f"{fd:+.1f}% vs {obs_dt or 'latest'}" if fd is not None else m_disp,
                 })
 
-        for item in (ext.get("cfa_rt") or [])[:2]:
-            lat = item.get("latest") or {}
+        raw_p = str(lead.get("pathogen") or "").lower() if lead else "flu"
+        pref_p = "flu" if "flu" in raw_p else ("covid-19" if "covid" in raw_p else raw_p)
+
+        cfa = ext.get("cfa_rt") or []
+        if cfa:
+            match_rt = next((r for r in cfa if r["pathogen"] == pref_p and _finite((r.get("latest") or {}).get("median"))), cfa[0])
+            lat = match_rt.get("latest") or {}
             if _finite(lat.get("median")):
-                pg = f" · P(grow) {int(round(lat['p_growing'] * 100))}%" if _finite(lat.get("p_growing")) else ""
+                pg = f"{int(round(lat['p_growing'] * 100))}% grow prob." if _finite(lat.get("p_growing")) else ""
                 kpis.append({
-                    "label": f"{item['label']} Rt",
+                    "label": f"{match_rt['label']} Rt",
                     "value": f"{lat['median']:.2f}",
                     "unit": "",
-                    "sub": f"{lat.get('category') or ''}{pg}".strip(" ·"),
+                    "sub": " · ".join(x for x in [lat.get("category"), pg] if x),
                 })
 
+        sub_info = ext.get("flu_subtypes")
+        if sub_info and sub_info.get("percent_positive") is not None:
+            dt_s = _fmt_date_short(sub_info.get("latest_date"))
+            kpis.append({
+                "label": "Flu test positivity",
+                "value": f"{sub_info['percent_positive']:.1f}%",
+                "unit": "",
+                "sub": " · ".join(x for x in [sub_info.get("geo_scope"), dt_s] if x),
+            })
+
         nwss_list = ext.get("wastewater") or []
-        if nwss_list:
-            # Prefer pathogen matching primary signal
-            pref_p = signals[0]["pathogen"] if signals else "flu"
+        if nwss_list and len(kpis) < 4:
             match = next((w for w in nwss_list if w["pathogen"] == pref_p), nwss_list[0])
             w_d = match.get("pct_1wk")
             kpis.append({
-                "label": f"Wastewater ({match['label']})",
-                "value": f"{match['latest_wval']:.2f}",
+                "label": f"{match['label']} wastewater",
+                "value": f"{match['latest_wval']:.1f}",
                 "unit": "WVAL",
                 "sub": f"{match['sites']} sites · {w_d:+.1f}% wk/wk" if w_d is not None else f"{match['sites']} sites",
             })
 
-        ed_list = ext.get("ed_visits") or []
-        if ed_list:
-            pref_p = signals[0]["pathogen"] if signals else "flu"
-            match_ed = next((e for e in ed_list if e["pathogen"] == pref_p), ed_list[0])
-            ed_d = match_ed.get("pct_1wk")
-            kpis.append({
-                "label": f"ED Visits ({match_ed['label']})",
-                "value": f"{match_ed['latest_pct']:.1f}%",
-                "unit": "",
-                "sub": f"{ed_d:+.1f}% wk/wk · {match_ed['latest_date']}" if ed_d is not None else match_ed["latest_date"],
-            })
-
-        uk_list = ext.get("ukhsa_positivity") or []
-        if uk_list and not ed_list:
-            m_uk = uk_list[0]
-            kpis.append({
-                "label": f"UKHSA PCR ({m_uk['label']})",
-                "value": f"{m_uk['latest_pct']:.1f}%",
-                "unit": "",
-                "sub": m_uk["latest_date"],
-            })
-
-        sub_info = ext.get("flu_subtypes")
-        if sub_info and sub_info.get("percent_positive") is not None:
-            kpis.append({
-                "label": "Flu Test Positivity",
-                "value": f"{sub_info['percent_positive']:.1f}%",
-                "unit": "",
-                "sub": f"{sub_info['geo_scope']} · {sub_info.get('latest_date') or ''}".strip(" ·"),
-            })
-
         clades = ext.get("clades") or []
-        if clades:
-            pref_p = signals[0]["pathogen"] if signals else "flu"
+        if clades and len(kpis) < 4:
             m_cl = next((c for c in clades if c["pathogen"] == pref_p and c.get("latest_shares")), clades[0])
             if m_cl.get("latest_shares"):
                 top_cl = m_cl["latest_shares"][0]
                 kpis.append({
-                    "label": f"Top {m_cl['subtype']} Clade",
+                    "label": f"Top {m_cl['subtype']} clade",
                     "value": top_cl["clade"],
                     "unit": f"{top_cl['pct']:.0f}%",
-                    "sub": f"{m_cl['region']} · {m_cl['latest_date']}",
+                    "sub": f"{m_cl['region']} · {_fmt_date_short(m_cl['latest_date'])}",
                 })
 
-        return kpis[:6]
+        return kpis[:4]
 
     def build_briefing(self, place_key: Optional[str] = None) -> Dict[str, Any]:
         """Construct complete factual Place-First Briefing payload for `place_key`."""
@@ -1349,8 +1315,13 @@ class BriefingBuilder:
         cat_streams = globe_reg.get("categorical_streams") or []
         stream_by_sig = {s["signal_id"]: s for s in (globe_reg.get("streams") or [])}
 
-        signals: List[Dict[str, Any]] = []
+        raw_signals: List[Dict[str, Any]] = []
         contrib_hubs: List[Dict[str, Any]] = []
+        hub_geo_kind = {
+            h.get("id"): h.get("geo_kind")
+            for h in (catalog.get("hubs") or [])
+            if h.get("id")
+        }
         for h_ent in place_info.get("hubs") or []:
             hid = h_ent["hub_id"]
             ctx = ctxs.get(hid)
@@ -1376,13 +1347,19 @@ class BriefingBuilder:
                     cat_streams=cat_streams,
                     pathogen=h_ent["pathogen"],
                     pathogen_label=h_ent["pathogen_label"],
+                    concept_id=t_ent.get("concept_id"),
+                    geo_kind=hub_geo_kind.get(hid),
                 )
-                if s_entry is not None:
-                    signals.append(s_entry)
-                    if s_entry.get("ref_date"):
-                        hub_latest_ref = max(hub_latest_ref or "", s_entry["ref_date"])
-                    if s_entry.get("obs_date"):
-                        hub_latest_obs = max(hub_latest_obs or "", s_entry["obs_date"])
+                if s_entry is None:
+                    continue
+                # Drop empty signals lacking both recent observations and a forecast fan
+                if s_entry.get("latest_obs") is None and s_entry.get("fan") is None:
+                    continue
+                raw_signals.append(s_entry)
+                if s_entry.get("ref_date"):
+                    hub_latest_ref = max(hub_latest_ref or "", s_entry["ref_date"])
+                if s_entry.get("obs_date"):
+                    hub_latest_obs = max(hub_latest_obs or "", s_entry["obs_date"])
             contrib_hubs.append({
                 "hub_id": hid,
                 "label": h_ent["hub_label"],
@@ -1393,30 +1370,50 @@ class BriefingBuilder:
                 "latest_obs_date": hub_latest_obs,
             })
 
-        # Sort signals: observed series first, flagship count/rate targets ahead of proportions, then activity
+        # Deduplicate signals sharing a canonical concept at state/national level (e.g. FluSight + MetroCast)
+        place_level = str(place_info.get("level") or "")
+        deduped: Dict[str, Dict[str, Any]] = {}
+        def _cand_quality(s: Dict[str, Any]) -> Tuple[Any, ...]:
+            is_substate_hub = s.get("geo_kind") == "us-metrocast"
+            prefer_broad_hub = 0 if (is_substate_hub and place_level in ("state", "country", "nation")) else 1
+            return (
+                1 if s.get("fan") is not None else 0,
+                prefer_broad_hub,
+                1 if s.get("latest_obs") is not None else 0,
+                s.get("obs_date") or "",
+                len(s.get("observed") or []),
+            )
+
+        for s in raw_signals:
+            dkey = str(s.get("concept_id") or s.get("label") or s.get("signal_id")).lower()
+            prev = deduped.get(dkey)
+            if prev is None or _cand_quality(s) > _cand_quality(prev):
+                deduped[dkey] = s
+
+        signals = list(deduped.values())
+
+        def _pathogen_rank(s: Dict[str, Any]) -> int:
+            pl_low = f"{s.get('pathogen','')} {s.get('label','')}".lower()
+            if "flu" in pl_low or "influenza" in pl_low:
+                return 0
+            if "covid" in pl_low:
+                return 1
+            if "rsv" in pl_low:
+                return 2
+            return 3
+
         def _signal_rank(s: Dict[str, Any]) -> Tuple[Any, ...]:
             tid_low = str(s.get("target_id") or "").lower()
             is_flagship = s.get("scale") != "proportion" and any(k in tid_low for k in ("hosp", "admission", "ili", "ari"))
             return (
                 s.get("latest_obs") is None,
                 0 if is_flagship else (1 if s.get("scale") != "proportion" else 2),
-                -(float(s["activity"]) if _finite(s.get("activity")) else -1.0),
-                s["pathogen_label"],
-                s["target_short"],
+                _pathogen_rank(s),
+                s["label"],
             )
 
         signals.sort(key=_signal_rank)
-
-        # Evaluate local skill calibration for up to 3 connected signals cleanly
         calibrations: List[Dict[str, Any]] = []
-        for s in signals[:3]:
-            ctx = ctxs.get(s["hub_id"])
-            if ctx is None:
-                continue
-            cal_item = self._evaluate_signal_calibration(ctx, s)
-            if cal_item:
-                s["calibration"] = cal_item
-                calibrations.append(cal_item)
 
         ext = self._build_external_feeds_payload(juris)
         peers = self._build_peers_section(

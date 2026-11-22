@@ -228,7 +228,6 @@ export function openLocationPicker(anchor, ctx) {
           },
           h("span", { class: "c-row-text" },
             h("span", { class: "c-row-label" }, "Globe"),
-            h("span", { class: "c-row-sub" }, "Open interactive sphere"),
           ),
           h("span", { class: "c-row-sub" }, "→")))
         : null;

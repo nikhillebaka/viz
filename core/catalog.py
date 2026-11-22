@@ -596,25 +596,16 @@ class WorkspaceCatalog:
     # ------------------------------------------------------------------ Multi-Hub Globe
 
     @staticmethod
-    def _pick_representative_models(models: Dict[str, Dict[str, Any]], target: str, ref_date: Optional[str]) -> List[str]:
-        """Select 1-2 representative models (preferring designated/ensemble) covering `target` at `ref_date`."""
-        scored: List[Tuple[int, str]] = []
-        for mid, info in models.items():
-            t_list = info.get("targets") or []
-            if t_list and target not in t_list:
-                continue
-            dates = info.get("dates") or []
-            if ref_date and dates and ref_date not in dates:
-                continue
-            low = mid.lower()
-            tier = 3
-            if "ensemble" in low:
-                tier = 0 if info.get("designated") else 1
-            elif info.get("designated"):
-                tier = 2
-            scored.append((tier, mid))
-        scored.sort(key=lambda it: (it[0], it[1]))
-        return [mid for _, mid in scored[:2]]
+    def _pick_representative_models(
+        models: Dict[str, Dict[str, Any]],
+        target: str,
+        ref_date: Optional[str],
+        *,
+        get_meta: Optional[Any] = None,
+        hub_id: Optional[str] = None,
+    ) -> List[str]:
+        """Select 1-2 representative official hub ensemble models covering `target` at `ref_date`."""
+        return rank_ensemble_candidates(models, target, ref_date, get_meta=get_meta, hub_id=hub_id)[:2]
 
     def _compute_hub_globe_slice(self, prov: Dict[str, Any], catalog_places: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         """Extract cached spatial summaries for one provider hub across its weekly targets."""
@@ -672,7 +663,13 @@ class WorkspaceCatalog:
                 if not info.get("targets") or tid in info["targets"]:
                     t_rounds.extend(info.get("dates") or [])
             ref_date = max(t_rounds) if t_rounds else latest_round
-            rep_models = self._pick_representative_models(models, tid, ref_date)
+            rep_models = self._pick_representative_models(
+                models,
+                tid,
+                ref_date,
+                get_meta=ctx.loader.get_model_metadata,
+                hub_id=hub_id,
+            )
 
             spatial = ctx.loader.get_spatial_data(tid, ref_date, rep_models, horizon="all", precise=True)
             avail_h = spatial.get("available_horizons") or []
@@ -971,3 +968,134 @@ class WorkspaceCatalog:
         with self._lock:
             self._globe_cache = (cat["stamp"], globe_payload)
         return globe_payload
+
+
+def display_model_name(model_id: Optional[str]) -> Optional[str]:
+    """Strip internal `<hub>:` remote namespace prefix for clean UI display."""
+    if not model_id:
+        return model_id
+    return str(model_id).split(":", 1)[-1]
+
+
+_ENSEMBLE_CANONICAL_SUFFIXES = frozenset({
+    "ensemble",
+    "hubensemble",
+    "ensemble_mean",
+    "ensemble_median",
+    "ensemble_short",
+})
+_ENSEMBLE_SECONDARY_MARKERS = (
+    "hjudge",
+    "trained",
+    "lop",
+    "equal",
+    "_cat",
+    "-cat",
+    "dist_",
+    "_dist",
+    "national_cat",
+)
+
+
+def _strip_namespace(mid: str) -> str:
+    return str(mid).split(":", 1)[-1]
+
+
+def _is_baseline_name(mid: str, info: Dict[str, Any]) -> bool:
+    if info.get("is_baseline"):
+        return True
+    low = _strip_namespace(mid).lower()
+    return low == "baseline" or low.endswith("-baseline") or low.endswith("-quantilebaseline") or "_baseline" in low
+
+
+def rank_ensemble_candidates(
+    models: Dict[str, Dict[str, Any]],
+    target: Optional[str],
+    ref_date: Optional[str] = None,
+    *,
+    get_meta: Optional[Any] = None,
+    hub_id: Optional[str] = None,
+) -> List[str]:
+    """Rank models covering `target` (and optional `ref_date`) preferring official hub ensembles.
+
+    Tier 0: Non-baseline hub-prefixed canonical ensemble (e.g., FluSight-ensemble,
+            CovidHub-ensemble, RSVHub-ensemble, respicast-hubEnsemble).
+    Tier 1: Non-baseline with YAML `ensemble_of_hub_models=True` and `designated=False`.
+    Tier 2: Non-baseline with YAML `ensemble_of_hub_models=True` (e.g., epiENGAGE-ensemble_short).
+    Tier 3: Non-baseline with `designated=False` and `"ensemble"` in name.
+    Tier 4: Remaining non-baseline `"ensemble"` models ordered by longest round history.
+    Tier 5: Any remaining non-baseline model ordered by longest round history.
+    """
+    hub_prefixes: Set[str] = set()
+    for mid, info in models.items():
+        if _is_baseline_name(mid, info):
+            raw = _strip_namespace(mid).lower()
+            team, sep, _ = raw.partition("-")
+            if sep and team:
+                hub_prefixes.add(team)
+    if hub_id:
+        clean_hid = str(hub_id).lower().removeprefix("remote_")
+        for tok in clean_hid.replace("-", "_").split("_"):
+            if len(tok) >= 3 and tok not in {"flu", "covid", "covid19", "rsv", "hub", "local", "syndromic"}:
+                hub_prefixes.add(tok)
+        hub_prefixes.add(clean_hid.replace("_", ""))
+
+    scored: List[Tuple[int, int, int, str, str]] = []
+    for mid, info in models.items():
+        t_list = info.get("targets") or []
+        if target and t_list and target not in t_list:
+            continue
+        dates = info.get("dates") or []
+        if ref_date and dates and ref_date not in dates:
+            continue
+        if _is_baseline_name(mid, info):
+            continue
+
+        stripped = _strip_namespace(mid)
+        low = stripped.lower()
+        team_low, sep, model_part = low.partition("-")
+        suffix = model_part if sep else low
+        is_secondary = any(tok in low for tok in _ENSEMBLE_SECONDARY_MARKERS)
+        is_canon = (suffix in _ENSEMBLE_CANONICAL_SUFFIXES) or ("hubensemble" in low)
+
+        yaml_ens = False
+        if get_meta is not None and not is_secondary and (
+            "ensemble" in low or "hub" in low or team_low in hub_prefixes
+        ):
+            try:
+                md = get_meta(mid)
+                yaml_ens = isinstance(md, dict) and md.get("ensemble_of_hub_models") is True
+            except Exception:
+                yaml_ens = False
+
+        designated = bool(info.get("designated"))
+        has_ens_word = "ensemble" in low
+
+        if not is_secondary and (team_low in hub_prefixes or "hubensemble" in low) and (is_canon or yaml_ens):
+            tier = 0
+        elif not is_secondary and yaml_ens and not designated:
+            tier = 1
+        elif not is_secondary and yaml_ens:
+            tier = 2
+        elif not is_secondary and not designated and has_ens_word:
+            tier = 3
+        elif not is_secondary and has_ens_word:
+            tier = 4
+        elif has_ens_word:
+            tier = 5
+        else:
+            tier = 6
+
+        if suffix in {"ensemble", "hubensemble"}:
+            sub_p = 0
+        elif any(k in suffix for k in ("short", "mean", "median")):
+            sub_p = 1
+        elif "long" in suffix:
+            sub_p = 2
+        else:
+            sub_p = 3
+
+        scored.append((tier, sub_p, -len(dates), low, mid))
+
+    scored.sort()
+    return [mid for *_, mid in scored]
