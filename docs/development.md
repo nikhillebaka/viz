@@ -2,64 +2,71 @@
 
 ## Automated Tests
 
-Install the dev dependencies, then run the suite from the hub root (several tests read the hub's own `model-output/` and `target-data/`):
+### Python Unit & Integration Tests
+Run the Python suite with either `pytest` or `unittest` (with the parent workspace directory on `PYTHONPATH`):
+
 ```bash
-viz/.venv/bin/pip install -r viz/requirements-dev.txt
-PYTHONPATH=. viz/.venv/bin/python -m pytest viz/tests -v
+PYTHONPATH=.. viz/.venv/bin/python -m unittest discover -s viz/tests
+# or with pytest:
+PYTHONPATH=.. viz/.venv/bin/python -m pytest viz/tests -v
 ```
 
-Or using the standard library `unittest`:
+### Frontend Unit Tests (Node >= 20, zero external packages)
+
 ```bash
-PYTHONPATH=. python3 -m unittest discover viz/tests
+node --test "next/tests/unit/**/*.test.mjs"
 ```
 
-### Test Files
-- `test_metrics.py`: WIS calculation, exact 3-part decomposition, tournament relative WIS, and quantile deduplication.
-- `test_evaluation.py`: Multi-model evaluation pipeline, date/season aggregations, and caching.
-- `test_cli_parity.py`: Verifies numerical parity between `score_cli.py` and `/api/metrics`.
-- `test_server.py`: HTTP endpoint routing, CORS handling, and cache refresh controls.
-- `test_cache_manager.py`: Columnar Parquet cache generation, mtime freshness, and concurrency locks.
-- `test_heatmap.py`: Heatmap matrix generation, direct ROWS/COLS cross-sections, LOC/TIME scopes, sorting, normalizations, and `/api/heatmap` API parity.
-- `test_synthetic_ensemble.py`: Quantile Vincentization (median and mean), monotonicity enforcement (rearrangement), spatial split routing, preview auditing, and recipe persistence.
-- `test_surveillance_rebuild.py`: Surveillance schema validation and fallback synthesis.
-- `test_validation_warnings.py`: Checks for empty files, missing columns, and data anomalies.
-- `test_regressions.py`: Small, self-contained fixture tests (no repository data) for scoring edge cases, ensemble safety and caching, heatmap metrics, and export scope.
-- `test_eval_window.py`: Per-location season phases (including seasons that have not peaked yet), week-range and phase scoping of scores and task exports, and weekly wins.
-- `test_fast_paths.py`: Equivalence of the fast scoring paths with the original algorithms on randomized and edge-case inputs: matrix relative WIS vs the original pair loop, % vs baseline from per-task scores vs re-scoring, threaded vs sequential evaluations, and the memoized truth preparation.
-- `test_remote_hubs.py`: Live hub sync against a local fake S3 server. Covers the flu-only compatibility check, schema-drift normalization, truth merging, incremental sync (revisions and deletions), skipping corrupt files, and keeping hub data out of the CLI.
+### End-to-End CDP Browser Tests (Headless Chromium)
+
+```bash
+# Auto-starts next/dev/serve.py on a free port:
+node next/tests/e2e/run.mjs
+
+# Or run against an already running server:
+node next/tests/e2e/run.mjs --base http://127.0.0.1:8501
+```
+
+### Test Highlights
+- `tests/test_metrics.py`, `tests/test_fast_paths.py`, `tests/test_prescore_and_vzf2.py`: WIS, CRPS, Energy Score, PMF scoring (RPS, Log loss, Brier, Mode hit), `EvaluationEngine.evaluate_samples`, `VZF2`/`VZT1` binary encoding, gzip/ETag static serving.
+- `tests/test_briefings.py`: Multi-hub place resolution, official hub ensemble ranking (`rank_ensemble_candidates`), CDC/WHO/UKHSA/ECDC ERVISS/Nextstrain feed parsing & Parquet caching.
+- `tests/test_evaluation.py`, `tests/test_cli_parity.py`, `tests/test_eval_window.py`: Leaderboard aggregations, shared-task fair intersection, evaluation windows, CLI parity.
+- `tests/test_remote_hubs.py`, `tests/test_server.py`: S3/GitHub transport syncing, web-mode read-only hardening, CORS/routing.
+- `next/tests/unit/`: `scores.test.mjs`, `briefing.test.mjs`, `trajectories.test.mjs`, `geo.test.mjs`, `multi-hub.test.mjs`, plus chart/scale/selection/fan tests.
+- `next/tests/e2e/`: `smoke`, `views`, `scores`, `sheet`, `picker`, `layers`, `time`, `more`, `briefing`, `globe`, `nonquantile`.
+
+---
 
 ## File Layout
 
 ```text
 viz/
-├── setup.sh / setup.bat     # One-time setup: venv, dependencies, surveillance data
-├── run.sh / run.bat         # Launch the dashboard
-├── server.py                # HTTP server and REST API request handler
-├── score_cli.py             # Headless command-line evaluation tool
-├── rebuild_surveillance.py  # Surveillance data download / rebuild
-├── config.example.json      # Copy to config.json to override defaults
-├── core/                    # Engine shared by the server and the CLI
-│   ├── config.py            #   Configuration loader with Hubverse auto-discovery
-│   ├── data_loader.py       #   Forecast and surveillance data ingestion
-│   ├── cache_manager.py     #   Columnar Parquet cache with mtime invalidation
-│   ├── evaluation.py        #   Evaluation engine, aggregations, tournament scaling
-│   ├── metrics.py           #   Vectorized scoring (WIS, MAE, coverage, decomposition)
-│   ├── peaks.py             #   Season peak targets: extraction, summaries, scoring
-│   ├── peak_data.py         #   Peak query layer used by the data loader
-│   └── synthetic_ensemble.py#   Quantile Vincentization and ensemble synthesis
-├── remote/                  # Live hub data: S3 client, flu-hub checks, normalization, sync
-├── static/                  # Frontend (no build step)
-│   ├── index.html           #   Dashboard layout and methodology modal
-│   ├── style.css            #   Dark and light themes
-│   ├── js/                  #   ES modules (main.js, api.js, state.js, components/)
-│   └── vendor/              #   Bundled Plotly and SheetJS
-├── data/seed/               # Bundled 2010–2023 ILINet / FluSurv-NET history (read-only)
-├── data/surveillance/       # (Generated) Working surveillance data, rebuilt by setup
-├── tests/                   # pytest / unittest suite
-├── docs/                    # Reference documentation
-├── LICENSE                  # MIT
-├── THIRD_PARTY_NOTICES.md   # Bundled Plotly / SheetJS licenses (texts in licenses/)
-└── .cache/                  # (Generated) Parquet cache, safe to delete
+├── setup.sh / setup.bat       # Environment setup
+├── run.sh / run.bat           # Launch the server on 127.0.0.1:8501
+├── server.py                  # Multi-hub HTTP server & /api/* + /api/next/* routing
+├── score_cli.py               # Headless CLI scorer
+├── rebuild_surveillance.py    # Surveillance data download / rebuild
+├── core/                      # Python engine
+│   ├── workspace.py           #   Multi-hub WorkspaceManager & read-only web-mode guard
+│   ├── catalog.py             #   Cross-hub catalog, globe builder, official ensemble ranking
+│   ├── briefings.py           #   Place-first editorial briefing composer
+│   ├── briefing_feeds.py      #   External surveillance/virology fetchers (CDC, ECDC ERVISS, WHO, UKHSA, Nextstrain)
+│   ├── next_api.py            #   VZF2 fans, VZT1 trajectories, PMF, manifest, as-of APIs
+│   ├── evaluation.py          #   Evaluation engine (Quantiles, PMFs, Sample CRPS & Energy Score)
+│   ├── metrics.py             #   Vectorized scoring functions
+│   ├── geo.py                 #   US FIPS, HHS regions, MetroCast HSAs, Europe ISO-2 mapping
+│   ├── calendar.py            #   US Saturday / RespiCast Sunday + horizon offset alignment
+│   ├── prescore.py            #   Persistent quantile pre-score cache
+│   ├── cache_manager.py       #   Columnar Parquet cache with mtime invalidation
+│   ├── config.py / data_loader.py / peaks.py / peak_data.py / synthetic_ensemble.py / truth.py
+├── remote/                    # Remote hub specs, S3 & GitHub transports, incremental sync
+├── next/                      # Sole frontend (no build step; see next/ARCHITECTURE.md)
+│   ├── features/              #   FanChart, GlobeView, BriefingView, PmfView, Shell, Pickers, Guide
+│   ├── sections/              #   Scores, Heatmap, Map, Peaks, Trajectories, Rate change
+│   ├── geo/                   #   Offline TopoJSON atlases (world 1:50m, US counties, MetroCast HSAs)
+│   └── tests/                 #   Node unit tests & Chromium CDP E2E tests
+├── tests/                     # Python unittest suite
+├── docs/                      # Reference documentation
+├── LICENSE / THIRD_PARTY_NOTICES.md
+└── .cache/                    # (Generated) Parquet & remote hub caches
 ```
-
-Python modules import each other as `viz.core.*` and `viz.remote.*`, which is why the folder must be named `viz` and why tests run with the hub root on `PYTHONPATH`.

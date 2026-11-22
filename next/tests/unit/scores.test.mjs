@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scopeOf, seasonWeekEnd, seasonWeekOf } from "../../sections/scope.js";
-import { metricsRequest, modelLocationsQuery, rowsFrom, sortRows, relLevel, coverageLevel, delimited, datesLabel, horizonsLabel, cliCommand } from "../../sections/scores/model.js";
+import { metricsRequest, modelLocationsQuery, rowsFrom, sortRows, exportRows, relLevel, coverageLevel, delimited, datesLabel, horizonsLabel, cliCommand } from "../../sections/scores/model.js";
 import { parseUrl, writeUrl } from "../../features/url.js";
 
 const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -219,4 +219,54 @@ test("modelLocationsQuery mirrors metricsRequest across seasons, window, horizon
   }));
   assert.equal(qFair.get("fair"), "1");
   assert.equal(qFair.get("models"), "B,m1,m2");
+});
+
+test("rowsFrom, sortRows, and exportRows support categorical PMF evaluations (RPS, Log loss, Brier, Mode hit)", () => {
+  const pmfResp = {
+    is_categorical: true,
+    ordinal: true,
+    rank_metric: "rps",
+    baseline_model: "B-cat",
+    rankings: [
+      {
+        model_id: "B-cat", has_data_in_scope: true, count: 40, rps: 0.40, log_score: 1.15, brier: 0.72, hit_mode: 42.5,
+        relative_wis: 1.0, pct_diff_vs_baseline: 0.0,
+        by_horizon: { 0: { rps: 0.30, log_score: 1.0, count: 20 }, 1: { rps: 0.50, log_score: 1.3, count: 20 } },
+      },
+      {
+        model_id: "M-good", has_data_in_scope: true, count: 40, rps: 0.20, log_score: 0.70, brier: 0.40, hit_mode: 75.0,
+        relative_wis: 0.52, pct_diff_vs_baseline: -50.0,
+        by_horizon: { 0: { rps: 0.15, log_score: 0.6, count: 20 }, 1: { rps: 0.25, log_score: 0.8, count: 20 } },
+      },
+    ],
+  };
+  const rs = rowsFrom(pmfResp, { ids: ["M-good"], baseline: "B-cat", scale: "natural", label: (id) => id });
+  const good = rs.find((r) => r.id === "M-good");
+  assert.equal(good.isCategorical, true);
+  assert.equal(good.active, true);
+  assert.equal(good.rps, 0.20);
+  assert.equal(good.logScore, 0.70);
+  assert.equal(good.brier, 0.40);
+  assert.equal(good.hitMode, 75.0);
+  assert.equal(good.rel, 0.52);
+  assert.equal(good.byH[0].rel, 0.5);
+  assert.equal(good.byH[1].rel, 0.5);
+
+  const byRps = sortRows(rs, "rps").ranked;
+  assert.deepEqual(byRps.map((r) => r.id), ["M-good", "B-cat"]);
+  const byHit = sortRows(rs, "hitMode").ranked;
+  assert.deepEqual(byHit.map((r) => r.id), ["M-good", "B-cat"]);
+
+  const sc = scopeOf({ date: "2026-01-10" }, manifest);
+  const exp = exportRows(pmfResp, {
+    order: byRps.map((r) => r.id),
+    ranks: sortRows(rs, "rps").ranks,
+    scope: sc,
+    target: "wk flu hosp rate change",
+    scopeLabel: "All states",
+    sourceOf: () => "hub",
+  });
+  assert.equal(exp[0].rps, 0.2);
+  assert.equal(exp[0].log_loss, 0.7);
+  assert.equal(exp[0].mode_hit_pct, 75);
 });

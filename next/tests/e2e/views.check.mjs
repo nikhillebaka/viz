@@ -18,7 +18,11 @@ export default async function views(page, t) {
 
   for (const s of SECTIONS) {
     await t.step(`${s.id} shows real data`, async () => {
-      await page.eval((id) => { document.getElementById(id)?.scrollIntoView({ block: "start" }); scrollBy(0, -24); }, s.id);
+      await page.eval((id) => {
+        document.getElementById(`tab-${id}`)?.click();
+        document.getElementById(id)?.scrollIntoView({ block: "start" });
+        scrollBy(0, -24);
+      }, s.id);
       await page.waitFor(s.ready, { timeout: 30000, message: `${s.id} never showed data` });
       const state = await page.eval((id) => {
         const el = document.getElementById(id);
@@ -38,7 +42,10 @@ export default async function views(page, t) {
   }
 
   await t.step("heatmap readout and click-through", async () => {
-    await page.eval(() => document.getElementById("heatmap").scrollIntoView({ block: "start" }));
+    await page.eval(() => {
+      document.getElementById("tab-heatmap")?.click();
+      document.getElementById("heatmap").scrollIntoView({ block: "start" });
+    });
     await page.frames(2);
     const pt = await page.eval(() => {
       const c = document.querySelector("#heatmap .hm-canvas"), r = c.getBoundingClientRect();
@@ -52,7 +59,10 @@ export default async function views(page, t) {
   });
 
   await t.step("peaks rows: hover shows a readout and the row's box", async () => {
-    await page.eval(() => document.getElementById("peaks").scrollIntoView({ block: "start" }));
+    await page.eval(() => {
+      document.getElementById("tab-peaks")?.click();
+      document.getElementById("peaks").scrollIntoView({ block: "start" });
+    });
     await page.frames(2);
     const pt = await page.eval(() => {
       const rows = [...document.querySelectorAll("#peaks .pe-row.is-model")];
@@ -79,6 +89,10 @@ export default async function views(page, t) {
   });
 
   await t.step("no console errors", async () => {
+    await page.eval(() => {
+      document.getElementById("tab-scores")?.click();
+      localStorage.removeItem("viz.section_tab");
+    });
     t.eq(page.errors, [], "uncaught exceptions and console errors");
   });
 }

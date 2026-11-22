@@ -34,8 +34,8 @@ export default async function more(page, t) {
 
   await t.step("menu lists its items", async () => {
     const labels = await menuItem(page);
-    for (const l of ["Data sources", "Refresh data", "Copy link", "Guide", "Shortcuts"]) t.ok(labels.includes(l), `menu has ${l}`);
-    t.ok(!labels.includes("Present") && !labels.includes("Methods"), "no Present or Methods");
+    for (const l of ["Briefing", "Data sources", "Refresh data", "Copy link", "Guide", "Shortcuts"]) t.ok(labels.includes(l), `menu has ${l}`);
+    t.ok(!labels.includes("Present") && !labels.includes("Methods") && !labels.includes("Classic viz"), "no Present, Methods, or Classic viz");
     await shot(page, "menu");
     await closeLayer(page);
   });

@@ -37,19 +37,25 @@ const COLUMNS = {
   mae: { label: "MAE", tip: "Mean absolute error of the median" },
   cov50: { label: "50%", tip: "50% interval coverage · target 50" },
   cov95: { label: "95%", tip: "95% interval coverage · target 95" },
+  rps: { label: "RPS", tip: "Ranked probability score · ordinal PMF · lower is better" },
+  logScore: { label: "Log loss", tip: "Mean negative log-likelihood (-ln p of realized bin) · lower is better" },
+  brier: { label: "Brier", tip: "Multi-class Brier score · lower is better" },
+  hitMode: { label: "Mode hit", tip: "Share of forecasts where most likely category matched observed" },
   n: { label: "N", tip: "Forecasts scored" },
-  delta: { label: "vs base", tip: "WIS change vs the baseline, on shared forecasts" },
+  delta: { label: "vs base", tip: "Score change vs the baseline, on shared forecasts" },
   wins: { label: "Wins", tip: "Rounds with the lowest WIS · among the selected models and baseline" },
   per100k: { label: "/100k", tip: "WIS per 100k population" },
   sharp: { label: "Width", tip: "Mean 95% interval width" },
   cov80: { label: "80%", tip: "80% interval coverage · target 80" },
-  h0: { label: "0 wk", tip: "Relative WIS at horizon 0 · vs baseline, ratio of means" },
-  h1: { label: "1 wk", tip: "Relative WIS at horizon 1 · vs baseline, ratio of means" },
-  h2: { label: "2 wk", tip: "Relative WIS at horizon 2 · vs baseline, ratio of means" },
-  h3: { label: "3 wk", tip: "Relative WIS at horizon 3 · vs baseline, ratio of means" },
-  h4: { label: "4 wk", tip: "Relative WIS at horizon 4 · vs baseline, ratio of means" },
+  h0: { label: "0 wk", tip: "Relative score at horizon 0 · vs baseline, ratio of means" },
+  h1: { label: "1 wk", tip: "Relative score at horizon 1 · vs baseline, ratio of means" },
+  h2: { label: "2 wk", tip: "Relative score at horizon 2 · vs baseline, ratio of means" },
+  h3: { label: "3 wk", tip: "Relative score at horizon 3 · vs baseline, ratio of means" },
+  h4: { label: "4 wk", tip: "Relative score at horizon 4 · vs baseline, ratio of means" },
 };
 const BASE_COLS = ["rel", "wis", "mae", "cov50", "cov95", "n"];
+const PMF_BASE_COLS = ["rel", "rps", "logScore", "brier", "hitMode", "n"];
+const PMF_OPTIONAL_COLS = ["delta", "h0", "h1", "h2", "h3", "h4"];
 export const OPTIONAL_COLS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"];
 const DEFAULT_UI = Object.freeze({ sort: DEFAULT_SORT, rev: false, cols: [], open: [] });
 const uiOf = (st) => ({ ...DEFAULT_UI, ...(st.scores || {}) });
@@ -84,9 +90,12 @@ export function mount(el, ctx) {
   const fBase = frag("baseline", (a) => baselineMenu(a));
   const fExport = h("button", { type: "button", class: "sc-frag sc-export", "aria-label": "Export", onclick: (e) => exportMenu(e.currentTarget) }, "↓");
   const sep = () => h("span", { class: "sc-sep", "aria-hidden": "true" }, "·");
+  const wisGuide = guideLink("relative-wis", "Relative WIS in the Guide");
+  const pmfGuide = guideLink("pmf", "Categorical PMF scoring in the Guide");
+  pmfGuide.hidden = true;
   const scopeLine = h("div", { class: "sc-scope", role: "toolbar", "aria-label": "Evaluation scope" },
     h("h2", { class: "sc-title" }, "Scores"),
-    h("div", { class: "sc-frags" }, fMetric, guideLink("relative-wis", "Relative WIS in the Guide"), sep(), fPlace, sep(), fDates, sep(), fHz, sep(), fBase), fExport);
+    h("div", { class: "sc-frags" }, fMetric, wisGuide, pmfGuide, sep(), fPlace, sep(), fDates, sep(), fHz, sep(), fBase), fExport);
   const progress = h("div", { class: "sc-progress", "aria-hidden": "true" });
   const notice = h("div", { class: "sc-notice", hidden: true });
   const board = h("div", { class: "sc-board", role: "table", "aria-label": "Leaderboard" });
@@ -226,11 +235,25 @@ export function mount(el, ctx) {
     drawFigures();
   }
 
+  const isCatMode = (st, s = shown) => !!s?.is_categorical || !!manifest.targetById.get(st?.target)?.is_categorical;
+  const activeColsFor = (st, ui) => {
+    const hs = availH();
+    if (isCatMode(st)) {
+      const base = shown?.ordinal === false ? PMF_BASE_COLS.filter((c) => c !== "rps") : PMF_BASE_COLS;
+      return [...base, ...PMF_OPTIONAL_COLS.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
+    }
+    return [...BASE_COLS, ...OPTIONAL_COLS.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
+  };
+
   function renderScope(st, sc) {
     const def = (on) => (on ? "is-set" : "");
-    const metric = ["Relative WIS", sc.scale === "log" && "log", sc.fair && "shared only", sc.rank === "selected" && "among selected"].filter(Boolean).join(" · ");
+    const cat = isCatMode(st);
+    const baseMetricLabel = cat ? (shown?.ordinal === false ? "Relative Log loss" : "Relative RPS") : "Relative WIS";
+    const metric = [baseMetricLabel, !cat && sc.scale === "log" && "log", sc.fair && "shared only", sc.rank === "selected" && "among selected"].filter(Boolean).join(" · ");
     fMetric.textContent = metric;
-    fMetric.className = ["sc-frag", def(sc.scale === "log" || sc.fair || sc.rank === "selected"), shown?.common_task_status === "empty_disjoint" && "is-warn"].filter(Boolean).join(" ");
+    fMetric.className = ["sc-frag", def((!cat && sc.scale === "log") || sc.fair || sc.rank === "selected"), shown?.common_task_status === "empty_disjoint" && "is-warn"].filter(Boolean).join(" ");
+    wisGuide.hidden = cat;
+    pmfGuide.hidden = !cat;
     const loc = manifest.locationById.get(st.location);
     fPlace.textContent = (sc.place === "US" && geoCls.aggregateId === "US")
       ? "US"
@@ -270,8 +293,7 @@ export function mount(el, ctx) {
   }
 
   function renderBoard(st, sc, ui) {
-    const hs = availH();
-    const cols = [...BASE_COLS, ...OPTIONAL_COLS.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
+    const cols = activeColsFor(st, ui);
     board.style.setProperty("--sc-grid", gridTemplate(cols));
     const keepFocus = document.activeElement?.closest?.(".sc-row")?.dataset.id;
     const kids = [];
@@ -378,6 +400,10 @@ export function mount(el, ctx) {
       case "wins": return v(r.wins == null ? DASH : `${r.wins}/${r.competed ?? DASH}`);
       case "per100k": return v(fmtScore(r.per100k));
       case "sharp": return v(fmtScore(r.sharp));
+      case "rps": return v(r.rps == null ? DASH : r.rps.toFixed(3));
+      case "logScore": return v(r.logScore == null ? DASH : r.logScore.toFixed(2));
+      case "brier": return v(r.brier == null ? DASH : r.brier.toFixed(3));
+      case "hitMode": return v(r.hitMode == null ? DASH : `${fmtPct(r.hitMode)}%`);
       default: {
         const k = +c.slice(1), rel = r.baseline ? 1 : r.byH[k]?.rel ?? null, lvl = relLevel(rel);
         return h("span", { class: "sc-num sc-cov-cell mono", role: "cell" }, fmtRel(rel), h("i", { class: "sc-mark", style: { "--c": lvl ? `var(--score-${lvl})` : null } }));
@@ -387,6 +413,15 @@ export function mount(el, ctx) {
 
   /* the column titles: a footer that rides the bottom of the screen and rests under the last row */
   function headerRow(cols, ui, sc) {
+    const cat = isCatMode(store.get());
+    const colLabel = (key) => {
+      if (key === "rel" && cat) return shown?.ordinal === false ? "Rel. Log" : "Rel. RPS";
+      return COLUMNS[key].label;
+    };
+    const colTip = (key) => {
+      if (key === "rel" && cat) return shown?.ordinal === false ? "Relative Log loss · pairwise vs the baseline · lower is better" : "Relative RPS · pairwise vs the baseline · lower is better";
+      return COLUMNS[key]?.tip;
+    };
     const head = (key, text, cls = "") => {
       const active = ui.sort === key;
       const asc = (SORTS[key]?.asc ?? true) !== ui.rev;
@@ -395,14 +430,15 @@ export function mount(el, ctx) {
         "aria-sort": active ? (asc ? "ascending" : "descending") : "none",
         onclick: () => setUi(active ? { rev: !ui.rev } : { sort: key, rev: false }),
       }, text, active ? h("span", { class: "sc-arrow", "aria-hidden": "true" }, asc ? "↑" : "↓") : null);
-      if (COLUMNS[key]?.tip) tooltip(b, COLUMNS[key].tip);
+      const tip = colTip(key);
+      if (tip) tooltip(b, tip);
       return b;
     };
-    const relHead = h("span", { class: "sc-head-rel" }, head("rel", COLUMNS.rel.label),
+    const relHead = h("span", { class: "sc-head-rel" }, head("rel", colLabel("rel")),
       h("span", { class: "sc-axis-ticks mono", "aria-hidden": "true" }, h("i", { style: { "--x": "0%" } }, "0.5"), h("i", { style: { "--x": "50%" } }, "1"), h("i", { style: { "--x": "100%" } }, "2")));
     return h("div", { class: "sc-row sc-headrow", role: "row" },
       h("span"), head("name", "Model", "is-left"),
-      ...cols.map((c) => (c === "rel" ? relHead : head(c, COLUMNS[c].label))), plusBtn);
+      ...cols.map((c) => (c === "rel" ? relHead : head(c, colLabel(c)))), plusBtn);
   }
 
   function rowKey(e, r) {
@@ -418,28 +454,40 @@ export function mount(el, ctx) {
   /* ---------------- figures ---------------- */
   /* emphasisOnly (a hover): restyle the drawn figures in place, redrawing only one that must name a line */
   function drawFigures(emphasisOnly = false) {
-    const st = store.get(), ui = uiOf(st);
+    const st = store.get();
     const list = [...order.ranked];
+    const cat = isCatMode(st);
+    const hasHz = list.some((r) => Object.values(r.byH || {}).some((b) => b?.rel != null));
+    const calFig = figSvgs.cal.closest("figure");
+    const hzFig = figSvgs.hz.closest("figure");
+    const anatFig = figSvgs.anat.closest("figure");
+    if (calFig) calFig.hidden = cat;
+    if (anatFig) anatFig.hidden = cat;
+    if (hzFig) hzFig.hidden = !list.length || (cat && !hasHz);
+    figs.hidden = !list.length || (cat && !hasHz);
+    if (figs.hidden) return;
     const emph = new Set([st.focus].filter(Boolean));
     const o = { emph, hover, onHover: (id) => setHover(id), onPick: (id) => openSheet(id) };
-    figs.hidden = !list.length;
-    if (!list.length) return;
     const one = (svg, draw) => { if (!emphasisOnly || !emphasize(svg, emph, hover)) draw(); };
-    one(figSvgs.cal, () => calibrationFigure(figSvgs.cal, list, o));
+    if (!cat) one(figSvgs.cal, () => calibrationFigure(figSvgs.cal, list, o));
     one(figSvgs.hz, () => horizonFigure(figSvgs.hz, list, o));
-    shareBtn.textContent = share ? "Share" : "WIS";
-    one(figSvgs.anat, () => anatomyFigure(figSvgs.anat, list, { ...o, share }));
+    if (!cat) {
+      shareBtn.textContent = share ? "Share" : "WIS";
+      one(figSvgs.anat, () => anatomyFigure(figSvgs.anat, list, { ...o, share }));
+    }
   }
 
   /* ---------------- scope popovers and menus ---------------- */
   function metricMenu(a) {
-    const sc = scope();
+    const st = store.get(), sc = scope(), cat = isCatMode(st);
     openMenu(a, {
       label: "Metric",
       items: [
-        { header: "Scale" },
-        { label: "Natural", checked: sc.scale === "natural", onSelect: () => setScope(store, { scale: "natural" }) },
-        { label: "Log", checked: sc.scale === "log", onSelect: () => setScope(store, { scale: "log" }) },
+        ...(cat ? [] : [
+          { header: "Scale" },
+          { label: "Natural", checked: sc.scale === "natural", onSelect: () => setScope(store, { scale: "natural" }) },
+          { label: "Log", checked: sc.scale === "log", onSelect: () => setScope(store, { scale: "log" }) },
+        ]),
         { header: "Forecasts" },
         { label: "All forecasts", checked: !sc.fair, onSelect: () => setScope(store, { fair: false }) },
         { label: "Shared only", checked: sc.fair, onSelect: () => setScope(store, { fair: true }) },
@@ -504,12 +552,15 @@ export function mount(el, ctx) {
     openMenu(a, { label: "Baseline", items: [{ header: "Baseline" }, ...cands.map(item), ...(sel.length ? [{ header: "Selected" }, ...sel.map(item)] : [])] });
   }
   function columnsMenu(a) {
-    const ui = uiOf(store.get());
-    const hs = availH();
+    const st = store.get(), ui = uiOf(st), hs = availH(), cat = isCatMode(st);
+    const opts = cat ? PMF_OPTIONAL_COLS : OPTIONAL_COLS;
+    const relPrefix = cat ? (shown?.ordinal === false ? "Rel. Log · " : "Rel. RPS · ") : "Rel. WIS · ";
     openMenu(a, {
       label: "Columns",
-      items: OPTIONAL_COLS.filter((c) => colAvailable(c, hs)).map((c) => ({
-        label: COLUMNS[c].tip.split(" · ")[0].replace(/^Relative WIS at horizon (\d)/, "Rel. WIS · $1 wk"), toggle: true, checked: ui.cols.includes(c),
+      items: opts.filter((c) => colAvailable(c, hs)).map((c) => ({
+        label: /^h\d+$/.test(c) ? `${relPrefix}${c.slice(1)} wk` : COLUMNS[c].tip.split(" · ")[0],
+        toggle: true,
+        checked: ui.cols.includes(c),
         onSelect: () => { const cur = uiOf(store.get()).cols; setUi({ cols: cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c] }); },
       })),
     });

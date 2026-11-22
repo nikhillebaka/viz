@@ -21,6 +21,8 @@ from viz.core.briefing_feeds import (
     US_FIPS_TO_HHS,
     WHO_NH_VACCINE_REFERENCE,
     BriefingFeedStore,
+    _iso_yearweek_to_sunday,
+    fetch_ecdc_erviss,
 )
 from viz.core.catalog import display_model_name, rank_ensemble_candidates
 from viz.core.workspace import HubManager
@@ -142,6 +144,30 @@ def _fixture_router(fail_urls=()):
                 "pivots": [2026.75, 2026.85],
                 "cov_tip_1": {"frequencies": [0.7, 0.85]},
             }).encode("utf-8")
+
+        if "sentinelTestsDetectionsPositivity.csv" in url:
+            return (
+                "survtype,countryname,yearweek,pathogen,pathogentype,pathogensubtype,indicator,age,value\n"
+                "primary care sentinel,Poland,2026-W45,Influenza,Influenza,total,positivity,total,6.0\n"
+                "primary care sentinel,Poland,2026-W46,Influenza,Influenza,total,positivity,total,7.5\n"
+                "primary care sentinel,Poland,2026-W46,Influenza,Influenza,total,positivity,0-4,25.0\n"
+                "primary care sentinel,EU/EEA,2026-W45,SARS-CoV-2,SARS-CoV-2,SARS-CoV-2,positivity,total,4.0\n"
+                "primary care sentinel,EU/EEA,2026-W46,SARS-CoV-2,SARS-CoV-2,SARS-CoV-2,positivity,total,5.2\n"
+            ).encode("utf-8")
+
+        if "ILIARIRates.csv" in url:
+            return (
+                "survtype,countryname,yearweek,indicator,age,value\n"
+                "primary care syndromic,Poland,2026-W45,ILIconsultationrate,total,272.3\n"
+                "primary care syndromic,Poland,2026-W46,ILIconsultationrate,total,288.1\n"
+                "primary care syndromic,Germany,2026-W46,ARIconsultationrate,total,1324.9\n"
+            ).encode("utf-8")
+
+        if "SARIRates.csv" in url:
+            return (
+                "survtype,countryname,yearweek,indicator,age,value\n"
+                "SARI syndromic,Germany,2026-W46,SARIrate,total,8.6\n"
+            ).encode("utf-8")
 
         raise RuntimeError(f"Unexpected fixture URL: {url}")
 
@@ -400,18 +426,42 @@ class TestBriefingFeedsAndBuilder(unittest.TestCase):
         self.assertIsNotNone(ma["virology"]["flu_subtypes"])
         self.assertGreaterEqual(len(ma["virology"]["clades"]), 2)
         self.assertEqual(ma["calibration"], [])
+        self.assertTrue(any(k.get("signal_id") == sig0["signal_id"] for k in ma["kpis"]))
         # Ensure strict factual prose (no loaded adjectives/medical advice)
         prose = " ".join(ma["summary"]["paragraphs"]).lower()
         for banned in ("alarming", "surge", "crisis", "panic", "you should"):
             self.assertNotIn(banned, prose)
 
-        # Poland has no sub-regions so peers section should be empty
+        # US briefing carries sub-region deep-link metadata for peer rows
+        us = mgr.briefings.build_briefing("US")
+        self.assertIsNotNone(us["peers"].get("hub_id"))
+        self.assertIsNotNone(us["peers"].get("target_id"))
+        if us["peers"]["rows"]:
+            self.assertIn("location_id", us["peers"]["rows"][0])
+
+        # Poland has no sub-regions so peers section should be empty, and includes ECDC ERVISS + WHO fallback
         pl_brief = mgr.briefings.build_briefing("PL")
         self.assertEqual(pl_brief["place"]["key"], "PL")
         self.assertEqual(pl_brief["place"]["clade_region"], "Europe")
         self.assertIsNotNone(pl_brief["virology"]["flu_subtypes"])
         self.assertEqual(pl_brief["virology"]["wastewater"], [])  # zero US-only mock panels for Poland
         self.assertEqual(pl_brief["peers"]["rows"], [])
+        ecdc = pl_brief["virology"].get("ecdc_surveillance") or []
+        self.assertTrue(any(e["indicator"] == "sentinel_positivity" and e["pathogen"] == "flu" and e["latest_value"] == 7.5 for e in ecdc))
+        self.assertTrue(any(e["indicator"] == "sentinel_positivity" and e["pathogen"] == "covid-19" and "EU/EEA" in e["geo_scope"] for e in ecdc))
+        self.assertTrue(any(e["indicator"] == "ili_rate" and e["latest_value"] == 288.1 for e in ecdc))
+        # WHO FluNet RSV fallback present since Poland has no RSV row in mock ECDC
+        self.assertTrue(any(e["source"] == "WHO FluNet" and e["pathogen"] == "rsv" for e in ecdc))
+
+    def test_ecdc_erviss_parser_and_partial_failure(self):
+        self.assertEqual(_iso_yearweek_to_sunday("2026-W46"), "2026-11-15")
+        df = fetch_ecdc_erviss(_fixture_router(fail_urls=("SARIRates.csv",)))
+        self.assertGreater(df.height, 0)
+        # Age 0-4 filtered out; only total retained
+        pl_flu = df.filter((pl.col("location_id") == "PL") & (pl.col("pathogen") == "flu") & (pl.col("week_end") == "2026-11-15"))
+        self.assertEqual(pl_flu.height, 1)
+        self.assertAlmostEqual(pl_flu["value"].item(), 7.5, places=2)
+        self.assertEqual(df.filter(pl.col("location_id") == "EU").height, 2)
 
     def test_briefing_http_endpoints(self):
         mgr = _build_us_and_eu_workspace(self.tmp_root, self.data_dir)

@@ -3,6 +3,23 @@
  * Zero DOM dependencies. */
 import { DAY } from "../../lib/scale.js";
 
+/** Build query string for `/api/next/sample-scores`. */
+export function sampleScoresQuery({ target, season, location, scopePlace = "current", horizons = null, dims = null } = {}) {
+  const q = new URLSearchParams();
+  if (target) q.set("target", String(target));
+  q.set("location", scopePlace === "all" || !location ? "all" : String(location));
+  if (season) q.set("season", String(season));
+  q.set("date", "all");
+  q.set("models", "all");
+  if (Array.isArray(horizons) && horizons.length) q.set("horizons", horizons.join(","));
+  if (dims && typeof dims === "object") {
+    for (const [k, v] of Object.entries(dims)) {
+      if (v != null && v !== "") q.set(k, String(v));
+    }
+  }
+  return q.toString();
+}
+
 /** Return all manifest models that carry sample trajectories for `targetId`. */
 export function sampleModelsForTarget(manifest, targetId) {
   if (!manifest?.models?.length) return [];

@@ -944,6 +944,84 @@ class BriefingBuilder:
                         "latest_shares": latest_shares,
                     })
 
+        # 8. European ECDC ERVISS Surveillance (+ WHO FluNet positivity fallback)
+        ecdc_items: List[Dict[str, Any]] = []
+        if scope in ("eu", "gb") or (iso2 and iso2 in EUROPE_REF):
+            df_ecdc = self.feed_store.read_feed("ecdc_erviss")
+            ecdc_specs = (
+                ("sentinel_positivity", "flu", "Influenza sentinel positivity", "%"),
+                ("sentinel_positivity", "covid-19", "SARS-CoV-2 sentinel positivity", "%"),
+                ("sentinel_positivity", "rsv", "RSV sentinel positivity", "%"),
+                ("ili_rate", "syndromic", "ILI consultation rate", "per 100k"),
+                ("ari_rate", "syndromic", "ARI consultation rate", "per 100k"),
+                ("sari_rate", "syndromic", "SARI hospitalization rate", "per 100k"),
+            )
+            seen_ecdc_keys: set[Tuple[str, str]] = set()
+            if df_ecdc is not None and df_ecdc.height > 0:
+                country_label = EUROPE_REF.get(iso2 or "", {}).get("name") or iso2 or "Europe"
+                for ind, pval, lbl, unit in ecdc_specs:
+                    sub = df_ecdc.filter(
+                        (pl.col("location_id") == iso2) & (pl.col("indicator") == ind) & (pl.col("pathogen") == pval)
+                    ).sort("week_end").tail(16) if iso2 else pl.DataFrame()
+                    used_scope = country_label
+                    if sub.is_empty():
+                        sub = df_ecdc.filter(
+                            (pl.col("location_id") == "EU") & (pl.col("indicator") == ind) & (pl.col("pathogen") == pval)
+                        ).sort("week_end").tail(16)
+                        used_scope = "EU/EEA (ECDC ERVISS)"
+                    if sub.is_empty():
+                        continue
+                    pts = [
+                        {"date": str(r[0])[:10], "value": round(float(r[1]), 2)}
+                        for r in sub.select(["week_end", "value"]).iter_rows()
+                    ]
+                    if pts:
+                        cur = pts[-1]
+                        prev = pts[-2] if len(pts) >= 2 else None
+                        seen_ecdc_keys.add((ind, pval))
+                        ecdc_items.append({
+                            "indicator": ind,
+                            "pathogen": pval,
+                            "label": lbl,
+                            "unit": unit,
+                            "source": "ECDC ERVISS",
+                            "geo_scope": used_scope,
+                            "latest_date": cur["date"],
+                            "latest_value": cur["value"],
+                            "pct_1wk": _pct_delta(cur["value"], prev["value"] if prev else None),
+                            "series": pts,
+                        })
+
+            if iso2 and df_who is not None and df_who.height > 0:
+                sub_w = df_who.filter(pl.col("location_id") == iso2).sort("week_start").tail(16)
+                country_label = EUROPE_REF.get(iso2, {}).get("name") or iso2
+                if not sub_w.is_empty():
+                    for pval, num_col, den_col, lbl in (
+                        ("flu", "inf_all", "spec_processed", "Influenza virological positivity"),
+                        ("rsv", "rsv", "rsv_processed", "RSV virological positivity"),
+                    ):
+                        if ("sentinel_positivity", pval) in seen_ecdc_keys:
+                            continue
+                        pts = []
+                        for wk_s, nv, dv in sub_w.select(["week_start", num_col, den_col]).iter_rows():
+                            if dv and dv > 0 and nv is not None and nv >= 0:
+                                pts.append({"date": str(wk_s)[:10], "value": round((float(nv) / float(dv)) * 100.0, 2)})
+                        if pts:
+                            cur = pts[-1]
+                            prev = pts[-2] if len(pts) >= 2 else None
+                            ecdc_items.append({
+                                "indicator": "sentinel_positivity",
+                                "pathogen": pval,
+                                "label": lbl,
+                                "unit": "%",
+                                "source": "WHO FluNet",
+                                "geo_scope": country_label,
+                                "latest_date": cur["date"],
+                                "latest_value": cur["value"],
+                                "pct_1wk": _pct_delta(cur["value"], prev["value"] if prev else None),
+                                "series": pts,
+                            })
+
         return {
             "cfa_rt": cfa_rt_items,
             "wastewater": wastewater_items,
@@ -952,6 +1030,7 @@ class BriefingBuilder:
             "flu_subtypes": flu_subtypes,
             "ukhsa_positivity": ukhsa_items,
             "clades": clades_list,
+            "ecdc_surveillance": ecdc_items,
         }
 
     def _build_peers_section(
@@ -1046,6 +1125,7 @@ class BriefingBuilder:
                 who_info = who_pos_by_loc.get(k)
                 rows.append({
                     "key": k,
+                    "location_id": lid or k,
                     "name": p_ent["name"],
                     "abbr": p_ent["abbr"],
                     "level": p_ent["level"],
@@ -1104,6 +1184,10 @@ class BriefingBuilder:
                 "title": subregion_label,
                 "unit": sub_unit,
                 "focal_key": pkey,
+                "hub_id": sub_hub,
+                "target_id": sub_target,
+                "ref_date": (primary_sig or {}).get("ref_date"),
+                "model_id": (primary_sig or {}).get("model_id"),
                 "rows": subregion_rows[:24],
                 "total_count": len(subregion_rows),
             }
@@ -1199,6 +1283,7 @@ class BriefingBuilder:
                 "value": _fmt_num(lead.get("latest_obs"), u, p100),
                 "unit": u if "%" not in u else "",
                 "sub": sub,
+                "signal_id": lead.get("signal_id"),
             })
             if _finite(lead.get("forecast_end_median")) and lead.get("forecast_end_date"):
                 fd = lead.get("forecast_change_pct")
@@ -1209,6 +1294,7 @@ class BriefingBuilder:
                     "value": _fmt_num(lead["forecast_end_median"], u, p100),
                     "unit": u if "%" not in u else "",
                     "sub": f"{fd:+.1f}% vs {obs_dt or 'latest'}" if fd is not None else m_disp,
+                    "signal_id": lead.get("signal_id"),
                 })
 
         raw_p = str(lead.get("pathogen") or "").lower() if lead else "flu"
@@ -1259,6 +1345,34 @@ class BriefingBuilder:
                     "unit": f"{top_cl['pct']:.0f}%",
                     "sub": f"{m_cl['region']} · {_fmt_date_short(m_cl['latest_date'])}",
                 })
+
+        ecdc_list = ext.get("ecdc_surveillance") or []
+        if ecdc_list and len(kpis) < 4:
+            sent = [e for e in ecdc_list if e.get("indicator") == "sentinel_positivity"]
+            ordered_sent = sorted(sent, key=lambda e: (0 if e.get("pathogen") == pref_p else 1))
+            added_ecdc = 0
+            for e in ordered_sent:
+                if len(kpis) >= 4 or added_ecdc >= 2:
+                    break
+                if e.get("pathogen") == "flu" and any(
+                    "positivity" in (k.get("label") or "").lower() and "flu" in (k.get("label") or "").lower()
+                    for k in kpis
+                ):
+                    continue
+                d1 = e.get("pct_1wk")
+                dt_s = _fmt_date_short(e.get("latest_date"))
+                short_lbl = {
+                    "flu": "Flu sentinel positivity",
+                    "covid-19": "SARS-CoV-2 positivity",
+                    "rsv": "RSV sentinel positivity",
+                }.get(e.get("pathogen"), e.get("label", "Positivity"))
+                kpis.append({
+                    "label": short_lbl,
+                    "value": f"{e['latest_value']:.1f}%",
+                    "unit": "",
+                    "sub": " · ".join(x for x in [e.get("geo_scope"), f"{d1:+.1f}% wk/wk" if d1 is not None else dt_s] if x),
+                })
+                added_ecdc += 1
 
         return kpis[:4]
 

@@ -31,6 +31,7 @@ export function mountSections(root, ctx) {
 
   const isAvailable = (id) => {
     const s = store.get();
+    if (manifest.targetById.get(s.target)?.is_categorical) return id === "scores";
     if (id === "rate_change") return !!findRateChangeTarget(ctx.catalog, manifest, s.target, s.location);
     if (id === "trajectories") return hasSampleModels(manifest, s.target);
     return true;

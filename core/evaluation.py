@@ -30,6 +30,7 @@ from viz.core.metrics import (
     model_task_keys,
     score_forecasts,
     score_pmf_forecasts,
+    score_sample_forecasts,
     summarize_scored_tasks,
 )
 from viz.core.parallel import ordered_map, ordered_map_outcomes
@@ -247,6 +248,9 @@ class EvaluationResult:
     rankings: List[Dict[str, Any]]
     validation_warnings: List[str] = field(default_factory=list)
     window: Optional[Dict[str, Any]] = None
+    is_categorical: bool = False
+    ordinal: bool = False
+    rank_metric: str = "wis"
     # Resolved scope, reused by task-level exports so they match the leaderboard exactly
     locations_filter: Optional[List[str]] = field(default=None, repr=False)
     common_task_set: Optional[Set[Tuple[Any, ...]]] = field(default=None, repr=False)
@@ -271,6 +275,9 @@ class EvaluationResult:
             "common_task_status": self.common_task_status,
             "common_task_message": self.common_task_message,
             "common_tasks_count": self.common_tasks_count,
+            "is_categorical": self.is_categorical,
+            "ordinal": self.ordinal,
+            "rank_metric": self.rank_metric,
             "rankings": self.rankings,
             "validation_warnings": self.validation_warnings,
             "window": self.window,
@@ -331,13 +338,18 @@ class EvaluationEngine:
         self._loc_eval_cache_size = 16
         self._loc_eval_cache_lock = threading.Lock()
         self._loc_eval_inflight: Dict[str, threading.Event] = {}
+        self._sample_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._sample_eval_cache_size = 32
+        self._sample_eval_cache_lock = threading.Lock()
 
     def clear_cache(self) -> None:
-        """Clear both leaderboard and per-location evaluation caches."""
+        """Clear leaderboard, per-location, and sample-trajectory evaluation caches."""
         with self._eval_cache_lock:
             self._eval_cache.clear()
         with self._loc_eval_cache_lock:
             self._loc_eval_cache.clear()
+        with self._sample_eval_cache_lock:
+            self._sample_eval_cache.clear()
 
     def _compute_cache_key(self, params: EvaluationParams) -> str:
         oracle_pq = self.loader.cache_mgr.get_oracle_parquet()
@@ -1686,6 +1698,9 @@ class EvaluationEngine:
             common_task_status="none",
             common_task_message=None,
             common_tasks_count=None,
+            is_categorical=True,
+            ordinal=ordinal,
+            rank_metric=rank_col,
             rankings=comparisons,
             validation_warnings=sorted(set(self.loader.get_validation_warnings(requested_model_ids))),
             window=window_filter.describe() if window_filter is not None else None,
@@ -1752,3 +1767,219 @@ class EvaluationEngine:
         if not dfs:
             return None
         return pl.concat(dfs, how="diagonal")
+
+    def evaluate_samples(self, params: EvaluationParams) -> Dict[str, Any]:
+        """Evaluate sample-trajectory forecasts using exact empirical CRPS and multi-horizon Energy Score."""
+        cache_key = "samp|" + self._compute_cache_key(params)
+        with self._sample_eval_cache_lock:
+            hit = self._sample_eval_cache.get(cache_key)
+            if hit is not None:
+                self._sample_eval_cache.move_to_end(cache_key)
+                return hit
+
+        sc_res = self._resolve_eval_scope(params)
+        target = sc_res.target
+        oracle = sc_res.oracle
+        locations_filter = sc_res.locations_filter
+        agg_locs = sc_res.agg_locs
+        dates_filter = sc_res.dates_filter
+        window_filter = sc_res.window_filter
+        dim_filter = sc_res.dim_filter
+        extra_cols = sc_res.extra_cols
+        all_models = sc_res.all_models
+        requested_model_ids = sc_res.requested_model_ids
+        baseline_id = sc_res.baseline_id
+        cfg_default = sc_res.cfg_default
+        tgt_default = sc_res.tgt_default
+        baseline_meta = sc_res.baseline_meta
+        model_meta_stats = sc_res.model_meta_stats
+        to_load = sc_res.to_load
+        horizon_set = sc_res.horizon_set
+        season_hint = sc_res.season_hint
+        total_scope_dates_count = sc_res.total_scope_dates_count
+
+        # Filter to models likely carrying sample trajectories for this target
+        sample_to_load = [
+            (mid, eval_dates)
+            for (mid, eval_dates) in to_load
+            if (
+                all_models.get(mid, {}).get("has_samples")
+                or "sample" in (all_models.get(mid, {}).get("output_types") or [])
+            )
+            and (not all_models.get(mid, {}).get("targets") or target in all_models[mid]["targets"])
+        ]
+
+        def _load_sample_df(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
+            mid, eval_dates = item
+            raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
+            lf = self.loader.cache_mgr.scan_model_samples(raw_id, is_local=is_local)
+            df = None
+            if lf is not None:
+                df = lf.filter((pl.col("target") == target) & pl.col("reference_date").is_in(eval_dates)).collect()
+            if df is None or df.is_empty():
+                raw_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
+                if raw_df is not None and not raw_df.is_empty() and "output_type" in raw_df.columns:
+                    df = raw_df.filter((pl.col("target") == target) & (pl.col("output_type") == "sample"))
+            if df is None or df.is_empty():
+                return None
+            return self._filter_df_scope(
+                df,
+                horizons=horizon_set,
+                dim_filter=dim_filter,
+                window_filter=window_filter,
+            )
+
+        sample_dfs: Dict[str, pl.DataFrame] = {}
+        for (mid, _), df in zip(sample_to_load, ordered_map(_load_sample_df, sample_to_load)):
+            if df is not None and not df.is_empty():
+                sample_dfs[mid] = df
+
+        scores_by_model: Dict[str, Dict[str, Any]] = {}
+        if sample_dfs:
+            def _score_s(df: pl.DataFrame) -> Dict[str, Any]:
+                return score_sample_forecasts(
+                    df,
+                    oracle,
+                    target,
+                    locations=locations_filter,
+                    reference_dates=dates_filter,
+                    horizons=horizon_set,
+                    extra_task_ids=extra_cols or None,
+                    aggregate_locations=agg_locs,
+                    compute_energy_score=True,
+                    return_task_df=True,
+                )
+
+            for mid, sc in zip(list(sample_dfs.keys()), ordered_map(_score_s, list(sample_dfs.values()))):
+                if sc and sc.get("overall"):
+                    scores_by_model[mid] = sc
+
+        primary_pool = any((sc.get("metadata") or {}).get("states_count", 0) > 0 for sc in scores_by_model.values())
+        agg_list = sorted(agg_locs)
+        pool_filter = (~pl.col("location").is_in(agg_list)) if primary_pool else pl.col("location").is_in(agg_list)
+
+        crps_task_scores: Dict[str, pl.DataFrame] = {}
+        es_task_scores: Dict[str, pl.DataFrame] = {}
+        for mid, sc in scores_by_model.items():
+            tdf = sc.get("task_df")
+            if tdf is not None and not tdf.is_empty():
+                ft = tdf.filter(pool_filter)
+                if not ft.is_empty():
+                    crps_task_scores[mid] = ft
+            edf = sc.get("energy_df")
+            if edf is not None and not edf.is_empty():
+                fe = edf.filter(pool_filter)
+                if not fe.is_empty():
+                    es_task_scores[mid] = fe
+
+        effective_baseline = baseline_id if (baseline_id and baseline_id in crps_task_scores) else None
+        if not effective_baseline and crps_task_scores:
+            effective_baseline = resolve_baseline(
+                all_models,
+                model_meta=baseline_meta,
+                target=target,
+                dates=dates_filter,
+                season=season_hint,
+                config_default=cfg_default,
+                target_config_default=tgt_default,
+                eligible_ids=set(crps_task_scores.keys()),
+            ) or max(
+                crps_task_scores.keys(),
+                key=lambda m: (crps_task_scores[m].height, "ensemble" in m.lower(), m),
+            )
+
+        rel_crps = (
+            compute_pairwise_relative_wis(
+                crps_task_scores,
+                effective_baseline,
+                metric_col="crps",
+                extra_task_ids=extra_cols,
+            )
+            if crps_task_scores
+            else {}
+        )
+        rel_es = (
+            compute_pairwise_relative_wis(
+                es_task_scores,
+                effective_baseline if effective_baseline in es_task_scores else next(iter(es_task_scores.keys()), None),
+                metric_col="energy_score",
+                extra_task_ids=extra_cols,
+            )
+            if es_task_scores
+            else {}
+        )
+
+        # Include sample-capable models (or all scored models)
+        candidate_ids = [
+            mid for mid in requested_model_ids
+            if mid in scores_by_model
+            or all_models.get(mid, {}).get("has_samples")
+            or "sample" in (all_models.get(mid, {}).get("output_types") or [])
+        ]
+
+        rankings: List[Dict[str, Any]] = []
+        for mid in candidate_ids:
+            m_stat = model_meta_stats.get(mid, {})
+            sc = scores_by_model.get(mid)
+            if sc is None or not sc.get("overall") or sc["overall"].get("count", 0) == 0:
+                rankings.append({
+                    "model_id": mid,
+                    "has_data_in_scope": False,
+                    "crps": None,
+                    "relative_crps": None,
+                    "energy_score": None,
+                    "relative_energy_score": None,
+                    "count": 0,
+                    "evaluated_dates_count": 0,
+                    "locations_count": 0,
+                    "scope_rounds_available": m_stat.get("available_scope_dates_count", 0),
+                    "scope_rounds_total": total_scope_dates_count,
+                    "by_horizon": {},
+                })
+                continue
+
+            rc = rel_crps.get(mid, {}) if isinstance(rel_crps.get(mid), dict) else {}
+            re = rel_es.get(mid, {}) if isinstance(rel_es.get(mid), dict) else {}
+            ov = sc["overall"]
+            meta = sc.get("metadata") or {}
+            rankings.append({
+                "model_id": mid,
+                "has_data_in_scope": True,
+                "crps": ov.get("crps"),
+                "relative_crps": rc.get("relative_wis"),
+                "energy_score": ov.get("energy_score"),
+                "relative_energy_score": re.get("relative_wis"),
+                "count": int(ov.get("count") or 0),
+                "evaluated_dates_count": int(meta.get("dates_count") or 0),
+                "locations_count": int(meta.get("locations_count") or 0),
+                "scope_rounds_available": m_stat.get("available_scope_dates_count", 0),
+                "scope_rounds_total": total_scope_dates_count,
+                "by_horizon": sc.get("by_horizon", {}),
+            })
+
+        rankings.sort(
+            key=lambda x: (
+                not x["has_data_in_scope"],
+                x["relative_crps"] is None,
+                x["relative_crps"] if x["relative_crps"] is not None else float("inf"),
+                x["crps"] if x["crps"] is not None else float("inf"),
+                x["model_id"],
+            )
+        )
+
+        payload = {
+            "target": target,
+            "location_filter": sc_res.loc_param,
+            "date_filter": sc_res.date_param,
+            "season_filter": sc_res.season_param,
+            "selected_seasons": sc_res.selected_seasons,
+            "scope_dates_count": total_scope_dates_count,
+            "baseline_model": effective_baseline,
+            "rankings": rankings,
+        }
+        with self._sample_eval_cache_lock:
+            self._sample_eval_cache[cache_key] = payload
+            self._sample_eval_cache.move_to_end(cache_key)
+            while len(self._sample_eval_cache) > self._sample_eval_cache_size:
+                self._sample_eval_cache.popitem(last=False)
+        return payload

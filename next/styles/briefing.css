@@ -179,6 +179,15 @@
   padding-left: var(--space-16);
   border-left: 1px solid var(--line-hairline);
 }
+.br-kpi.is-clickable {
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.br-kpi.is-clickable:hover,
+.br-kpi.is-clickable:focus-visible {
+  background: var(--fill-hover);
+  outline: none;
+}
 
 .br-kpi-label {
   font-size: var(--text-small);
@@ -511,6 +520,18 @@ details.br-details > summary:hover { color: var(--ink-primary); }
   .br-kpi:nth-child(n+3) { border-top: 1px solid var(--line-hairline); }
 }
 
+.br-row-chart-btn {
+  opacity: 0.72;
+  white-space: nowrap;
+}
+.br-table tr:hover .br-row-chart-btn,
+.br-row-chart-btn:focus-visible {
+  opacity: 1;
+}
+.br-print-footer {
+  display: none;
+}
+
 /* ---- Print / PDF Stylesheet ---- */
 @media print {
   @page { margin: 0.55in; size: auto; }
@@ -524,14 +545,46 @@ details.br-details > summary:hover { color: var(--ink-primary); }
     --line-hairline: #dddddd;
     --line-axis: #999999;
     --shade-forecast: rgba(0, 0, 0, 0.04);
+    --series-1: #1d4ed8;
+    --accent: #1d4ed8;
+    --score-1: #15803d;
+    --score-2: #0d9488;
+    --score-7: #d97706;
+    --score-9: #b91c1c;
+    --season-1: #2563eb;
+    --season-2: #0f766e;
+    --season-3: #d97706;
+    --season-4: #7c3aed;
+    --clade-1: #1d4ed8;
+    --clade-2: #0f766e;
+    --clade-3: #b45309;
+    --clade-4: #6d28d9;
+    --clade-5: #be123c;
+    --clade-6: #047857;
+    --clade-other: #9ca3af;
   }
+  #app.is-briefing-open > :not(.app-briefing) { display: none !important; }
   body, .app-briefing {
     position: static !important;
     overflow: visible !important;
     background: #ffffff !important;
     color: #111111 !important;
   }
-  .app-fixed, .br-scroll-scrim, .br-actions, .br-tabs, .br-toggle, .br-cta-banner { display: none !important; }
+  .br-page, .br-svg, .br-pmf-fill, .br-swatch, .br-swatch-sq {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .app-fixed, .br-scroll-scrim, .br-actions, .br-tabs, .br-toggle, .br-cta-banner,
+  .br-hover-readout, .br-head-meta .br-link-btn, .br-row-chart-btn, .br-col-action { display: none !important; }
   .br-page { padding: 0 !important; max-width: none !important; gap: 20px !important; }
   .br-section, .br-svg-wrap, .br-kpi-strip, .br-subpanel { break-inside: avoid; }
+  .br-print-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #dddddd;
+    font-size: 11px;
+    color: #666666;
+  }
 }

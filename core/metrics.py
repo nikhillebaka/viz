@@ -884,10 +884,11 @@ def score_sample_forecasts(
 
     task_df = pl.DataFrame(crps_rows)
     mean_energy: Optional[float] = None
+    energy_rows: List[Dict[str, Any]] = []
     if compute_energy_score and merged.height > 0:
         es_vals: List[float] = []
         round_keys = ["reference_date", "location"] + extra_cols
-        for _, rg in merged.group_by(round_keys, maintain_order=True):
+        for rk_vals, rg in merged.group_by(round_keys, maintain_order=True):
             piv = rg.pivot(
                 on="horizon",
                 index="output_type_id",
@@ -907,14 +908,26 @@ def score_sample_forecasts(
             if not all(hc in obs_by_h for hc in h_cols):
                 continue
             mat = piv_clean.select(h_cols).to_numpy()
+            if mat.shape[0] > 200:
+                idx = np.linspace(0, mat.shape[0] - 1, 200, dtype=int)
+                mat = mat[idx]
             y_vec = np.asarray([obs_by_h[hc] for hc in h_cols], dtype=np.float64)
-            es_vals.append(energy_score(mat, y_vec))
+            es_v = energy_score(mat, y_vec)
+            if math.isfinite(es_v):
+                es_vals.append(es_v)
+                rk_tuple = rk_vals if isinstance(rk_vals, tuple) else (rk_vals,)
+                erow = dict(zip(round_keys, rk_tuple))
+                erow["horizon"] = 0
+                erow["energy_score"] = es_v
+                energy_rows.append(erow)
         if es_vals:
             mean_energy = float(np.mean(es_vals))
 
     agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
     is_agg = task_df["location"].is_in(sorted(agg_set)) if agg_set else pl.Series(values=[False] * task_df.height)
     primary_df = task_df.filter(~is_agg) if (~is_agg).any() else task_df.filter(is_agg)
+    evaluated_dates = sorted(task_df.get_column("reference_date").unique().to_list())
+    distinct_locs = sorted(task_df.get_column("location").unique().to_list())
 
     out: Dict[str, Any] = {
         "overall": {
@@ -926,9 +939,17 @@ def score_sample_forecasts(
             int(h): {"crps": float(primary_df.filter(pl.col("horizon") == h)["crps"].mean()), "count": int(primary_df.filter(pl.col("horizon") == h).height)}
             for h in sorted(primary_df.get_column("horizon").unique().to_list())
         },
+        "metadata": {
+            "evaluated_dates": evaluated_dates,
+            "dates_count": len(evaluated_dates),
+            "locations_count": len(distinct_locs),
+            "states_count": len([loc for loc in distinct_locs if loc not in agg_set]),
+            "total_tasks": task_df.height,
+        },
     }
     if return_task_df:
         out["task_df"] = task_df
+        out["energy_df"] = pl.DataFrame(energy_rows) if energy_rows else None
     return out
 
 

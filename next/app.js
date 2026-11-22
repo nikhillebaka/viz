@@ -12,7 +12,7 @@ import { createStore } from "./lib/store.js";
 import { h, storage } from "./lib/dom.js";
 import { DAY, parseIso } from "./lib/scale.js";
 import { activeLayer } from "./ui/floating.js";
-import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted } from "./features/selection.js";
+import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted, chart } from "./features/selection.js";
 import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
@@ -228,7 +228,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       if (nextCat) ctx.catalog = nextCat;
       return nextCat;
     },
-    async switchContext({ hub = null, target = null, location: nextLoc = null, date = null, dims = null, keepGlobe = false, forceReload = false } = {}) {
+    async switchContext({ hub = null, target = null, location: nextLoc = null, date = null, model = null, dims = null, keepGlobe = false, forceReload = false } = {}) {
       const targetHub = hub || manifest.hub_id;
       if (!forceReload && targetHub === manifest.hub_id) {
         const cur = store.get();
@@ -245,6 +245,10 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
         if (date) {
           const snapped = nearestWithin(date, manifest.allRounds, 21);
           if (snapped) patch.date = snapped;
+        }
+        if (model && manifest.modelById.has(model)) {
+          const nextSel = model === manifest.baseline ? setBaseline(cur.sel, true) : chart(cur.sel, model);
+          if (nextSel !== cur.sel) patch.sel = nextSel;
         }
         if (Object.keys(patch).length) store.set(patch);
         return;
@@ -278,7 +282,10 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
       if (prev.location && manifest.locationById.has(prev.location)) storage.set(geoKey(manifest), prev.location);
       const resolvedLoc = resolveMappedLocation(nextMan, nextCat, manifest.hub_id, prev.location, nextLoc);
       const nextStored = fromStorage(nextMan);
-      const nextSel = nextStored.sel || nextDef.sel;
+      let nextSel = nextStored.sel || nextDef.sel;
+      if (model && nextMan.modelById.has(model)) {
+        nextSel = model === nextMan.baseline ? setBaseline(nextSel, true) : chart(nextSel, model);
+      }
       const resolvedDate = (date && nearestWithin(date, nextMan.allRounds, 21))
         || nearestWithin(prev.date, nextMan.allRounds, 21)
         || defaultDate(nextMan, nextSel);

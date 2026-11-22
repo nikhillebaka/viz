@@ -146,8 +146,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
   let sections = null;
   const syncSectionVis = () => {
     const s = store.get();
-    const cat = isCategoricalTarget(manifest.targetById.get(s.target));
-    if (sections?.el) sections.el.hidden = cat || !s.location;
+    if (sections?.el) sections.el.hidden = !s.location;
   };
 
   const offs = [
@@ -320,13 +319,14 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
           },
           onOpenChart: (sig) => {
             setBriefingOpen(false, null, true);
-            ctx.switchContext?.({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date });
+            ctx.switchContext?.({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date, model: sig.model_id || null });
           },
           onOpenScores: (sig) => {
             setBriefingOpen(false, null, true);
-            const p = ctx.switchContext?.({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date });
+            sections?.select?.("scores");
+            const p = ctx.switchContext?.({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date, model: sig.model_id || null });
             Promise.resolve(p).then(() => {
-              setTimeout(() => document.querySelector(".app-sections")?.scrollIntoView({ behavior: "smooth" }), 140);
+              setTimeout(() => document.querySelector(".app-sections")?.scrollIntoView({ behavior: "smooth" }), 160);
             });
           },
           onOpenGlobe: () => setGlobeOpen(true),

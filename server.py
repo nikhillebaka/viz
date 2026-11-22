@@ -39,8 +39,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("viz.server")
 
-STATIC_DIR = APP_DIR / "static"
-NEXT_DIR = APP_DIR / "next"  # the new frontend, served beside classic at /next/
+NEXT_DIR = APP_DIR / "next"  # sole frontend served at /next/ (/ redirects there)
 _FALLBACK_SERVER_CFG = VizConfig(APP_DIR, app_dir=APP_DIR).get_server_config()
 MAX_JSON_BODY_BYTES = 1 * 1024 * 1024  # 1 MB cap on POST JSON payloads
 
@@ -97,7 +96,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         self._cache_control_override: Optional[str] = None
-        super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
+        super().__init__(*args, directory=str(NEXT_DIR), **kwargs)
 
     def setup(self):
         try:
@@ -307,11 +306,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         mgr = self._mgr()
 
-        # Static frontends
+        # Static frontend
         if path == "/next" or path.startswith("/next/"):
             self._serve_dir(path, "/next", NEXT_DIR)
-        elif path == "/classic" or path.startswith("/classic/"):
-            self._serve_dir(path, "/classic", STATIC_DIR)
         # Workspace endpoints
         elif path == "/api/workspace":
             self._send_json(mgr.workspace_summary(requested_hub_id=self._requested_hub_id(query)))
@@ -421,16 +418,14 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 status=405,
             )
         elif path == "/" or not path or path == "/index.html":
-            # viz next is the default page; classic is at /classic/. A temporary redirect, so browsers
-            # don't remember it; the query comes along (next reads classic's link parameters).
+            # viz next is the sole frontend; / redirects to /next/ preserving query parameters.
             self.send_response(302)
             self.send_header("Location", "/next/" + (f"?{parsed.query}" if parsed.query else ""))
             self.end_headers()
         else:
-            # Fall back to static files in STATIC_DIR
-            super().do_GET()
+            self.send_error(404, "File not found")
 
-    # ---- the two frontends: viz next at /next/ (the default; / redirects there) and classic at /classic/ ----
+    # ---- static serving helper for /next/ ----
     def _serve_dir(self, path: str, prefix: str, root: Path):
         if path == prefix:
             self.send_response(301)
@@ -638,6 +633,13 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._handle_metrics(ctx, query, horizons=horizons)
+        elif name == "sample-scores":
+            try:
+                horizons = self._parse_horizons(query)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._handle_sample_scores(ctx, query, horizons=horizons)
         elif name == "model-locations":
             try:
                 horizons = self._parse_horizons(query)
@@ -1178,6 +1180,16 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             logger.warning("Metrics evaluation error: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
 
+    def _handle_sample_scores(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
+        params = self._parse_eval_params(ctx, query, horizons=horizons)
+        try:
+            self._send_json(ctx.eval_engine.evaluate_samples(params))
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.warning("Sample scores evaluation error: %s", exc)
+            self._send_json({"error": str(exc)}, status=500)
+
     def _handle_model_locations(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
         model_id = query.get("model", [""])[0].strip()
         if not model_id:
@@ -1441,7 +1453,7 @@ def run_server(
         print(f"  Hub:     {hub_banner}")
         print(f"  Data:    {mgr.data_dir}")
         print(f"  Engine:  Polars (Vectorized SIMD) + Parquet Acceleration")
-        print(f"  Serving: {NEXT_DIR}  (classic: {STATIC_DIR})")
+        print(f"  Serving: {NEXT_DIR}")
         print(f"  Press Ctrl+C to terminate.")
         print(f"========================================================\n", flush=True)
         try:

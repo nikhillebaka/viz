@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { parseIso, DAY } from "../../lib/scale.js";
 import { indexManifest } from "../../lib/api.js";
 import {
+  sampleScoresQuery,
   crpsEnsemble1D,
   energyScore,
   empiricalQuantile,
@@ -115,5 +116,29 @@ describe("next/sections/trajectories/model.js", () => {
     assert.equal(pickDefaultSampleModel(sampleModelsForTarget(man, "t-samp"), { charted: [{ id: "M-no" }], baseline: true }, man), "Base-M");
     // Falls back to ensemble/designated when baseline disabled
     assert.equal(pickDefaultSampleModel(sampleModelsForTarget(man, "t-samp"), { charted: [], baseline: false }, man), "M-ens");
+  });
+
+  it("sampleScoresQuery formats current vs all-location sample leaderboard queries cleanly", () => {
+    const qLoc = new URLSearchParams(sampleScoresQuery({
+      target: "wk inc flu hosp",
+      season: "2025-2026",
+      location: "25",
+      scopePlace: "current",
+      dims: { age_group: "0-17" },
+    }));
+    assert.equal(qLoc.get("target"), "wk inc flu hosp");
+    assert.equal(qLoc.get("location"), "25");
+    assert.equal(qLoc.get("season"), "2025-2026");
+    assert.equal(qLoc.get("date"), "all");
+    assert.equal(qLoc.get("models"), "all");
+    assert.equal(qLoc.get("age_group"), "0-17");
+
+    const qAll = new URLSearchParams(sampleScoresQuery({
+      target: "wk inc flu hosp",
+      season: "2025-2026",
+      location: "25",
+      scopePlace: "all",
+    }));
+    assert.equal(qAll.get("location"), "all");
   });
 });

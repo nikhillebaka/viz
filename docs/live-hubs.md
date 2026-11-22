@@ -1,11 +1,32 @@
-# Live hub data (CDC FluSight on S3)
+# Live Hub Data & External Surveillance Feeds
 
-Click **FluSight Sandbox** in the top-left corner to open the data-sources menu. From there you can copy live forecasts from the public [CDC FluSight hub](https://github.com/cdcepi/FluSight-forecast-hub) S3 mirror (`cdcepi-flusight-forecast-hub`) and compare them with your own models.
+viz connects to multiple public Hubverse repositories via **S3** and **GitHub** (configured in [remote/hubs.py](../remote/hubs.py)) as well as open public surveillance/genomic APIs used in Place-First Briefings.
 
-- **Nothing is downloaded until you press Sync.** Opening the Live Hub Data dialog only lists the hub, so you can see what is available per season. The default selection is the current season, which is a few MB.
-- **Syncs are incremental.** Only files whose S3 ETag or size changed are fetched. Upstream deletions are mirrored, and resubmissions are recorded as revisions. Use *Check for new forecasts* in the menu to see what changed upstream.
-- **Each file is validated before it is stored.** Schema drift (e.g. `int64` vs `int32` horizons, `date32` dates) is normalized and only quantile rows are kept. Crossing quantiles, negative counts, unknown locations, duplicate rows, and mismatched `model_id`s are reported under *Data quality*. Unreadable files are skipped, never partially loaded.
-- **Hub models are namespaced** (e.g. `flusight:UMass-flusion`), so they never collide with repository models of the same name. In the model bar they live in their own collapsible row with *This round* and *Designated only* filters.
-- **Truth uses the newest available source (Auto).** The hub's `oracle-output`, admissions series, and newer as-of snapshots are merged with the repository's truth. For every observation the newest vintage wins and older sources only fill gaps. Each week appears exactly once, so charts, indicators, and scores stay continuous across seasons. Rounds whose target weeks have not been observed yet are marked *Pending truth* on the leaderboard.
-- **Viz only supports flu hubs for now.** *Connect another hub…* accepts any public Hubverse bucket. Hubs with non-flu targets (e.g. COVID-19, RSV) or non-state locations (e.g. city-level hubs) are rejected with a warning.
-- **Copies live in `viz/.cache/remote/`.** Hide a hub from the menu (its data stays on disk), or use *Remove local copy* to delete it. **The CLI (`score_cli.py`) ignores hub data and scores repository models only.**
+## Built-in Public Hubs
+
+Open **⋯ → Data sources** in the top-right bar to browse, inspect, sync, or toggle any provider:
+
+| Hub | Source | Geography | Output Types |
+| :--- | :--- | :--- | :--- |
+| **CDC FluSight** | S3 `cdcepi-flusight-forecast-hub` | US National + States/Territories | `quantile`, `pmf`, `sample` |
+| **Flu MetroCast** | GitHub `reichlab/flu-metrocast` | US Sub-state / 95 HSAs & States | `quantile`, `sample` |
+| **US COVID-19 Forecast Hub** | S3 `covid19-forecast-hub` | US National + States/Territories | `quantile`, `sample` |
+| **US RSV Forecast Hub** | S3 `rsv-forecast-hub` | US National + States/Territories | `quantile`, `sample` |
+| **RespiCast Syndromic (ILI/ARI)** | GitHub `european-modelling-hubs/RespiCast-SyndromicIndicators` (+ 2023–24 Flu/ARI archives) | EU/EEA + UK countries | `quantile` |
+| **RespiCast COVID-19** | GitHub `european-modelling-hubs/RespiCast-Covid19` | EU/EEA + UK countries | `quantile` |
+
+Additional public Hubverse S3 buckets or GitHub `owner/repo` repositories can be added from **Data sources** in `local` mode.
+
+### Sync & Storage Behavior
+- **On-demand & incremental:** Nothing downloads until you press *Sync* (or *Check*). Only upstream changes (matching ETag / git tree SHA) are pulled per season.
+- **Validation:** Schema drift, crossing quantiles, negative counts, unknown locations, and duplicate rows are normalized and surfaced under **⋯ → Warnings**. Unreadable files are skipped without corrupting the store.
+- **Truth reconciliation:** Oracle outputs and target time series are merged across available vintages so the chart displays continuous history while *Pending truth* marks rounds whose target weeks are not yet reported.
+- **Cache paths:** Synced forecasts live under `.cache/remote/<hub_id>/`, with per-model Parquet caches in `.cache/models/` (or `.cache/remote_cache/` when run standalone).
+
+## External Briefing Surveillance & Virology Feeds
+
+Briefings ([core/briefing_feeds.py](../core/briefing_feeds.py)) fetch unauthenticated open feeds asynchronously on demand via **Refresh feeds** and persist Parquet tables under `.cache/briefings/`:
+
+- **US Feeds:** CDC NWSS Wastewater (`cdc_nwss`), CDC CFA $R_t$ (`cdc_cfa_rt`), CDC NSSP ED Visits (`cdc_nssp_ed`), CDC NREVSS Lab Positivity (`cdc_nrevss`), CMU Delphi FluView Clinical (`delphi_fluview`).
+- **European & UK Feeds:** ECDC ERVISS Weekly Surveillance CSVs (`ecdc_erviss`: `sentinelTestsDetectionsPositivity.csv`, `ILIARIRates.csv`, `SARIRates.csv`), WHO RespiMart FluNet (`who_flunet`), and UKHSA Respiratory PCR Positivity (`ukhsa_resp`).
+- **Genomic Clades:** Nextstrain North America & Europe Auspice v2 frequencies (`nextstrain_clades`) for Influenza A(H3N2), A(H1N1)pdm09, and SARS-CoV-2, alongside Northern Hemisphere WHO/FDA reference vaccine compositions.

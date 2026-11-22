@@ -12,8 +12,10 @@ under `<data_dir>/briefings/`.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 from datetime import date, datetime, timedelta, timezone
 import gzip
+import io
 import json
 import logging
 import os
@@ -218,6 +220,13 @@ FEED_SPECS: Dict[str, Dict[str, Any]] = {
         "scope": "US+EU",
         "description": "Regional circulating clade/subclade frequencies for Influenza A(H3N2), A(H1N1)pdm09, and SARS-CoV-2.",
     },
+    "ecdc_erviss": {
+        "label": "ECDC ERVISS Surveillance",
+        "source_url": "https://github.com/EU-ECDC/Respiratory_viruses_weekly_data",
+        "ttl_hours": 24.0,
+        "scope": "EU",
+        "description": "European sentinel test positivity (Influenza, SARS-CoV-2, RSV), primary care ILI/ARI consultation rates, and SARI hospitalization rates.",
+    },
 }
 
 FEED_SCHEMAS: Dict[str, Dict[str, Any]] = {
@@ -300,6 +309,15 @@ FEED_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "clade": pl.Utf8,
         "frequency": pl.Float64,
     },
+    "ecdc_erviss": {
+        "location_id": pl.Utf8,
+        "country_name": pl.Utf8,
+        "indicator": pl.Utf8,
+        "pathogen": pl.Utf8,
+        "week_end": pl.Utf8,
+        "value": pl.Float64,
+        "unit": pl.Utf8,
+    },
 }
 
 
@@ -363,6 +381,25 @@ def _epiweek_to_saturday_iso(epiweek: int) -> Optional[str]:
         wk1_sun = jan4 - timedelta(days=days_since_sunday)
         wk_sat = wk1_sun + timedelta(days=(week - 1) * 7 + 6)
         return wk_sat.isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _iso_yearweek_to_sunday(yw: Any) -> Optional[str]:
+    """Convert ISO year-week string 'YYYY-Www' -> Sunday YYYY-MM-DD."""
+    s = str(yw or "").strip().upper()
+    if "-W" in s:
+        parts = s.split("-W", 1)
+    elif "W" in s:
+        parts = s.split("W", 1)
+    else:
+        return None
+    if len(parts) != 2:
+        return None
+    try:
+        year = int(parts[0])
+        week = int(parts[1])
+        return date.fromisocalendar(year, week, 7).isoformat()
     except (TypeError, ValueError):
         return None
 
@@ -1010,6 +1047,108 @@ def fetch_nextstrain_clades(http_get: Callable[[str, int], bytes]) -> pl.DataFra
     )
 
 
+_ECDC_RAW_BASE = "https://raw.githubusercontent.com/EU-ECDC/Respiratory_viruses_weekly_data/main/data"
+_ECDC_FILES: Tuple[Tuple[str, str], ...] = (
+    ("sentinel_positivity", f"{_ECDC_RAW_BASE}/sentinelTestsDetectionsPositivity.csv"),
+    ("ili_ari", f"{_ECDC_RAW_BASE}/ILIARIRates.csv"),
+    ("sari", f"{_ECDC_RAW_BASE}/SARIRates.csv"),
+)
+
+
+def fetch_ecdc_erviss(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    """Fetch weekly European respiratory surveillance CSVs from ECDC ERVISS."""
+    cutoff = _cutoff_date_str(540)
+    dedup: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+    success_count = 0
+    last_err: Optional[Exception] = None
+
+    def _loc_for(country_name: Any) -> Optional[Tuple[str, str]]:
+        cname = str(country_name or "").strip()
+        if not cname:
+            return None
+        if cname.lower() in {"eu/eea", "eu-eea", "eu"}:
+            return ("EU", "EU/EEA")
+        code = resolve_eu_location_id(None, cname)
+        return (code, cname) if code else None
+
+    for kind, url in _ECDC_FILES:
+        try:
+            raw = http_get(url, DEFAULT_HTTP_TIMEOUT_SEC)
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            text = raw.decode("utf-8", errors="replace")
+            success_count += 1
+        except Exception as exc:
+            logger.warning("ECDC ERVISS fetch failed for %s: %s", kind, exc)
+            last_err = exc
+            continue
+
+        for rec in csv.DictReader(io.StringIO(text)):
+            age = str(rec.get("age") or "").strip().lower()
+            if age != "total":
+                continue
+            wk = _iso_yearweek_to_sunday(rec.get("yearweek"))
+            if not wk or wk < cutoff:
+                continue
+            val = _safe_float(rec.get("value"))
+            if val is None or val < 0.0:
+                continue
+            loc = _loc_for(rec.get("countryname"))
+            if not loc:
+                continue
+            loc_id, cname = loc
+
+            if kind == "sentinel_positivity":
+                if str(rec.get("indicator") or "").strip().lower() != "positivity":
+                    continue
+                subtype_raw = str(rec.get("pathogensubtype") or "").strip().lower()
+                if subtype_raw and subtype_raw not in {"total", "sars-cov-2", "rsv"}:
+                    continue
+                norm_p = normalize_pathogen_name(rec.get("pathogen"))
+                if norm_p not in {"flu", "covid-19", "rsv"}:
+                    continue
+                ind = "sentinel_positivity"
+                path_val = norm_p
+                unit = "%"
+            elif kind == "ili_ari":
+                ind_raw = str(rec.get("indicator") or "").strip()
+                if ind_raw == "ILIconsultationrate":
+                    ind = "ili_rate"
+                elif ind_raw == "ARIconsultationrate":
+                    ind = "ari_rate"
+                else:
+                    continue
+                path_val = "syndromic"
+                unit = "per 100k"
+            else:
+                if str(rec.get("indicator") or "").strip() != "SARIrate":
+                    continue
+                ind = "sari_rate"
+                path_val = "syndromic"
+                unit = "per 100k"
+
+            dkey = (loc_id, ind, path_val, wk)
+            if dkey not in dedup:
+                dedup[dkey] = {
+                    "location_id": loc_id,
+                    "country_name": cname,
+                    "indicator": ind,
+                    "pathogen": path_val,
+                    "week_end": wk,
+                    "value": round(val, 2),
+                    "unit": unit,
+                }
+
+    if success_count == 0 and last_err is not None:
+        raise last_err
+    if not dedup:
+        return _empty_df("ecdc_erviss")
+    return pl.DataFrame(list(dedup.values()), schema=FEED_SCHEMAS["ecdc_erviss"]).sort(
+        ["location_id", "indicator", "pathogen", "week_end"],
+        descending=[False, False, False, True],
+    )
+
+
 _FEED_FETCHERS: Dict[str, Callable[[Callable[[str, int], bytes]], pl.DataFrame]] = {
     "cdc_nwss": fetch_cdc_nwss,
     "cdc_cfa_rt": fetch_cdc_cfa_rt,
@@ -1019,6 +1158,7 @@ _FEED_FETCHERS: Dict[str, Callable[[Callable[[str, int], bytes]], pl.DataFrame]]
     "who_flunet": fetch_who_flunet,
     "ukhsa_resp": fetch_ukhsa_resp,
     "nextstrain_clades": fetch_nextstrain_clades,
+    "ecdc_erviss": fetch_ecdc_erviss,
 }
 
 

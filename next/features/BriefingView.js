@@ -396,6 +396,7 @@ export function mountBriefing(
     placeKey = null,
     onPlaceChange = null,
     onOpenChart = null,
+    onOpenScores = null,
     onOpenGlobe = null,
   } = {},
 ) {
@@ -530,7 +531,16 @@ export function mountBriefing(
     if (onOpenChart) {
       onOpenChart(sig);
     } else if (ctx?.switchContext) {
-      ctx.switchContext({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date });
+      ctx.switchContext({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date, model: sig.model_id || null });
+    }
+  }
+
+  function openSignalInScores(sig) {
+    if (!sig) return;
+    if (onOpenScores) {
+      onOpenScores(sig);
+    } else if (ctx?.switchContext) {
+      ctx.switchContext({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date, model: sig.model_id || null });
     }
   }
 
@@ -625,14 +635,34 @@ export function mountBriefing(
       );
       if (data.kpis?.length) {
         summaryEl.appendChild(h("div", { class: "br-kpi-strip" },
-          data.kpis.map((k) => h("div", { class: "br-kpi" },
+          data.kpis.map((k) => {
+            const targetIdx = k.signal_id ? signals.findIndex((s) => s.signal_id === k.signal_id) : -1;
+            const clickable = targetIdx >= 0;
+            const activateKpi = () => {
+              if (!clickable) return;
+              activeSignalIdx = targetIdx;
+              render();
+            };
+            return h("div", {
+              class: clickable ? "br-kpi is-clickable" : "br-kpi",
+              tabindex: clickable ? "0" : null,
+              role: clickable ? "button" : null,
+              onclick: clickable ? activateKpi : null,
+              onkeydown: clickable ? (e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  activateKpi();
+                }
+              } : null,
+            },
             h("span", { class: "br-kpi-label" }, k.label),
             h("div", { class: "br-kpi-val" },
               h("span", null, k.value),
               k.unit ? h("span", { class: "br-kpi-unit" }, k.unit) : null,
             ),
             k.sub ? h("span", { class: "br-kpi-sub" }, k.sub) : null,
-          )),
+            );
+          }),
         ));
       }
       page.appendChild(summaryEl);
@@ -645,6 +675,11 @@ export function mountBriefing(
         h("h2", { class: "br-h2" }, "Forecast Outlook"),
         h("div", { class: "br-head-meta" },
           h("span", null, `${activeSig.hub_label} · ${activeSig.season}`),
+          h("button", {
+            type: "button",
+            class: "br-link-btn",
+            onclick: () => openSignalInScores(activeSig),
+          }, "Scores ↗"),
           h("button", {
             type: "button",
             class: "br-link-btn is-accent",
@@ -790,6 +825,7 @@ export function mountBriefing(
     // 4. SUB-REGIONS ONLY (By State or Within State — never neighbor country lists)
     if (peers?.rows?.length) {
       const showRtCol = peers.rows.some((r) => r.rt?.median != null);
+      const canOpenRowChart = !!(peers.hub_id && peers.target_id);
       const unitCol = peers.unit ? `Latest (${peers.unit})` : "Latest";
 
       const peerSec = h("section", { class: "br-section", "aria-label": peers.title || "Sub-regions" },
@@ -807,6 +843,7 @@ export function mountBriefing(
               h("th", { class: "num" }, "1-wk change"),
               h("th", null, "10-wk trend"),
               showRtCol ? h("th", { class: "num" }, "Rt") : null,
+              canOpenRowChart ? h("th", { class: "num br-col-action" }, "") : null,
             )),
             h("tbody", null,
               peers.rows.map((row) => {
@@ -827,6 +864,22 @@ export function mountBriefing(
                 h("td", { class: ["num br-mono", deltaClass(row.pct_1wk)] }, formatSignedPct(row.pct_1wk)),
                 h("td", null, renderSparklineSvg(row.sparkline)),
                 showRtCol ? h("td", { class: "num br-mono" }, row.rt?.median != null ? row.rt.median.toFixed(2) : "—") : null,
+                canOpenRowChart ? h("td", { class: "num br-col-action" },
+                  h("button", {
+                    type: "button",
+                    class: "br-link-btn br-row-chart-btn",
+                    onclick: (e) => {
+                      e.stopPropagation();
+                      openSignalInChart({
+                        hub_id: peers.hub_id,
+                        target_id: peers.target_id,
+                        location_id: row.location_id || row.key,
+                        ref_date: peers.ref_date,
+                        model_id: peers.model_id,
+                      });
+                    },
+                  }, "Chart ↗"),
+                ) : null,
                 );
               }),
             ),
@@ -850,7 +903,7 @@ export function mountBriefing(
       virSec.appendChild(h("div", { class: "br-cta-banner" },
         h("div", { class: "br-cta-copy" },
           h("strong", null, "External surveillance and genomic feeds are not yet cached locally."),
-          h("span", null, "Fetch CDC wastewater, ED visits, lab positivity, WHO FluNet subtypes, UKHSA, and Nextstrain clades."),
+          h("span", null, "Fetch CDC wastewater, ED visits, lab positivity, ECDC ERVISS, WHO FluNet subtypes, UKHSA, and Nextstrain clades."),
         ),
         h("button", {
           type: "button",
@@ -861,8 +914,19 @@ export function mountBriefing(
       ));
     }
 
-    // 5a. Clean combined surveillance table (Wastewater, ED Visits %, PCR Positivity)
+    // 5a. Clean combined surveillance table (Wastewater, ED Visits %, PCR Positivity, ECDC ERVISS)
     const survRows = [];
+    for (const ec of virology.ecdc_surveillance || []) {
+      const valStr = ec.unit === "%" ? `${ec.latest_value.toFixed(1)}%` : `${ec.latest_value.toFixed(1)} ${ec.unit}`;
+      survRows.push({
+        metric: ec.label,
+        source: `${ec.source || "ECDC ERVISS"} · ${ec.geo_scope}`,
+        value: valStr,
+        delta: ec.pct_1wk,
+        date: formatIsoShort(ec.latest_date),
+        spark: (ec.series || []).map((p) => p.value),
+      });
+    }
     for (const w of virology.wastewater || []) {
       survRows.push({
         metric: `${w.label} wastewater`,
@@ -1061,6 +1125,12 @@ export function mountBriefing(
       ),
     );
     page.appendChild(auditSec);
+
+    const hubNames = hubList.map((hb) => hb.label).join(", ");
+    page.appendChild(h("footer", { class: "br-print-footer" },
+      h("span", null, `${place.name}${repWeek ? ` · ${formatIsoShort(repWeek, true)}` : ""}`),
+      h("span", null, `${hubNames ? `Hubs: ${hubNames} · ` : ""}Printed ${new Date().toISOString().slice(0, 10)}`),
+    ));
 
     host.append(h("div", { class: "br-scroll-scrim", "aria-hidden": "true" }), page);
   }

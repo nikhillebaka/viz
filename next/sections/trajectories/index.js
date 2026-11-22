@@ -3,7 +3,7 @@
 import { onThemeChange, cssColor } from "../../lib/dom.js";
 import { fmtDay, valueFormat } from "../../lib/format.js";
 import { parseIso, linear, niceMax, ticks, DAY, WEEK } from "../../lib/scale.js";
-import { loadFan } from "../../lib/api.js";
+import { loadFan, loadSampleScores } from "../../lib/api.js";
 import { seriesColor } from "../../chart/layout.js";
 import { slotOf } from "../../features/selection.js";
 import { loadRoundTrajectories } from "../../features/chart/trajectories.js";
@@ -12,6 +12,7 @@ import {
   fitCanvas, perFrame, pointerReadout, readoutContent, onScreen, onDprChange,
 } from "../shared.js";
 import {
+  sampleScoresQuery,
   sampleModelsForTarget,
   pickDefaultSampleModel,
   summarizeTrajectories,
@@ -96,13 +97,19 @@ export function mount(el, ctx) {
   linkStyle("trajectories");
   linkStyle("sheet");
   const { manifest, store } = ctx;
-  const f = frame(el, "Trajectories");
+  const f = frame(el, "Trajectories", "trajectories");
 
   let primaryModel = null;
   let compareModel = null;
   let showRibbon = true;
   let showPeakCloud = false;
   let userToggledCloud = false;
+  let scoreScope = "current"; // "current" | "all"
+  let boardData = null;
+  let boardLoading = false;
+  let boardErr = false;
+  let boardReqSeq = 0;
+  let boardKey = "";
 
   let curSum = null;
   let cmpSum = null;
@@ -172,6 +179,7 @@ export function mount(el, ctx) {
     pinnedSampleId = null;
     readout.hide();
     refreshView();
+    renderLeaderboard();
   });
 
   function syncLine() {
@@ -194,6 +202,157 @@ export function mount(el, ctx) {
   const readout = pointerReadout(fig);
   const foot = h("p", { class: "tr-note" }, "Drag vertically over a future week to condition · Click a path to pin");
   f.body.append(nums, fig, foot);
+  const boardWrap = h("div", { class: "tr-board-wrap" });
+  el.append(boardWrap);
+
+  function renderLeaderboard() {
+    const s = store.get();
+    const models = modelList();
+    if (!models.length || !s.target || !s.location) {
+      boardWrap.replaceChildren();
+      return;
+    }
+    const season = manifest.seasonOf(s.date) ?? manifest.seasons.at(-1)?.id ?? "";
+    const locName = manifest.locationById.get(s.location)?.name || s.location;
+    const baseId = boardData?.baseline_model || null;
+    const allIds = (boardData?.rankings || []).map((r) => r.model_id);
+    const lbl = (id) => (allIds.length ? manifest.label(id, allIds) : modelLabel(id));
+
+    const header = h("div", { class: "tr-board-head" },
+      h("div", { class: "tr-board-title" },
+        h("span", { class: "tr-board-label" }, "Sample Leaderboard"),
+        h("div", { class: "tr-scope-pills", role: "tablist", "aria-label": "Sample score scope" },
+          h("button", {
+            type: "button", role: "tab",
+            class: ["tr-scope-btn", scoreScope === "current" && "is-active"],
+            "aria-selected": String(scoreScope === "current"),
+            onclick: () => { if (scoreScope !== "current") { scoreScope = "current"; loadLeaderboard(true); } },
+          }, locName),
+          h("button", {
+            type: "button", role: "tab",
+            class: ["tr-scope-btn", scoreScope === "all" && "is-active"],
+            "aria-selected": String(scoreScope === "all"),
+            onclick: () => { if (scoreScope !== "all") { scoreScope = "all"; loadLeaderboard(true); } },
+          }, `All places · ${season}`),
+        ),
+      ),
+      h("span", { class: "tr-board-sub mono" },
+        baseId ? `Rel. CRPS vs ${lbl(baseId)} · CRPS · Energy score` : "CRPS · Multivariate Energy Score",
+      ),
+    );
+
+    if (boardLoading) {
+      boardWrap.replaceChildren(header, h("p", { class: "tr-note" }, "Scoring sample trajectories across season rounds…"));
+      return;
+    }
+    if (boardErr) {
+      boardWrap.replaceChildren(header, h("p", { class: "tr-note" }, "Sample scores unavailable for this scope."));
+      return;
+    }
+    const rows = (boardData?.rankings || []).filter((r) => r.has_data_in_scope && r.count > 0);
+    if (!rows.length) {
+      boardWrap.replaceChildren(header, h("p", { class: "tr-note" }, `No realized sample forecasts in ${season} for this scope.`));
+      return;
+    }
+
+    boardWrap.replaceChildren(
+      header,
+      h("div", { class: "tr-table-scroll" },
+        h("table", { class: "v-table" },
+          h("thead", null,
+            h("tr", null,
+              h("th", null, "Rank"),
+              h("th", null, "Model"),
+              h("th", { class: "num" }, "Rel. CRPS"),
+              h("th", { class: "num" }, "CRPS"),
+              h("th", { class: "num" }, "Energy"),
+              h("th", { class: "num" }, "N"),
+              models.length > 1 ? h("th", null, "") : null,
+            )),
+          h("tbody", null,
+            ...rows.map((r, idx) => {
+              const isPri = r.model_id === primaryModel;
+              const isCmp = r.model_id === compareModel;
+              return h("tr", {
+                "data-model": r.model_id,
+                class: isPri ? "is-primary" : null,
+                onclick: (e) => {
+                  if (e.shiftKey && r.model_id !== primaryModel) {
+                    compareModel = isCmp ? null : r.model_id;
+                    load();
+                    renderLeaderboard();
+                    return;
+                  }
+                  if (r.model_id === primaryModel) return;
+                  primaryModel = r.model_id;
+                  if (compareModel === primaryModel) compareModel = null;
+                  gate = null; pinnedSampleId = null; hoverSampleId = null;
+                  load();
+                  renderLeaderboard();
+                },
+              },
+              h("td", { class: "mono" }, String(idx + 1)),
+              h("td", null, lbl(r.model_id)),
+              h("td", { class: "num mono" }, r.model_id === baseId ? "1.00" : (typeof r.relative_crps === "number" ? r.relative_crps.toFixed(2) : "–")),
+              h("td", { class: "num mono" }, typeof r.crps === "number" ? vf.value(r.crps) : "–"),
+              h("td", { class: "num mono" }, typeof r.energy_score === "number" ? vf.value(r.energy_score) : "–"),
+              h("td", { class: "num mono" }, String(r.count ?? 0)),
+              models.length > 1 ? h("td", { class: "num" },
+                isPri ? h("span", { class: "tr-board-sub" }, "Active") : h("button", {
+                  type: "button",
+                  class: ["tr-cmp-btn", isCmp && "is-on"],
+                  onclick: (ev) => {
+                    ev.stopPropagation();
+                    compareModel = isCmp ? null : r.model_id;
+                    load();
+                    renderLeaderboard();
+                  },
+                }, isCmp ? "Comparing" : "Compare"),
+              ) : null,
+              );
+            }),
+          ),
+        ),
+      ),
+    );
+  }
+
+  function loadLeaderboard(force = false) {
+    const s = store.get();
+    const models = modelList();
+    const season = manifest.seasonOf(s.date) ?? manifest.seasons.at(-1)?.id ?? null;
+    if (!models.length || !s.target || !s.location || !season) {
+      boardKey = "";
+      boardData = null;
+      renderLeaderboard();
+      return;
+    }
+    const query = sampleScoresQuery({ target: s.target, season, location: s.location, scopePlace: scoreScope, dims: s.dims });
+    const nextKey = `${manifest.hub_id || ""}|${query}`;
+    if (!force && nextKey === boardKey && boardData) {
+      renderLeaderboard();
+      return;
+    }
+    boardKey = nextKey;
+    const seq = ++boardReqSeq;
+    boardLoading = true;
+    boardErr = false;
+    renderLeaderboard();
+    loadSampleScores(query)
+      .then((res) => {
+        if (seq !== boardReqSeq) return;
+        boardLoading = false;
+        boardErr = false;
+        boardData = res;
+        renderLeaderboard();
+      })
+      .catch((err) => {
+        if (err?.name === "AbortError" || seq !== boardReqSeq) return;
+        boardLoading = false;
+        boardErr = true;
+        renderLeaderboard();
+      });
+  }
 
   function renderNums() {
     if (!curSum) { nums.replaceChildren(); return; }
@@ -331,6 +490,7 @@ export function mount(el, ctx) {
     readout.hide();
 
     refreshView();
+    renderLeaderboard();
   }
 
   /* ---------------- Canvas drawing ---------------- */
@@ -713,7 +873,7 @@ export function mount(el, ctx) {
           pinnedSampleId = null;
           hoverSampleId = null;
         }
-        screen.run(load);
+        screen.run(() => { load(); loadLeaderboard(); });
       } else if (changed.has("sel")) {
         scheduleDraw();
       }
@@ -721,10 +881,12 @@ export function mount(el, ctx) {
   ];
 
   load();
+  loadLeaderboard();
   return {
     resize: scheduleDraw,
     destroy() {
       reqSeq++;
+      boardReqSeq++;
       offs.forEach((off) => off());
     },
   };

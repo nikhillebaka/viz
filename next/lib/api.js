@@ -24,9 +24,12 @@ export function getActiveHub() {
 export function setActiveHub(id) {
   activeHubId = id ? String(id) : null;
   fans.clear();
+  sampleScoreCache.clear();
 }
 
 const briefingCache = new Map();
+const sampleScoreCache = new Map();
+const SAMPLE_SCORE_CACHE = 32;
 
 /** Drop every cached manifest, catalog, globe, briefing, and fan response (e.g. after data sync or refresh). */
 export function clearAllCaches() {
@@ -34,6 +37,7 @@ export function clearAllCaches() {
   catalogP = null;
   globeP = null;
   briefingCache.clear();
+  sampleScoreCache.clear();
   fans.clear();
 }
 
@@ -493,6 +497,33 @@ export function loadPmf(target, season, location, opts = {}) {
   if (opts.models?.length) q.set("models", opts.models.join(","));
   if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));
   return getJson(`/api/next/pmf?${q}`);
+}
+
+/**
+ * GET /api/next/sample-scores — CRPS & multivariate Energy Score leaderboard across sample models.
+ * @param {string} query
+ * @param {{ signal?: AbortSignal }} [opts]
+ */
+export function loadSampleScores(query, { signal } = {}) {
+  const key = `${activeHubId || ""}|${query}`;
+  const hit = sampleScoreCache.get(key);
+  if (hit) return hit;
+  const p = fetch(apiUrl(`/api/next/sample-scores?${query}`), { signal })
+    .then((r) => {
+      if (!r.ok) {
+        const e = new Error(`sample-scores ${r.status}`);
+        e.status = r.status;
+        throw e;
+      }
+      return r.json();
+    })
+    .catch((e) => {
+      if (sampleScoreCache.get(key) === p) sampleScoreCache.delete(key);
+      throw e;
+    });
+  sampleScoreCache.set(key, p);
+  while (sampleScoreCache.size > SAMPLE_SCORE_CACHE) sampleScoreCache.delete(sampleScoreCache.keys().next().value);
+  return p;
 }
 
 /**

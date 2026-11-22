@@ -194,6 +194,8 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
         sc = score_sample_forecasts(sample_df, oracle_df, "wk inc flu hosp", return_task_df=True)
         self.assertGreater(sc["overall"]["crps"], 0.0)
         self.assertIsNotNone(sc["overall"]["energy_score"])
+        self.assertIsNotNone(sc.get("energy_df"))
+        self.assertEqual(sc["energy_df"].height, 1)
         self.assertEqual(sc["overall"]["count"], 2)
 
     def test_prescore_parity_and_pmf_eval_dispatch(self):
@@ -229,10 +231,21 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
 
         # PMF evaluation dispatch
         pmf_res = engine.evaluate(EvaluationParams(target="wk flu hosp rate change", location="states"))
+        self.assertTrue(pmf_res.is_categorical)
+        self.assertTrue(pmf_res.ordinal)
+        self.assertEqual(pmf_res.rank_metric, "rps")
         pmf_a = next(r for r in pmf_res.rankings if r["model_id"] == "Model-A")
         self.assertTrue(pmf_a["has_data_in_scope"])
         self.assertAlmostEqual(pmf_a["brier"], (1 - 0.6) ** 2 + 4 * (0.1 ** 2), places=6)
         self.assertEqual(pmf_a["hit_mode"], 100.0)
+
+        # Sample trajectory leaderboard evaluation
+        samp_res = engine.evaluate_samples(EvaluationParams(target="wk inc flu hosp", location="01", season="2025-2026"))
+        samp_a = next(r for r in samp_res["rankings"] if r["model_id"] == "Model-A")
+        self.assertTrue(samp_a["has_data_in_scope"])
+        self.assertGreater(samp_a["crps"], 0.0)
+        self.assertEqual(samp_a["relative_crps"], 1.0)
+        self.assertIsNotNone(samp_a["energy_score"])
 
     def test_vzf2_sparse_smaller_than_vzf1_and_http_gzip_etag(self):
         mgr = HubManager(data_dir=self.data_dir, cli_hubs=[self.base], include_enclosing=False)
@@ -290,15 +303,24 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
 
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/next/trajectories?target=wk+inc+flu+hosp&season=2025-2026&location=01&date=2025-11-15") as tresp:
                 self.assertTrue(tresp.read().startswith(b"VZT1"))
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/next/metrics?target=wk+flu+hosp+rate+change&location=states") as mresp:
+                pmf_api = json.loads(mresp.read().decode("utf-8"))
+                self.assertTrue(pmf_api["is_categorical"])
+                self.assertEqual(pmf_api["rank_metric"], "rps")
+
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/next/sample-scores?target=wk+inc+flu+hosp&location=01&season=2025-2026") as sresp:
+                s_api = json.loads(sresp.read().decode("utf-8"))
+                self.assertTrue(any(r["model_id"] == "Model-A" and r["crps"] > 0 for r in s_api["rankings"]))
         finally:
             srv.shutdown()
             srv.server_close()
 
     def test_static_dir_redirect_and_gzip_etag(self):
         tmp_next = Path(tempfile.mkdtemp())
-        (tmp_next / "lab").mkdir()
+        (tmp_next / "sub").mkdir()
         (tmp_next / "geo").mkdir()
-        (tmp_next / "lab" / "index.html").write_text("<!doctype html><title>Lab</title>" + ("<!-- pad -->" * 120), encoding="utf-8")
+        (tmp_next / "sub" / "index.html").write_text("<!doctype html><title>Sub</title>" + ("<!-- pad -->" * 120), encoding="utf-8")
         (tmp_next / "geo" / "sample.json").write_text(json.dumps({"items": list(range(400))}), encoding="utf-8")
         mgr = HubManager(data_dir=self.data_dir, cli_hubs=[self.base], include_enclosing=False)
 
@@ -313,18 +335,18 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             try:
                 conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-                conn.request("GET", "/next/lab")
+                conn.request("GET", "/next/sub")
                 r1 = conn.getresponse()
                 r1.read()
                 self.assertEqual(r1.status, 301)
-                self.assertEqual(r1.getheader("Location"), "/next/lab/")
+                self.assertEqual(r1.getheader("Location"), "/next/sub/")
 
-                conn.request("GET", "/next/lab/", headers={"Accept-Encoding": "gzip"})
+                conn.request("GET", "/next/sub/", headers={"Accept-Encoding": "gzip"})
                 r2 = conn.getresponse()
                 body2 = r2.read()
                 self.assertEqual(r2.status, 200)
                 self.assertEqual(r2.getheader("Content-Encoding"), "gzip")
-                self.assertIn("<title>Lab</title>", gzip.decompress(body2).decode("utf-8"))
+                self.assertIn("<title>Sub</title>", gzip.decompress(body2).decode("utf-8"))
 
                 conn.request("GET", "/next/geo/sample.json", headers={"Accept-Encoding": "gzip"})
                 r3 = conn.getresponse()
@@ -339,6 +361,12 @@ class TestPreScorePmfSamplesAndVzf2(unittest.TestCase):
                 r4 = conn.getresponse()
                 r4.read()
                 self.assertEqual(r4.status, 304)
+
+                for retired in ("/classic/", "/next/lab/"):
+                    conn.request("GET", retired)
+                    rr = conn.getresponse()
+                    rr.read()
+                    self.assertEqual(rr.status, 404)
                 conn.close()
             finally:
                 srv.shutdown()

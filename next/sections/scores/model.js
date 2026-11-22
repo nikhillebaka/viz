@@ -99,10 +99,14 @@ export function rowsFrom(resp, { ids, baseline, scale, full = null, wins = resp,
   const byId = new Map((resp?.rankings || []).map((r) => [r.model_id, r]));
   const winsById = new Map((wins?.rankings || []).map((r) => [r.model_id, r]));
   const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
+  const isCat = !!resp?.is_categorical || (resp?.rankings || []).some((r) => r.has_data_in_scope && r.wis == null && (r.rps != null || r.log_score != null));
+  const ordinal = resp?.ordinal !== false;
+  const rankMetric = resp?.rank_metric || (ordinal ? "rps" : "log_score");
   const log = scale === "log";
   const eff = resp?.baseline_model || baseline;
   const base = allH.get(full?.baseline_model || eff) || allH.get(baseline);
   const wisKey = log ? "wis_log" : "wis";
+  const hValKey = isCat ? rankMetric : wisKey;
   const hSet = new Set(HORIZONS);
   for (const entry of allH.values()) {
     for (const k of Object.keys(entry?.by_horizon || {})) {
@@ -112,20 +116,27 @@ export function rowsFrom(resp, { ids, baseline, scale, full = null, wins = resp,
   }
   const hs = [...hSet].sort((a, b) => a - b);
   const baseH = {};
-  for (const h of hs) baseH[h] = num(base?.by_horizon?.[h]?.[wisKey]);
+  for (const h of hs) baseH[h] = num(base?.by_horizon?.[h]?.[hValKey]);
 
   const want = [...ids.filter((id) => id !== baseline), baseline].filter((id, i, a) => id && a.indexOf(id) === i);
   return want.map((id) => {
     const r = byId.get(id);
     const isBase = id === baseline;
-    const active = !!(r && r.has_data_in_scope && num(r.wis) != null && r.count > 0);
+    const active = isCat
+      ? !!(r && r.has_data_in_scope && r.count > 0 && (num(r.rps) != null || num(r.log_score) != null))
+      : !!(r && r.has_data_in_scope && num(r.wis) != null && r.count > 0);
     const byH = {};
     const rh = allH.get(id);
     for (const h of hs) {
       const b = rh?.by_horizon?.[h];
-      const w = num(b?.[wisKey]);
+      const w = num(b?.[hValKey]);
       byH[h] = b ? {
-        wis: w, n: num(b.count) || 0,
+        wis: num(b?.[wisKey]),
+        rps: num(b.rps),
+        logScore: num(b.log_score),
+        brier: num(b.brier),
+        hitMode: num(b.hit_mode),
+        n: num(b.count) || 0,
         rel: w != null && baseH[h] ? w / baseH[h] : null,
         comp: { spread: num(b.sharpness_component), over: num(b.overprediction_penalty), under: num(b.underprediction_penalty) },
         cal: calOf(b.calibration),
@@ -133,29 +144,38 @@ export function rowsFrom(resp, { ids, baseline, scale, full = null, wins = resp,
     }
     const row = {
       id, label: label(id), team: team(id), baseline: isBase, active,
+      isCategorical: isCat, ordinal,
       pending: !!r?.pending_truth, note: r?.status_note || (r ? "" : "No forecasts in scope"),
       seasons: r?.active_seasons || [],
       n: active ? r.count : 0,
       rounds: [r?.scope_rounds_available ?? 0, r?.scope_rounds_total ?? 0],
       q: r?.quantile_count ?? null, q23: r ? r.has_23_quantiles !== false : true,
       rel: null, wis: null, mae: null, cov50: null, cov80: null, cov95: null, sharp: null, per100k: null,
+      rps: null, logScore: null, brier: null, hitMode: null,
       delta: null, wins: null, competed: null, comp: { spread: null, over: null, under: null },
       cal: LEVELS.map(() => null), byH,
     };
     if (!active) return row;
-    row.wis = num(r[wisKey]);
-    row.mae = num(r[log ? "mae_log" : "mae"]);
-    row.cov50 = num(r.cov50); row.cov95 = num(r.cov95);
-    row.sharp = num(r.sharpness); row.per100k = num(r.wis_per_100k);
-    row.comp = { spread: num(r.decomp_sharpness), over: num(r.decomp_overpred), under: num(r.decomp_underpred) };
-    row.cal = calOf(r.calibration);
-    row.rel = pending ? null : num(r[log ? "relative_wis_log" : "relative_wis"]);
+    if (isCat) {
+      row.rps = num(r.rps);
+      row.logScore = num(r.log_score);
+      row.brier = num(r.brier);
+      row.hitMode = num(r.hit_mode);
+    } else {
+      row.wis = num(r[wisKey]);
+      row.mae = num(r[log ? "mae_log" : "mae"]);
+      row.cov50 = num(r.cov50); row.cov95 = num(r.cov95);
+      row.sharp = num(r.sharpness); row.per100k = num(r.wis_per_100k);
+      row.comp = { spread: num(r.decomp_sharpness), over: num(r.decomp_overpred), under: num(r.decomp_underpred) };
+      row.cal = calOf(r.calibration);
+      row.cov80 = row.cal[LEVELS.indexOf(0.8)];
+    }
+    row.rel = pending ? null : num(r[!isCat && log ? "relative_wis_log" : "relative_wis"]);
     if (isBase && id === eff && !pending) row.rel = 1;
-    row.delta = num(r[log ? "pct_diff_vs_baseline_log" : "pct_diff_vs_baseline"]);
+    row.delta = num(r[!isCat && log ? "pct_diff_vs_baseline_log" : "pct_diff_vs_baseline"]);
     const w = winsById.get(id);
-    row.wins = w ? num(w[log ? "weeks_won_log" : "weeks_won"]) : null;
+    row.wins = w ? num(w[!isCat && log ? "weeks_won_log" : "weeks_won"]) : null;
     row.competed = w ? num(w.weeks_competed) || null : null;
-    row.cov80 = row.cal[LEVELS.indexOf(0.8)];
     if (row.n === 0) row.active = false;
     return row;
   });
@@ -168,6 +188,10 @@ export const SORTS = Object.freeze({
   rel: { get: (r) => r.rel, asc: true, score: true },
   wis: { get: (r) => r.wis, asc: true, score: true },
   mae: { get: (r) => r.mae, asc: true, score: true },
+  rps: { get: (r) => r.rps, asc: true, score: true },
+  logScore: { get: (r) => r.logScore, asc: true, score: true },
+  brier: { get: (r) => r.brier, asc: true, score: true },
+  hitMode: { get: (r) => r.hitMode, asc: false, score: true },
   cov50: { get: (r) => (r.cov50 == null ? null : Math.abs(r.cov50 - 50)), asc: true, score: true },
   cov80: { get: (r) => (r.cov80 == null ? null : Math.abs(r.cov80 - 80)), asc: true, score: true },
   cov95: { get: (r) => (r.cov95 == null ? null : Math.abs(r.cov95 - 95)), asc: true, score: true },
@@ -312,11 +336,32 @@ export function horizonsLabel(horizons, availableHorizons = HORIZONS) {
 export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sourceOf, full = null, wins = resp }) {
   const byId = new Map((resp?.rankings || []).map((r) => [r.model_id, r]));
   const winsById = new Map((wins?.rankings || []).map((r) => [r.model_id, r]));
+  const isCat = !!resp?.is_categorical || (resp?.rankings || []).some((r) => r.has_data_in_scope && r.wis == null && (r.rps != null || r.log_score != null));
+  const rankMetric = resp?.rank_metric || (resp?.ordinal === false ? "log_score" : "rps");
   const log = scope.scale === "log";
   const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
   const r2 = (v, d) => (typeof v === "number" && Number.isFinite(v) ? +v.toFixed(d) : null);
   return order.map((id) => {
     const r = byId.get(id) || {};
+    if (isCat) {
+      const bhCat = (h) => r2(allH.get(id)?.by_horizon?.[h]?.[rankMetric], 3);
+      return {
+        rank: ranks.get(id) ?? null, model_id: id, model_type: sourceOf(id),
+        tasks_evaluated: r.count ?? 0,
+        relative_score: r2(r.relative_wis, 3),
+        rps: r2(r.rps, 4),
+        log_loss: r2(r.log_score, 4),
+        brier_score: r2(r.brier, 4),
+        mode_hit_pct: r2(r.hit_mode, 1),
+        pct_diff_vs_baseline: r2(r.pct_diff_vs_baseline, 1),
+        baseline_model: resp?.baseline_model ?? scope.baseline,
+        h0_score: bhCat(0), h1_score: bhCat(1), h2_score: bhCat(2), h3_score: bhCat(3),
+        target, evaluation_location: scope.location, evaluation_scope: scopeLabel,
+        seasons: scope.seasons.join(","), weeks: scope.weeks ? scope.weeks.join("-") : "", phase: scope.phase || "",
+        horizons: scope.horizons ? scope.horizons.join(",") : "", rank_among: scope.rank,
+        common_tasks_fair: scope.fair ? "true" : "false", has_data_in_scope: !!r.has_data_in_scope, status_note: r.status_note || "",
+      };
+    }
     const bh = (h) => r2(allH.get(id)?.by_horizon?.[h]?.wis, 2);
     const w = winsById.get(id) || {};
     return {

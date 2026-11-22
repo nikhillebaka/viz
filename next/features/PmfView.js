@@ -4,7 +4,7 @@
  *   - Flow: calm diverging figure-ground stream anchored on midpoint category (e.g. Stable)
  *   - Bars: discrete 5-bin / K-bin probability histograms with 50% dashed rule */
 import { h, on, cssColor, onThemeChange } from "../lib/dom.js";
-import { loadPmf } from "../lib/api.js";
+import { apiUrl, loadPmf } from "../lib/api.js";
 import { fragment, action, setLine, linkStyle, fitCanvas, perFrame, resetColors, onDprChange } from "../sections/shared.js";
 
 const CAT_LABELS = {
@@ -214,6 +214,13 @@ export function mountPmfView(host, ctx) {
   let token = 0;
   let destroyed = false;
   let loadedReqKey = "";
+  let currentSrc = null;
+  let tableScope = "local"; // "local" | "all"
+  let allScopeData = null;
+  let allScopeKey = "";
+  let allScopeLoading = false;
+  let allScopeErr = false;
+  const allScopeCache = new Map();
   const offs = [];
 
   const setEmpty = (text, retry) => {
@@ -361,10 +368,139 @@ export function mountPmfView(host, ctx) {
     );
   }
 
+  function loadAllScopeMetrics() {
+    if (!currentSrc?.targetId || !data?.season) return;
+    const key = `${currentSrc.hubId || ""}|${currentSrc.targetId}|${data.season}|${JSON.stringify(currentSrc.dims || {})}`;
+    if (allScopeCache.has(key)) {
+      allScopeData = allScopeCache.get(key);
+      allScopeKey = key;
+      allScopeLoading = false;
+      allScopeErr = false;
+      renderTable();
+      return;
+    }
+    const q = new URLSearchParams({
+      target: currentSrc.targetId,
+      location: "all",
+      season: data.season,
+      date: "all",
+      models: "all",
+    });
+    if (currentSrc.hubId) q.set("workspace", String(currentSrc.hubId));
+    if (currentSrc.dims) {
+      for (const [k, v] of Object.entries(currentSrc.dims)) if (v != null && v !== "") q.set(k, String(v));
+    }
+    allScopeKey = key;
+    allScopeLoading = true;
+    allScopeErr = false;
+    renderTable();
+    fetch(apiUrl(`/api/next/metrics?${q}`))
+      .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+      .then((j) => {
+        if (destroyed) return;
+        allScopeCache.set(key, j);
+        if (allScopeKey === key) {
+          allScopeData = j;
+          allScopeLoading = false;
+          allScopeErr = false;
+          renderTable();
+        }
+      })
+      .catch(() => {
+        if (destroyed || allScopeKey !== key) return;
+        allScopeLoading = false;
+        allScopeErr = true;
+        renderTable();
+      });
+  }
+
   function renderTable() {
     if (!data?.modelIds?.length || !data?.rounds?.length) { tableWrap.replaceChildren(); return; }
     const activeDates = viewMode === "all" ? data.rounds : [data.rounds[roundIdx]];
     const targetHzs = viewMode === "all" && shapeMode !== "bars" ? [horizon] : data.horizons;
+    const placeName = currentSrc?.locationName || "This place";
+
+    const scopeBar = h("div", { class: "pmf-table-head" },
+      h("div", { class: "pmf-scope-pills", role: "tablist", "aria-label": "PMF score scope" },
+        h("button", {
+          type: "button", role: "tab",
+          class: ["pmf-scope-btn", tableScope === "local" && "is-active"],
+          "aria-selected": String(tableScope === "local"),
+          onclick: () => { if (tableScope !== "local") { tableScope = "local"; renderTable(); } },
+        }, placeName),
+        h("button", {
+          type: "button", role: "tab",
+          class: ["pmf-scope-btn", tableScope === "all" && "is-active"],
+          "aria-selected": String(tableScope === "all"),
+          onclick: () => {
+            if (tableScope !== "all") {
+              tableScope = "all";
+              const expectedKey = `${currentSrc?.hubId || ""}|${currentSrc?.targetId}|${data.season}|${JSON.stringify(currentSrc?.dims || {})}`;
+              if (allScopeKey !== expectedKey || !allScopeData) loadAllScopeMetrics();
+              else renderTable();
+            }
+          },
+        }, `All places · ${data.season || ""}`),
+      ),
+      h("span", { class: "pmf-scope-note" },
+        tableScope === "all" && allScopeData?.baseline_model ? `vs ${manifest.label(allScopeData.baseline_model)}` : "Lower RPS / Log loss is better",
+        " · ",
+        h("button", {
+          type: "button", class: "c-link",
+          onclick: async (e) => {
+            const { openGuide } = await import("./Guide.js");
+            openGuide("pmf", e.currentTarget);
+          },
+        }, "Guide ↗"),
+      ),
+    );
+
+    if (tableScope === "all") {
+      if (allScopeLoading) {
+        tableWrap.replaceChildren(scopeBar, h("p", { class: "pmf-scope-note" }, "Scoring all locations…"));
+        return;
+      }
+      if (allScopeErr || !allScopeData?.rankings?.length) {
+        tableWrap.replaceChildren(scopeBar, h("p", { class: "pmf-scope-note" }, "Seasonal PMF scores unavailable for this slice."));
+        return;
+      }
+      const scored = allScopeData.rankings.filter((r) => r.has_data_in_scope && r.count > 0);
+      const idsAll = scored.map((r) => r.model_id);
+      const ordinal = allScopeData.ordinal !== false;
+      tableWrap.replaceChildren(
+        scopeBar,
+        h("table", { class: "v-table" },
+          h("thead", null,
+            h("tr", null,
+              h("th", null, `Model (${allScopeData.scope_dates_count || data.rounds.length} rounds · all places)`),
+              h("th", null, ordinal ? "Rel. RPS" : "Rel. Log"),
+              ordinal ? h("th", null, "RPS") : null,
+              h("th", null, "Log loss"),
+              h("th", null, "Brier"),
+              h("th", null, "Mode hit"),
+              h("th", null, "N"),
+            )),
+          h("tbody", null,
+            ...scored.map((r, idx) =>
+              h("tr", {
+                "data-model": r.model_id,
+                class: r.model_id === focusModel ? "is-focus" : null,
+                onclick: () => {
+                  if (data.modelIds.includes(r.model_id)) { focusModel = r.model_id; renderAll(); }
+                },
+              },
+              h("td", null, h("span", { class: "v-name", style: { "--c": r.model_id === focusModel ? "var(--accent)" : `var(--series-${(idx % 5) + 1})` } }, h("i"), manifest.label(r.model_id, idsAll))),
+              h("td", { class: "num" }, r.model_id === allScopeData.baseline_model ? "1.00" : (typeof r.relative_wis === "number" ? r.relative_wis.toFixed(2) : "–")),
+              ordinal ? h("td", { class: "num" }, typeof r.rps === "number" ? r.rps.toFixed(3) : "–") : null,
+              h("td", { class: "num" }, typeof r.log_score === "number" ? r.log_score.toFixed(2) : "–"),
+              h("td", { class: "num" }, typeof r.brier === "number" ? r.brier.toFixed(3) : "–"),
+              h("td", { class: "num" }, typeof r.hit_mode === "number" ? `${Math.round(r.hit_mode)}%` : "–"),
+              h("td", { class: "num" }, String(r.count ?? 0)),
+              )))),
+      );
+      return;
+    }
+
     const labelMap = new Map(data.modelIds.map((id) => [id, manifest.label(id, data.modelIds)]));
 
     const rows = data.modelIds.map((mid) => {
@@ -405,6 +541,7 @@ export function mountPmfView(host, ctx) {
       : `Model (${data.rounds[roundIdx]} · all horizons)`;
 
     tableWrap.replaceChildren(
+      scopeBar,
       h("table", { class: "v-table" },
         h("thead", null,
           h("tr", null,
@@ -977,6 +1114,7 @@ export function mountPmfView(host, ctx) {
     titleEl.textContent = src?.title || "Rate change";
 
     if (!src?.targetId || !src?.locationId) {
+      currentSrc = src;
       loadedReqKey = "";
       data = null;
       sec.classList.remove("is-loading");
@@ -988,10 +1126,12 @@ export function mountPmfView(host, ctx) {
 
     const reqKey = `${src.hubId || ""}|${src.targetId}|${season}|${src.locationId}|${JSON.stringify(src.dims || {})}`;
     if (!force && reqKey === loadedReqKey && data) {
+      currentSrc = src;
       roundIdx = nearestIndex(data.rounds, s.date);
       renderAll();
       return;
     }
+    currentSrc = src;
     loadedReqKey = reqKey;
 
     const tToken = ++token;
@@ -1020,6 +1160,7 @@ export function mountPmfView(host, ctx) {
       if (!data.horizons.includes(horizon)) horizon = data.horizons.includes(1) ? 1 : (data.horizons[0] ?? 0);
       roundIdx = nearestIndex(data.rounds, s.date);
       setEmpty(null);
+      if (tableScope === "all") loadAllScopeMetrics();
       renderAll();
     } catch {
       if (destroyed || tToken !== token) return;

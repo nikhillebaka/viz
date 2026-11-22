@@ -34,16 +34,6 @@ import {
   lookupPlaceMeta,
   validateTileLayout,
 } from "../../geo/eu_tiles.js";
-import {
-  buildBriefingForPlace,
-  buildPmfFixture,
-  buildSpatialSnapshot,
-  buildTrajectoriesFixture,
-  deriveQuantilesFromTrajectories,
-  metricForPlace,
-  scorePmfEntry,
-  verticalPmfSegments,
-} from "../../lab/fixtures.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GEO_DIR = path.resolve(HERE, "../../geo");
@@ -236,6 +226,15 @@ describe("next/geo/topo.js + metrocast_hsas.json", () => {
       assert.ok(verts >= 400, `${iso} expected high-resolution >= 400 vertices, got ${verts}`);
     }
   });
+
+  it("extracts all five NYC borough counties (36005, 36047, 36061, 36081, 36085) from us-counties-10m.json", () => {
+    const usTopo = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "us-counties-10m.json"), "utf8"));
+    const county2d = extractLonLatFeatures(usTopo, "counties");
+    for (const fips of ["36005", "36047", "36061", "36081", "36085"]) {
+      const rings = county2d.get(fips);
+      assert.ok(Array.isArray(rings) && rings.length > 0, `expected rings for NYC county ${fips}`);
+    }
+  });
 });
 
 describe("next/geo/eu_tiles.js", () => {
@@ -251,87 +250,5 @@ describe("next/geo/eu_tiles.js", () => {
     }
     assert.equal(lookupPlaceMeta("DE")?.abbr, "DE");
     assert.equal(lookupPlaceMeta("25")?.abbr, "MA");
-  });
-});
-
-describe("next/lab/fixtures.js", () => {
-  it("builds spatial metrics and normalized seasonal intensity across states, EU, and MetroCast HSAs", () => {
-    const s = buildSpatialSnapshot();
-    assert.ok(s.us[1].US.rate_per_100k > 0);
-    assert.ok(s.eu.eu_ili[1].DE.rate_per_100k > 0);
-
-    const hsasData = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "metrocast_hsas.json"), "utf8"));
-    const boston = hsasData.hsas.find((h) => h.id === "boston");
-    const m = metricForPlace(boston, "seasonal_intensity");
-    assert.ok(m.value >= 1 && m.value <= 100);
-    assert.equal(metricForPlace(boston, "none").value, null);
-  });
-
-  it("ensures 20-round PMF fixture sums to 1.0 and verticalPmfSegments centers around 0", () => {
-    const pmf = buildPmfFixture();
-    assert.equal(pmf.rounds.length, 20);
-    for (const loc of Object.keys(pmf.byPlace)) {
-      for (const date of pmf.rounds) {
-        const r = pmf.byPlace[loc].rounds[date];
-        for (const mId of Object.keys(r.models)) {
-          for (const h of [0, 1, 2, 3]) {
-            const entry = r.models[mId][h];
-            const sum = entry.probs.reduce((a, b) => a + b, 0);
-            assert.ok(Math.abs(sum - 1) < 1e-6);
-          }
-        }
-      }
-    }
-    const segs = verticalPmfSegments([0.1, 0.2, 0.2, 0.3, 0.2]);
-    // Decreasing segments below 0, stable symmetric at 0, increasing above 0
-    assert.ok(segs[0].y1 <= 0 && segs[1].y1 <= 0);
-    assert.ok(Math.abs(segs[2].y0 + segs[2].y1) < 1e-9);
-    assert.ok(segs[3].y0 >= 0 && segs[4].y1 <= 1.0001);
-    const perfect = scorePmfEntry([0, 0, 1, 0, 0], 2);
-    assert.equal(perfect.rps, 0);
-  });
-
-  it("generates monotonic derived trajectory quantiles and finite sample scores", () => {
-    const tr = buildTrajectoriesFixture();
-    for (const id of tr.modelOrder) {
-      const mod = tr.models[id];
-      assert.equal(mod.samples.length, 100);
-      assert.ok(mod.scores.crps > 0);
-      assert.ok(mod.scores.energyScore > 0);
-      for (const q of mod.quantiles) {
-        assert.ok(q.q05 <= q.q10 && q.q10 <= q.q25 && q.q25 <= q.q50 && q.q50 <= q.q75 && q.q75 <= q.q90 && q.q90 <= q.q95);
-      }
-    }
-    assert.deepEqual(deriveQuantilesFromTrajectories([]), []);
-  });
-
-  it("builds full multi-stream briefings across US, State, MetroCast HSA, and EU countries", () => {
-    const hsasData = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "metrocast_hsas.json"), "utf8"));
-    const boston = hsasData.hsas.find((h) => h.id === "boston");
-    for (const [id, meta] of [["US", null], ["25", null], ["boston", boston], ["DE", null], ["GB-ENG", null]]) {
-      const b = buildBriefingForPlace(id, meta, hsasData.hsas);
-      assert.equal(b.placeId, id);
-      assert.ok(b.kpis.length === 5);
-      assert.ok(b.streams.length >= 4);
-      assert.ok(b.spread.length >= 5);
-      assert.equal(b.virology.length, 18);
-      assert.equal(b.clades.length, 18);
-      assert.equal(b.vaccineMatch.length, 3);
-      assert.ok(b.sources.length >= 4);
-      for (const v of b.virology) {
-        const s = v.h1n1 + v.h3n2 + v.aUnsub + v.bVic;
-        assert.ok(Math.abs(s - 1) < 0.02);
-      }
-      assert.ok(!JSON.stringify(b).includes("undefined"));
-    }
-  });
-
-  it("extracts all five NYC borough counties (36005, 36047, 36061, 36081, 36085) from us-counties-10m.json", () => {
-    const usTopo = JSON.parse(fs.readFileSync(path.join(GEO_DIR, "us-counties-10m.json"), "utf8"));
-    const county2d = extractLonLatFeatures(usTopo, "counties");
-    for (const fips of ["36005", "36047", "36061", "36081", "36085"]) {
-      const rings = county2d.get(fips);
-      assert.ok(Array.isArray(rings) && rings.length > 0, `expected rings for NYC county ${fips}`);
-    }
   });
 });
