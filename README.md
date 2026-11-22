@@ -2,7 +2,7 @@
 
 A local/web dashboard and CLI scorer for [Hubverse](https://hubverse.io) infectious-disease forecasting hubs. Runs standalone against public hubs or directly inside a local Hubverse repository.
 
-Uses Python (`polars`, `pyarrow`, `numpy`, `pyyaml`) with no Node build step and no database.
+Uses Python (`polars`, `pyarrow`, `numpy`) with no Node build step and no database.
 
 ---
 

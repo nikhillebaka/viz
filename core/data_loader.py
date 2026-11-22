@@ -17,11 +17,6 @@ from typing import Dict, List, Optional, Any, Set, Tuple, Union
 import numpy as np
 import polars as pl
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
 from viz.core.cache_manager import ParquetCacheManager, NULL_VALUES, filter_quantile_rows
 from viz.core.calendar import CalendarSpec, infer_calendar
 from viz.core.config import VizConfig
@@ -3611,17 +3606,7 @@ class SandboxDataLoader:
         if meta_file is not None:
             try:
                 raw_text = meta_file.read_text(encoding="utf-8")
-                data = None
-                if yaml is not None:
-                    try:
-                        parsed = yaml.safe_load(raw_text)
-                        if isinstance(parsed, dict):
-                            data = parsed
-                    except Exception as y_err:
-                        logger.debug("PyYAML load failed on %s: %s; falling back to parser", meta_file, y_err)
-
-                if data is None:
-                    data = self._parse_simple_yaml(raw_text)
+                data = self._parse_simple_yaml(raw_text)
 
                 data["has_metadata_file"] = True
                 data.setdefault("team_name", model_id.split("-")[0] if "-" in model_id else "Research Team")
@@ -3667,82 +3652,385 @@ class SandboxDataLoader:
             "ensemble_of_hub_models": False,
         }
 
+    _YAML_KEY_RE = re.compile(
+        r'^(?:"([A-Za-z0-9_.-]+)"|\'([A-Za-z0-9_.-]+)\'|([A-Za-z0-9_.-]+))\s*:(?:\s+(.*))?$'
+    )
+
+    @classmethod
+    def _match_yaml_key_val(cls, s: str) -> Optional[Tuple[str, str]]:
+        m = cls._YAML_KEY_RE.match(s)
+        if not m:
+            return None
+        key = m.group(1) or m.group(2) or m.group(3)
+        rest = m.group(4) if m.group(4) is not None else ""
+        return key, rest
+
     @staticmethod
-    def _parse_simple_yaml(text: str) -> Dict[str, Any]:
-        """Robust YAML/JSON fallback parser for standard Hubverse model metadata schemas."""
+    def _strip_yaml_inline_comment(s: str) -> str:
+        in_sq = False
+        in_dq = False
+        esc = False
+        for i, ch in enumerate(s):
+            if esc:
+                esc = False
+                continue
+            if ch == "\\" and in_dq:
+                esc = True
+                continue
+            if ch == "'" and not in_dq:
+                in_sq = not in_sq
+            elif ch == '"' and not in_sq:
+                in_dq = not in_dq
+            elif ch == "#" and not in_sq and not in_dq:
+                if i == 0 or s[i - 1].isspace():
+                    return s[:i].rstrip()
+        return s.rstrip()
+
+    @staticmethod
+    def _has_unclosed_yaml_quote(s: str) -> bool:
+        t = s.lstrip()
+        if not t or t[0] not in ('"', "'"):
+            return False
+        q = t[0]
+        esc = False
+        i = 1
+        while i < len(t):
+            ch = t[i]
+            if esc:
+                esc = False
+                i += 1
+                continue
+            if ch == "\\" and q == '"':
+                esc = True
+                i += 1
+                continue
+            if ch == "'" and q == "'" and i + 1 < len(t) and t[i + 1] == "'":
+                i += 2
+                continue
+            if ch == q:
+                return False
+            i += 1
+        return True
+
+    @classmethod
+    def _parse_yaml_scalar(cls, val: str) -> Any:
+        v = cls._strip_yaml_inline_comment(val.strip())
+        if not v:
+            return None
+        if v.startswith('"') and v.endswith('"') and len(v) >= 2:
+            inner = v[1:-1]
+            inner_norm = re.sub(r"\\\s+\\\s*", " ", inner)
+            try:
+                return json.loads('"' + inner_norm + '"')
+            except Exception:
+                return (
+                    inner_norm.replace('\\"', '"')
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
+                    .replace("\\ ", " ")
+                    .replace("\\\\", "\\")
+                )
+        if v.startswith("'") and v.endswith("'") and len(v) >= 2:
+            return v[1:-1].replace("''", "'")
+        low = v.lower()
+        if low in ("true", "yes"):
+            return True
+        if low in ("false", "no"):
+            return False
+        if low in ("null", "~"):
+            return None
+        if re.fullmatch(r"-?\d+", v):
+            if len(v.lstrip("-")) > 1 and v.lstrip("-").startswith("0"):
+                return v
+            return int(v)
+        if re.fullmatch(r"-?\d+\.\d+", v):
+            try:
+                return float(v)
+            except ValueError:
+                pass
+        return v
+
+    @classmethod
+    def _parse_yaml_flow(cls, text: str) -> Any:
+        cleaned = re.sub(r",\s*([\]\}])", r"\1", text.strip())
+        for candidate in (
+            cleaned,
+            re.sub(r'([{\s,])([A-Za-z_][A-Za-z0-9_.-]*)\s*:(?=\s)', r'\1"\2":', cleaned),
+        ):
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+        s = cleaned.strip()
+        if s.startswith("[") and s.endswith("]"):
+            inner = s[1:-1].strip()
+            if not inner:
+                return []
+            if "{" not in inner and "[" not in inner:
+                return [cls._parse_yaml_scalar(p.strip()) for p in inner.split(",") if p.strip()]
+        return s
+
+    @classmethod
+    def _parse_simple_yaml(cls, text: str) -> Dict[str, Any]:
+        """Self-contained YAML/JSON parser for Hubverse model metadata schemas."""
+        stripped_all = text.strip()
+        if stripped_all.startswith("{"):
+            parsed_flow = cls._parse_yaml_flow(stripped_all)
+            if isinstance(parsed_flow, dict):
+                return parsed_flow
+
+        raw_lines = text.splitlines()
+        non_empty = [
+            (len(l) - len(l.lstrip(" ")), l)
+            for l in raw_lines
+            if l.strip() and not l.lstrip().startswith("#") and l.strip() not in ("---", "...")
+        ]
+        if not non_empty:
+            return {}
+        key_indents = [
+            ind for ind, l in non_empty
+            if not l.lstrip().startswith("-") and cls._match_yaml_key_val(l.lstrip()) is not None
+        ]
+        base_indent = min(key_indents) if key_indents else 0
+
         result: Dict[str, Any] = {}
-        current_list_key = None
-        current_list: List[Any] = []
-        current_multiline_key = None
-        current_multiline: List[str] = []
+        n = len(raw_lines)
+        i = 0
 
-        lines = text.splitlines()
-        for raw_line in lines:
-            line = raw_line.rstrip()
-            if not line or line.lstrip().startswith("#"):
-                continue
+        def is_top_key(line: str) -> bool:
+            s = line.lstrip(" ")
+            ind = len(line) - len(s)
+            if ind != base_indent or s.startswith("-") or s.startswith("#"):
+                return False
+            return cls._match_yaml_key_val(s) is not None
 
-            # Multi-line continuation
-            if current_multiline_key:
-                if raw_line.startswith("  ") or raw_line.startswith("\t"):
-                    current_multiline.append(raw_line.strip())
-                    continue
-                else:
-                    result[current_multiline_key] = " ".join(current_multiline)
-                    current_multiline_key = None
-                    current_multiline = []
+        def consume_flow(first_chunk: str, idx: int) -> Tuple[Any, int]:
+            open_ch = first_chunk[0]
+            close_ch = "]" if open_ch == "[" else "}"
+            buf = [first_chunk]
+            depth = 0
+            in_sq = in_dq = esc = False
 
-            # List item continuation
-            if line.startswith("  - ") or line.startswith("    - "):
-                item_val = line.split("- ", 1)[1].strip().strip('"').strip("'")
-                if current_list_key:
-                    current_list.append(item_val)
-                continue
-
-            # Top-level or sub key-value
-            if ":" in line and not line.startswith(" "):
-                if current_list_key:
-                    result[current_list_key] = current_list
-                    current_list_key = None
-                    current_list = []
-
-                key, val = line.split(":", 1)
-                key = key.strip()
-                val = val.strip()
-
-                if val in ("|", ">", "|-", ">-"):
-                    current_multiline_key = key
-                    current_multiline = []
-                    continue
-
-                if not val:
-                    current_list_key = key
-                    current_list = []
-                    continue
-
-                # Check if JSON flow-style array or object: e.g. [ { "name": ... } ]
-                if (val.startswith("[") and val.endswith("]")) or (val.startswith("{") and val.endswith("}")):
-                    try:
-                        result[key] = json.loads(val)
+            def scan_depth(chunk: str, d: int, sq: bool, dq: bool, es: bool) -> Tuple[int, bool, bool, bool]:
+                for ch in chunk:
+                    if es:
+                        es = False
                         continue
-                    except Exception:
-                        pass
+                    if ch == "\\" and dq:
+                        es = True
+                        continue
+                    if ch == "'" and not dq:
+                        sq = not sq
+                    elif ch == '"' and not sq:
+                        dq = not dq
+                    elif not sq and not dq:
+                        if ch == open_ch:
+                            d += 1
+                        elif ch == close_ch:
+                            d -= 1
+                return d, sq, dq, es
 
-                # Parse scalar types
-                v_clean = val.strip('"').strip("'")
-                if v_clean.lower() == "true":
-                    result[key] = True
-                elif v_clean.lower() == "false":
-                    result[key] = False
-                elif v_clean.isdigit():
-                    result[key] = int(v_clean)
+            depth, in_sq, in_dq, esc = scan_depth(first_chunk, depth, in_sq, in_dq, esc)
+            while depth > 0 and idx < n:
+                nl = cls._strip_yaml_inline_comment(raw_lines[idx])
+                buf.append(nl)
+                depth, in_sq, in_dq, esc = scan_depth(nl, depth, in_sq, in_dq, esc)
+                idx += 1
+            return cls._parse_yaml_flow("\n".join(buf)), idx
+
+        def consume_scalar_lines(first_val: str, idx: int, min_cont_indent: int) -> Tuple[Any, int]:
+            parts = [first_val]
+            while idx < n:
+                cur_joined = " ".join(p for p in parts if p)
+                unclosed = cls._has_unclosed_yaml_quote(cur_joined)
+                nl = raw_lines[idx]
+                if not nl.strip():
+                    if unclosed:
+                        parts.append("")
+                        idx += 1
+                        continue
+                    k = idx + 1
+                    while k < n and not raw_lines[k].strip():
+                        k += 1
+                    if (
+                        k < n
+                        and not is_top_key(raw_lines[k])
+                        and (len(raw_lines[k]) - len(raw_lines[k].lstrip(" "))) > min_cont_indent
+                        and not raw_lines[k].lstrip().startswith("#")
+                        and not raw_lines[k].lstrip().startswith("- ")
+                    ):
+                        idx += 1
+                        continue
+                    break
+                if not unclosed and nl.lstrip().startswith("#"):
+                    idx += 1
+                    continue
+                if not unclosed and is_top_key(nl):
+                    break
+                ns = nl.lstrip(" ")
+                nind = len(nl) - len(ns)
+                if not unclosed and nind <= min_cont_indent:
+                    break
+                if not unclosed and (ns.startswith("- ") or ns == "-" or cls._match_yaml_key_val(ns) is not None):
+                    if min_cont_indent > base_indent:
+                        break
+                parts.append(ns.rstrip() if unclosed else cls._strip_yaml_inline_comment(ns))
+                idx += 1
+            joined = " ".join(p for p in parts if p != "")
+            return cls._parse_yaml_scalar(joined), idx
+
+        while i < n:
+            line = raw_lines[i]
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped in ("---", "..."):
+                i += 1
+                continue
+            if not is_top_key(line):
+                i += 1
+                continue
+
+            s = line.lstrip(" ")
+            kv = cls._match_yaml_key_val(s)
+            if kv is None:
+                i += 1
+                continue
+            key, rest = kv
+            val = cls._strip_yaml_inline_comment(rest.strip()) if not cls._has_unclosed_yaml_quote(rest.strip()) else rest.strip()
+            i += 1
+
+            # Case 1: Block scalar | or >
+            if re.match(r"^[|>][-+]?\d*$", val):
+                style = val[0]
+                block_lines: List[str] = []
+                block_indent: Optional[int] = None
+                while i < n:
+                    nl = raw_lines[i]
+                    if not nl.strip():
+                        block_lines.append("")
+                        i += 1
+                        continue
+                    ind = len(nl) - len(nl.lstrip(" "))
+                    if ind <= base_indent and (is_top_key(nl) or nl.lstrip().startswith("#")):
+                        if is_top_key(nl):
+                            break
+                        i += 1
+                        continue
+                    if ind <= base_indent:
+                        break
+                    if block_indent is None:
+                        block_indent = ind
+                    block_lines.append(nl[min(len(nl), block_indent):].rstrip())
+                    i += 1
+                while block_lines and not block_lines[-1]:
+                    block_lines.pop()
+                if style == "|":
+                    result[key] = "\n".join(block_lines)
                 else:
-                    result[key] = v_clean
+                    paras: List[str] = []
+                    cur: List[str] = []
+                    for bl in block_lines:
+                        if not bl:
+                            if cur:
+                                paras.append(" ".join(cur))
+                                cur = []
+                            paras.append("")
+                        else:
+                            cur.append(bl.strip())
+                    if cur:
+                        paras.append(" ".join(cur))
+                    result[key] = "\n".join(paras)
+                continue
 
-        if current_list_key:
-            result[current_list_key] = current_list
-        if current_multiline_key:
-            result[current_multiline_key] = " ".join(current_multiline)
+            # Case 2: Flow array [...] or object {...} on key line
+            if val.startswith("[") or val.startswith("{"):
+                result[key], i = consume_flow(val, i)
+                continue
+
+            # Case 3: Empty val on key line
+            if not val:
+                j = i
+                while j < n and (not raw_lines[j].strip() or raw_lines[j].lstrip().startswith("#")):
+                    j += 1
+                if j >= n or is_top_key(raw_lines[j]):
+                    result[key] = None
+                    i = j
+                    continue
+                next_line = raw_lines[j]
+                next_s = next_line.lstrip(" ")
+                next_ind = len(next_line) - len(next_s)
+
+                if next_s.startswith("[") or next_s.startswith("{"):
+                    first_flow = cls._strip_yaml_inline_comment(next_s)
+                    result[key], i = consume_flow(first_flow, j + 1)
+                    continue
+
+                if next_s.startswith("- ") or next_s == "-":
+                    items: List[Any] = []
+                    i = j
+                    list_indent = next_ind
+                    while i < n:
+                        nl = raw_lines[i]
+                        if not nl.strip() or nl.lstrip().startswith("#"):
+                            i += 1
+                            continue
+                        if is_top_key(nl):
+                            break
+                        ns = nl.lstrip(" ")
+                        nind = len(nl) - len(ns)
+                        if nind < list_indent or not (ns.startswith("- ") or ns == "-"):
+                            break
+                        after_dash = ns[1:].strip()
+                        i += 1
+                        sub_kv = cls._match_yaml_key_val(after_dash)
+                        item_is_dict = sub_kv is not None
+                        if not after_dash:
+                            k = i
+                            while k < n and (not raw_lines[k].strip() or raw_lines[k].lstrip().startswith("#")):
+                                k += 1
+                            if k < n and not is_top_key(raw_lines[k]):
+                                ks = raw_lines[k].lstrip(" ")
+                                kind = len(raw_lines[k]) - len(ks)
+                                if kind > list_indent and cls._match_yaml_key_val(ks) is not None:
+                                    item_is_dict = True
+                        if item_is_dict:
+                            obj: Dict[str, Any] = {}
+                            if sub_kv is not None:
+                                sk, sv = sub_kv
+                                sv_clean = cls._strip_yaml_inline_comment(sv.strip()) if not cls._has_unclosed_yaml_quote(sv.strip()) else sv.strip()
+                                obj[sk], i = consume_scalar_lines(sv_clean, i, list_indent + 1)
+                            while i < n:
+                                sl = raw_lines[i]
+                                if not sl.strip() or sl.lstrip().startswith("#"):
+                                    i += 1
+                                    continue
+                                if is_top_key(sl):
+                                    break
+                                ss = sl.lstrip(" ")
+                                sind = len(sl) - len(ss)
+                                if sind <= list_indent:
+                                    break
+                                skv = cls._match_yaml_key_val(ss)
+                                if skv is not None:
+                                    sk, sv = skv
+                                    sv_clean = cls._strip_yaml_inline_comment(sv.strip()) if not cls._has_unclosed_yaml_quote(sv.strip()) else sv.strip()
+                                    i += 1
+                                    obj[sk], i = consume_scalar_lines(sv_clean, i, sind)
+                                else:
+                                    i += 1
+                            items.append(obj)
+                        else:
+                            sv_clean = cls._strip_yaml_inline_comment(after_dash) if not cls._has_unclosed_yaml_quote(after_dash) else after_dash
+                            item_val, i = consume_scalar_lines(sv_clean, i, list_indent)
+                            items.append(item_val)
+                    result[key] = items
+                    continue
+                elif next_ind > base_indent:
+                    sv_clean = cls._strip_yaml_inline_comment(next_s) if not cls._has_unclosed_yaml_quote(next_s) else next_s
+                    result[key], i = consume_scalar_lines(sv_clean, j + 1, base_indent)
+                    continue
+
+            # Case 4: Inline scalar on key line
+            result[key], i = consume_scalar_lines(val, i, base_indent)
 
         return result
 

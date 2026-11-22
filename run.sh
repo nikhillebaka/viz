@@ -30,7 +30,7 @@ else
     exit 1
 fi
 
-if ! "$PYTHON_BIN" -c "import polars, pyarrow, yaml" &> /dev/null; then
+if ! "$PYTHON_BIN" -c "import polars, pyarrow, numpy" &> /dev/null; then
     echo "ERROR: viz dependencies are not installed for $PYTHON_BIN."
     echo "Run ./setup.sh first (or: pip install -r \"$DIR/requirements.txt\")."
     exit 1

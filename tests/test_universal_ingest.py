@@ -165,6 +165,62 @@ class TestUniversalIngest(unittest.TestCase):
         self.assertIsNotNone(df_loaded)
         self.assertIn("age_group", df_loaded.columns)
 
+    def test_parse_simple_yaml_edge_cases(self):
+        parse = SandboxDataLoader._parse_simple_yaml
+
+        # 1. Block list of contributor dicts (indent 0 and indent 2), wrapped plain strings, leading-zero ORCID
+        yml_block = """
+  team_name: Google Science AI
+  model_contributors:
+    - name: Zahra Shamsi
+      affiliation: Network Science Institute,
+        Northeastern University
+      orcid: 0000-0002-9834-2978
+    - name: Sarah Martinson
+      affiliation: Google
+  designated_model: true
+  designated_github_users:
+  - jcblemai
+  data_inputs:
+    "COVID-19 Hospital Admissions data (NHSN) and Population data"
+  team_funding: J.L. and J.C.L. disclose support from the Insight Net
+    cooperative agreement CDC-RFA-FT-23-0069.
+"""
+        d1 = parse(yml_block)
+        self.assertEqual(d1["team_name"], "Google Science AI")
+        self.assertTrue(d1["designated_model"])
+        self.assertEqual(d1["designated_github_users"], ["jcblemai"])
+        self.assertEqual(d1["data_inputs"], "COVID-19 Hospital Admissions data (NHSN) and Population data")
+        self.assertIn("CDC-RFA-FT-23-0069", d1["team_funding"])
+        self.assertEqual(len(d1["model_contributors"]), 2)
+        self.assertEqual(d1["model_contributors"][0]["name"], "Zahra Shamsi")
+        self.assertEqual(d1["model_contributors"][0]["orcid"], "0000-0002-9834-2978")
+        self.assertEqual(
+            d1["model_contributors"][0]["affiliation"],
+            "Network Science Institute, Northeastern University",
+        )
+
+        # 2. Multi-line flow array with trailing commas and unquoted object keys, plus multi-line quoted strings
+        yml_flow = """
+"team_name": "UMass Amherst"
+"model_contributors":
+  [
+    { name: "Nikhil Lebaka", affiliation: "UMass Amherst", email: "nrlebaka@umass.edu" },
+    { "name": "Evan Ray", "affiliation": "UMass Amherst", "email": "elray@umass.edu" },
+  ]
+methods_long: "2023-10-11: First line with colon.
+2023-10-12: Second unindented line inside quotes.
+"
+team_funding: none
+"""
+        d2 = parse(yml_flow)
+        self.assertEqual(d2["team_name"], "UMass Amherst")
+        self.assertEqual(len(d2["model_contributors"]), 2)
+        self.assertEqual(d2["model_contributors"][0]["name"], "Nikhil Lebaka")
+        self.assertEqual(d2["model_contributors"][1]["email"], "elray@umass.edu")
+        self.assertIn("2023-10-12: Second unindented line inside quotes.", d2["methods_long"])
+        self.assertEqual(d2["team_funding"], "none")
+
 
 if __name__ == "__main__":
     unittest.main()
