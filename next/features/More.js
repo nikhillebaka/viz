@@ -131,6 +131,7 @@ export function mountMore(zone, ctx) {
         { label: "Shortcuts", shortcut: "?", onSelect: () => guide("shortcuts", btn) },
       ]
       : [
+        { label: "Briefing", shortcut: "B", onSelect: () => ctx.openBriefing?.() },
         { label: "Data sources", shortcut: dataShortcut, onSelect: () => open("hubs") },
         warnings.count ? { label: "Warnings", shortcut: warnings.count.toLocaleString(), onSelect: () => open("warnings") } : null,
         "-",

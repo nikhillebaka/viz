@@ -632,7 +632,17 @@ class HubManager:
                     self.registry.set_active(fallback.id if fallback else None)
 
         from viz.core.catalog import WorkspaceCatalog
+        from viz.core.briefing_feeds import BriefingFeedStore
+        from viz.core.briefings import BriefingBuilder
         self.catalog = WorkspaceCatalog(self)
+        self.briefing_feeds = BriefingFeedStore(self.data_dir)
+        self.briefings = BriefingBuilder(self, self.briefing_feeds)
+
+    def _invalidate_catalog(self) -> None:
+        if hasattr(self, "catalog"):
+            self.catalog.invalidate()
+        if hasattr(self, "briefings"):
+            self.briefings.invalidate()
 
     def _remote_hub_record(self, hub_id: str) -> Optional[LocalHubRecord]:
         """Synthetic workspace record for a synced remote hub opened standalone (`remote_<id>`)."""
@@ -769,7 +779,7 @@ class HubManager:
 
     def _on_remote_inventory_change(self, hub_id: str, changed_models: List[str]):
         remote_ws_id = f"{REMOTE_HUB_PREFIX}{hub_id}"
-        self.catalog.invalidate()
+        self._invalidate_catalog()
         with self._lock:
             self._contexts.pop(remote_ws_id, None)
             loaded = list(self._contexts.values())
@@ -783,8 +793,7 @@ class HubManager:
             ctx.loader.scan_models(force_refresh=True)
 
     def _invalidate_all_contexts(self, exclude_id: Optional[str] = None):
-        if hasattr(self, "catalog"):
-            self.catalog.invalidate()
+        self._invalidate_catalog()
         with self._lock:
             items = [(hid, ctx) for hid, ctx in self._contexts.items() if hid != exclude_id]
         for _, ctx in items:
@@ -834,7 +843,7 @@ class HubManager:
         with self._lock:
             self._contexts.pop(rec.id, None)
         self._invalidate_all_contexts(exclude_id=rec.id)
-        self.catalog.invalidate()
+        self._invalidate_catalog()
         if activate:
             self._refresh_cached_server_config()
         return {
@@ -852,7 +861,7 @@ class HubManager:
         if not Path(rec.path).is_dir():
             raise ValueError(f"Hub folder no longer exists: {rec.path}")
         self.registry.set_active(hub_id)
-        self.catalog.invalidate()
+        self._invalidate_catalog()
         self._refresh_cached_server_config()
         return {
             "ok": True,
@@ -871,7 +880,7 @@ class HubManager:
 
         self.registry.remove_hub(hub_id)
         self._invalidate_all_contexts()
-        self.catalog.invalidate()
+        self._invalidate_catalog()
 
         if clear_cache:
             hubs_root = (self.data_dir / "hubs").resolve()
@@ -907,7 +916,7 @@ class HubManager:
         if self.get_context(clean_hub) is None:
             raise KeyError(f"Unknown hub '{clean_hub}'")
         aliases = self.registry.set_target_alias(clean_hub, clean_target, concept_id)
-        self.catalog.invalidate()
+        self._invalidate_catalog()
         return {
             "ok": True,
             "target_aliases": aliases,

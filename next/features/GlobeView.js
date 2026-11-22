@@ -579,6 +579,13 @@ export function mountGlobeView(host, ctx) {
           }),
         ),
         subParts.length ? h("p", { class: "gb-sub" }, subParts.join(" · ")) : null,
+        ctx.openBriefing ? h("div", { class: "gb-drawer-briefing-row", style: { marginTop: "8px" } },
+          h("button", {
+            type: "button",
+            class: "c-btn sm",
+            onclick: () => ctx.openBriefing(reg.key || selectedKey),
+          }, "Open Briefing →"),
+        ) : null,
       ),
       orderedStreams.length ? h("div", { class: "gb-streams" },
         h("div", { class: "gb-streams-head", "aria-hidden": "true" },

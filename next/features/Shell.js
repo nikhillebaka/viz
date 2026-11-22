@@ -14,6 +14,8 @@ import { loadGlobe } from "../lib/api.js";
 import { openTargetMenu } from "./TargetMenu.js";
 import { targetDimSpecs, defaultDims, isCategoricalTarget } from "./url.js";
 import { mountSections } from "../sections/index.js";
+import { mountBriefing } from "./BriefingView.js";
+import { buildBriefingHash, parseBriefingHash } from "./briefing/model.js";
 
 const pickers = {
   models: () => import("./ModelPicker.js").then((m) => m.openModelPicker),
@@ -46,9 +48,10 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
   const placeBtn = pill({ label: "Location", chevron: true, className: "app-place" });
   const showTargetBtn = (ctx.catalog?.targets?.length || 0) > 1 || manifest.targets.length > 1;
   const targetBtn = showTargetBtn ? pill({ label: "Target", chevron: true, className: "app-target" }) : null;
+  const briefingBtn = pill({ label: "Briefing", className: "app-briefing-btn" });
   const themeBtn = pill({ icon: icon.theme, ariaLabel: "Light or dark", className: "app-theme" });
   for (const b of [modelsBtn, placeBtn, targetBtn]) b?.setAttribute("aria-haspopup", b === targetBtn ? "menu" : "dialog");
-  tl.append(...[backBtn, modelsBtn, placeBtn, targetBtn].filter(Boolean));
+  tl.append(...[backBtn, modelsBtn, placeBtn, targetBtn, briefingBtn].filter(Boolean));
   tr.append(themeBtn);
   tooltip(themeBtn, "Light or dark", { placement: "bottom" });
 
@@ -87,7 +90,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
     targetBtn.setAttribute("aria-label", `Target: ${t?.label ?? store.get().target}`);
   };
   renderModels(); renderPlace(); renderTarget();
-  const glasses = [modelsBtn, placeBtn, targetBtn, themeBtn].filter(Boolean).map((b) => glass(b));
+  const glasses = [modelsBtn, placeBtn, targetBtn, briefingBtn, themeBtn].filter(Boolean).map((b) => glass(b));
   const [gModels, gPlace, gTarget] = glasses;
   const gBack = glass(backBtn);
   glasses.push(gBack);
@@ -228,6 +231,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
   function setGlobeOpen(open, updateHash = true) {
     const want = !!open;
     if (want === globeOpen) return;
+    if (want && briefingOpen) setBriefingOpen(false, null, false);
     globeOpen = want;
     root.classList.toggle("is-globe-open", want);
     if (want) {
@@ -263,9 +267,97 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
       chart.request();
     }
   }
-  backBtn.addEventListener("click", () => setGlobeOpen(false));
+  backBtn.addEventListener("click", () => {
+    if (briefingOpen) setBriefingOpen(false);
+    if (globeOpen) setGlobeOpen(false);
+  });
   ctx.openGlobe = () => setGlobeOpen(true);
   ctx.closeGlobe = () => setGlobeOpen(false);
+
+  function currentPlaceKeyForBriefing() {
+    const loc = store?.get?.()?.location;
+    if (!loc || !ctx.catalog?.places) return loc || null;
+    const hubId = manifest?.hub_id;
+    for (const p of Object.values(ctx.catalog.places)) {
+      if (p.key === loc) return p.key;
+      if ((p.hubs || []).some((h) => (!hubId || h.hub_id === hubId) && h.location_id === loc)) return p.key;
+    }
+    return loc;
+  }
+
+  let briefingOpen = false;
+  let briefingHost = null;
+  let briefingInst = null;
+  let prevBriefingOverflow = "";
+  function setBriefingOpen(open, placeKey = null, updateHash = true) {
+    const want = !!open;
+    if (want && globeOpen) setGlobeOpen(false, false);
+    if (want && briefingOpen) {
+      if (placeKey && briefingInst) briefingInst.loadPlace(placeKey);
+      return;
+    }
+    if (!want && !briefingOpen) return;
+    briefingOpen = want;
+    if (want) {
+      prevBriefingOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      markReady();
+      gBack.update();
+      root.classList.add("is-briefing-open");
+      if (!briefingHost) {
+        briefingHost = h("section", { class: "app-briefing", "aria-label": "Place epidemiological briefing" });
+        root.append(briefingHost);
+      }
+      if (!briefingInst) {
+        briefingInst = mountBriefing(briefingHost, ctx, {
+          placeKey,
+          onPlaceChange: (k) => {
+            if (!briefingOpen) return;
+            const targetHash = buildBriefingHash(k);
+            if (location.hash !== targetHash) {
+              history.replaceState(history.state, "", `${location.pathname}${location.search}${targetHash}`);
+            }
+          },
+          onOpenChart: (sig) => {
+            setBriefingOpen(false, null, true);
+            ctx.switchContext?.({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date });
+          },
+          onOpenScores: (sig) => {
+            setBriefingOpen(false, null, true);
+            const p = ctx.switchContext?.({ hub: sig.hub_id, target: sig.target_id, location: sig.location_id, date: sig.ref_date });
+            Promise.resolve(p).then(() => {
+              setTimeout(() => document.querySelector(".app-sections")?.scrollIntoView({ behavior: "smooth" }), 140);
+            });
+          },
+          onOpenGlobe: () => setGlobeOpen(true),
+        });
+      } else if (placeKey) {
+        briefingInst.loadPlace(placeKey);
+      }
+      if (updateHash) {
+        const targetHash = buildBriefingHash(placeKey);
+        if (location.hash !== targetHash) {
+          history.replaceState(history.state, "", `${location.pathname}${location.search}${targetHash}`);
+        }
+      }
+    } else {
+      root.classList.remove("is-briefing-open");
+      document.body.style.overflow = prevBriefingOverflow;
+      briefingInst?.destroy?.();
+      briefingInst = null;
+      briefingHost?.remove();
+      briefingHost = null;
+      glasses.forEach((g) => g.update());
+      dimGlasses.forEach((g) => g.update());
+      if (updateHash && location.hash.startsWith("#briefing")) {
+        history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+      }
+      chart.request();
+    }
+  }
+  briefingBtn.addEventListener("click", () => setBriefingOpen(true, currentPlaceKeyForBriefing(), true));
+  ctx.openBriefing = (pk = null) => setBriefingOpen(true, pk ?? currentPlaceKeyForBriefing(), true);
+  ctx.closeBriefing = () => setBriefingOpen(false);
 
   // ⋯ bubble (hubs, warnings, the Guide): loaded when idle; the page works without it
   let more = null, gone = false;
@@ -274,7 +366,7 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
   if (pickLocation) {
     markReady();
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (!gone && !store.get().location && !globeOpen) openPicker("location", placeBtn);
+      if (!gone && !store.get().location && !globeOpen && !briefingOpen) openPicker("location", placeBtn);
     }));
   }
 
@@ -299,29 +391,36 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
   function toggleTheme() { store.set({ theme: store.get().theme === "light" ? "dark" : "light" }); }
 
   const stopTime = timeKeys((dir) => chart.step(dir), {
-    active: () => { if (globeOpen) return false; const l = activeLayer(); return !l || l.panel.hasAttribute("data-time-keys"); },
+    active: () => { if (globeOpen || briefingOpen) return false; const l = activeLayer(); return !l || l.panel.hasAttribute("data-time-keys"); },
   });
   offs.push(on(window, "hashchange", () => {
     if (location.hash === "#globe") { setGlobeOpen(true, false); return; }
+    const bh = parseBriefingHash(location.hash);
+    if (bh.active) { setBriefingOpen(true, bh.placeKey, false); return; }
     if (globeOpen && !location.hash) setGlobeOpen(false, false);
+    if (briefingOpen && !location.hash) setBriefingOpen(false, null, false);
     sheet().then((m) => { const id = m.modelHash(); if (id) m.openModel(id, ctx); });
   }));
+  const initBriefing = parseBriefingHash(location.hash);
   if (location.hash === "#globe") setGlobeOpen(true, false);
+  else if (initBriefing.active) setBriefingOpen(true, initBriefing.placeKey, false);
   offs.push(stopTime, on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const layer = activeLayer();
-    // Escape: an open layer closes itself first (it stops the event), then Globe, then focus.
+    // Escape: an open layer closes itself first (it stops the event), then Globe/Briefing, then focus.
     if (e.key === "Escape") {
+      if (!layer && briefingOpen) { e.preventDefault(); setBriefingOpen(false); return; }
       if (!layer && globeOpen) { e.preventDefault(); setGlobeOpen(false); return; }
       if (!layer && store.get().focus && !e.target.closest?.(TEXT_FIELD)) { e.preventDefault(); chart.clearFocus(); }
       return;
     }
-    if (globeOpen || layer || e.target.closest?.(TEXT_FIELD)) return;
+    if (globeOpen || briefingOpen || layer || e.target.closest?.(TEXT_FIELD)) return;
     switch (e.key) {
       case "=": case "+": chart.zoom(1); break;
       case "-": chart.zoom(-1); break;
       case "0": chart.zoom(0); break;
       case "/": e.preventDefault(); openPicker("models", modelsBtn); break;
+      case "b": case "B": e.preventDefault(); ctx.openBriefing?.(); break;
       case "t": case "T": toggleTheme(); break;
       default: return;
     }
@@ -334,6 +433,9 @@ export function mountShell(root, ctx, { pickLocation = false } = {}) {
       pmfLoadToken++;
       pmfInst?.destroy();
       if (globeOpen) document.body.style.overflow = prevBodyOverflow;
+      if (briefingOpen) document.body.style.overflow = prevBriefingOverflow;
+      briefingInst?.destroy?.();
+      briefingHost?.remove();
       globeToken++;
       globeInst?.destroy();
       more?.destroy();

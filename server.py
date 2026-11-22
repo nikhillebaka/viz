@@ -242,7 +242,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         # Requiring a JSON content type forces a CORS preflight, so other sites open in the
         # browser cannot submit state-changing requests to this local server
-        if path.startswith(("/api/ensemble/", "/api/remote/", "/api/workspace/", "/api/cache/")) and not self.headers.get("Content-Type", "").startswith("application/json"):
+        if path.startswith(("/api/ensemble/", "/api/remote/", "/api/workspace/", "/api/cache/", "/api/briefing/")) and not self.headers.get("Content-Type", "").startswith("application/json"):
             self._send_json({"error": "This endpoint requires 'Content-Type: application/json'"}, status=415)
             return
         if path.startswith("/api/workspace/"):
@@ -272,6 +272,10 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             ctx = self._require_ctx(query)
             if ctx is not None:
                 self._handle_cache_refresh(ctx, clear=True)
+        elif path == "/api/briefing/refresh":
+            if not self._require_local_mutation("Briefing feed refresh"):
+                return
+            self._handle_briefing_refresh()
         elif path == "/api/ensemble/preview":
             ctx = self._require_ctx(query)
             if ctx is not None:
@@ -504,6 +508,18 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         if name == "globe":
             globe = mgr.catalog.build_globe()
             self._send_json(globe, etag=self._weak_etag(f"globe|{globe.get('stamp')}|{mgr.mode}"))
+            return
+        if name == "briefing":
+            place = query.get("place", [""])[0].strip() or None
+            payload = mgr.briefings.build_briefing(place)
+            meta = payload.get("meta") or {}
+            fs = payload.get("feed_status") or {}
+            resolved_k = (payload.get("place") or {}).get("key") or place or ""
+            etag = self._weak_etag(f"briefing|{resolved_k}|{meta.get('cache_stamp')}|{fs.get('refreshing')}|{mgr.mode}")
+            self._send_json(payload, etag=etag)
+            return
+        if name == "briefing/status":
+            self._send_json(mgr.briefing_feeds.get_status())
             return
         if name == "manifest":
             req_id = self._requested_hub_id(query)
@@ -797,6 +813,26 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             "models_cached": count,
             "rebuilt": rebuilt,
         })
+
+    def _handle_briefing_refresh(self):
+        from viz.core.briefing_feeds import FEED_SPECS
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            self._send_json({"error": "Invalid JSON body"}, status=400)
+            return
+        feeds = body.get("feeds")
+        if feeds is not None:
+            if not isinstance(feeds, list) or any(str(f) not in FEED_SPECS for f in feeds):
+                self._send_json({"error": "Unknown or invalid feed id in 'feeds'"}, status=400)
+                return
+            feeds = [str(f) for f in feeds]
+        force = bool(body.get("force", True))
+        mgr = self._mgr()
+        started = mgr.briefing_feeds.start_refresh(feed_ids=feeds, force=force)
+        self._send_json(
+            {"started": started, "status": mgr.briefing_feeds.get_status()},
+            status=202,
+        )
 
     def _handle_model_details(self, ctx: HubContext, query: dict):
         model_id = query.get("model", query.get("model_id", [""]))[0].strip()

@@ -26,17 +26,21 @@ export function setActiveHub(id) {
   fans.clear();
 }
 
-/** Drop every cached manifest, catalog, globe, and fan response (e.g. after data sync or refresh). */
+const briefingCache = new Map();
+
+/** Drop every cached manifest, catalog, globe, briefing, and fan response (e.g. after data sync or refresh). */
 export function clearAllCaches() {
   manifestCache.clear();
   catalogP = null;
   globeP = null;
+  briefingCache.clear();
   fans.clear();
 }
 
 /**
  * Append `workspace=<activeHubId>` to `/api/...` URLs (excluding `/api/workspace*`,
- * `/api/next/catalog`, and `/api/next/globe`) without altering existing params such as `/api/remote/*`'s `hub=`.
+ * `/api/next/catalog`, `/api/next/globe`, `/api/next/briefing*`, and `/api/briefing/*`) without
+ * altering existing params such as `/api/remote/*`'s `hub=`.
  * @param {string} url
  * @returns {string}
  */
@@ -48,6 +52,9 @@ export function apiUrl(url) {
     || basePath.startsWith("/api/workspace/")
     || basePath === "/api/next/catalog"
     || basePath === "/api/next/globe"
+    || basePath === "/api/next/briefing"
+    || basePath === "/api/next/briefing/status"
+    || basePath.startsWith("/api/briefing/")
   ) {
     return url;
   }
@@ -494,4 +501,48 @@ export function loadPmf(target, season, location, opts = {}) {
  */
 export function prefetchFan(target, season, location) {
   loadFan(target, season, location).catch(() => {});
+}
+
+export function invalidateBriefingCache() {
+  briefingCache.clear();
+}
+
+/** GET /api/next/briefing — multi-hub Place-First editorial briefing payload. */
+export function loadBriefing(placeKey = "", { bust = false } = {}) {
+  const key = String(placeKey || "__default__");
+  if (bust) briefingCache.delete(key);
+  const hit = briefingCache.get(key);
+  if (hit) return hit;
+  const q = new URLSearchParams();
+  if (placeKey) q.set("place", String(placeKey));
+  if (bust) q.set("_t", String(Date.now()));
+  const qs = q.toString();
+  const url = qs ? `/api/next/briefing?${qs}` : "/api/next/briefing";
+  const p = getJson(url).catch((e) => {
+    if (briefingCache.get(key) === p) briefingCache.delete(key);
+    throw e;
+  });
+  briefingCache.set(key, p);
+  return p;
+}
+
+/** GET /api/next/briefing/status — external surveillance/virology feed freshness & refresh state. */
+export function loadBriefingStatus() {
+  return getJson("/api/next/briefing/status");
+}
+
+/** POST /api/briefing/refresh — start non-blocking background refresh of external feeds. */
+export async function refreshBriefingFeeds({ feeds = null, force = true } = {}) {
+  const r = await fetch("/api/briefing/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...(feeds ? { feeds } : {}), force }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(data?.error || `refresh ${r.status}`);
+    e.status = r.status;
+    throw e;
+  }
+  return data;
 }
