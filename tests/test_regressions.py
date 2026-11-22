@@ -4,10 +4,16 @@ Covers scoring edge cases, synthetic ensemble safety and caching, heatmap metric
 parity with the leaderboard, task-export scope, and evaluation cache invalidation.
 """
 
+import http.server
+import json
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
+import urllib.error
+import urllib.request
 
 import polars as pl
 
@@ -15,6 +21,8 @@ from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams
 from viz.core.metrics import compute_pairwise_relative_wis, score_forecasts
 from viz.core.synthetic_ensemble import SyntheticEnsembleConfig
+from viz.core.workspace import HubManager
+from viz.server import SandboxRequestHandler
 
 TARGET = "wk inc flu hosp"
 ED_TARGET = "wk inc flu prop ed visits"
@@ -208,6 +216,134 @@ class TestRegressions(unittest.TestCase):
         df, telemetry = self.loader.ensemble_mgr.generate_ensemble_forecasts(cfg)
         self.assertEqual(sorted(df["output_type_id"].unique().to_list()), [0.25, 0.5, 0.75])
         self.assertEqual(telemetry["partial_coverage_tasks"], 0)
+
+    # --- Per-location evaluation & HTTP endpoint ----------------------------
+
+    def test_evaluate_model_locations_matches_leaderboard_per_location(self):
+        # Asymmetric model covering only horizon 0 in state "01" so pairwise Rel. WIS != 2-model ratio
+        partial = forecast_rows(0.9, locations=("01",)).filter(pl.col("horizon") == 0)
+        self.write_model("Partial-h0", partial)
+
+        for fair_flag, hs in ((False, None), (True, None), (False, [1]), (True, [0])):
+            for mid in ("Good-model", "Ok-model", "FluSight-baseline"):
+                params = EvaluationParams(
+                    target=TARGET,
+                    date=REF_DATE,
+                    models=["Good-model", "Ok-model", "Partial-h0", "FluSight-baseline"] if fair_flag else None,
+                    baseline="FluSight-baseline",
+                    fair=fair_flag,
+                    horizons=hs,
+                )
+                loc_res = self.engine.evaluate_model_locations(mid, params)
+                self.assertEqual(loc_res["baseline"], "FluSight-baseline")
+                for loc in ("US", "01", "02"):
+                    loc_params = EvaluationParams(
+                        target=TARGET,
+                        location=loc,
+                        date=REF_DATE,
+                        models=params.models,
+                        baseline="FluSight-baseline",
+                        fair=fair_flag,
+                        horizons=hs,
+                    )
+                    ev = self.engine.evaluate(loc_params)
+                    row = next((r for r in ev.rankings if r["model_id"] == mid), None)
+                    got = loc_res["locations"].get(loc)
+                    if row is None or not row["has_data_in_scope"]:
+                        self.assertIsNone(got, f"{mid} {loc} fair={fair_flag} hs={hs}")
+                        continue
+                    self.assertIsNotNone(got, f"{mid} {loc} fair={fair_flag} hs={hs}")
+                    self.assertEqual(got["n"], row["count"])
+                    self.assertAlmostEqual(got["wis"], row["wis"], places=6)
+                    if row["relative_wis"] is not None:
+                        self.assertAlmostEqual(got["rel_wis"], row["relative_wis"], places=4)
+                    else:
+                        self.assertIsNone(got["rel_wis"])
+                    if row["relative_wis_log"] is not None:
+                        self.assertAlmostEqual(got["rel_wis_log"], row["relative_wis_log"], places=4)
+                    else:
+                        self.assertIsNone(got["rel_wis_log"])
+
+        # Missing baseline in a location yields rel_wis=None (no silent peer fallback)
+        no_base = forecast_rows(1.25, locations=("02",))
+        self.write_model("Only-02", no_base)
+        shutil.rmtree(self.base / "model-output" / "FluSight-baseline")
+        self.write_model("FluSight-baseline", forecast_rows(1.6, locations=("01",)))
+        self.engine.clear_cache()
+        self.assertEqual(len(self.engine._loc_eval_cache), 0)
+        res_02 = self.engine.evaluate_model_locations(
+            "Only-02", EvaluationParams(target=TARGET, date=REF_DATE, baseline="FluSight-baseline"),
+        )
+        self.assertIn("02", res_02["locations"])
+        self.assertIsNone(res_02["locations"]["02"]["rel_wis"])
+        self.assertIsNone(res_02["locations"]["02"]["rel_wis_log"])
+        self.assertIsNotNone(res_02["locations"]["02"]["wis"])
+
+    def test_http_model_locations_endpoint(self):
+        data_dir = Path(tempfile.mkdtemp())
+        try:
+            mgr = HubManager(data_dir=data_dir, cli_hubs=[self.base], include_enclosing=False)
+
+            class H(SandboxRequestHandler):
+                hub_manager = mgr
+
+                def log_message(self, *args):
+                    pass
+
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as err:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/api/next/model-locations")
+                self.assertEqual(err.exception.code, 400)
+
+                url = (
+                    f"http://127.0.0.1:{port}/api/next/model-locations"
+                    f"?model=Good-model&target=wk+inc+flu+hosp&season=all&baseline=FluSight-baseline"
+                )
+                with urllib.request.urlopen(url) as resp:
+                    self.assertEqual(resp.status, 200)
+                    payload = json.loads(resp.read().decode("utf-8"))
+                self.assertEqual(payload["model"], "Good-model")
+                self.assertEqual(payload["baseline"], "FluSight-baseline")
+                self.assertEqual(sorted(payload["locations"].keys()), ["01", "02", "US"])
+                ev_01 = mgr.get_context().eval_engine.evaluate(
+                    EvaluationParams(target=TARGET, location="01", season="all", baseline="FluSight-baseline")
+                )
+                row_01 = next(r for r in ev_01.rankings if r["model_id"] == "Good-model")
+                self.assertAlmostEqual(payload["locations"]["01"]["rel_wis"], row_01["relative_wis"], places=4)
+                self.assertAlmostEqual(payload["locations"]["01"]["wis"], row_01["wis"], places=6)
+                self.assertEqual(payload["locations"]["01"]["n"], row_01["count"])
+            finally:
+                srv.shutdown()
+                srv.server_close()
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+    def test_prescore_caches_empty_target_models_and_hits_mem_cache(self):
+        # Persistent model that forecasts only ED_TARGET should still be returned (empty df) by prescore for TARGET
+        self.write_model("Ed-only", forecast_rows(1.1, target=ED_TARGET))
+        all_models = self.loader.scan_models(force_refresh=True)
+        oracle = self.loader.get_oracle()
+        first = self.engine.prescore.get_model_task_scores(
+            TARGET, ["Good-model", "Ed-only"], all_models, oracle, non_negative=True,
+        )
+        self.assertIn("Ed-only", first)
+        self.assertTrue(first["Ed-only"][0].is_empty())
+        self.assertEqual(first["Ed-only"][1]["quantile_count"], 0)
+        self.assertIn(TARGET, self.engine.prescore._mem_cache)
+
+        # Warm call hits _mem_cache even without hitting disk state
+        with patch.object(self.engine.prescore, "_load_disk_state", side_effect=AssertionError("disk read")):
+            second = self.engine.prescore.get_model_task_scores(
+                TARGET, ["Good-model", "Ed-only"], all_models, oracle, non_negative=True,
+            )
+        self.assertEqual(second["Good-model"][0].height, first["Good-model"][0].height)
+        self.assertTrue(second["Ed-only"][0].is_empty())
+
+        self.engine.prescore.invalidate(TARGET)
+        self.assertNotIn(TARGET, self.engine.prescore._mem_cache)
 
 
 if __name__ == "__main__":

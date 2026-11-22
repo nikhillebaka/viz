@@ -24,6 +24,7 @@ from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
 from viz.core.metrics import (
     TASK_KEY_COLS,
     compute_pairwise_relative_wis,
+    compute_pairwise_relative_wis_indexed,
     find_common_tasks,
     intersect_task_keys,
     model_task_keys,
@@ -276,6 +277,41 @@ class EvaluationResult:
         }
 
 
+@dataclass
+class _ResolvedScope:
+    """Resolved target, temporal/location/dim filters, model list, and baseline for an evaluation run."""
+    target: str
+    loc_param: str
+    date_param: str
+    season_param: str
+    fair_flag: bool
+    oracle: pl.DataFrame
+    locations_filter: Optional[List[str]]
+    agg_locs: Set[str]
+    scope_type: str
+    selected_seasons: List[str]
+    dates_filter: Optional[List[str]]
+    window_filter: Optional[WindowFilter]
+    target_meta: Dict[str, Any]
+    is_pmf_target: bool
+    extra_cols: List[str]
+    dim_filter: Dict[str, str]
+    all_models: Dict[str, Dict[str, Any]]
+    requested_model_ids: List[str]
+    baseline_id: Optional[str]
+    cfg_default: Optional[str]
+    tgt_default: Optional[str]
+    baseline_meta: Dict[str, Dict[str, Any]]
+    models_to_load: List[str]
+    model_meta_stats: Dict[str, Dict[str, Any]]
+    total_scope_dates_count: int
+    to_load: List[Tuple[str, List[str]]]
+    horizon_set: Optional[List[int]]
+    target_non_neg: bool
+    pop_map: Optional[Dict[str, int]]
+    season_hint: Optional[str]
+
+
 class EvaluationEngine:
     """
     Decoupled evaluation orchestrator.
@@ -291,14 +327,26 @@ class EvaluationEngine:
         self._eval_cache_size = 64
         self._eval_cache_lock = threading.Lock()
         self._eval_inflight: Dict[str, threading.Event] = {}
+        self._loc_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._loc_eval_cache_size = 16
+        self._loc_eval_cache_lock = threading.Lock()
+        self._loc_eval_inflight: Dict[str, threading.Event] = {}
+
+    def clear_cache(self) -> None:
+        """Clear both leaderboard and per-location evaluation caches."""
+        with self._eval_cache_lock:
+            self._eval_cache.clear()
+        with self._loc_eval_cache_lock:
+            self._loc_eval_cache.clear()
 
     def _compute_cache_key(self, params: EvaluationParams) -> str:
         oracle_pq = self.loader.cache_mgr.get_oracle_parquet()
         oracle_mtime = oracle_pq.stat().st_mtime if oracle_pq and oracle_pq.exists() else 0.0
 
+        all_models = self.loader.scan_models()
         models = params.models or []
         if not models or "all" in [m.lower() for m in models]:
-            models = list(self.loader.scan_models().keys())
+            models = list(all_models.keys())
         mtimes = []
         for mid in sorted(models):
             if hasattr(self.loader, "ensemble_mgr") and self.loader.ensemble_mgr.get_config(mid):
@@ -308,7 +356,12 @@ class EvaluationEngine:
                     f"{cfg.models}:{cfg.state_models}:{cfg.national_models}:{cfg.created_at}"
                 )
             else:
-                raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
+                info = all_models.get(mid)
+                if info is not None and "raw_name" in info:
+                    raw_id = str(info["raw_name"])
+                    is_local = bool(info.get("is_local", False))
+                else:
+                    raw_id, is_local = self.loader._resolve_model_id_and_local(mid)
                 pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
                 mtimes.append(f"{mid}:{pq.stat().st_mtime if pq and pq.exists() else 0.0}")
 
@@ -404,34 +457,244 @@ class EvaluationEngine:
                 entry["competed"] = int(competed)
         return out
 
-    def evaluate(self, params: EvaluationParams, force_refresh: bool = False) -> EvaluationResult:
-        """Execute evaluation across requested models according to the given parameters."""
-        cache_key = self._compute_cache_key(params)
+    @staticmethod
+    def _cache_get_or_run(
+        cache: "OrderedDict[str, Any]",
+        lock: threading.Lock,
+        inflight: Dict[str, threading.Event],
+        max_size: int,
+        cache_key: str,
+        force_refresh: bool,
+        compute_fn: Any,
+    ) -> Any:
         while True:
-            with self._eval_cache_lock:
-                if not force_refresh and cache_key in self._eval_cache:
-                    self._eval_cache.move_to_end(cache_key)
-                    return self._eval_cache[cache_key]
-                event = self._eval_inflight.get(cache_key)
+            with lock:
+                if not force_refresh and cache_key in cache:
+                    cache.move_to_end(cache_key)
+                    return cache[cache_key]
+                event = inflight.get(cache_key)
                 if event is None or force_refresh:
                     event = threading.Event()
-                    self._eval_inflight[cache_key] = event
+                    inflight[cache_key] = event
                     break
             event.wait()
 
         try:
-            result = self._evaluate_uncached(params)
-            with self._eval_cache_lock:
-                self._eval_cache[cache_key] = result
-                self._eval_cache.move_to_end(cache_key)
-                while len(self._eval_cache) > self._eval_cache_size:
-                    self._eval_cache.popitem(last=False)
+            result = compute_fn()
+            with lock:
+                cache[cache_key] = result
+                cache.move_to_end(cache_key)
+                while len(cache) > max_size:
+                    cache.popitem(last=False)
             return result
         finally:
-            with self._eval_cache_lock:
-                if self._eval_inflight.get(cache_key) is event:
-                    self._eval_inflight.pop(cache_key, None)
+            with lock:
+                if inflight.get(cache_key) is event:
+                    inflight.pop(cache_key, None)
             event.set()
+
+    def evaluate(self, params: EvaluationParams, force_refresh: bool = False) -> EvaluationResult:
+        """Execute evaluation across requested models according to the given parameters."""
+        cache_key = self._compute_cache_key(params)
+        return self._cache_get_or_run(
+            self._eval_cache,
+            self._eval_cache_lock,
+            self._eval_inflight,
+            self._eval_cache_size,
+            cache_key,
+            force_refresh,
+            lambda: self._evaluate_uncached(params),
+        )
+
+    def evaluate_model_locations(
+        self,
+        model_id: str,
+        params: EvaluationParams,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """Return per-location pairwise Relative WIS, WIS, and counts matching `evaluate(location=loc)`."""
+        table = self._evaluate_locations_table(params, force_refresh=force_refresh)
+        return {
+            "model": model_id,
+            "target": table["target"],
+            "baseline": table["baseline"],
+            "locations": table["models"].get(model_id, {}),
+        }
+
+    def _evaluate_locations_table(
+        self,
+        params: EvaluationParams,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        loc_params = EvaluationParams(
+            target=params.target,
+            location="all",
+            date=params.date,
+            season=params.season,
+            models=params.models,
+            baseline=params.baseline,
+            fair=params.fair,
+            weeks=params.weeks,
+            phase=params.phase,
+            horizons=params.horizons,
+            dims=params.dims,
+        )
+        cache_key = self._compute_cache_key(loc_params)
+        return self._cache_get_or_run(
+            self._loc_eval_cache,
+            self._loc_eval_cache_lock,
+            self._loc_eval_inflight,
+            self._loc_eval_cache_size,
+            cache_key,
+            force_refresh,
+            lambda: self._evaluate_locations_table_uncached(loc_params),
+        )
+
+    def _evaluate_locations_table_uncached(self, params: EvaluationParams) -> Dict[str, Any]:
+        sc = self._resolve_eval_scope(params)
+        if sc.is_pmf_target:
+            return {"target": sc.target, "baseline": sc.baseline_id, "models": {}}
+
+        prescored = self.prescore.get_model_task_scores(
+            sc.target,
+            [mid for mid, _ in sc.to_load],
+            sc.all_models,
+            sc.oracle,
+            non_negative=sc.target_non_neg,
+            extra_task_ids=sc.extra_cols,
+        )
+        scoped_frames: Dict[str, pl.DataFrame] = {}
+        for mid, (tdf_full, _) in prescored.items():
+            if tdf_full.is_empty():
+                continue
+            sub = self._filter_df_scope(
+                tdf_full,
+                locations=None,
+                reference_dates=sc.dates_filter,
+                horizons=sc.horizon_set,
+                dim_filter=sc.dim_filter,
+                window_filter=sc.window_filter,
+            )
+            if not sub.is_empty():
+                scoped_frames[mid] = sub
+
+        def _can_have_quantiles(mid: str) -> bool:
+            info = sc.all_models.get(mid) or {}
+            if info.get("is_synthetic"):
+                return True
+            ots = info.get("output_types") or []
+            if ots and "quantile" not in ots:
+                return False
+            tgts = info.get("targets") or []
+            if tgts and sc.target not in tgts:
+                return False
+            return True
+
+        fallback_items = [(mid, ds) for mid, ds in sc.to_load if mid not in prescored and _can_have_quantiles(mid)]
+        if fallback_items:
+            def _score_fb(item: Tuple[str, List[str]]) -> Optional[pl.DataFrame]:
+                mid, eval_dates = item
+                m_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
+                if m_df is None or m_df.is_empty():
+                    return None
+                m_df = self._filter_df_scope(
+                    m_df,
+                    horizons=sc.horizon_set,
+                    dim_filter=sc.dim_filter,
+                    window_filter=sc.window_filter,
+                )
+                if m_df.is_empty():
+                    return None
+                scored = score_forecasts(
+                    m_df,
+                    sc.oracle,
+                    target=sc.target,
+                    locations=None,
+                    reference_dates=sc.dates_filter,
+                    horizons=sc.horizon_set,
+                    non_negative=sc.target_non_neg,
+                    population_map=sc.pop_map,
+                    extra_task_ids=sc.extra_cols or None,
+                    aggregate_locations=sc.agg_locs,
+                    return_task_df=True,
+                )
+                tdf = scored.get("task_df") if scored else None
+                return tdf if (tdf is not None and not tdf.is_empty()) else None
+
+            for (mid, _), tdf in zip(fallback_items, ordered_map(_score_fb, fallback_items)):
+                if tdf is not None and not tdf.is_empty():
+                    scoped_frames[mid] = tdf
+
+        if not scoped_frames:
+            return {"target": sc.target, "baseline": sc.baseline_id, "models": {}}
+
+        model_list: List[str] = []
+        model_idx_map: Dict[str, int] = {}
+        frames: List[pl.DataFrame] = []
+        for mid, df in scoped_frames.items():
+            idx = len(model_list)
+            model_list.append(mid)
+            model_idx_map[mid] = idx
+            sel = [
+                pl.col("location").cast(pl.String),
+                pl.col("reference_date").cast(pl.String),
+                pl.col("horizon").cast(pl.Int64),
+            ] + [
+                pl.col(ec).cast(pl.String) for ec in sc.extra_cols if ec in df.columns
+            ] + [
+                pl.col("wis").cast(pl.Float64),
+                (pl.col("wis_log").cast(pl.Float64) if "wis_log" in df.columns else pl.lit(None, dtype=pl.Float64).alias("wis_log")),
+                pl.lit(idx, dtype=pl.Int32).alias("_m"),
+            ]
+            frames.append(df.select(sel))
+
+        long = pl.concat(frames, how="diagonal_relaxed")
+        parts = long.partition_by("location", as_dict=True)
+        n_models = len(model_list)
+        base_idx = model_idx_map.get(sc.baseline_id) if sc.baseline_id else None
+        task_cols = ["reference_date", "horizon"] + [ec for ec in sc.extra_cols if ec in long.columns]
+        scope_idxs = [model_idx_map[m] for m in sc.requested_model_ids if m in model_idx_map] if sc.fair_flag else []
+        per_model: Dict[str, Dict[str, Dict[str, Any]]] = {m: {} for m in model_list}
+
+        for loc_key, g in parts.items():
+            loc = str(loc_key[0] if isinstance(loc_key, tuple) else loc_key)
+            if sc.fair_flag and len(scope_idxs) > 1:
+                shared = (
+                    g.filter(pl.col("_m").is_in(scope_idxs))
+                    .select(["_m", *task_cols])
+                    .unique()
+                    .group_by(task_cols)
+                    .agg(pl.len().alias("_k"))
+                    .filter(pl.col("_k") == len(scope_idxs))
+                    .select(task_cols)
+                )
+                if shared.is_empty():
+                    continue
+                g = g.join(shared, on=task_cols, how="semi")
+
+            stats = g.group_by("_m").agg(
+                pl.col("wis").mean().alias("wis"),
+                pl.col("wis_log").mean().alias("wis_log"),
+                pl.len().alias("n"),
+            )
+            rel_lin, dir_lin = compute_pairwise_relative_wis_indexed(
+                g, n_models, base_idx, "wis", task_cols
+            )
+            rel_log, dir_log = compute_pairwise_relative_wis_indexed(
+                g, n_models, base_idx, "wis_log", task_cols
+            )
+            for m_idx, w, wl, cnt in stats.iter_rows():
+                per_model[model_list[m_idx]][loc] = {
+                    "rel_wis": rel_lin.get(m_idx),
+                    "rel_wis_log": rel_log.get(m_idx),
+                    "wis": _finite_or_none(w),
+                    "wis_log": _finite_or_none(wl),
+                    "direct_pct": dir_lin.get(m_idx),
+                    "direct_pct_log": dir_log.get(m_idx),
+                    "n": int(cnt),
+                }
+
+        return {"target": sc.target, "baseline": sc.baseline_id, "models": per_model}
 
     def _season_for_date(self, d: str) -> str:
         if hasattr(self.loader, "get_season_for_date"):
@@ -468,7 +731,7 @@ class EvaluationEngine:
             out = window_filter.apply(out)
         return out
 
-    def _evaluate_uncached(self, params: EvaluationParams) -> EvaluationResult:
+    def _resolve_eval_scope(self, params: EvaluationParams) -> _ResolvedScope:
         target = params.target or self.config.get_default_target()
         if is_peak_target(target):
             raise ValueError(
@@ -483,12 +746,10 @@ class EvaluationEngine:
         cal = self.loader.get_calendar() if hasattr(self.loader, "get_calendar") else None
         geo = self.loader.get_geo_graph() if hasattr(self.loader, "get_geo_graph") else None
 
-        # 1. Oracle ground truth
         oracle = self.loader.get_oracle(as_polars=True)
         if oracle is None or oracle.is_empty():
             raise ValueError("No oracle ground truth data found.")
 
-        # 2. Hierarchical GeoGraph location resolution & aggregate separation
         locations_filter: Optional[List[str]] = None
         if loc_param in ("states", "primary"):
             if geo is not None:
@@ -508,12 +769,8 @@ class EvaluationEngine:
         else:
             locations_filter = [loc_param]
 
-        if geo is not None:
-            agg_locs = set(geo.aggregate_locations_in_scope())
-        else:
-            agg_locs = {"US"}
+        agg_locs = set(geo.aggregate_locations_in_scope()) if geo is not None else {"US"}
 
-        # 3. Temporal scope resolution
         forecast_seasons = self.loader.get_forecast_seasons()
         all_avail_seasons = self.loader.get_all_seasons()
         default_latest_season = (
@@ -559,12 +816,10 @@ class EvaluationEngine:
                 selected_seasons = forecast_seasons or all_avail_seasons
                 dates_filter = self.loader.get_dates_for_season("all")
 
-        # 3b. Window filter
         window_filter = self._build_window_filter(target, params.weeks, params.phase, calendar=cal)
         if window_filter is not None and dates_filter:
             dates_filter = [d for d in dates_filter if window_filter.round_in_window(d)]
 
-        # 3c. Target metadata & extra Hubverse task_id dimensions
         target_meta = self.config.get_target_metadata(target)
         is_pmf_target = bool(
             target_meta.get("is_categorical")
@@ -582,7 +837,6 @@ class EvaluationEngine:
             elif dinfo.get("default"):
                 dim_filter[col] = str(dinfo["default"])
 
-        # 4. Model selection & baseline resolution
         all_models = self.loader.scan_models()
         if not params.models:
             requested_model_ids = list(all_models.keys())
@@ -613,7 +867,6 @@ class EvaluationEngine:
         if baseline_id and baseline_id not in models_to_load and baseline_id in all_models:
             models_to_load.append(baseline_id)
 
-        # 5. Resolve per-model active rounds in scope
         model_meta_stats: Dict[str, Dict[str, Any]] = {}
         total_scope_dates_count = len(dates_filter) if dates_filter else 0
         to_load: List[Tuple[str, List[str]]] = []
@@ -637,6 +890,71 @@ class EvaluationEngine:
         horizon_set = sorted(set(int(h) for h in params.horizons)) if params.horizons is not None else None
         target_non_neg = self.config.is_target_non_negative(target)
         pop_map = self._population_map(target)
+
+        return _ResolvedScope(
+            target=target,
+            loc_param=loc_param,
+            date_param=date_param,
+            season_param=season_param,
+            fair_flag=fair_flag,
+            oracle=oracle,
+            locations_filter=locations_filter,
+            agg_locs=agg_locs,
+            scope_type=scope_type,
+            selected_seasons=selected_seasons,
+            dates_filter=dates_filter,
+            window_filter=window_filter,
+            target_meta=target_meta,
+            is_pmf_target=is_pmf_target,
+            extra_cols=extra_cols,
+            dim_filter=dim_filter,
+            all_models=all_models,
+            requested_model_ids=requested_model_ids,
+            baseline_id=baseline_id,
+            cfg_default=cfg_default,
+            tgt_default=tgt_default,
+            baseline_meta=baseline_meta,
+            models_to_load=models_to_load,
+            model_meta_stats=model_meta_stats,
+            total_scope_dates_count=total_scope_dates_count,
+            to_load=to_load,
+            horizon_set=horizon_set,
+            target_non_neg=target_non_neg,
+            pop_map=pop_map,
+            season_hint=season_hint,
+        )
+
+    def _evaluate_uncached(self, params: EvaluationParams) -> EvaluationResult:
+        sc_res = self._resolve_eval_scope(params)
+        target = sc_res.target
+        loc_param = sc_res.loc_param
+        date_param = sc_res.date_param
+        season_param = sc_res.season_param
+        fair_flag = sc_res.fair_flag
+        oracle = sc_res.oracle
+        locations_filter = sc_res.locations_filter
+        agg_locs = sc_res.agg_locs
+        scope_type = sc_res.scope_type
+        selected_seasons = sc_res.selected_seasons
+        dates_filter = sc_res.dates_filter
+        window_filter = sc_res.window_filter
+        target_meta = sc_res.target_meta
+        is_pmf_target = sc_res.is_pmf_target
+        extra_cols = sc_res.extra_cols
+        dim_filter = sc_res.dim_filter
+        all_models = sc_res.all_models
+        requested_model_ids = sc_res.requested_model_ids
+        baseline_id = sc_res.baseline_id
+        cfg_default = sc_res.cfg_default
+        tgt_default = sc_res.tgt_default
+        baseline_meta = sc_res.baseline_meta
+        model_meta_stats = sc_res.model_meta_stats
+        total_scope_dates_count = sc_res.total_scope_dates_count
+        to_load = sc_res.to_load
+        horizon_set = sc_res.horizon_set
+        target_non_neg = sc_res.target_non_neg
+        pop_map = sc_res.pop_map
+        season_hint = sc_res.season_hint
 
         # Dispatch categorical/PMF targets vs quantile targets
         if is_pmf_target:

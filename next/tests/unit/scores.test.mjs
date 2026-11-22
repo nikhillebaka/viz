@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scopeOf, seasonWeekEnd, seasonWeekOf } from "../../sections/scope.js";
-import { metricsRequest, rowsFrom, sortRows, relLevel, coverageLevel, delimited, datesLabel, horizonsLabel, cliCommand } from "../../sections/scores/model.js";
+import { metricsRequest, modelLocationsQuery, rowsFrom, sortRows, relLevel, coverageLevel, delimited, datesLabel, horizonsLabel, cliCommand } from "../../sections/scores/model.js";
 import { parseUrl, writeUrl } from "../../features/url.js";
 
 const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -184,4 +184,39 @@ test("rowsFrom and horizonsLabel support extended RespiCast horizons (-1, 4 wk)"
   assert.ok(Math.abs(r.byH[4].rel - 150 / 180) < 1e-9);
   assert.equal(horizonsLabel(null, [1, 2, 3, 4]), "1–4 wk");
   assert.equal(horizonsLabel(null, [-1, 0, 1, 2, 3, 4]), "-1–4 wk");
+});
+
+test("modelLocationsQuery mirrors metricsRequest across seasons, window, horizons, rank, and fair", () => {
+  const sc = scopeOf({ date: "2026-01-10" }, manifest);
+  const q1 = new URLSearchParams(modelLocationsQuery("m1", sc, { target: "t", selected: ["m2"], allSeasons: ["2024-2025", "2025-2026"] }));
+  assert.equal(q1.get("model"), "m1");
+  assert.equal(q1.get("target"), "t");
+  assert.equal(q1.get("season"), "2025-2026");
+  assert.equal(q1.get("models"), "all");
+  assert.equal(q1.get("fair"), "0");
+  assert.equal(q1.get("baseline"), "B");
+  assert.equal(q1.get("horizons"), null);
+
+  // all-seasons + window + horizon subset
+  const qAll = new URLSearchParams(modelLocationsQuery("m1", {
+    ...sc, seasons: ["2025-2026", "2024-2025"], weeks: [4, 12], phase: "pre", horizons: [2, 1],
+  }, { target: "t", selected: [], allSeasons: ["2024-2025", "2025-2026"], availableHorizons: [1, 2, 3, 4] }));
+  assert.equal(qAll.get("season"), "all");
+  assert.equal(qAll.get("weeks"), "4-12");
+  assert.equal(qAll.get("phase"), "pre");
+  assert.equal(qAll.get("horizons"), "1,2");
+
+  // rank among selected OR fair=1 constrains models list and ensures queried model is present
+  const qSel = new URLSearchParams(modelLocationsQuery("m3", { ...sc, rank: "selected" }, {
+    target: "t", selected: ["m2", "m1"], allSeasons: ["2024-2025", "2025-2026"], baseline: "B_eff",
+  }));
+  assert.equal(qSel.get("models"), "B_eff,m1,m2,m3");
+  assert.equal(qSel.get("baseline"), "B_eff");
+  assert.equal(qSel.get("fair"), "0");
+
+  const qFair = new URLSearchParams(modelLocationsQuery("m1", { ...sc, fair: true }, {
+    target: "t", selected: ["m2"], allSeasons: ["2025-2026"],
+  }));
+  assert.equal(qFair.get("fair"), "1");
+  assert.equal(qFair.get("models"), "B,m1,m2");
 });

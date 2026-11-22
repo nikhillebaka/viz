@@ -616,15 +616,19 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_surveillance(ctx, query, precise=True)
         elif name == "metrics":
             # /api/metrics, plus horizons=0,1 to score only those horizons (relative WIS computed on them)
-            raw = query.get("horizons", [""])[0].strip()
-            horizons = None
-            if raw and raw.lower() != "all":
-                try:
-                    horizons = sorted({int(h) for h in raw.split(",") if h.strip()}) or None
-                except ValueError:
-                    self._send_json({"error": f"Invalid horizons '{raw}' (expected e.g. '0,1')"}, status=400)
-                    return
+            try:
+                horizons = self._parse_horizons(query)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
             self._handle_metrics(ctx, query, horizons=horizons)
+        elif name == "model-locations":
+            try:
+                horizons = self._parse_horizons(query)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._handle_model_locations(ctx, query, horizons=horizons)
         else:
             self._send_json({"error": f"Unknown endpoint '{path}'"}, status=404)
 
@@ -1077,11 +1081,29 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         seasons = [s.strip() for s in seasons_param.split(",") if s.strip()] or ctx.loader.get_forecast_seasons()
         self._send_json(ctx.loader.get_season_curves(target, location, seasons))
 
-    def _handle_metrics(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
+    @staticmethod
+    def _parse_horizons(query: dict) -> Optional[List[int]]:
+        raw = query.get("horizons", [""])[0].strip()
+        if not raw or raw.lower() == "all":
+            return None
+        try:
+            return sorted({int(h) for h in raw.split(",") if h.strip()}) or None
+        except ValueError as exc:
+            raise ValueError(f"Invalid horizons '{raw}' (expected e.g. '0,1')") from exc
+
+    def _parse_eval_params(
+        self,
+        ctx: HubContext,
+        query: dict,
+        *,
+        horizons: Optional[List[int]] = None,
+        location_override: Optional[str] = None,
+        ensure_model: Optional[str] = None,
+    ):
         from viz.core.evaluation import EvaluationParams
 
         target = query.get("target", [ctx.config.get_default_target()])[0]
-        loc_param = query.get("location", ["all"])[0]
+        loc_param = location_override if location_override is not None else query.get("location", ["all"])[0]
         date_param = query.get("date", ["all"])[0]
         season_param = query.get("season", [""])[0].strip()
         models_param = query.get("models", [""])[0]
@@ -1091,9 +1113,11 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         phase_param = query.get("phase", [""])[0].strip() or None
 
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()] if models_param else None
+        if ensure_model and model_ids and "all" not in [m.lower() for m in model_ids] and ensure_model not in model_ids:
+            model_ids.append(ensure_model)
         dims = self._extract_dims(ctx, target, query)
 
-        params = EvaluationParams(
+        return EvaluationParams(
             target=target,
             location=loc_param,
             date=date_param,
@@ -1107,6 +1131,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             dims=dims,
         )
 
+    def _handle_metrics(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
+        params = self._parse_eval_params(ctx, query, horizons=horizons)
         try:
             result = ctx.eval_engine.evaluate(params)
             self._send_json(result.to_dict())
@@ -1114,6 +1140,26 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:
             logger.warning("Metrics evaluation error: %s", exc)
+            self._send_json({"error": str(exc)}, status=500)
+
+    def _handle_model_locations(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
+        model_id = query.get("model", [""])[0].strip()
+        if not model_id:
+            self._send_json({"error": "Missing 'model' parameter"}, status=400)
+            return
+        params = self._parse_eval_params(
+            ctx,
+            query,
+            horizons=horizons,
+            location_override="all",
+            ensure_model=model_id,
+        )
+        try:
+            self._send_json(ctx.eval_engine.evaluate_model_locations(model_id, params))
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.warning("Model locations evaluation error: %s", exc)
             self._send_json({"error": str(exc)}, status=500)
 
     def _route_remote_post(self, remote_mgr: Any, path: str):
@@ -1215,8 +1261,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         try:
             registered = ctx.loader.register_synthetic_ensemble(cfg)
-            with ctx.eval_engine._eval_cache_lock:
-                ctx.eval_engine._eval_cache.clear()
+            ctx.eval_engine.clear_cache()
 
             if body.get("save_to_disk"):
                 ctx.loader.save_synthetic_ensemble(registered.id)
@@ -1241,8 +1286,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         try:
             res = ctx.loader.save_synthetic_ensemble(ensemble_id)
-            with ctx.eval_engine._eval_cache_lock:
-                ctx.eval_engine._eval_cache.clear()
+            ctx.eval_engine.clear_cache()
             self._send_json(res)
         except Exception as exc:
             logger.exception("Error persisting synthetic ensemble: %s", exc)
@@ -1258,8 +1302,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         try:
             removed = ctx.loader.remove_synthetic_ensemble(ensemble_id)
-            with ctx.eval_engine._eval_cache_lock:
-                ctx.eval_engine._eval_cache.clear()
+            ctx.eval_engine.clear_cache()
             if removed:
                 self._send_json({"status": "ok", "ensemble_id": ensemble_id})
             else:

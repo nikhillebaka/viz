@@ -97,7 +97,11 @@ class PreScoreStore:
         if model_info.get("is_synthetic"):
             # Only cache persistent/on-disk models; synthetic ensembles are cheap or dynamically edited
             return None, None
-        raw_id, is_local = self.loader._resolve_model_id_and_local(model_id)
+        if "raw_name" in model_info:
+            raw_id = str(model_info["raw_name"])
+            is_local = bool(model_info.get("is_local", False))
+        else:
+            raw_id, is_local = self.loader._resolve_model_id_and_local(model_id)
         pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
         if pq is None:
             return None, None
@@ -178,29 +182,64 @@ class PreScoreStore:
             return {}
 
         extra_cols = list(extra_task_ids)
-        target_pqs: Dict[str, Tuple[Path, List[Any]]] = {}
-        for mid in model_ids:
-            info = all_models.get(mid)
-            if not info:
-                continue
-            pq, sig = self._model_parquet_and_sig(mid, info)
-            if pq is not None and sig is not None:
-                target_pqs[mid] = (pq, sig)
+        cache_meta_key = (oracle_sig, bool(non_negative), tuple(extra_cols))
+        models_mtime = getattr(self.loader, "_models_cache_mtime", None)
+        empty_df = pl.DataFrame()
 
-        if not target_pqs:
-            return {}
+        def _needs_prescore_check(mid: str) -> bool:
+            info = all_models.get(mid)
+            if not info or info.get("is_synthetic"):
+                return False
+            ots = info.get("output_types") or []
+            if ots and "quantile" not in ots:
+                return False
+            tgts = info.get("targets") or []
+            if tgts and target not in tgts:
+                return False
+            return True
 
         with self._locks.get(f"prescore::{_target_slug(target)}"):
+            with self._mem_lock:
+                mem = self._mem_cache.get(target)
+            if (
+                mem is not None
+                and mem[0] == cache_meta_key
+                and models_mtime is not None
+                and models_mtime > 0
+                and mem[1] == models_mtime
+            ):
+                _, _, mem_by_mid, mem_models = mem
+                if all(mem_models.get(mid) is not None for mid in model_ids if _needs_prescore_check(mid)):
+                    return {
+                        mid: (mem_by_mid.get(mid, empty_df), mem_models[mid])
+                        for mid in model_ids
+                        if mid in mem_models
+                    }
+
+            target_pqs: Dict[str, Tuple[Path, List[Any]]] = {}
+            for mid in model_ids:
+                info = all_models.get(mid)
+                if not info:
+                    continue
+                pq, sig = self._model_parquet_and_sig(mid, info)
+                if pq is not None and sig is not None:
+                    target_pqs[mid] = (pq, sig)
+
+            if not target_pqs:
+                return {}
+
+            if mem is not None and mem[0] == cache_meta_key:
+                _, _, mem_by_mid, mem_models = mem
+                if all(mem_models.get(mid, {}).get("sig") == sig for mid, (_, sig) in target_pqs.items()):
+                    return {mid: (mem_by_mid.get(mid, empty_df), mem_models[mid]) for mid in target_pqs}
+
             disk_df, disk_meta = self._load_disk_state(target, oracle_sig, non_negative, extra_cols)
             cached_models = disk_meta.get("models") or {}
 
             stale_or_new: List[Tuple[str, Path, List[Any]]] = []
-            valid_cached: Set[str] = set()
             for mid, (pq, sig) in target_pqs.items():
                 entry = cached_models.get(mid)
-                if entry is not None and entry.get("sig") == sig:
-                    valid_cached.add(mid)
-                else:
+                if entry is None or entry.get("sig") != sig:
                     stale_or_new.append((mid, pq, sig))
 
             # Also prune deleted models if the score table already needs rewriting
@@ -280,12 +319,16 @@ class PreScoreStore:
                     except OSError as exc:
                         logger.warning("Could not write prescore cache for %s: %s", target, exc)
 
-            results: Dict[str, Tuple[pl.DataFrame, Dict[str, Any]]] = {}
+            all_by_mid: Dict[str, pl.DataFrame] = {}
             if not disk_df.is_empty() and "model_id" in disk_df.columns:
-                req_set = set(target_pqs.keys())
-                sub = disk_df.filter(pl.col("model_id").is_in(sorted(req_set)))
-                by_mid = {str(k[0]): g.drop("model_id") for k, g in sub.group_by(["model_id"], maintain_order=True)}
-                for mid in req_set:
-                    if mid in by_mid and mid in cached_models:
-                        results[mid] = (by_mid[mid], cached_models[mid])
-            return results
+                all_by_mid = {
+                    str(k[0]): g.drop("model_id")
+                    for k, g in disk_df.group_by(["model_id"], maintain_order=True)
+                }
+            with self._mem_lock:
+                self._mem_cache[target] = (cache_meta_key, models_mtime, all_by_mid, dict(cached_models))
+            return {
+                mid: (all_by_mid.get(mid, empty_df), cached_models[mid])
+                for mid in target_pqs
+                if mid in cached_models
+            }

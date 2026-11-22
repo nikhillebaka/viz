@@ -1086,6 +1086,69 @@ def _relative_wis_from_ratios(
     return results
 
 
+def compute_pairwise_relative_wis_indexed(
+    df: pl.DataFrame,
+    n_models: int,
+    base_idx: Optional[int],
+    metric_col: str,
+    task_cols: Sequence[str],
+) -> Tuple[Dict[int, float], Dict[int, float]]:
+    """Vectorized pairwise tournament relative WIS for a single partitioned location DataFrame."""
+    if base_idx is None or base_idx < 0 or base_idx >= n_models or metric_col not in df.columns:
+        return {}, {}
+
+    f = df.filter(pl.col(metric_col).is_not_null() & pl.col(metric_col).is_finite())
+    if f.is_empty():
+        return {}, {}
+
+    t_cols = list(task_cols)
+    f = f.unique(subset=["_m", *t_cols], keep="last")
+    tids = f.select(pl.struct(*t_cols).rank("dense").cast(pl.Int64) - 1).to_series().to_numpy()
+    mids = f.get_column("_m").to_numpy()
+    w = f.get_column(metric_col).cast(pl.Float64).to_numpy()
+    n_tasks = int(tids.max()) + 1
+
+    V = np.zeros((n_tasks, n_models), dtype=np.float64)
+    P = np.zeros((n_tasks, n_models), dtype=np.float64)
+    V[tids, mids] = w
+    P[tids, mids] = 1.0
+    C = P.T @ P
+    S = V.T @ P
+
+    has_tasks = np.diag(C) > 0
+    if not has_tasks[base_idx]:
+        return {}, {}
+
+    valid = (C > 0) & (S > 0) & (S.T > 0)
+    np.fill_diagonal(valid, has_tasks)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean_i = np.where(C > 0, S / C, 0.0)
+        ratios = np.where(valid, mean_i / mean_i.T, 1.0)
+        np.fill_diagonal(ratios, 1.0)
+        log_r = np.where(valid, np.log(ratios), 0.0)
+
+    cnt = valid.sum(axis=1)
+    active_n = int(has_tasks.sum())
+    ok = (cnt > 1) | ((active_n == 1) & (cnt == 1))
+    theta = np.full(n_models, np.nan, dtype=np.float64)
+    theta[ok] = np.exp(log_r[ok].sum(axis=1) / cnt[ok])
+
+    base_theta = theta[base_idx]
+    if not (np.isfinite(base_theta) and base_theta > 0):
+        return {}, {}
+
+    rel: Dict[int, float] = {base_idx: 1.0}
+    direct: Dict[int, float] = {base_idx: 0.0}
+    for i in range(n_models):
+        if i == base_idx:
+            continue
+        if np.isfinite(theta[i]):
+            rel[i] = round(float(theta[i] / base_theta), 4)
+        if valid[i, base_idx]:
+            direct[i] = round((float(ratios[i, base_idx]) - 1.0) * 100.0, 2)
+    return rel, direct
+
+
 def _pairwise_relative_wis_reference(
     model_task_wis: Dict[str, Any],
     baseline_model: Optional[str] = None,

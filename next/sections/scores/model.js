@@ -20,29 +20,55 @@ export const DASH = "–";
  * @returns {{ query: string, full: string | null, quick: string | null, key: string, models: "all" | string[] }}
  *   key identifies the response
  */
+function applyScopeFilters(p, scope, { allSeasons = [], availableHorizons = HORIZONS } = {}) {
+  const all = allSeasons.length > 1 && scope.seasons.length === allSeasons.length;
+  p.set("season", all ? "all" : scope.seasons.join(","));
+  p.set("fair", scope.fair ? "1" : "0");
+  if (scope.weeks) p.set("weeks", `${scope.weeks[0]}-${scope.weeks[1]}`);
+  if (scope.phase) p.set("phase", scope.phase);
+  const hs = scope.horizons && scope.horizons.length < availableHorizons.length ? [...scope.horizons].sort((a, b) => a - b) : null;
+  return hs;
+}
+
 export function metricsRequest(scope, { target, selected, allSeasons, availableHorizons = HORIZONS }) {
   const p = new URLSearchParams();
   p.set("target", target);
   p.set("location", scope.location);
   p.set("date", "all");
-  const all = allSeasons.length > 1 && scope.seasons.length === allSeasons.length;
-  p.set("season", all ? "all" : scope.seasons.join(","));
+  const hs = applyScopeFilters(p, scope, { allSeasons, availableHorizons });
   // relative WIS among every model in scope, so adding a model never moves anyone else's number;
   // shared-only (common tasks) is defined among the selected models, so it scores just those
   const picked = [...new Set([...selected, scope.baseline].filter(Boolean))].sort();
   const models = scope.rank === "all" && !scope.fair ? "all" : picked;
   p.set("models", models === "all" ? "all" : models.join(","));
-  p.set("fair", scope.fair ? "1" : "0");
   if (scope.baseline) p.set("baseline", scope.baseline);
-  if (scope.weeks) p.set("weeks", `${scope.weeks[0]}-${scope.weeks[1]}`);
-  if (scope.phase) p.set("phase", scope.phase);
-  const hs = scope.horizons && scope.horizons.length < availableHorizons.length ? [...scope.horizons].sort((a, b) => a - b) : null;
   const full = hs ? p.toString() : null;
   if (hs) p.set("horizons", hs.join(","));
   const query = p.toString();
   let quick = null;
   if (models === "all" && picked.length) { p.set("models", picked.join(",")); quick = p.toString(); }
   return { query, full, quick, key: query, models };
+}
+
+/**
+ * Query string for `/api/next/model-locations` matching the active leaderboard evaluation scope.
+ * @param {string} id
+ * @param {ReturnType<import("../scope.js").scopeOf>} scope
+ * @param {{ target: string, selected?: string[], allSeasons?: string[], availableHorizons?: number[], baseline?: string | null }} o
+ * @returns {string}
+ */
+export function modelLocationsQuery(id, scope, { target, selected = [], allSeasons = [], availableHorizons = HORIZONS, baseline = null } = {}) {
+  const p = new URLSearchParams();
+  p.set("model", id);
+  p.set("target", target);
+  const hs = applyScopeFilters(p, scope, { allSeasons, availableHorizons });
+  const effBase = baseline || scope.baseline;
+  const picked = [...new Set([...selected, effBase, id].filter(Boolean))].sort();
+  const models = scope.rank === "all" && !scope.fair ? "all" : picked;
+  p.set("models", models === "all" ? "all" : models.join(","));
+  if (effBase) p.set("baseline", effBase);
+  if (hs) p.set("horizons", hs.join(","));
+  return p.toString();
 }
 
 /* ------------------------------------------------------------------ rows */

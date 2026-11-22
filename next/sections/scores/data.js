@@ -1,5 +1,5 @@
-/* The scores' data: /api/next/metrics, /api/model-details, /api/season-curves and the per-location WIS from
- * /api/heatmap. Responses are cached (FIFO); a metrics request supersedes the one in flight. */
+/* The scores' data: /api/next/metrics, /api/next/model-locations, /api/model-details and /api/season-curves.
+ * Responses are cached (FIFO); a metrics request supersedes the one in flight. */
 import { apiUrl, getActiveHub } from "../../lib/api.js";
 
 const LIMIT = 50;
@@ -83,36 +83,16 @@ export function loadCurves(target, location, seasons) {
 }
 
 /**
- * Shared-task mean WIS per state/country for a model and the baseline in one season (heatmap models × locations).
- * @param {number[] | null} [horizons=null]
- * @returns {Promise<{ model: Map<string, number>, base: Map<string, number>, counts: Map<string, number> }>}
+ * Per-location pairwise Relative WIS, WIS, and counts for a model in the active evaluation scope.
+ * @param {string} query from `modelLocationsQuery`
+ * @returns {Promise<{ locations: Map<string, object>, baseline: string | null }>}
  */
-export function loadPlaces(target, season, id, baseline, horizons = null) {
-  const models = [...new Set([id, baseline].filter(Boolean))];
-  const p = new URLSearchParams({
-    rows: "model", cols: "location", target, metric: "wis", location: "states",
-    season, fair: "1", models: models.join(","),
-  });
-  if (Array.isArray(horizons) && horizons.length) p.set("horizons", horizons.join(","));
-  else p.set("horizon", "all");
-  const q = p.toString();
-  const key = sk(q);
+export function loadPlaces(query) {
+  const key = sk(query);
   if (caches.places.has(key)) return caches.places.get(key);
-  const pr = getJson(`/api/next/heatmap?${q}`).then((d) => {
-    const row = (mid) => {
-      const i = (d.y_keys || []).indexOf(mid), m = new Map();
-      if (i < 0) return m;
-      (d.x_keys || []).forEach((abbr, j) => { const v = d.matrix?.[i]?.[j]; if (typeof v === "number") m.set(abbr, v); });
-      return m;
-    };
-    const counts = new Map();
-    if (d.cell_meta) {
-      for (const abbr of d.x_keys || []) {
-        const cnt = d.cell_meta[`${id}:${abbr}`]?.task_count;
-        if (typeof cnt === "number") counts.set(abbr, cnt);
-      }
-    }
-    return { model: row(id), base: row(baseline), counts };
-  }).catch((e) => { caches.places.delete(key); throw e; });
+  const pr = getJson(`/api/next/model-locations?${query}`).then((d) => ({
+    locations: new Map(Object.entries(d?.locations || {})),
+    baseline: d?.baseline || null,
+  })).catch((e) => { caches.places.delete(key); throw e; });
   return remember(caches.places, key, pr);
 }

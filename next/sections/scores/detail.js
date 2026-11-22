@@ -6,8 +6,9 @@ import { tooltip } from "../../ui/floating.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
 import { classifyHubGeo } from "../../geo/picker_geo.js";
 import { EU_GRID_PROPORTIONED, EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT } from "../../geo/eu_tiles.js";
-import { LEVELS, fmtScore, fmtRel, relLevel } from "./model.js";
+import { LEVELS, fmtScore, fmtRel, relLevel, modelLocationsQuery } from "./model.js";
 import { loadDetails, loadPlaces } from "./data.js";
+import { targetHorizons } from "../scope.js";
 import { s } from "./figures.js";
 import { seriesColor } from "../../chart/layout.js";
 import { slotOf } from "../../features/selection.js";
@@ -64,22 +65,31 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
   el.append(
     block("Anatomy", anatomy, key),
     block("Coverage", h("div", { class: "sc-cov-wrap" }, cov)),
-    block(tilesTitle(scope, manifest), tiles),
+    block("Locations", tiles),
     h("div", { class: "sc-block sc-wide" }, h("div", { class: "sc-block-title" }, "Submissions"), subs),
     h("div", { class: "sc-block sc-wide" }, facts),
   );
 
-  // per location: shared-task mean WIS over the baseline's on the newest scoped season & active horizons
-  const season = scope.seasons[0];
-  if (season && !row.baseline) {
+  // per location: pairwise tournament relative WIS, WIS, and count matching the leaderboard scope
+  if (scope.seasons.length && !row.baseline) {
+    const st = store.get();
+    const isLog = scope.scale === "log";
+    const query = modelLocationsQuery(row.id, scope, {
+      target: st.target,
+      selected: st.sel.selected,
+      allSeasons: (manifest.seasons || []).map((x) => x.id),
+      availableHorizons: targetHorizons(manifest, st.target),
+      baseline: baseline || scope.baseline,
+    });
     tiles.append(h("span", { class: "sc-quiet" }, "Loading"));
-    loadPlaces(store.get().target, season, row.id, baseline || scope.baseline, scope.horizons).then(({ model, base: b, counts }) => {
+    loadPlaces(query).then(({ locations }) => {
       tiles.replaceChildren(...tileItems.map((it) => {
         const { loc, key: k, label } = it;
-        const m = loc ? (model.get(loc.abbr) ?? model.get(loc.id) ?? model.get(k)) : null;
-        const bv = loc ? (b.get(loc.abbr) ?? b.get(loc.id) ?? b.get(k)) : null;
-        const n = loc ? (counts?.get(loc.abbr) ?? counts?.get(loc.id) ?? counts?.get(k) ?? null) : null;
-        const rel = m != null && bv > 0 ? m / bv : null, lvl = relLevel(rel);
+        const entry = loc ? (locations.get(loc.id) ?? locations.get(loc.abbr) ?? locations.get(k)) : null;
+        const rel = entry ? (isLog ? entry.rel_wis_log : entry.rel_wis) : null;
+        const wis = entry ? (isLog ? entry.wis_log : entry.wis) : null;
+        const n = entry?.n ?? null;
+        const lvl = relLevel(rel);
         const gridStyle = it.col != null
           ? {
             gridColumn: it.w > 1 ? `${it.col} / span ${it.w}` : String(it.col),
@@ -91,7 +101,15 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
           style: { ...gridStyle, "--c": lvl ? `var(--score-${lvl})` : null },
           "aria-label": label, onclick: () => loc && goTo({ location: loc.id }),
         });
-        tooltip(t, `${label} · ${rel == null ? "–" : `${fmtRel(rel)}× baseline WIS · WIS ${fmtScore(m)}${n != null ? ` · ${n} ${n === 1 ? "forecast" : "forecasts"}` : ""}`}`);
+        const tip = rel == null && wis == null
+          ? `${label} · –`
+          : [
+            label,
+            rel != null && `Rel. WIS ${fmtRel(rel)}`,
+            wis != null && `${isLog ? "Log WIS" : "WIS"} ${fmtScore(wis)}`,
+            n != null && `${n} ${n === 1 ? "forecast" : "forecasts"}`,
+          ].filter(Boolean).join(" · ");
+        tooltip(t, tip);
         return t;
       }));
     }, () => tiles.replaceChildren(h("span", { class: "sc-quiet" }, "Can't load locations")));
@@ -134,15 +152,6 @@ function buildTileLayout(geoCls, manifest, byAbbr) {
       return { key: abbr, loc, label: loc?.name || abbr, col: cx + 1, row: cy + 1, w: 1, h: 1 };
     }),
   };
-}
-
-/* "Locations", plus where the tiles' scope is wider than the table's: one season and every week */
-function tilesTitle(scope, manifest) {
-  return [
-    "Locations",
-    scope.seasons.length > 1 && (manifest.seasonById.get(scope.seasons[0])?.label || scope.seasons[0]),
-    (scope.weeks || scope.phase) && "whole season",
-  ].filter(Boolean).join(" · ");
 }
 
 function drawCoverage(svg, row, base, color) {
