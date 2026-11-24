@@ -17,7 +17,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY --chown=viz:viz server.py viz.config.json THIRD_PARTY_NOTICES.md ./
+COPY --chown=viz:viz server.py THIRD_PARTY_NOTICES.md ./
 COPY --chown=viz:viz core ./core
 COPY --chown=viz:viz remote ./remote
 COPY --chown=viz:viz web ./web
