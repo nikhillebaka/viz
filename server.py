@@ -32,8 +32,14 @@ from viz.remote.sync import current_season
 from viz.remote.transports import TransportError
 
 
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+VERBOSE_LOGGING = _env_truthy("VIZ_VERBOSE")
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO if VERBOSE_LOGGING else logging.ERROR,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -93,10 +99,15 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     """Custom request handler with multi-hub REST API routing and static file delivery."""
 
     hub_manager: Optional[HubManager] = HUB_MANAGER
+    log_requests: bool = VERBOSE_LOGGING
 
     def __init__(self, *args, **kwargs):
         self._cache_control_override: Optional[str] = None
         super().__init__(*args, directory=str(NEXT_DIR), **kwargs)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        if self.log_requests:
+            super().log_message(format, *args)
 
     def setup(self):
         try:
@@ -1383,8 +1394,12 @@ def run_server(
     mode: Optional[str] = None,
     data_dir: Optional[str] = None,
     no_auto_hub: bool = False,
+    verbose: Optional[bool] = None,
 ):
     """Launch the threaded HTTP server with transparent cache warmup."""
+    effective_verbose = VERBOSE_LOGGING if verbose is None else bool(verbose)
+    SandboxRequestHandler.log_requests = effective_verbose
+    logging.getLogger().setLevel(logging.INFO if effective_verbose else logging.ERROR)
     if hubs or mode is not None or data_dir is not None or no_auto_hub or HUB_MANAGER is None:
         try:
             cli_paths = [Path(h) for h in hubs] if hubs else None
@@ -1473,6 +1488,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["local", "web"], default=None, help="Runtime mode: local (default) or web")
     parser.add_argument("--data-dir", type=str, default=None, help="Override directory for workspace & caches")
     parser.add_argument("--no-auto-hub", action="store_true", help="Do not auto-register an enclosing parent hub")
+    parser.add_argument("-v", "--verbose", action="store_true", default=None, help="Log HTTP requests and diagnostic info to the terminal")
     args = parser.parse_args()
     run_server(
         port=args.port,
@@ -1481,4 +1497,5 @@ if __name__ == "__main__":
         mode=args.mode,
         data_dir=args.data_dir,
         no_auto_hub=args.no_auto_hub,
+        verbose=args.verbose,
     )

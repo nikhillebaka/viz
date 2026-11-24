@@ -5,9 +5,11 @@ parity with the leaderboard, task-export scope, and evaluation cache invalidatio
 """
 
 import http.server
+import io
 import json
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import threading
 import unittest
@@ -345,6 +347,129 @@ class TestRegressions(unittest.TestCase):
 
         self.engine.prescore.invalidate(TARGET)
         self.assertNotIn(TARGET, self.engine.prescore._mem_cache)
+
+    def test_negative_horizons_excluded_by_default_when_nonneg_present(self):
+        # Add oracle truth for week -1 (2024-01-06) and append h=-1 rows to models alongside h=0,1
+        oracle_path = self.base / "target-data" / "oracle-output.csv"
+        extra_oracle = [
+            {
+                "as_of": "2024-06-01",
+                "target": TARGET,
+                "target_end_date": "2024-01-06",
+                "location": loc,
+                "output_type": "quantile",
+                "oracle_value": val,
+            }
+            for loc, val in TRUTH.items()
+        ]
+        pl.concat([pl.read_csv(oracle_path, schema_overrides={"location": pl.String}), pl.DataFrame(extra_oracle)]).write_csv(oracle_path)
+
+        def with_neg1(scale: float) -> pl.DataFrame:
+            neg = pl.DataFrame([
+                {
+                    "location": loc,
+                    "horizon": -1,
+                    "target_end_date": "2024-01-06",
+                    "reference_date": REF_DATE,
+                    "target": TARGET,
+                    "output_type": "quantile",
+                    "output_type_id": q,
+                    "value": TRUTH[loc] * scale * (0.6 + 0.8 * q),
+                }
+                for loc in ("US", "01", "02")
+                for q in QUANTILES
+            ])
+            return pl.concat([neg, forecast_rows(scale)])
+
+        for mid, scale in (("FluSight-baseline", 1.5), ("Good-model", 1.05)):
+            self.write_model(mid, with_neg1(scale))
+
+        # Default evaluation drops h=-1 cleanly and keeps only [0, 1]
+        default_res = self.engine.evaluate(
+            EvaluationParams(target=TARGET, location="states", date=REF_DATE, baseline="FluSight-baseline")
+        )
+        good_row = next(r for r in default_res.rankings if r["model_id"] == "Good-model")
+        self.assertEqual(sorted(int(h) for h in good_row["by_horizon"].keys()), [0, 1])
+        self.assertEqual(good_row["count"], 4)
+
+        loc_res = self.engine.evaluate_model_locations(
+            "Good-model", EvaluationParams(target=TARGET, date=REF_DATE, baseline="FluSight-baseline"),
+        )
+        self.assertEqual(loc_res["locations"]["01"]["n"], 2)
+
+        # Explicit horizons=[-1, 0] still scores -1 when requested
+        explicit_res = self.engine.evaluate(
+            EvaluationParams(target=TARGET, location="states", date=REF_DATE, baseline="FluSight-baseline", horizons=[-1, 0])
+        )
+        good_exp = next(r for r in explicit_res.rankings if r["model_id"] == "Good-model")
+        self.assertEqual(sorted(int(h) for h in good_exp["by_horizon"].keys()), [-1, 0])
+
+        # Hindcast-only target with exclusively negative horizons still scores -1 by default
+        neg_only_target = "hindcast only flu hosp"
+        neg_oracle = [
+            {
+                "as_of": "2024-06-01",
+                "target": neg_only_target,
+                "target_end_date": "2024-01-06",
+                "location": loc,
+                "output_type": "quantile",
+                "oracle_value": val,
+            }
+            for loc, val in TRUTH.items()
+        ]
+        pl.concat([pl.read_csv(oracle_path, schema_overrides={"location": pl.String}), pl.DataFrame(neg_oracle)]).write_csv(oracle_path)
+        for mid, scale in (("FluSight-baseline", 1.4), ("Hindcast-model", 1.1)):
+            df_h = pl.DataFrame([
+                {
+                    "location": loc,
+                    "horizon": -1,
+                    "target_end_date": "2024-01-06",
+                    "reference_date": REF_DATE,
+                    "target": neg_only_target,
+                    "output_type": "quantile",
+                    "output_type_id": q,
+                    "value": TRUTH[loc] * scale * (0.6 + 0.8 * q),
+                }
+                for loc in ("US", "01", "02")
+                for q in QUANTILES
+            ])
+            self.write_model(mid, df_h)
+        hind_res = self.engine.evaluate(
+            EvaluationParams(target=neg_only_target, location="states", date=REF_DATE, baseline="FluSight-baseline")
+        )
+        hind_row = next(r for r in hind_res.rankings if r["model_id"] == "Hindcast-model")
+        self.assertEqual(sorted(int(h) for h in hind_row["by_horizon"].keys()), [-1])
+
+    def test_request_logging_off_by_default_and_toggleable(self):
+        self.assertFalse(SandboxRequestHandler.log_requests)
+        data_dir = Path(tempfile.mkdtemp())
+        try:
+            mgr = HubManager(data_dir=data_dir, cli_hubs=[self.base], include_enclosing=False)
+
+            class H(SandboxRequestHandler):
+                hub_manager = mgr
+
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                buf_quiet = io.StringIO()
+                with patch.object(sys, "stderr", buf_quiet):
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status") as resp:
+                        self.assertEqual(resp.status, 200)
+                self.assertEqual(buf_quiet.getvalue(), "")
+
+                H.log_requests = True
+                buf_verbose = io.StringIO()
+                with patch.object(sys, "stderr", buf_verbose):
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status") as resp:
+                        self.assertEqual(resp.status, 200)
+                self.assertIn("GET /api/status", buf_verbose.getvalue())
+            finally:
+                srv.shutdown()
+                srv.server_close()
+        finally:
+            shutil.rmtree(data_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

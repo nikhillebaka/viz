@@ -13,6 +13,7 @@
  *
  * parseUrl() and writeUrl() are pure (node tests run them); readUrl() and syncUrl() add the browser. */
 import { parseIso } from "../lib/scale.js";
+import { targetHorizons } from "../sections/scope.js";
 import { create, fromLists, chartedBySlot } from "./selection.js";
 import { parseLayers } from "./chart/layers.js";
 
@@ -218,7 +219,7 @@ export function parseUrl(search, manifest) {
     }
     if (Object.keys(parsedDims).length) out.dims = { ...defaultDims(manifest, effectiveTarget), ...parsedDims };
   }
-  const scope = parseScope(q, manifest);
+  const scope = parseScope(q, manifest, effectiveTarget);
   if (scope) out.scope = scope;
   const scores = parseScores(q, manifest);
   if (scores) out.scores = scores;
@@ -257,15 +258,16 @@ const SORT_KEYS = ["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per
 const COL_KEYS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"];
 
 /* the evaluation scope (sections/scope.js), only what differs from its defaults */
-function parseScope(q, manifest) {
+function parseScope(q, manifest, targetId) {
   const sc = {};
   const ss = list(q, "ss").filter((s) => manifest.seasonById?.has(s));
   if (ss.length) sc.seasons = ss;
   const wk = /^(\d{1,2})[-:](\d{1,2})$/.exec(q.get("wk") || "");
   if (wk) { const a = Math.max(1, Math.min(53, +wk[1])), b = Math.max(1, Math.min(53, +wk[2])); sc.weeks = [Math.min(a, b), Math.max(a, b)]; }
   if (["pre", "peak", "post"].includes(q.get("ph"))) sc.phase = q.get("ph");
+  const defH = targetHorizons(manifest, targetId);
   const hz = [...new Set(list(q, "hz").map(Number))].filter((h) => Number.isInteger(h) && h >= -4 && h <= 53).sort((a, b) => a - b);
-  if (hz.length && (hz.length < 4 || !sameList(hz, [0, 1, 2, 3]))) sc.horizons = hz;
+  if (hz.length && !sameList(hz, defH)) sc.horizons = hz;
   if (["US", "current"].includes(q.get("pl"))) sc.place = q.get("pl");
   if (q.get("fair") === "1") sc.fair = true;
   if (q.get("bl") && manifest.modelById.has(q.get("bl"))) sc.baseline = q.get("bl");
@@ -291,7 +293,8 @@ function writeScope(p, sc, manifest, targetId) {
   if (Array.isArray(sc.seasons) && sc.seasons.length) p.push(["ss", sc.seasons.join(",")]);
   if (Array.isArray(sc.weeks) && sc.weeks.length === 2) p.push(["wk", `${sc.weeks[0]}-${sc.weeks[1]}`]);
   if (sc.phase) p.push(["ph", sc.phase]);
-  if (Array.isArray(sc.horizons) && sc.horizons.length && !sameList(sc.horizons, [0, 1, 2, 3])) p.push(["hz", sc.horizons.join(",")]);
+  const defH = targetHorizons(manifest, targetId);
+  if (Array.isArray(sc.horizons) && sc.horizons.length && !sameList(sc.horizons, defH)) p.push(["hz", sc.horizons.join(",")]);
   if (sc.place === "US" || sc.place === "current") p.push(["pl", sc.place]);
   if (sc.fair) p.push(["fair", "1"]);
   const base = manifest.baselineFor?.(targetId) ?? manifest.baseline;

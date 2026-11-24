@@ -30,12 +30,22 @@ export function targetHorizons(manifest, targetId) {
   const id = targetId || manifest?.default_target || manifest?.targets?.[0]?.id;
   const hMeta = manifest?.targetById?.get?.(id)?.horizons || manifest?.targets?.find?.((t) => t.id === id)?.horizons;
   if (!hMeta) return HORIZONS;
-  const set = new Set(
+  const all = [...new Set(
     [...(hMeta.required || []), ...(hMeta.optional || [])]
       .map(Number)
       .filter((n) => Number.isInteger(n) && n >= -4),
-  );
-  return set.size ? [...set].sort((a, b) => a - b) : HORIZONS;
+  )].sort((a, b) => a - b);
+  if (!all.length) return HORIZONS;
+  const nonNeg = all.filter((n) => n >= 0);
+  return nonNeg.length ? nonNeg : all;
+}
+
+function hasManifestHorizons(manifest, targetId) {
+  const id = targetId || manifest?.default_target || manifest?.targets?.[0]?.id;
+  const hMeta = manifest?.targetById?.get?.(id)?.horizons || manifest?.targets?.find?.((t) => t.id === id)?.horizons;
+  if (!hMeta) return false;
+  return [...(hMeta.required || []), ...(hMeta.optional || [])]
+    .some((x) => { const n = Number(x); return Number.isInteger(n) && n >= -4; });
 }
 
 /**
@@ -72,7 +82,7 @@ const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
  *   ("states", "US" or a location id); from / to are the window's dates in the newest scoped season
  *   (null for an open end).
  */
-export function scopeOf(state, manifest) {
+export function scopeOf(state, manifest, availableHorizons = null) {
   const sc = { ...DEFAULT_SCOPE, ...(state.scope || {}) };
   const known = new Set((manifest.seasons || []).map((s) => s.id));
   const pinned = Array.isArray(sc.seasons) ? sc.seasons.filter((s) => !known.size || known.has(s)) : [];
@@ -83,9 +93,17 @@ export function scopeOf(state, manifest) {
     ? [Math.max(1, Math.min(sc.weeks[0], sc.weeks[1])), Math.min(53, Math.max(sc.weeks[0], sc.weeks[1]))] : null;
   const y = startYearOf(seasons[0]);
   const target = state.target || manifest.default_target || manifest.targets?.[0]?.id || "";
-  const availH = targetHorizons(manifest, target);
+  const hasExplicitH = (Array.isArray(availableHorizons) && availableHorizons.length > 0)
+    || hasManifestHorizons(manifest, target);
+  const availH = Array.isArray(availableHorizons) && availableHorizons.length
+    ? availableHorizons
+    : targetHorizons(manifest, target);
   const availSet = new Set(availH);
-  const hs = Array.isArray(sc.horizons) ? sc.horizons.filter((h) => availSet.has(h)).sort((a, b) => a - b) : [];
+  const hsRaw = Array.isArray(sc.horizons)
+    ? [...new Set(sc.horizons.map(Number))].filter((h) => Number.isInteger(h) && h >= -4).sort((a, b) => a - b)
+    : [];
+  const hs = hasExplicitH ? hsRaw.filter((h) => availSet.has(h)) : hsRaw;
+  const sameAsAvail = hs.length === availH.length && hs.every((h, i) => h === availH[i]);
   const place = ["US", "current"].includes(sc.place) ? sc.place : "all";
   const defaultLoc = manifest.geo?.default_location ?? manifest.default_location ?? "US";
   const location = place === "US" ? "US" : place === "current" ? state.location || defaultLoc : "states";
@@ -97,7 +115,7 @@ export function scopeOf(state, manifest) {
     from: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[0])) : null,
     to: weeks && Number.isFinite(y) ? iso(seasonWeekEnd(y, weeks[1])) : null,
     phase: PHASES.includes(sc.phase) ? sc.phase : null,
-    horizons: hs.length && hs.length < availH.length ? hs : null,
+    horizons: hs.length && (hasExplicitH ? hs.length < availH.length : !sameAsAvail) ? hs : null,
     place, location,
     fair: !!sc.fair,
     baseline: sc.baseline || defaultBaseline || "",

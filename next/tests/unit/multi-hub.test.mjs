@@ -64,18 +64,20 @@ describe("Phase 3 multi-hub frontend helpers", () => {
       geo: { default_location: "DE" },
       targets: [
         { id: "ari", horizons: { required: [0, 1, 2, 3], optional: [4] } },
-        { id: "short", horizons: { required: [-1, 0], optional: [] } },
+        { id: "flusight", horizons: { required: [], optional: [-1, 0, 1, 2, 3] } },
+        { id: "hindcast", horizons: { required: [-2, -1], optional: [] } },
       ],
       locations: [{ id: "DE", abbr: "DE", name: "Germany" }, { id: "FR", abbr: "FR", name: "France" }],
       seasons: [{ id: "2025-2026", rounds: ["2025-11-26"] }],
       models: [],
     });
     assert.deepEqual(targetHorizons(man, "ari"), [0, 1, 2, 3, 4]);
-    assert.deepEqual(targetHorizons(man, "short"), [-1, 0]);
-    const sc = scopeOf({ target: "short", date: "2025-11-26", scope: { place: "current" } }, man);
+    assert.deepEqual(targetHorizons(man, "flusight"), [0, 1, 2, 3]);
+    assert.deepEqual(targetHorizons(man, "hindcast"), [-2, -1]);
+    const sc = scopeOf({ target: "flusight", date: "2025-11-26", scope: { place: "current" } }, man);
     assert.equal(sc.location, "DE");
     assert.equal(sc.horizons, null);
-    const scSub = scopeOf({ target: "short", date: "2025-11-26", location: "FR", scope: { horizons: [0], place: "current" } }, man);
+    const scSub = scopeOf({ target: "flusight", date: "2025-11-26", location: "FR", scope: { horizons: [0], place: "current" } }, man);
     assert.deepEqual(scSub.horizons, [0]);
     assert.equal(scSub.location, "FR");
   });

@@ -117,8 +117,25 @@ export function mount(el, ctx) {
   let rows = [], order = { ranked: [], unranked: [], ranks: new Map() };
   let hover = null, share = false, previewed = null, dead = false;
 
-  const scope = () => scopeOf(store.get(), manifest);
-  const availH = () => targetHorizons(manifest, store.get().target);
+  const dataHorizons = (st = store.get()) => {
+    const hasSubset = Array.isArray(st.scope?.horizons) && st.scope.horizons.length > 0;
+    const src = respFull || (!hasSubset ? shown : null);
+    if (!src?.rankings?.length || (src.target && src.target !== st.target)) return null;
+    const hSet = new Set();
+    for (const r of src.rankings) {
+      if (!r?.has_data_in_scope || !r.by_horizon) continue;
+      for (const k of Object.keys(r.by_horizon)) {
+        const n = Number(k);
+        if (Number.isInteger(n)) hSet.add(n);
+      }
+    }
+    if (!hSet.size) return null;
+    const all = [...hSet].sort((a, b) => a - b);
+    const nonNeg = all.filter((n) => n >= 0);
+    return nonNeg.length ? nonNeg : all;
+  };
+  const availH = (st = store.get()) => dataHorizons(st) || targetHorizons(manifest, st.target);
+  const scope = () => { const st = store.get(); return scopeOf(st, manifest, availH(st)); };
   const colAvailable = (c, hs = availH()) => {
     const m = /^h(-?\d+)$/.exec(c);
     return !m || hs.includes(Number(m[1]));
@@ -512,7 +529,7 @@ export function mount(el, ctx) {
     openMenu(a, { label: "Locations", items });
   }
   function horizonsPopover(a) {
-    const avail = targetHorizons(manifest, store.get().target);
+    const avail = availH();
     openPopover(a, {
       title: "Horizons", width: 280,
       content(body, layer) {

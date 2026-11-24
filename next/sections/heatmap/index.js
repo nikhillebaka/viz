@@ -76,6 +76,10 @@ export function mount(el, ctx) {
   swap.classList.add("v-push");
 
   function syncLine() {
+    const avail = targetHorizons(manifest, store.get().target);
+    if (avail.length && !avail.includes(view.horizon)) {
+      view = { ...view, horizon: avail.includes(1) ? 1 : avail[0] };
+    }
     if (view.model !== "truth" && !modelChoices().some((c) => c.value === view.model)) view = normalizeView({ ...view, model: "truth" }, counts());
     Object.values(F).forEach((b) => b.sync());
     const custom = customOn || presetOf(view) === "custom";

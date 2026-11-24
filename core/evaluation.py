@@ -14,7 +14,7 @@ import logging
 import math
 from pathlib import Path
 import threading
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import polars as pl
 
@@ -668,6 +668,12 @@ class EvaluationEngine:
                 if tdf is not None and not tdf.is_empty():
                     scoped_frames[mid] = tdf
 
+        if sc.horizon_set is None and (
+            self._target_has_non_negative_horizon(sc.target_meta)
+            or self._has_non_negative_horizon([*(tdf for tdf, _ in prescored.values()), *scoped_frames.values()])
+        ):
+            self._restrict_frames_non_negative(scoped_frames)
+
         if not scoped_frames:
             return {"target": sc.target, "baseline": sc.baseline_id, "models": {}}
 
@@ -773,6 +779,47 @@ class EvaluationEngine:
         if window_filter is not None:
             out = window_filter.apply(out)
         return out
+
+    @staticmethod
+    def _target_has_non_negative_horizon(target_meta: Optional[Dict[str, Any]]) -> bool:
+        """Return True when target metadata declares any non-negative horizon."""
+        th = (target_meta or {}).get("horizons") or {}
+        for key in ("required", "optional"):
+            for raw_h in th.get(key) or ():
+                try:
+                    if int(raw_h) >= 0:
+                        return True
+                except (TypeError, ValueError):
+                    pass
+        return False
+
+    @staticmethod
+    def _has_non_negative_horizon(frames: Iterable[Optional[pl.DataFrame]]) -> bool:
+        """Return True when any non-empty frame contains a non-negative horizon."""
+        for df in frames:
+            if df is None or df.is_empty() or "horizon" not in df.columns:
+                continue
+            if bool(df.select((pl.col("horizon").cast(pl.Int64, strict=False) >= 0).any()).item()):
+                return True
+        return False
+
+    @staticmethod
+    def _filter_non_negative_horizons(df: Optional[pl.DataFrame]) -> Optional[pl.DataFrame]:
+        """Keep only `horizon >= 0` rows when a `"horizon"` column is present."""
+        if df is None or df.is_empty() or "horizon" not in df.columns:
+            return df
+        return df.filter(pl.col("horizon").cast(pl.Int64, strict=False) >= 0)
+
+    @classmethod
+    def _restrict_frames_non_negative(cls, *frame_maps: Dict[str, pl.DataFrame]) -> None:
+        """Filter every DataFrame across `frame_maps` to `horizon >= 0`, pruning empty entries."""
+        for fmap in frame_maps:
+            for k in list(fmap.keys()):
+                filtered = cls._filter_non_negative_horizons(fmap[k])
+                if filtered is None or filtered.is_empty():
+                    del fmap[k]
+                else:
+                    fmap[k] = filtered
 
     def _resolve_eval_scope(self, params: EvaluationParams) -> _ResolvedScope:
         target = params.target or self.config.get_default_target()
@@ -1128,6 +1175,30 @@ class EvaluationEngine:
                     else:
                         submitted_keys[mid] = kt
 
+        # Scope prescored task rows before default-horizon normalization and fair intersection
+        sub_tdf_by_mid: Dict[str, pl.DataFrame] = {}
+        for mid, (tdf_full, _) in prescored.items():
+            if tdf_full.is_empty():
+                continue
+            sub_tdf = self._filter_df_scope(
+                tdf_full,
+                locations=locations_filter,
+                reference_dates=dates_filter,
+                horizons=horizon_set,
+                dim_filter=dim_filter,
+                window_filter=window_filter,
+            )
+            if not sub_tdf.is_empty():
+                sub_tdf_by_mid[mid] = sub_tdf
+
+        drop_neg_horizons = False
+        if horizon_set is None:
+            drop_neg_horizons = self._target_has_non_negative_horizon(target_meta) or self._has_non_negative_horizon(
+                [*(tdf for tdf, _ in prescored.values()), *sub_tdf_by_mid.values(), *model_dfs.values(), *submitted_keys.values()]
+            )
+            if drop_neg_horizons:
+                self._restrict_frames_non_negative(sub_tdf_by_mid, model_dfs, submitted_keys)
+
         # 5b. With a window or horizon subset, report remaining rounds in scope
         if window_filter is not None or horizon_set is not None:
             remaining: Set[str] = set()
@@ -1166,11 +1237,8 @@ class EvaluationEngine:
                 eval_source_frames[m] = model_dfs[m]
             elif m in submitted_keys:
                 eval_source_frames[m] = submitted_keys[m]
-            elif m in prescored:
-                # Filter pre-scored task_df to dates/locations/dims if no window/horizon cut needed submitted_keys
-                tdf_full, _ = prescored[m]
-                if not tdf_full.is_empty():
-                    eval_source_frames[m] = tdf_full
+            elif m in sub_tdf_by_mid:
+                eval_source_frames[m] = sub_tdf_by_mid[m]
 
         if fair_flag and len(eval_source_frames) > 1:
             common_task_set = find_common_tasks(
@@ -1207,17 +1275,11 @@ class EvaluationEngine:
         if common_task_status != "empty_disjoint":
             common_tasks_arg = _common_tasks_frame(common_task_set, extra_task_ids=extra_cols)
 
-            for mid, (tdf_full, mmeta) in prescored.items():
-                if tdf_full.is_empty():
-                    continue
-                sub_tdf = self._filter_df_scope(
-                    tdf_full,
-                    locations=locations_filter,
-                    reference_dates=dates_filter,
-                    horizons=horizon_set,
-                    dim_filter=dim_filter,
-                    window_filter=window_filter,
-                )
+            for mid, sub_tdf in sub_tdf_by_mid.items():
+                if (window_filter is not None or horizon_set is not None) and dates_filter:
+                    sub_tdf = sub_tdf.filter(pl.col("reference_date").is_in(dates_filter))
+                    if sub_tdf.is_empty():
+                        continue
                 if common_tasks_arg is not None and not sub_tdf.is_empty():
                     if isinstance(common_tasks_arg, pl.DataFrame):
                         join_cols = [c for c in list(TASK_KEY_COLS) + extra_cols if c in sub_tdf.columns and c in common_tasks_arg.columns]
@@ -1226,6 +1288,7 @@ class EvaluationEngine:
                         sub_tdf = pl.DataFrame()
                 if sub_tdf.is_empty():
                     continue
+                _, mmeta = prescored[mid]
                 sc = summarize_scored_tasks(
                     sub_tdf,
                     present_quantiles=mmeta.get("present_quantiles"),
@@ -1361,6 +1424,8 @@ class EvaluationEngine:
                         # Lightweight check only when a model returned 0 scored tasks
                         eval_ds = m_stat.get("available_scope_dates", [])
                         m_df = _load_raw((mid, eval_ds)) if eval_ds else None
+                        if drop_neg_horizons and m_df is not None and not m_df.is_empty():
+                            m_df = self._filter_non_negative_horizons(m_df)
                     in_scope = m_df is not None and not m_df.is_empty()
                     if in_scope:
                         if "target" in m_df.columns:
@@ -1626,6 +1691,11 @@ class EvaluationEngine:
             if df is not None and not df.is_empty():
                 pmf_dfs[mid] = df
 
+        if horizon_set is None and (
+            self._target_has_non_negative_horizon(target_meta) or self._has_non_negative_horizon(pmf_dfs.values())
+        ):
+            self._restrict_frames_non_negative(pmf_dfs)
+
         scores_by_model: Dict[str, Dict[str, Any]] = {}
         if pmf_dfs:
             def _score_pmf(df: pl.DataFrame) -> Dict[str, Any]:
@@ -1817,6 +1887,14 @@ class EvaluationEngine:
             return None
 
         dfs = [t_df for t_df in ordered_map(_task_scores, active_mids) if t_df is not None]
+        if params.horizons is None and (
+            self._target_has_non_negative_horizon(self.config.get_target_metadata(target))
+            or self._has_non_negative_horizon(dfs)
+        ):
+            dfs = [
+                f for f in (self._filter_non_negative_horizons(df) for df in dfs)
+                if f is not None and not f.is_empty()
+            ]
         if not dfs:
             return None
         return pl.concat(dfs, how="diagonal")
@@ -1886,6 +1964,12 @@ class EvaluationEngine:
         for (mid, _), df in zip(sample_to_load, ordered_map(_load_sample_df, sample_to_load)):
             if df is not None and not df.is_empty():
                 sample_dfs[mid] = df
+
+        if horizon_set is None and (
+            self._target_has_non_negative_horizon(sc_res.target_meta)
+            or self._has_non_negative_horizon(sample_dfs.values())
+        ):
+            self._restrict_frames_non_negative(sample_dfs)
 
         scores_by_model: Dict[str, Dict[str, Any]] = {}
         if sample_dfs:

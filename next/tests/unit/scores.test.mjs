@@ -270,3 +270,26 @@ test("rowsFrom, sortRows, and exportRows support categorical PMF evaluations (RP
   assert.equal(exp[0].log_loss, 0.7);
   assert.equal(exp[0].mode_hit_pct, 75);
 });
+
+test("scopeOf and URL adapt dynamically to target-specific horizon lists", () => {
+  const eu = {
+    baseline: "B",
+    default_target: "ili",
+    seasonOf: (d) => (d >= "2025-07-27" ? "2025-2026" : "2024-2025"),
+    seasonById: new Map([["2025-2026", {}]]),
+    modelById: new Map([["B", {}], ["m1", {}]]),
+    locationById: new Map([["DE", {}]]),
+    targetById: new Map([["ili", { id: "ili", horizons: { required: [1, 2, 3, 4], optional: [-1] } }]]),
+    targets: [{ id: "ili", horizons: { required: [1, 2, 3, 4], optional: [-1] } }],
+    locations: [{ id: "DE" }],
+    seasons: [{ id: "2025-2026" }],
+    recommended: [],
+    allRounds: [{ iso: "2026-01-10", t: Date.UTC(2026, 0, 10) }],
+  };
+  assert.equal(scopeOf({ target: "ili", date: "2026-01-10", scope: { horizons: [1, 2, 3, 4] } }, eu, [1, 2, 3, 4]).horizons, null);
+  assert.deepEqual(scopeOf({ target: "ili", date: "2026-01-10", scope: { horizons: [0, 1, 2] } }, eu, [1, 2, 3, 4]).horizons, [1, 2]);
+  assert.equal(parseUrl("hz=1,2,3,4", eu).scope, undefined, "target default [1..4] stays omitted");
+  assert.deepEqual(parseUrl("hz=0,1,2,3", eu).scope.horizons, [0, 1, 2, 3], "subset matching another hub is preserved");
+  assert.equal(writeUrl({ target: "ili", location: "DE", date: "2026-01-10", scope: { horizons: [1, 2, 3] } }, eu), "?hz=1,2,3");
+  assert.equal(writeUrl({ target: "ili", location: "DE", date: "2026-01-10", scope: { horizons: [1, 2, 3, 4] } }, eu), "");
+});
