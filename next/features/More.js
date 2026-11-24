@@ -62,10 +62,14 @@ export function reloadSoon(ms = 1200) { setTimeout(() => location.reload(), ms);
 
 /**
  * Dataset warnings from /api/status plus each enabled synced hub's quality notes.
+ * @param {boolean} [isWeb=false]
  * @returns {Promise<{ status: string[], hubs: object[], count: number }>}
  */
-export async function loadWarningSummary() {
-  const [st, rh] = await Promise.all([getJSON("/api/status").catch(() => ({})), getJSON("/api/remote/hubs").catch(() => ({ hubs: [] }))]);
+export async function loadWarningSummary(isWeb = false) {
+  const [st, rh] = await Promise.all([
+    getJSON("/api/status").catch(() => ({})),
+    isWeb ? Promise.resolve({ hubs: [] }) : getJSON("/api/remote/hubs").catch(() => ({ hubs: [] })),
+  ]);
   const status = (st.validation_warnings || []).map(String);
   const hubs = (rh.hubs || []).filter((x) => x.synced && x.warnings_count);
   return { status, hubs, count: status.length + hubs.reduce((n, x) => n + x.warnings_count, 0) };
@@ -91,18 +95,20 @@ const guideHash = () => (/^#guide(\/|$)/.test(location.hash) ? decodeURIComponen
  */
 export function mountMore(zone, ctx) {
   const hubless = Boolean(ctx.hubless || ctx.manifest?.empty);
+  const isWeb = (ctx.manifest?.mode || "local") === "web";
   const btn = pill({ icon: icon.more, ariaLabel: "More", className: "app-more" });
   btn.setAttribute("aria-haspopup", "menu");
   zone.append(btn);
   const g = glass(btn);
   const tip = tooltip(btn, "More", { placement: "bottom" });
   let warnings = { count: 0 };
-  const refreshWarnings = () => (hubless ? Promise.resolve() : loadWarningSummary().then((w) => { warnings = w; }).catch(() => {}));
-  // a quiet dot while a hub sync runs, or after one failed (until Data sources is opened)
+  const refreshWarnings = () => (hubless ? Promise.resolve() : loadWarningSummary(isWeb).then((w) => { warnings = w; }).catch(() => {}));
+  // a quiet dot while a hub sync runs, or after one failed (local mode only)
   const dot = h("span", { class: "mo-dot", hidden: true, "aria-hidden": "true" });
   btn.append(dot);
   let offSync = () => {}, gone = false;
   const showSync = (st) => {
+    if (isWeb) return;
     dot.hidden = !st;
     dot.classList.toggle("is-failed", st === "failed");
     dot.classList.toggle("is-new", st === "new");
@@ -114,7 +120,9 @@ export function mountMore(zone, ctx) {
     (window.requestIdleCallback ?? setTimeout)(() => {
       if (gone) return;
       refreshWarnings();
-      import("./Hubs.js").then((m) => { if (gone) return; offSync = m.watchSync(showSync); return m.resumeSync(ctx); }).catch(() => {});
+      if (!isWeb) {
+        import("./Hubs.js").then((m) => { if (gone) return; offSync = m.watchSync(showSync); return m.resumeSync(ctx); }).catch(() => {});
+      }
     });
   }
 
@@ -122,7 +130,7 @@ export function mountMore(zone, ctx) {
 
   btn.addEventListener("click", () => {
     const wsCount = ctx.manifest?.workspace_hubs?.length || 0;
-    const dataShortcut = hubless ? "Add" : wsCount > 1 ? `${wsCount} hubs` : undefined;
+    const dataShortcut = hubless ? (isWeb ? "Upload" : "Add") : wsCount > 1 ? `${wsCount} hubs` : undefined;
     const items = hubless
       ? [
         { label: "Data sources", shortcut: dataShortcut, onSelect: () => open("hubs") },
@@ -135,7 +143,7 @@ export function mountMore(zone, ctx) {
         { label: "Data sources", shortcut: dataShortcut, onSelect: () => open("hubs") },
         warnings.count ? { label: "Warnings", shortcut: warnings.count.toLocaleString(), onSelect: () => open("warnings") } : null,
         "-",
-        { label: "Refresh data", onSelect: () => refresh(ctx) },
+        isWeb ? null : { label: "Refresh data", onSelect: () => refresh(ctx) },
         { label: "Copy link", onSelect: copyLink },
         "-",
         { label: "Guide", shortcut: "G", onSelect: () => guide(null, btn) },

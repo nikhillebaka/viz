@@ -97,6 +97,24 @@ export function matchCatalogPlaces(catalog, manifest, query, activeHubId) {
 
   if (catalog?.places && Object.keys(catalog.places).length) {
     const out = [];
+    const seenKeys = new Set();
+    const hubInCatalog = !activeHubId || (catalog?.hubs || []).some((h) => h.id === activeHubId);
+    if (!hubInCatalog && Array.isArray(manifest?.locations)) {
+      for (const l of matchLocations(manifest.locations, q)) {
+        seenKeys.add(`active::${l.id}`);
+        out.push({
+          key: l.id,
+          name: l.name || l.id,
+          abbr: l.abbr || l.id,
+          level: l.level || "custom",
+          inActiveHub: true,
+          targetHubId: activeHubId,
+          targetLocationId: l.id,
+          regionHint: manifest.hub || "Uploaded hub",
+        });
+      }
+    }
+    const catOut = [];
     for (const p of Object.values(catalog.places)) {
       const hubs = Array.isArray(p.hubs) ? p.hubs : [];
       if (!hubs.length) continue;
@@ -112,7 +130,7 @@ export function matchCatalogPlaces(catalog, manifest, query, activeHubId) {
       else if (p.level === "hsa") hintParts.push("MetroCast");
       else if (p.region) hintParts.push(p.region);
       if (pathogens.length) hintParts.push(pathogens.join(", "));
-      out.push({
+      catOut.push({
         key: p.key,
         name: p.name || p.key,
         abbr: p.abbr || p.key,
@@ -124,8 +142,8 @@ export function matchCatalogPlaces(catalog, manifest, query, activeHubId) {
         _rank: r,
       });
     }
-    out.sort((a, b) => a._rank - b._rank || (a.inActiveHub === b.inActiveHub ? 0 : a.inActiveHub ? -1 : 1) || a.name.localeCompare(b.name));
-    return out.map(({ _rank, ...rest }) => rest);
+    catOut.sort((a, b) => a._rank - b._rank || (a.inActiveHub === b.inActiveHub ? 0 : a.inActiveHub ? -1 : 1) || a.name.localeCompare(b.name));
+    return [...out, ...catOut.map(({ _rank, ...rest }) => rest)];
   }
 
   return matchLocations(manifest?.locations || [], q).map((l) => ({

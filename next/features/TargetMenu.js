@@ -16,6 +16,7 @@ import { defaultDims } from "./url.js";
  */
 export function buildTargetMenuGroups(catalog, manifest, currentLocationId, activeHubId, currentTargetId) {
   const catTargets = catalog?.targets;
+  const hubInCatalog = !activeHubId || (catalog?.hubs || []).some((h) => h.id === activeHubId);
   if (!Array.isArray(catTargets) || !catTargets.length) {
     return (manifest?.targets || [])
       .filter((t) => !t.is_categorical && (!Array.isArray(t.locations) || !currentLocationId || t.locations.includes(currentLocationId)))
@@ -29,6 +30,20 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
         checked: t.id === currentTargetId,
       }));
   }
+
+  const activePrivateItems = !hubInCatalog
+    ? (manifest?.targets || [])
+      .filter((t) => !t.is_categorical && (!Array.isArray(t.locations) || !currentLocationId || t.locations.includes(currentLocationId)))
+      .map((t) => ({
+        type: "item",
+        key: `${activeHubId}::${t.id}`,
+        hubId: activeHubId,
+        targetId: t.id,
+        locationId: currentLocationId,
+        label: t.label || t.short || t.id,
+        checked: t.id === currentTargetId,
+      }))
+    : [];
 
   const places = catalog.places || {};
   const hubById = new Map((catalog.hubs || []).map((h) => [h.id, h]));
@@ -139,6 +154,11 @@ export function buildTargetMenuGroups(catalog, manifest, currentLocationId, acti
   };
 
   const out = [];
+  if (activePrivateItems.length) {
+    out.push({ type: "header", label: manifest?.hub || "Uploaded hub" });
+    out.push(...activePrivateItems);
+    if (uniqInPlace.length || uniqOtherPlace.length) out.push({ type: "sep" });
+  }
   if (uniqInPlace.length) {
     const byPathogen = new Map();
     for (const ent of uniqInPlace) {

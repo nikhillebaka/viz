@@ -113,11 +113,13 @@ async function renderWelcome(manifest) {
   document.querySelector(".app-progress")?.classList.add("is-done");
   root.className = "app is-ready";
 
-  const [{ glass }, { pill, icon }, { mountMore }, { openHubs, mountPublicHubs }] = await Promise.all([
+  const [{ glass }, { pill, icon }, { mountMore }, { openHubs, mountPublicHubs }, { loadWebStatus }, { renderWebUploadSection }] = await Promise.all([
     import("./ui/glass.js"),
     import("./ui/controls.js"),
     import("./features/More.js"),
     import("./features/Hubs.js"),
+    import("./lib/api.js"),
+    import("./features/WebUpload.js"),
   ]);
 
   const tr = h("div", { class: "c-zone", "data-zone": "tr" });
@@ -135,17 +137,17 @@ async function renderWelcome(manifest) {
 
   const actionBtn = localMode
     ? h("button", {
-      type: "button", class: "c-btn mo-primary",
+      type: "button", class: "c-link mo-web-act",
       onclick: () => openHubs(actionBtn, { ...moreCtx, openBrowse: true }),
     }, hubless ? "Add local hub" : "Data sources")
     : null;
 
   const welcomeBits = [
-    h("h1", { class: "app-welcome-title" }, hubless ? "Connect a hub" : (manifest.hub || "Connected hub")),
+    h("h1", { class: "app-welcome-title" }, hubless ? (localMode ? "Connect a hub" : "Welcome to viz") : (manifest.hub || "Connected hub")),
     h("p", { class: "app-welcome-sub" }, hubless
       ? (localMode
         ? "Open a local Hubverse folder or sync a public hub."
-        : "No hub is currently available on this server.")
+        : "Public hubs sync automatically in the background, or you can open a local Hubverse folder right here.")
       : "No forecast rounds found in this hub yet."),
   ];
   if (actionBtn) {
@@ -158,6 +160,55 @@ async function renderWelcome(manifest) {
     const listHost = h("div", { class: "app-welcome-hubs" });
     welcomeBits.push(h("div", { class: "app-welcome-section" }, h("span", { class: "app-welcome-label" }, "Public hubs"), listHost));
     mountPublicHubs(listHost);
+  } else if (hubless && !localMode) {
+    const uploadHost = h("div", { class: "app-welcome-section" });
+    const pubHost = h("div", { class: "app-welcome-section" });
+    welcomeBits.push(uploadHost, pubHost);
+
+    const drawWebWelcome = async () => {
+      if (!document.body.contains(uploadHost)) return;
+      const ws = await loadWebStatus().catch(() => null);
+      if (!document.body.contains(uploadHost)) return;
+      uploadHost.replaceChildren(
+        h("span", { class: "app-welcome-label" }, "Your local hub"),
+        renderWebUploadSection({
+          webStatus: ws,
+          compact: true,
+          onOpenHub: (id) => location.assign(`/next/?hub=${encodeURIComponent(id)}`),
+          onUploaded: (res) => {
+            const id = res?.hub?.id;
+            location.assign(id ? `/next/?hub=${encodeURIComponent(id)}` : "/next/");
+          },
+          onDeleteHub: async (id) => {
+            await fetch("/api/web/workspaces/delete", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id }),
+            });
+            drawWebWelcome();
+          },
+        }),
+      );
+      const pubHubs = ws?.scheduler?.hubs || [];
+      if (pubHubs.length) {
+        pubHost.replaceChildren(
+          h("span", { class: "app-welcome-label" }, "Public hubs"),
+          h("div", { class: "app-welcome-hubs" }, ...pubHubs.map((x) => h("div", { class: "app-welcome-hub", "data-hub": x.id },
+            h("div", { class: "app-welcome-hub-text" },
+              h("span", { class: "app-welcome-hub-name" }, x.label),
+              h("span", { class: "app-welcome-hub-meta" }, x.synced
+                ? `${(x.models || 0).toLocaleString()} models ready`
+                : x.syncing ? "Syncing public data…" : "Queued for auto-sync")),
+            x.synced
+              ? h("button", { type: "button", class: "c-link mo-web-act", onclick: () => location.assign(`/next/?hub=${encodeURIComponent(`remote_${x.id}`)}`) }, "Open")
+              : null))),
+        );
+      }
+      if (!pubHubs.some((x) => x.synced) && document.body.contains(uploadHost)) {
+        setTimeout(drawWebWelcome, 3500);
+      }
+    };
+    drawWebWelcome();
   }
   const welcome = h("main", { class: "app-welcome" }, h("div", { class: "app-welcome-card" }, ...welcomeBits));
 
@@ -459,7 +510,7 @@ async function boot() {
   {
     const named = (new URLSearchParams(location.search).get("models") || "").split(",").map((x) => x.trim()).filter(Boolean);
     const missing = named.filter((id) => /^[a-z][a-z0-9_]*:/.test(id) && !id.startsWith("local:") && !manifest.modelById.has(id));
-    if (missing.length) {
+    if (missing.length && manifest.mode !== "web") {
       const hubId = missing[0].split(":")[0], hub = (manifest.hubs || []).find((x) => x.id === hubId);
       const label = hub?.label || hubId, n = missing.length;
       import("./ui/controls.js").then(({ toast }) => toast(`This link includes ${n} ${label} model${n === 1 ? "" : "s"} not synced here`, {

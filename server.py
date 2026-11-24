@@ -3,6 +3,7 @@ Self-contained, multi-threaded HTTP server for the Sandbox Visualization and Eva
 Built on Python standard library http.server + socketserver with zero external web framework dependencies.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import gzip
 import hashlib
@@ -12,9 +13,12 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+import shutil
+import signal
 import socket
 import socketserver
 import sys
+import tempfile
 import threading
 import urllib.parse
 from typing import Any, Dict, List, Optional
@@ -30,6 +34,36 @@ from viz.core.workspace import HubContext, HubManager
 from viz.remote.s3 import S3Error
 from viz.remote.sync import current_season
 from viz.remote.transports import TransportError
+from viz.web.auth import (
+    RequestIdentity,
+    auth_public_info,
+    generate_session_id,
+    hash_identity,
+    is_https_request,
+    make_session_cookie_header,
+    resolve_request_identity,
+)
+from viz.web.bundle import (
+    RateLimitExceededError,
+    UploadIncompatibleError,
+    UploadTooLargeError,
+    UploadValidationError,
+    extract_vzb1_stream,
+    validate_extracted_hub,
+)
+from viz.web.sessions import is_private_hub_id
+
+WEB_CSP_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "frame-ancestors 'self'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
 
 
 def _env_truthy(name: str) -> bool:
@@ -103,6 +137,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         self._cache_control_override: Optional[str] = None
+        self._is_private_response: bool = False
+        self._set_cookies: List[str] = []
+        self._identity_cached: Optional[RequestIdentity] = None
         super().__init__(*args, directory=str(NEXT_DIR), **kwargs)
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -111,7 +148,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def setup(self):
         try:
-            self.request.settimeout(30.0)
+            self.request.settimeout(60.0)
         except Exception:
             pass
         super().setup()
@@ -131,32 +168,78 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             pass
         return _FALLBACK_SERVER_CFG
 
+    def _client_ip(self) -> str:
+        mgr = self._mgr()
+        wcfg = getattr(mgr, "web_config", None)
+        if mgr.mode == "web" and wcfg is not None and wcfg.trust_proxy_auth:
+            xff = (self.headers.get("X-Forwarded-For") or "").strip()
+            if xff:
+                return xff.split(",", 1)[0].strip()
+            xri = (self.headers.get("X-Real-IP") or "").strip()
+            if xri:
+                return xri
+        return self.client_address[0] if self.client_address else "unknown"
+
+    def _request_identity(self) -> RequestIdentity:
+        if self._identity_cached is None:
+            mgr = self._mgr()
+            if mgr.mode == "web" and getattr(mgr, "web_config", None) is not None:
+                self._identity_cached = resolve_request_identity(self.headers, mgr.web_config)
+            else:
+                self._identity_cached = RequestIdentity(sid=None, sid_hash="", user=None)
+        return self._identity_cached
+
+    def _add_set_cookie(self, value: str) -> None:
+        self._set_cookies.append(value)
+
     def end_headers(self):
-        server_cfg = self._server_config()
-        allowed = server_cfg.get("allowed_origins", ["*"])
+        mgr = self._mgr()
         origin = self.headers.get("Origin")
-        if "*" in allowed:
-            self.send_header("Access-Control-Allow-Origin", "*")
-        elif origin:
-            origin_clean = origin.rstrip("/")
-            is_match = False
-            for a in allowed:
-                a_clean = a.rstrip("/")
-                if origin_clean == a_clean or a_clean == "*":
-                    is_match = True
-                    break
-                if ("localhost" in a_clean or "127.0.0.1" in a_clean) and (
-                    origin_clean.startswith("http://localhost:") or origin_clean.startswith("http://127.0.0.1:")
-                ):
-                    is_match = True
-                    break
-            if is_match:
+        if mgr.mode == "web":
+            wcfg = getattr(mgr, "web_config", None)
+            allowed = list(wcfg.allowed_origins) if wcfg else []
+            if origin and origin.rstrip("/") in [a.rstrip("/") for a in allowed]:
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "SAMEORIGIN")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+            self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+            self.send_header("Content-Security-Policy", WEB_CSP_POLICY)
+        else:
+            server_cfg = self._server_config()
+            allowed = server_cfg.get("allowed_origins", ["*"])
+            if "*" in allowed:
+                self.send_header("Access-Control-Allow-Origin", "*")
+            elif origin:
+                origin_clean = origin.rstrip("/")
+                is_match = False
+                for a in allowed:
+                    a_clean = a.rstrip("/")
+                    if origin_clean == a_clean or a_clean == "*":
+                        is_match = True
+                        break
+                    if ("localhost" in a_clean or "127.0.0.1" in a_clean) and (
+                        origin_clean.startswith("http://localhost:") or origin_clean.startswith("http://127.0.0.1:")
+                    ):
+                        is_match = True
+                        break
+                if is_match:
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Viz-Hub")
-        cc = self._cache_control_override or "no-cache, no-store, must-revalidate"
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Viz-Hub, X-Viz-Upload, X-Viz-Hub-Name, X-Viz-Storage-Tier",
+        )
+        for cookie_hdr in self._set_cookies:
+            self.send_header("Set-Cookie", cookie_hdr)
+        self._set_cookies.clear()
+        cc = "private, no-store" if self._is_private_response else (self._cache_control_override or "no-cache, no-store, must-revalidate")
         self._cache_control_override = None
+        if self._is_private_response:
+            self.send_header("Vary", "Cookie")
         self.send_header("Cache-Control", cc)
         super().end_headers()
 
@@ -206,10 +289,24 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 return h
         return None
 
-    def _require_ctx(self, query: dict, allow_hub_param: bool = True) -> Optional[HubContext]:
+    def _resolve_ctx(self, query: dict, allow_hub_param: bool = True) -> Optional[HubContext]:
         mgr = self._mgr()
         req_id = self._requested_hub_id(query, allow_hub_param=allow_hub_param)
-        ctx = mgr.get_context(req_id)
+        if req_id and is_private_hub_id(req_id):
+            if mgr.mode != "web" or mgr.web_store is None:
+                return None
+            identity = self._request_identity()
+            res = mgr.web_store.authorize_and_resolve(req_id, identity)
+            if res is None:
+                return None
+            rec, storage_root = res
+            self._is_private_response = True
+            return mgr.get_private_context(rec, storage_root)
+        return mgr.get_context(req_id)
+
+    def _require_ctx(self, query: dict, allow_hub_param: bool = True) -> Optional[HubContext]:
+        req_id = self._requested_hub_id(query, allow_hub_param=allow_hub_param)
+        ctx = self._resolve_ctx(query, allow_hub_param=allow_hub_param)
         if ctx is None:
             msg = f"Unknown workspace hub '{req_id}'" if req_id else "No hub configured"
             self._send_json({"error": msg}, status=404)
@@ -250,6 +347,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        if path.startswith("/api/web/"):
+            self._route_web_post(path, query)
+            return
         # Requiring a JSON content type forces a CORS preflight, so other sites open in the
         # browser cannot submit state-changing requests to this local server
         if path.startswith(("/api/ensemble/", "/api/remote/", "/api/workspace/", "/api/cache/", "/api/briefing/")) and not self.headers.get("Content-Type", "").startswith("application/json"):
@@ -317,8 +417,15 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         mgr = self._mgr()
 
+        # Health & readiness probes (fast, zero disk/hub load)
+        if path == "/healthz":
+            self._send_json({"ok": True, "mode": mgr.mode})
+        elif path == "/readyz":
+            self._handle_readyz(mgr)
+        elif path == "/api/web/status":
+            self._handle_web_status(mgr)
         # Static frontend
-        if path == "/next" or path.startswith("/next/"):
+        elif path == "/next" or path.startswith("/next/"):
             self._serve_dir(path, "/next", NEXT_DIR)
         # Workspace endpoints
         elif path == "/api/workspace":
@@ -529,10 +636,40 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         if name == "manifest":
             req_id = self._requested_hub_id(query)
-            ctx = mgr.get_context(req_id)
+            identity = self._request_identity()
+            private_ws = (
+                mgr.web_store.list_for_identity(identity)
+                if (mgr.mode == "web" and mgr.web_store is not None)
+                else {"all": []}
+            )
+            if mgr.mode == "web" and (identity.sid_hash or identity.user or private_ws["all"]):
+                self._is_private_response = True
+
+            ctx = self._resolve_ctx(query)
+            if not req_id and ctx is None and mgr.mode == "web" and private_ws["all"]:
+                # If no public hubs are synced yet on web startup, open caller's most recent upload
+                newest = private_ws["all"][-1]["id"]
+                ctx = self._resolve_ctx({"workspace": [newest]})
+
             if req_id and ctx is None:
                 self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
                 return
+
+            ws_hubs = mgr.workspace_hubs_brief()
+            if private_ws["all"]:
+                active_hub_id = ctx.hub_id if ctx is not None else None
+                for pw in private_ws["all"]:
+                    ws_hubs.append({
+                        "id": pw["id"],
+                        "label": pw["label"],
+                        "active": pw["id"] == active_hub_id,
+                        "exists": True,
+                        "kind": pw["kind"],
+                        "tier": pw["tier"],
+                        "state": pw["state"],
+                        "ttl_seconds_remaining": pw["ttl_seconds_remaining"],
+                    })
+
             if ctx is None:
                 self._send_json({
                     "empty": True,
@@ -540,7 +677,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "hub": None,
                     "hub_id": None,
                     "workspace": mgr.workspace_summary(),
-                    "workspace_hubs": [],
+                    "workspace_hubs": ws_hubs,
                     "targets": [],
                     "default_target": None,
                     "baseline": None,
@@ -566,8 +703,11 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 man["hub_path"] = str(ctx.base_dir)
             else:
                 man.pop("hub_path", None)
-            man["workspace_hubs"] = mgr.workspace_hubs_brief()
-            man_etag = self._weak_etag(f"man|{man.get('stamp')}|{mgr.mode}|{ctx.hub_id}|{len(man['workspace_hubs'])}")
+            man["workspace_hubs"] = ws_hubs
+            priv_sig = ",".join(pw["id"] for pw in private_ws["all"])
+            man_etag = self._weak_etag(
+                f"man|{man.get('stamp')}|{mgr.mode}|{ctx.hub_id}|{len(ws_hubs)}|{priv_sig}"
+            )
             self._send_json(man, etag=man_etag)
             return
 
@@ -715,11 +855,12 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         cache_control: Optional[str] = None,
     ):
         cc = cache_control or "no-cache"
-        if status == 200 and etag is not None:
-            if self._etag_matches(self.headers.get("If-None-Match"), etag):
+        eff_etag = None if self._is_private_response else etag
+        if status == 200 and eff_etag is not None:
+            if self._etag_matches(self.headers.get("If-None-Match"), eff_etag):
                 self._cache_control_override = cc
                 self.send_response(304)
-                self.send_header("ETag", etag)
+                self.send_header("ETag", eff_etag)
                 self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 return
@@ -735,8 +876,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        if etag is not None and status == 200:
-            self.send_header("ETag", etag)
+        if eff_etag is not None and status == 200:
+            self.send_header("ETag", eff_etag)
         if use_gzip:
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Vary", "Accept-Encoding")
@@ -746,6 +887,181 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def _send_json(self, data: Any, status: int = 200, *, etag: Optional[str] = None):
         self._send_bytes(json.dumps(data).encode("utf-8"), "application/json", status=status, etag=etag)
+
+    def _handle_readyz(self, mgr: HubManager):
+        synced = mgr.remote_store.synced_hub_ids()
+        require_hub = _env_truthy("VIZ_READYZ_REQUIRE_HUB")
+        if mgr.mode == "web" and require_hub and not synced:
+            self._send_json({"ready": False, "mode": mgr.mode, "hubs_synced": 0}, status=503)
+            return
+        self._send_json({
+            "ready": True,
+            "mode": mgr.mode,
+            "hubs_synced": len(synced),
+        })
+
+    def _handle_web_status(self, mgr: HubManager):
+        if mgr.mode != "web" or mgr.web_config is None or mgr.web_store is None or mgr.web_scheduler is None:
+            self._send_json({"error": "Web status is only available in web mode"}, status=404)
+            return
+        self._is_private_response = True
+        identity = self._request_identity()
+        cfg = mgr.web_config
+        self._send_json({
+            "mode": "web",
+            "auth": auth_public_info(identity.user, cfg),
+            "limits": {
+                "max_compressed_bytes": cfg.max_compressed_bytes,
+                "max_uncompressed_bytes": cfg.max_uncompressed_bytes,
+                "max_files": cfg.max_files,
+                "ephem_ttl_seconds": cfg.ephem_ttl_seconds,
+                "ephem_max_hubs_per_session": cfg.ephem_max_hubs_per_session,
+                "user_quota_bytes": cfg.user_quota_bytes,
+                "user_max_hubs": cfg.user_max_hubs,
+                "user_cold_after_seconds": cfg.user_cold_after_seconds,
+            },
+            "workspaces": mgr.web_store.list_for_identity(identity),
+            "scheduler": mgr.web_scheduler.get_telemetry(),
+            "briefings": mgr.briefing_feeds.get_status(),
+        })
+
+    def _route_web_post(self, path: str, query: dict):
+        _ = query
+        mgr = self._mgr()
+        if mgr.mode != "web" or mgr.web_config is None or mgr.web_store is None or mgr.web_rate_limiter is None:
+            self._send_json({"error": "Web workspace actions are only available in web mode"}, status=403)
+            return
+        self._is_private_response = True
+        if path == "/api/web/upload":
+            self._handle_web_upload(mgr)
+            return
+        if path == "/api/web/workspaces/delete":
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                self._send_json({"error": "This endpoint requires 'Content-Type: application/json'"}, status=415)
+                return
+            self._handle_web_delete(mgr)
+            return
+        self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)
+
+    def _handle_web_upload(self, mgr: HubManager):
+        cfg = mgr.web_config
+        store = mgr.web_store
+        limiter = mgr.web_rate_limiter
+        assert cfg is not None and store is not None and limiter is not None
+
+        if self.headers.get("X-Viz-Upload") != "1":
+            self._send_json({"error": "Missing required X-Viz-Upload header"}, status=400)
+            return
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        if not ctype.startswith("application/octet-stream"):
+            self._send_json({"error": "Upload requires 'Content-Type: application/octet-stream'"}, status=415)
+            return
+
+        tier = (self.headers.get("X-Viz-Storage-Tier") or "ephem").strip().lower()
+        if tier not in ("ephem", "persistent"):
+            tier = "ephem"
+        identity = self._request_identity()
+        if tier == "persistent" and identity.user is None:
+            self._send_json({"error": "Sign in via SSO before saving persistent hubs"}, status=401)
+            return
+
+        raw_len = (self.headers.get("Content-Length") or "").strip()
+        try:
+            content_length = int(raw_len)
+        except ValueError:
+            self._send_json({"error": "Valid Content-Length header is required"}, status=411)
+            return
+        if content_length <= 0:
+            self._send_json({"error": "Empty upload body"}, status=400)
+            return
+        if content_length > cfg.max_compressed_bytes:
+            self.close_connection = True
+            self._send_json(
+                {"error": f"Compressed upload exceeds {cfg.max_compressed_bytes // (1024 * 1024)} MB limit"},
+                status=413,
+            )
+            return
+
+        try:
+            limiter.acquire(self._client_ip())
+        except RateLimitExceededError as exc:
+            self._send_json({"error": str(exc)}, status=429)
+            return
+
+        minted_sid: Optional[str] = None
+        if tier == "ephem" and not identity.sid:
+            minted_sid = generate_session_id()
+            identity = RequestIdentity(
+                sid=minted_sid,
+                sid_hash=hash_identity(f"sid:{minted_sid}"),
+                user=identity.user,
+            )
+
+        staging_base = (mgr.data_dir / ".staging") if tier == "persistent" else (cfg.scratch_dir / ".staging")
+        staging_base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staging_dir = Path(tempfile.mkdtemp(prefix="viz-up-", dir=str(staging_base)))
+        is_gzip = "gzip" in (self.headers.get("Content-Encoding") or "").lower()
+        raw_name = (self.headers.get("X-Viz-Hub-Name") or "").strip()
+        hub_name = urllib.parse.unquote(raw_name)[:80] if raw_name else ""
+
+        try:
+            stats = extract_vzb1_stream(self.rfile, content_length, staging_dir, cfg, is_gzip=is_gzip)
+            info = validate_extracted_hub(staging_dir)
+            summary = store.save_uploaded_hub(staging_dir, hub_name, info, stats, identity, tier=tier)
+            if minted_sid is not None:
+                self._add_set_cookie(
+                    make_session_cookie_header(
+                        minted_sid,
+                        secure=is_https_request(self.headers, cfg),
+                        max_age=cfg.ephem_ttl_seconds,
+                    )
+                )
+            elif tier == "ephem" and identity.sid is not None:
+                # Refresh browser cookie expiration alongside sliding server TTL
+                self._add_set_cookie(
+                    make_session_cookie_header(
+                        identity.sid,
+                        secure=is_https_request(self.headers, cfg),
+                        max_age=cfg.ephem_ttl_seconds,
+                    )
+                )
+            self._send_json(
+                {
+                    "ok": True,
+                    "hub": summary,
+                    "workspaces": store.list_for_identity(identity),
+                },
+                status=201,
+            )
+        except UploadTooLargeError as exc:
+            self.close_connection = True
+            self._send_json({"error": str(exc)}, status=413)
+        except UploadValidationError as exc:
+            self.close_connection = True
+            self._send_json({"error": str(exc)}, status=400)
+        except UploadIncompatibleError as exc:
+            self._send_json({"error": str(exc)}, status=422)
+        finally:
+            limiter.release()
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _handle_web_delete(self, mgr: HubManager):
+        body = self._read_json_body()
+        hub_id = str(body.get("id") or body.get("hub") or "").strip()
+        if not hub_id or not is_private_hub_id(hub_id):
+            self._send_json({"error": "Valid uploaded hub id is required"}, status=400)
+            return
+        identity = self._request_identity()
+        deleted = mgr.web_store.delete_workspace(hub_id, identity)
+        if not deleted:
+            self._send_json({"error": f"Uploaded hub '{hub_id}' not found"}, status=404)
+            return
+        self._send_json({
+            "ok": True,
+            "removed": hub_id,
+            "workspaces": mgr.web_store.list_for_identity(identity),
+        })
 
     def _serve_file(self, file_path: Path, content_type: str):
         if not file_path.exists():
@@ -776,7 +1092,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_status(self, query: dict):
         mgr = self._mgr()
         req_id = self._requested_hub_id(query)
-        ctx = mgr.get_context(req_id)
+        ctx = self._resolve_ctx(query)
         if req_id and ctx is None:
             self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
             return
@@ -798,7 +1114,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         self._send_json({
             "status": "ok",
             "mode": mgr.mode,
-            "hub": ctx.base_dir.name,
+            "hub": ctx.display_label if mgr.mode != "local" else ctx.base_dir.name,
             "hub_id": ctx.hub_id,
             "hub_label": ctx.display_label,
             "models_count": len(models),
@@ -1387,6 +1703,26 @@ def _next_free_port(host: str, start: int) -> Optional[int]:
     return None
 
 
+class BoundedThreadingTCPServer(socketserver.ThreadingTCPServer):
+    """ThreadingTCPServer backed by a bounded worker pool to protect host CPU/threads."""
+
+    def __init__(self, server_address, RequestHandlerClass, *, max_workers: int = 32):
+        self._executor = ThreadPoolExecutor(max_workers=max(4, int(max_workers)), thread_name_prefix="viz-http")
+        super().__init__(server_address, RequestHandlerClass)
+
+    def process_request(self, request, client_address):
+        try:
+            self._executor.submit(self.process_request_thread, request, client_address)
+        except RuntimeError:
+            self.shutdown_request(request)
+
+    def server_close(self):
+        try:
+            super().server_close()
+        finally:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+
+
 def run_server(
     port: Optional[int] = None,
     host: Optional[str] = None,
@@ -1420,15 +1756,18 @@ def run_server(
 
     # SO_REUSEADDR lets a restart reuse a port stuck in TIME_WAIT on macOS/Linux. On Windows it
     # would instead let a second server bind a port that is already in use, so it stays off there.
-    socketserver.ThreadingTCPServer.allow_reuse_address = sys.platform != "win32"
-    socketserver.ThreadingTCPServer.daemon_threads = True
+    BoundedThreadingTCPServer.allow_reuse_address = sys.platform != "win32"
+    BoundedThreadingTCPServer.daemon_threads = True
 
     server_cfg = active_ctx.config.get_server_config() if active_ctx else _FALLBACK_SERVER_CFG
-    final_port = port if port is not None else server_cfg["port"]
-    final_host = host if host is not None else server_cfg["host"]
+    env_port = os.environ.get("VIZ_PORT", "").strip()
+    env_host = os.environ.get("VIZ_HOST", "").strip()
+    final_port = port if port is not None else (int(env_port) if env_port.isdigit() else server_cfg["port"])
+    final_host = host if host is not None else (env_host or ("0.0.0.0" if mgr.mode == "web" else server_cfg["host"]))
+    max_workers = mgr.web_config.max_workers if (mgr.mode == "web" and mgr.web_config is not None) else 32
 
     try:
-        httpd = socketserver.ThreadingTCPServer((final_host, final_port), SandboxRequestHandler)
+        httpd = BoundedThreadingTCPServer((final_host, final_port), SandboxRequestHandler, max_workers=max_workers)
     except OSError as exc:
         if exc.errno not in (errno.EADDRINUSE, 10048):  # 10048 = WSAEADDRINUSE
             raise
@@ -1444,6 +1783,13 @@ def run_server(
             sys.stderr.write(f"Start on a free port instead:  {launcher} {suggestion}\n\n")
         sys.exit(1)
 
+    # Start web-mode daemons (ephemeral TTL reaper / cold archiver + built-in hub auto-sync)
+    if mgr.mode == "web":
+        if mgr.web_store is not None:
+            mgr.web_store.start()
+        if mgr.web_scheduler is not None:
+            mgr.web_scheduler.start()
+
     # Warm up Parquet cache in background thread when an active hub is present
     if active_ctx is not None:
         def _warmup_background(ctx_to_warm: HubContext):
@@ -1454,10 +1800,19 @@ def run_server(
 
         threading.Thread(target=_warmup_background, args=(active_ctx,), daemon=True).start()
 
+    if threading.current_thread() is threading.main_thread():
+        def _on_sigterm(_signum, _frame):
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+        try:
+            signal.signal(signal.SIGTERM, _on_sigterm)
+        except (ValueError, OSError):
+            pass
+
     hub_banner = (
-        f"{active_ctx.display_label} ({active_ctx.base_dir})"
+        f"{active_ctx.display_label}" + (f" ({active_ctx.base_dir})" if mgr.mode == "local" else "")
         if active_ctx is not None
-        else "None (open UI to connect a local hub)"
+        else ("Public hubs auto-syncing (web mode)" if mgr.mode == "web" else "None (open UI to connect a local hub)")
     )
 
     with httpd:
@@ -1475,6 +1830,12 @@ def run_server(
             httpd.serve_forever()
         except KeyboardInterrupt:
             print("\nShutting down server...")
+        finally:
+            if mgr.mode == "web":
+                if mgr.web_scheduler is not None:
+                    mgr.web_scheduler.stop()
+                if mgr.web_store is not None:
+                    mgr.web_store.stop()
             httpd.server_close()
 
 

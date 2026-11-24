@@ -1,0 +1,31 @@
+services:
+  viz:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      VIZ_MODE: web
+      VIZ_DATA_DIR: /data
+      VIZ_SCRATCH_DIR: /tmp/viz-ephem
+      VIZ_AUTO_SYNC: "${VIZ_AUTO_SYNC:-1}"
+      VIZ_SYNC_INTERVAL_HOURS: "${VIZ_SYNC_INTERVAL_HOURS:-6}"
+      VIZ_TRUST_PROXY_AUTH: "${VIZ_TRUST_PROXY_AUTH:-0}"
+      VIZ_DEV_USER: "${VIZ_DEV_USER:-}"
+      VIZ_SSO_LOGIN_URL: "${VIZ_SSO_LOGIN_URL:-}"
+      VIZ_SSO_LOGOUT_URL: "${VIZ_SSO_LOGOUT_URL:-}"
+    volumes:
+      - viz_data:/data
+      - type: tmpfs
+        target: /tmp/viz-ephem
+        tmpfs:
+          size: 2147483648
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  viz_data:

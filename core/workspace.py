@@ -462,6 +462,7 @@ class HubContext:
         on_shared_change: Optional[Callable[[], None]] = None,
         shared_remote_store: Optional[RemoteStore] = None,
         shared_remote_mgr: Optional[RemoteManager] = None,
+        storage_root: Optional[Path] = None,
     ):
         self.hub_id = record.id
         self.record = record
@@ -473,14 +474,27 @@ class HubContext:
 
         info = inspect_local_hub(self.base_dir)
         self.display_label, self.description = _concise_hub_meta(record.label, info)
-        storage = resolve_hub_storage(self.base_dir, self.data_dir, hub_id=self.hub_id)
-        self.is_enclosing_default = storage["is_enclosing_default"]
-        self.cache_dir = storage["cache_dir"]
-        self.remote_dir = storage["remote_dir"]
-        self.hub_models_cache_dir = storage["hub_models_cache_dir"]
-        self.synthetic_dir = storage["synthetic_dir"]
-        self.surveillance_dir = storage["surveillance_dir"]
-        self.seed_dir = storage["seed_dir"]
+        if storage_root is not None:
+            sroot = Path(storage_root).resolve()
+            uses_flu_surv = _hub_uses_flu_surveillance(self.base_dir, info)
+            app_surv = APP_DIR / "data" / "surveillance"
+            app_seed = APP_DIR / "data" / "seed"
+            self.is_enclosing_default = False
+            self.cache_dir = (sroot / "cache").resolve()
+            self.remote_dir = (self.data_dir / "remote").resolve()
+            self.hub_models_cache_dir = (sroot / "hub_models").resolve()
+            self.synthetic_dir = (sroot / "synthetic").resolve()
+            self.surveillance_dir = app_surv if (uses_flu_surv and app_surv.is_dir()) else (self.cache_dir / "surveillance")
+            self.seed_dir = app_seed if (uses_flu_surv and app_seed.is_dir()) else (self.cache_dir / "seed")
+        else:
+            storage = resolve_hub_storage(self.base_dir, self.data_dir, hub_id=self.hub_id)
+            self.is_enclosing_default = storage["is_enclosing_default"]
+            self.cache_dir = storage["cache_dir"]
+            self.remote_dir = storage["remote_dir"]
+            self.hub_models_cache_dir = storage["hub_models_cache_dir"]
+            self.synthetic_dir = storage["synthetic_dir"]
+            self.surveillance_dir = storage["surveillance_dir"]
+            self.seed_dir = storage["seed_dir"]
 
         self.loader = SandboxDataLoader(
             self.base_dir,
@@ -594,6 +608,8 @@ class HubManager:
         self._lock = threading.RLock()
         self._ctx_locks = LockRegistry()
         self._contexts: "OrderedDict[str, HubContext]" = OrderedDict()
+        self._private_contexts: "OrderedDict[str, HubContext]" = OrderedDict()
+        self._max_private_loaded = max(8, self.max_loaded)
         self._server_config_lock = threading.Lock()
         self._cached_server_cfg: Optional[Dict[str, Any]] = None
         self.remote_store = RemoteStore(self.data_dir, root=(self.data_dir / "remote").resolve())
@@ -605,23 +621,26 @@ class HubManager:
             on_inventory_change=self._on_remote_inventory_change,
         )
 
-        # Startup registration & active hub selection
+        # Startup registration & active hub selection (never auto-register enclosing folder in web mode)
+        self._web_explicit_hub_ids: Set[str] = set()
+        effective_enclosing = include_enclosing and (self.mode == "local")
         cli_list = [Path(p) for p in (cli_hubs or []) if str(p).strip()]
         if cli_list:
             first_rec: Optional[LocalHubRecord] = None
             for idx, hp in enumerate(cli_list):
                 rec = self.registry.add_hub(hp, activate=(idx == 0))
+                self._web_explicit_hub_ids.add(rec.id)
                 if first_rec is None:
                     first_rec = rec
             if first_rec is not None:
                 self.registry.set_active(first_rec.id)
         else:
-            enclosing = detect_enclosing_hub() if include_enclosing else None
+            enclosing = detect_enclosing_hub() if effective_enclosing else None
             if enclosing is not None:
                 # Inside-hub invocation always activates the enclosing hub on startup so tests and
                 # direct `./viz/run.sh` launches land on the enclosing repo immediately.
                 self.registry.add_hub(enclosing, auto_detected=True, activate=True)
-            else:
+            elif self.mode == "local":
                 active_id = self.registry.get_active_id()
                 if not self._is_valid_hub_id(active_id):
                     fallback = next(
@@ -649,16 +668,49 @@ class HubManager:
         self.briefing_feeds = BriefingFeedStore(self.data_dir)
         self.briefings = BriefingBuilder(self, self.briefing_feeds)
 
+        if self.mode == "web":
+            from viz.web.bundle import UploadRateLimiter
+            from viz.web.config import WebConfig
+            from viz.web.scheduler import WebSyncScheduler
+            from viz.web.sessions import WebWorkspaceStore
+
+            self.web_config = WebConfig.from_env(self.data_dir)
+            self.web_store = WebWorkspaceStore(
+                self.data_dir,
+                self.web_config,
+                on_evict=self.evict_private_context,
+            )
+            self.web_scheduler = WebSyncScheduler(self, self.web_config)
+            self.web_rate_limiter = UploadRateLimiter(
+                self.web_config.upload_rate_per_min,
+                self.web_config.max_concurrent_uploads,
+            )
+        else:
+            self.web_config = None
+            self.web_store = None
+            self.web_scheduler = None
+            self.web_rate_limiter = None
+
     def _invalidate_catalog(self) -> None:
         if hasattr(self, "catalog"):
             self.catalog.invalidate()
         if hasattr(self, "briefings"):
             self.briefings.invalidate()
 
+    def _registered_local_records(self) -> List[LocalHubRecord]:
+        if self.mode == "local":
+            return self.registry.list_hubs()
+        return [r for r in self.registry.list_hubs() if r.id in self._web_explicit_hub_ids]
+
+    def _get_local_hub(self, hub_id: str) -> Optional[LocalHubRecord]:
+        if self.mode != "local" and hub_id not in self._web_explicit_hub_ids:
+            return None
+        return self.registry.get_hub(hub_id)
+
     def _is_valid_hub_id(self, hub_id: Optional[str]) -> bool:
         if not hub_id:
             return False
-        rec = self.registry.get_hub(hub_id)
+        rec = self._get_local_hub(hub_id)
         if rec is not None:
             return is_hub_dir(Path(rec.path))
         remote_rec = self._remote_hub_record(hub_id)
@@ -682,12 +734,12 @@ class HubManager:
         )
 
     def default_hub_id(self) -> Optional[str]:
-        active_id = self.registry.get_active_id()
+        active_id = self.registry.get_active_id() if (self.mode == "local" or self._web_explicit_hub_ids) else None
         if active_id:
-            rec = self.registry.get_hub(active_id) or self._remote_hub_record(active_id)
+            rec = self._get_local_hub(active_id) or self._remote_hub_record(active_id)
             if rec and Path(rec.path).is_dir():
                 return rec.id
-        for rec in self.registry.list_hubs():
+        for rec in self._registered_local_records():
             if Path(rec.path).is_dir():
                 return rec.id
         for rid in self.remote_store.synced_hub_ids():
@@ -717,7 +769,7 @@ class HubManager:
                     return cached
                 self._contexts.pop(target_id, None)
 
-            rec = self.registry.get_hub(target_id)
+            rec = self._get_local_hub(target_id)
             is_standalone_remote = False
             if rec is None:
                 rec = self._remote_hub_record(target_id)
@@ -745,6 +797,52 @@ class HubManager:
                     self._cached_server_cfg = ctx.config.get_server_config()
             return ctx
 
+    def get_private_context(self, record: LocalHubRecord, storage_root: Path) -> Optional[HubContext]:
+        """Load or return an isolated, session/user-scoped HubContext (never indexed in global catalog)."""
+        hub_id = record.id
+        resolved_base = Path(record.path).resolve()
+        with self._lock:
+            cached = self._private_contexts.get(hub_id)
+            if cached is not None:
+                if cached.base_dir == resolved_base and cached.base_dir.is_dir():
+                    self._private_contexts.move_to_end(hub_id)
+                    return cached
+                self._private_contexts.pop(hub_id, None)
+
+        with self._ctx_locks.get(hub_id):
+            with self._lock:
+                cached = self._private_contexts.get(hub_id)
+                if cached is not None and cached.base_dir == resolved_base and cached.base_dir.is_dir():
+                    self._private_contexts.move_to_end(hub_id)
+                    return cached
+                self._private_contexts.pop(hub_id, None)
+
+            if not resolved_base.is_dir():
+                return None
+
+            ctx = HubContext(
+                record,
+                self.data_dir,
+                mode=self.mode,
+                include_remote=False,
+                peer_truth_provider=None,
+                on_shared_change=None,
+                shared_remote_store=self.remote_store,
+                shared_remote_mgr=self.shared_remote_mgr,
+                storage_root=storage_root,
+            )
+            with self._lock:
+                self._private_contexts[hub_id] = ctx
+                self._private_contexts.move_to_end(hub_id)
+                while len(self._private_contexts) > self._max_private_loaded:
+                    self._private_contexts.popitem(last=False)
+            return ctx
+
+    def evict_private_context(self, hub_id: str) -> None:
+        """Drop a cached private uploaded hub context (called on TTL expiry, delete, or cold archival)."""
+        with self._lock:
+            self._private_contexts.pop(hub_id, None)
+
     def get_server_config(self) -> Optional[Dict[str, Any]]:
         """Cached server CORS/host config for fast response headers without loading hubs under lock."""
         with self._server_config_lock:
@@ -758,7 +856,7 @@ class HubManager:
         if ctx is not None:
             cfg = ctx.config.get_server_config()
         else:
-            rec = self.registry.get_hub(default_id) or self._remote_hub_record(default_id)
+            rec = self._get_local_hub(default_id) or self._remote_hub_record(default_id)
             if rec is None or not Path(rec.path).is_dir():
                 return None
             cfg = VizConfig(Path(rec.path), app_dir=APP_DIR).get_server_config()
@@ -834,9 +932,11 @@ class HubManager:
 
     def _peer_truth_sources(self, active_base: Path, active_targets: Set[str]) -> List[Dict[str, Any]]:
         """Discover compatible sibling local hubs registered in the workspace for truth/vintage sharing."""
+        if self.mode != "local":
+            return []
         peers: List[Dict[str, Any]] = []
         active_res = Path(active_base).resolve()
-        for rec in self.registry.list_hubs():
+        for rec in self._registered_local_records():
             try:
                 p = Path(rec.path).expanduser().resolve()
             except (OSError, RuntimeError):
@@ -977,7 +1077,7 @@ class HubManager:
         return entry
 
     def workspace_summary(self, requested_hub_id: Optional[str] = None) -> Dict[str, Any]:
-        records = self.registry.list_hubs()
+        records = self._registered_local_records()
         default_id = self.default_hub_id()
         has_requested = requested_hub_id and (
             any(r.id == requested_hub_id for r in records)
@@ -998,7 +1098,7 @@ class HubManager:
         """Lightweight registered hub list (local + synced standalone remote hubs) for /api/next/manifest."""
         active_id = self.default_hub_id()
         out = []
-        for rec in self.registry.list_hubs():
+        for rec in self._registered_local_records():
             p = Path(rec.path)
             info = inspect_local_hub(p)
             label, _ = _concise_hub_meta(rec.label, info)

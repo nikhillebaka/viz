@@ -172,9 +172,10 @@ export function mount(el, ctx) {
       .then((j) => { pmap = j; renderMap(); }, (e) => { if (!isAbort(e)) { pmap = null; renderMap(); } });
   }
 
-  /* Live hubs that hold files synced before peak forecasts were kept (fetched once, quietly). */
+  /* Live hubs that hold files synced before peak forecasts were kept (fetched once cleanly in local mode). */
   let hubsInfo = null;
   const outdatedHubs = () => {
+    if (manifest?.mode === "web") return [];
     if (hubsInfo === null) {
       hubsInfo = [];
       fetch(apiUrl("/api/remote/hubs")).then((r) => (r.ok ? r.json() : null)).then((j) => {

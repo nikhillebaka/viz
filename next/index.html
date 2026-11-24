@@ -4,10 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>viz</title>
-<script>
-  // the stored theme before first paint, so a light page never flashes dark (default dark)
-  try { if (JSON.parse(localStorage.getItem("viz.theme")) === "light") document.documentElement.dataset.theme = "light"; } catch (e) {}
-</script>
+<script src="theme-init.js"></script>
 <link rel="preload" href="fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="styles/tokens.css">

@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hub-viz
+  labels:
+    app.kubernetes.io/name: hub-viz
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hub-viz
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hub-viz
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: viz
+          image: ghcr.io/nikhillebaka/viz:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8501
+              protocol: TCP
+          env:
+            - name: VIZ_MODE
+              value: "web"
+            - name: VIZ_DATA_DIR
+              value: "/data"
+            - name: VIZ_SCRATCH_DIR
+              value: "/tmp/viz-ephem"
+            - name: VIZ_AUTO_SYNC
+              value: "1"
+            - name: VIZ_SYNC_INTERVAL_HOURS
+              value: "6"
+            - name: VIZ_EPHEM_TTL_SECONDS
+              value: "1800"
+            - name: VIZ_EPHEM_MAX_TOTAL_MB
+              value: "2048"
+            - name: VIZ_UPLOAD_MAX_COMPRESSED_MB
+              value: "100"
+            - name: VIZ_UPLOAD_MAX_UNCOMPRESSED_MB
+              value: "400"
+            - name: VIZ_USER_QUOTA_MB
+              value: "250"
+            - name: VIZ_USER_COLD_AFTER_HOURS
+              value: "24"
+            # Enable behind oauth2-proxy / OIDC ingress sidecar:
+            - name: VIZ_TRUST_PROXY_AUTH
+              value: "0"
+            # - name: VIZ_SSO_LOGIN_URL
+            #   value: "/oauth2/start?rd=/"
+            # - name: VIZ_SSO_LOGOUT_URL
+            #   value: "/oauth2/sign_out"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "6Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: ephem-scratch
+              mountPath: /tmp/viz-ephem
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: viz-data
+        - name: ephem-scratch
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

@@ -261,7 +261,7 @@ class WorkspaceCatalog:
 
     def _state_stamp(self) -> Tuple[Any, ...]:
         mgr = self.mgr
-        local_recs = [(r.id, r.path) for r in mgr.registry.list_hubs()]
+        local_recs = [(r.id, r.path) for r in mgr._registered_local_records()] if hasattr(mgr, "_registered_local_records") else [(r.id, r.path) for r in mgr.registry.list_hubs()]
         remote_ids = tuple(mgr.remote_store.synced_hub_ids())
         enabled_mask = tuple((rid, mgr.remote_store.is_enabled(rid)) for rid in remote_ids)
         aliases = mgr.registry.get_target_aliases()
@@ -282,8 +282,8 @@ class WorkspaceCatalog:
         """
         mgr = self.mgr
         active_id = mgr.default_hub_id()
-        user_aliases = mgr.registry.get_target_aliases()
-        records = list(mgr.registry.list_hubs())
+        user_aliases = mgr.registry.get_target_aliases() if mgr.mode == "local" else {}
+        records = list(mgr._registered_local_records()) if hasattr(mgr, "_registered_local_records") else list(mgr.registry.list_hubs())
         # Evaluate the active local hub first so it takes precedence cleanly
         records.sort(key=lambda r: (0 if r.id == active_id else 1, r.id))
 

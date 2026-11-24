@@ -409,6 +409,7 @@ export function mountBriefing(
   let pollTimer = null;
   let refreshing = false;
   let errorMsg = null;
+  const isWeb = (ctx?.manifest?.mode || "local") === "web";
 
   function stopPoll() {
     if (pollTimer) {
@@ -598,12 +599,14 @@ export function mountBriefing(
       }
     }
 
-    const refreshBtn = h("button", {
-      type: "button",
-      class: "br-btn",
-      disabled: refreshing,
-      onclick: triggerRefresh,
-    }, refreshing ? "Refreshing…" : "Refresh feeds");
+    const refreshBtn = isWeb
+      ? null
+      : h("button", {
+        type: "button",
+        class: "br-btn",
+        disabled: refreshing,
+        onclick: triggerRefresh,
+      }, refreshing ? "Refreshing…" : "Refresh feeds");
 
     page.appendChild(h("header", { class: "br-masthead" },
       (crumbBits.length || repWeek) ? h("div", { class: "br-crumb-row" },
@@ -899,7 +902,7 @@ export function mountBriefing(
       ),
     );
 
-    if (!virology.feeds_cached) {
+    if (!virology.feeds_cached && !isWeb) {
       virSec.appendChild(h("div", { class: "br-cta-banner" },
         h("div", { class: "br-cta-copy" },
           h("strong", null, "External surveillance and genomic feeds are not yet cached locally."),

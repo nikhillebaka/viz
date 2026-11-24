@@ -69,6 +69,7 @@ export function apiUrl(url) {
     || basePath === "/api/next/briefing"
     || basePath === "/api/next/briefing/status"
     || basePath.startsWith("/api/briefing/")
+    || basePath.startsWith("/api/web/")
   ) {
     return url;
   }
@@ -570,6 +571,11 @@ export function loadBriefing(placeKey = "", { bust = false } = {}) {
 /** GET /api/next/briefing/status — external surveillance/virology feed freshness & refresh state. */
 export function loadBriefingStatus() {
   return getJson("/api/next/briefing/status");
+}
+
+/** GET /api/web/status — read-only web-mode status, auth, uploaded workspaces, and auto-sync telemetry. */
+export function loadWebStatus() {
+  return getJsonRaw("/api/web/status");
 }
 
 /** POST /api/briefing/refresh — start non-blocking background refresh of external feeds. */

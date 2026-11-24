@@ -500,7 +500,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
     els.tray.hidden = !ids.length;
     const n = sel.selected.length, c = sel.charted.length;
     els.count.textContent = `${n} selected · ${c} charted`;
-    els.combine.hidden = n < 2;
+    els.combine.hidden = manifest?.mode === "web" || n < 2;
   }
 
   /* ---------------- the preview ---------------- */

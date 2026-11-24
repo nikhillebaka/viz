@@ -7,10 +7,11 @@
 import { h } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { icon, toast } from "../ui/controls.js";
-import { clearAllCaches, loadCatalog } from "../lib/api.js";
+import { clearAllCaches, loadCatalog, loadWebStatus } from "../lib/api.js";
 import { fmtDay } from "../lib/format.js";
 import { parseIso } from "../lib/scale.js";
 import { getJSON, postJSON, fmtBytes, fmtAgo, reloadSoon, loadWarningSummary } from "./More.js";
+import { renderWebUploadSection } from "./WebUpload.js";
 
 const POLL_MS = 700;
 const ARM_MS = 3500;
@@ -111,19 +112,24 @@ export function setHubsContext(ctx) {
   activeRemoteHubId = hid?.startsWith("remote_") ? hid.slice(7) : null;
 }
 
-/** Make a workspace hub the one the server opens on every launch (best effort; ?hub= still works without). */
+/** Make a workspace hub the one the server opens on every launch (local mode only; web mode uses URL + private sessions). */
 async function setStartupHub(wsId) {
+  const modeNow = activeCtx?.manifest?.mode || workspace?.mode || "local";
+  if (modeNow === "web") return;
   try { await postJSON("/api/workspace/activate", { id: wsId }); } catch { /* same-tab ?hub= works directly */ }
 }
 
-async function openRemoteHub(remoteId) {
-  const wsId = `remote_${remoteId}`;
+async function openHubById(wsId) {
   await setStartupHub(wsId);
   if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
     activeCtx.switchContext({ hub: wsId });
     return;
   }
   location.assign(`/next/?hub=${encodeURIComponent(wsId)}`);
+}
+
+async function openRemoteHub(remoteId) {
+  return openHubById(`remote_${remoteId}`);
 }
 
 async function applyWorkspaceUpdate() {
@@ -201,10 +207,11 @@ async function openLocalHub(id) {
 export async function openHubs(anchor, ctx = {}) {
   activeCtx = ctx;
   const manifest = ctx.manifest || {};
+  const isWeb = (manifest.mode || "local") === "web";
   const currentHubId = manifest.hub_id || null;
   activeRemoteHubId = currentHubId?.startsWith("remote_") ? currentHubId.slice(7) : null;
 
-  const localBox = h("div", { class: "mo-local-wrap" }, h("div", { class: "mo-note" }, "Loading local hubs…"));
+  const localBox = h("div", { class: "mo-local-wrap" }, h("div", { class: "mo-note" }, isWeb ? "Loading workspace…" : "Loading local hubs…"));
   const remoteBox = h("div", { class: "mo-remote-wrap" });
 
   let localPathVal = "";
@@ -213,13 +220,14 @@ export async function openHubs(anchor, ctx = {}) {
   let localBusy = true;
   let remoteBusy = false;
   let catalog = ctx.catalog || null;
+  let webStatus = null;
   const aliasOpen = new Set();
   let autoExpandedAmbiguous = false;
   browserOpen = false;
 
   const list = h("div", { class: "mo-hubs" });
   const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "S3 bucket or GitHub owner/repo", "aria-label": "Hub S3 bucket or GitHub repository" });
-  const addBtn = h("button", { type: "button", class: "c-btn filled sm" }, "Add hub");
+  const addBtn = h("button", { type: "button", class: "c-link mo-web-act" }, "Add hub");
   const addNote = h("div", { class: "mo-note", "aria-live": "polite" });
   const add = async () => {
     const source = input.value.trim();
@@ -308,6 +316,44 @@ export async function openHubs(anchor, ctx = {}) {
   };
 
   const renderLocal = () => {
+    if (isWeb) {
+      if (!webStatus && localBusy) {
+        localBox.replaceChildren(h("div", { class: "mo-note" }, "Loading workspace…"));
+        return;
+      }
+      localBox.replaceChildren(renderWebUploadSection({
+        webStatus,
+        currentHubId,
+        onOpenHub: (id) => openHubById(id),
+        onUploaded: async (res) => {
+          const id = res?.hub?.id;
+          toast(`${res?.hub?.label || "Hub"} · ready`);
+          clearAllCaches();
+          await activeCtx?.reloadCatalog?.().catch(() => {});
+          if (id) {
+            openHubById(id);
+            return;
+          }
+          webStatus = await loadWebStatus().catch(() => webStatus);
+          render?.();
+        },
+        onDeleteHub: async (id) => {
+          const r = await postJSON("/api/web/workspaces/delete", { id });
+          toast("Uploaded hub removed");
+          clearAllCaches();
+          await activeCtx?.reloadCatalog?.().catch(() => {});
+          if (id === currentHubId) {
+            location.assign("/next/");
+            return;
+          }
+          if (webStatus && r?.workspaces) webStatus = { ...webStatus, workspaces: r.workspaces };
+          else webStatus = await loadWebStatus().catch(() => webStatus);
+          render?.();
+        },
+      }));
+      return;
+    }
+
     if (!workspace) {
       localBox.replaceChildren(h("div", { class: "mo-note" }, localBusy ? "Loading local hubs…" : (localNoteText || "Could not inspect workspace")));
       return;
@@ -332,12 +378,12 @@ export async function openHubs(anchor, ctx = {}) {
       const showAliases = canUnify && aliasOpen.has(lh.id);
       const actions = [];
       if (!isActive && lh.exists) {
-        actions.push(h("button", { type: "button", class: "c-btn sm mo-primary", onclick: () => openLocalHub(lh.id) }, "Open"));
+        actions.push(h("button", { type: "button", class: "c-link mo-web-act", onclick: () => openLocalHub(lh.id) }, "Open"));
       }
       if (canUnify) {
         actions.push(h("button", {
           type: "button",
-          class: "c-btn sm",
+          class: "mo-text-act",
           "aria-expanded": String(showAliases),
           onclick: () => {
             if (aliasOpen.has(lh.id)) aliasOpen.delete(lh.id);
@@ -349,7 +395,7 @@ export async function openHubs(anchor, ctx = {}) {
       if (isLocalMode) {
         actions.push(h("button", {
           type: "button",
-          class: ["c-btn sm mo-remove", armedRemove && "armed"],
+          class: ["mo-text-remove mo-remove", armedRemove && "armed"],
           onclick: () => forgetLocalHub(lh, localNoteEl),
         }, armedRemove ? "Forget?" : "Remove"));
       }
@@ -421,7 +467,7 @@ export async function openHubs(anchor, ctx = {}) {
       });
       pathInput.addEventListener("input", () => { localPathVal = pathInput.value; });
       const addPathBtn = h("button", {
-        type: "button", class: "c-btn filled sm",
+        type: "button", class: "c-link mo-web-act",
         onclick: async () => {
           const val = pathInput.value.trim();
           if (!val) { pathInput.focus(); return; }
@@ -433,7 +479,7 @@ export async function openHubs(anchor, ctx = {}) {
       pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addPathBtn.click(); } });
 
       const browseBtn = h("button", {
-        type: "button", class: "c-btn filled sm",
+        type: "button", class: "mo-text-act",
         "aria-expanded": String(browserOpen),
         onclick: async () => {
           browserOpen = !browserOpen;
@@ -446,7 +492,7 @@ export async function openHubs(anchor, ctx = {}) {
 
       const pickBtn = workspace.native_picker_available
         ? h("button", {
-          type: "button", class: "c-btn filled sm",
+          type: "button", class: "mo-text-act",
           onclick: async () => {
             pickBtn.disabled = true;
             localNoteText = "Opening folder picker…";
@@ -496,7 +542,8 @@ export async function openHubs(anchor, ctx = {}) {
   };
 
   const renderRemote = () => {
-    const isWeb = (workspace?.mode || manifest.mode) === "web";
+    const webMode = isWeb || (workspace?.mode || manifest.mode) === "web";
+    const pubHubs = webMode && webStatus?.scheduler?.hubs?.length ? webStatus.scheduler.hubs : hubs;
     const orderRank = (x) => {
       if (x.id === activeRemoteHubId) return 0;
       if (x.synced && x.enabled !== false && x.compatible !== false) return 1;
@@ -505,28 +552,37 @@ export async function openHubs(anchor, ctx = {}) {
       if (!x.builtin) return 4;
       return 5;
     };
-    const visible = hubs
+    const visible = pubHubs
       .map((x, idx) => ({ x, idx, rank: orderRank(x) }))
       .sort((a, b) => a.rank - b.rank || a.idx - b.idx)
       .map((r) => r.x);
 
+    const sched = webStatus?.scheduler;
+    const schedLabel = webMode && sched
+      ? (sched.running
+        ? "Auto-syncing…"
+        : sched.last_run
+          ? `Auto-synced · ${fmtAgo(sched.last_run)}`
+          : (sched.auto_sync ? `Auto-sync every ${sched.interval_hours} h` : null))
+      : null;
+
     const remoteHead = h("div", { class: "c-section mo-section-gap" },
       h("span", { class: "c-section-title" },
-        h("span", null, "Live hubs"),
-        h("span", { class: "c-section-count" }, plural(visible.length, "hub"))));
-    if (!hubs.length && remoteBusy) {
+        h("span", null, webMode ? "Public hubs" : "Live hubs"),
+        h("span", { class: "c-section-count" }, [plural(visible.length, "hub"), schedLabel].filter(Boolean).join(" · "))));
+    if (!pubHubs.length && remoteBusy) {
       list.replaceChildren(h("div", { class: "mo-note" }, "Loading…"));
     } else if (!visible.length) {
-      list.replaceChildren(h("div", { class: "mo-note" }, remoteNoteText || "No remote hubs registered."));
+      list.replaceChildren(h("div", { class: "mo-note" }, remoteNoteText || "No public hubs configured."));
     } else {
-      list.replaceChildren(...visible.map((x) => hubBlock(x, { isWeb })));
+      list.replaceChildren(...visible.map((x) => hubBlock(x, { isWeb: webMode })));
     }
-    remoteBox.replaceChildren(
+    remoteBox.replaceChildren(...[
       remoteHead,
       list,
-      isWeb ? null : h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
-      isWeb ? null : addNote,
-    );
+      webMode ? null : h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
+      webMode ? null : addNote,
+    ].filter(Boolean));
   };
 
   render = () => {
@@ -538,6 +594,20 @@ export async function openHubs(anchor, ctx = {}) {
   localBusy = true;
   remoteBusy = true;
   render();
+
+  if (isWeb) {
+    await Promise.all([
+      loadWebStatus()
+        .then((ws) => { webStatus = ws; })
+        .catch((err) => { remoteNoteText = `Couldn't load web status · ${err.message}`; })
+        .finally(() => { localBusy = false; remoteBusy = false; render?.(); }),
+      (catalog ? Promise.resolve(catalog) : loadCatalog())
+        .then((c) => { if (c) catalog = c; })
+        .catch(() => {}),
+    ]);
+    render?.();
+    return layer;
+  }
 
   await Promise.all([
     loadWorkspace()
@@ -574,14 +644,14 @@ function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
     return h("div", { class: "mo-browser" }, h("div", { class: "mo-note" }, "Loading folders…"));
   }
   const roots = (snap.roots || []).map((r) => h("button", {
-    type: "button", class: "c-chip",
+    type: "button", class: "mo-tier-tab",
     "aria-pressed": String(r.path === snap.path),
     onclick: () => onNavigate(r.path),
   }, r.label));
 
   const head = h("div", { class: "mo-browse-head" },
     h("button", {
-      type: "button", class: "c-btn filled sm mo-up",
+      type: "button", class: "mo-text-act mo-up",
       disabled: !snap.parent, title: "Parent folder",
       onclick: () => snap.parent && onNavigate(snap.parent),
     }, "↑"),
@@ -597,7 +667,7 @@ function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
       curRegistered === currentHubId && currentHubId
         ? h("span", { class: "mo-src-state is-live" }, "Active")
         : h("button", {
-          type: "button", class: "c-btn sm mo-primary",
+          type: "button", class: "c-link mo-web-act",
           onclick: () => (curRegistered ? openLocalHub(curRegistered) : onConnect(snap.path)),
         }, curRegistered ? "Open" : "Connect"))
     : null;
@@ -617,7 +687,7 @@ function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
         ? (ent.registered_id === currentHubId && currentHubId
           ? h("span", { class: "mo-src-state is-live" }, "Active")
           : h("button", {
-            type: "button", class: "c-btn filled sm",
+            type: "button", class: "c-link mo-web-act",
             onclick: () => (ent.registered_id ? openLocalHub(ent.registered_id) : onConnect(ent.path)),
           }, ent.registered_id ? "Open" : "Connect"))
         : null);
@@ -635,15 +705,38 @@ function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
 }
 
 function hubBlock(x, { isWeb = false } = {}) {
-  const busy = running(x), anyBusy = hubs.some(running);
+  const busy = isWeb ? false : running(x), anyBusy = isWeb ? false : hubs.some(running);
   const compatible = x.compatible !== false;
   const isActiveRemote = activeRemoteHubId === x.id;
+  if (isWeb) {
+    const state = isActiveRemote ? "Active" : x.syncing ? "Updating" : "";
+    const stateCls = isActiveRemote ? "is-live" : x.syncing ? "is-syncing" : "";
+    const meta = x.synced
+      ? [
+        plural(x.models || 0, "model"),
+        x.latest_round ? `latest ${day(x.latest_round)}` : null,
+        x.last_sync ? `updated ${fmtAgo(x.last_sync)}` : null,
+      ].filter(Boolean).join(" · ")
+      : ([x.geography, x.description].filter(Boolean).join(" · ") || "Waiting for initial sync");
+    const openLink = (x.synced && !isActiveRemote)
+      ? h("button", { type: "button", class: "c-link mo-web-act", onclick: () => openRemoteHub(x.id) }, "Open")
+      : null;
+
+    return h("div", { class: "mo-src mo-web-row", "data-hub": x.id },
+      h("div", { class: "mo-web-main" },
+        h("div", { class: "mo-src-head" },
+          h("span", { class: "mo-src-name", title: x.description || undefined }, x.repo_url ? h("a", { href: x.repo_url, target: "_blank", rel: "noopener" }, x.label) : x.label),
+          state ? h("span", { class: ["mo-src-state", stateCls] }, state) : null),
+        h("div", { class: "mo-src-meta" }, meta)),
+      openLink ? h("div", { class: "mo-web-acts" }, openLink) : null);
+  }
+
   const state = isActiveRemote ? "Active" : busy ? "Syncing" : !x.synced ? "Not synced" : !compatible ? "Synced" : x.enabled ? "Live" : "Hidden";
   const stateCls = (isActiveRemote || (x.synced && !compatible && !busy))
     ? "is-live"
     : `is-${state.toLowerCase().replace(" ", "-")}`;
 
-  const shown = (x.synced && compatible && !isActiveRemote && !isWeb)
+  const shown = (x.synced && compatible && !isActiveRemote)
     ? h("button", {
       type: "button", class: "mo-toggle", role: "checkbox", "aria-checked": String(!!x.enabled), disabled: busy,
       "aria-label": `Show ${x.label} models`, onclick: () => toggle(x),
@@ -669,14 +762,14 @@ function hubBlock(x, { isWeb = false } = {}) {
   const listed = checks.get(x.id)?.seasons || [];
   const all = [...new Set([...(x.seasons || []), ...(currentSeason ? [currentSeason] : []), ...listed.map((s) => s.season)])].sort().reverse();
   const sel = picked.get(x.id) || new Set();
-  const chips = isWeb ? [] : all.map((s) => {
+  const chips = all.map((s) => {
     const info = listed.find((y) => y.season === s);
     const have = (x.seasons || []).includes(s);
     return h("button", {
-      type: "button", class: ["c-chip mo-season", have && "have"], "aria-pressed": String(sel.has(s)), disabled: busy,
+      type: "button", class: ["mo-season-check", have && "have"], role: "checkbox", "aria-checked": String(sel.has(s)), disabled: busy,
       title: info ? `${plural(info.rounds?.length || 0, "round")} · ${plural(info.models || 0, "model")} · ${fmtBytes(info.bytes)}` : have ? "Synced" : null,
       onclick: () => { sel.has(s) ? sel.delete(s) : sel.add(s); picked.set(x.id, sel); render?.(); },
-    }, seasonLabel(s));
+    }, h("span", { class: "c-check" }), seasonLabel(s));
   });
 
   const j = x.job || {};
@@ -687,39 +780,37 @@ function hubBlock(x, { isWeb = false } = {}) {
   const fresh = [...sel].filter((s) => !(x.seasons || []).includes(s));
   const syncLabel = fresh.length ? `Sync ${plural(fresh.length, "season")}` : x.synced ? "Update" : "Sync";
   const isArmed = armed.has(x.id);
-  const removeBtn = (!isWeb && (x.synced || !x.builtin))
-    ? h("button", { type: "button", class: ["c-btn sm mo-remove", isArmed && "armed"], disabled: anyBusy, onclick: () => remove(x) }, isArmed ? "Remove local copy?" : "Remove")
+  const removeBtn = (x.synced || !x.builtin)
+    ? h("button", { type: "button", class: ["mo-text-remove mo-remove", isArmed && "armed"], disabled: anyBusy, onclick: () => remove(x) }, isArmed ? "Remove local copy?" : "Remove")
     : null;
   const openBtn = (x.synced && !isActiveRemote)
     ? h("button", {
       type: "button",
-      class: ["c-btn sm", (fresh.length > 0 || needsUp) && !isWeb ? "filled" : "mo-primary"],
+      class: (fresh.length > 0 || needsUp) ? "mo-text-act" : "c-link mo-web-act",
       onclick: () => openRemoteHub(x.id),
     }, "Open")
     : null;
 
   let actions = [];
-  if (busy && !isWeb) {
-    actions = [h("button", { type: "button", class: "c-btn filled sm", onclick: () => cancel(x) }, "Cancel")];
-  } else if (isWeb) {
-    actions = [openBtn].filter(Boolean);
+  if (busy) {
+    actions = [h("button", { type: "button", class: "mo-text-act", onclick: () => cancel(x) }, "Cancel")];
   } else if (!x.synced) {
     actions = [
-      h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
-      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
+      h("button", { type: "button", class: "c-link mo-web-act", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
+      h("button", { type: "button", class: "mo-text-act", disabled: anyBusy, onclick: () => check(x) }, "Check"),
       removeBtn,
     ];
   } else if (fresh.length > 0 || needsUp) {
     actions = [
       openBtn,
-      h("button", { type: "button", class: "c-btn sm mo-primary", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
-      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check"),
+      h("button", { type: "button", class: "c-link mo-web-act", disabled: anyBusy || !sel.size, onclick: () => sync(x) }, syncLabel),
+      h("button", { type: "button", class: "mo-text-act", disabled: anyBusy, onclick: () => check(x) }, "Check"),
       removeBtn,
     ];
   } else {
     actions = [
       openBtn,
-      h("button", { type: "button", class: "c-btn filled sm", disabled: anyBusy, onclick: () => check(x) }, "Check for updates"),
+      h("button", { type: "button", class: "mo-text-act", disabled: anyBusy, onclick: () => check(x) }, "Check for updates"),
       removeBtn,
     ];
   }
@@ -828,10 +919,10 @@ export async function mountPublicHubs(host) {
         ? [j.phase || "Starting", j.files_total ? `${j.files_done || 0} / ${j.files_total} files` : null].filter(Boolean).join(" · ")
         : failedNotes.get(x.id) || [x.geography, x.synced ? `${plural(x.models || 0, "model")} synced` : null].filter(Boolean).join(" · ");
       const act = busy
-        ? h("button", { type: "button", class: "c-btn filled sm", onclick: () => postJSON("/api/remote/cancel", { hub: x.id }).catch(() => {}) }, "Cancel")
+        ? h("button", { type: "button", class: "mo-text-act", onclick: () => postJSON("/api/remote/cancel", { hub: x.id }).catch(() => {}) }, "Cancel")
         : x.synced
-          ? h("button", { type: "button", class: "c-btn sm mo-primary", onclick: () => openRemoteHub(x.id) }, "Open")
-          : h("button", { type: "button", class: "c-btn sm mo-primary", disabled: live, onclick: () => start(x) }, "Sync");
+          ? h("button", { type: "button", class: "c-link mo-web-act", onclick: () => openRemoteHub(x.id) }, "Open")
+          : h("button", { type: "button", class: "c-link mo-web-act", disabled: live, onclick: () => start(x) }, "Sync");
       return h("div", { class: "app-welcome-hub", "data-hub": x.id },
         h("div", { class: "app-welcome-hub-text" },
           h("span", { class: "app-welcome-hub-name" }, x.label),
@@ -918,11 +1009,13 @@ export async function openWarnings(anchor) {
   };
   input.addEventListener("input", draw);
   try {
-    const w = await loadWarningSummary();
+    const w = await loadWarningSummary(Boolean(activeCtx?.manifest?.mode === "web"));
     groups = [];
     if (w.status.length) groups.push({ title: "Dataset", rows: w.status.map((t) => ({ model: "", text: t, n: 1 })) });
-    const notesBy = await Promise.all(w.hubs.map((x) => getJSON(`/api/remote/warnings?hub=${encodeURIComponent(x.id)}`).catch(() => ({ warnings: [] }))));
-    w.hubs.forEach((x, i) => groups.push({ title: x.label, rows: groupNotes(notesBy[i].warnings || []) }));
+    if (w.hubs.length) {
+      const notesBy = await Promise.all(w.hubs.map((x) => getJSON(`/api/remote/warnings?hub=${encodeURIComponent(x.id)}`).catch(() => ({ warnings: [] }))));
+      w.hubs.forEach((x, i) => groups.push({ title: x.label, rows: groupNotes(notesBy[i].warnings || []) }));
+    }
     draw();
     layer.place();
   } catch (err) { list.replaceChildren(h("div", { class: "mo-note" }, `Couldn't load · ${err.message}`)); }
