@@ -1,15 +1,13 @@
 """
-Integration tests for the HTTP server API routes.
-Uses http.client with a live test server on an ephemeral port.
+Integration tests for core HTTP server API routes using HubManager on an ephemeral port.
 """
 
 import http.client
 import json
 from pathlib import Path
-import socketserver
+import shutil
 import sys
-import threading
-import time
+import tempfile
 import unittest
 import urllib.parse
 
@@ -17,135 +15,135 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from conftest import resolve_sandbox_hub  # noqa: E402
-from viz.server import SandboxRequestHandler  # noqa: E402
-
-BASE_DIR = resolve_sandbox_hub()
+from conftest import SYNTH_TARGET, build_synthetic_hub, start_test_server  # noqa: E402
 
 
-@unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
 class TestServerAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        socketserver.ThreadingTCPServer.allow_reuse_address = True
-        # Bind to port 0 to let OS select an available ephemeral port
-        cls.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SandboxRequestHandler)
-        cls.port = cls.httpd.server_address[1]
-        cls.server_thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.server_thread.start()
-        time.sleep(0.1)
+        cls._tmp = Path(tempfile.mkdtemp(prefix="viz-srv-test-")).resolve()
+        cls.hub_dir = build_synthetic_hub(cls._tmp / "hub")
+        cls._srv_ctx = start_test_server([cls.hub_dir])
+        cls.port, cls.mgr = cls._srv_ctx.__enter__()
 
     @classmethod
     def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
+        cls._srv_ctx.__exit__(None, None, None)
+        shutil.rmtree(cls._tmp, ignore_errors=True)
 
-    def _get(self, path: str, query: dict = None, headers: dict = None) -> tuple[int, dict]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict | None = None,
+        body: dict | None = None,
+    ) -> tuple[int, dict]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        url = path
-        if query:
-            url += "?" + urllib.parse.urlencode(query)
-        conn.request("GET", url, headers=headers or {})
-        resp = conn.getresponse()
-        data = resp.read().decode("utf-8")
-        conn.close()
-        return resp.status, json.loads(data)
+        url = f"{path}?{urllib.parse.urlencode(query)}" if query else path
+        payload = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        try:
+            conn.request(method, url, body=payload, headers=headers)
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode("utf-8"))
+            return resp.status, data
+        finally:
+            conn.close()
 
-    def _post(self, path: str, body: dict = None, headers: dict = None) -> tuple[int, dict]:
-        conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        payload = json.dumps(body or {}).encode("utf-8")
-        hdrs = {"Content-Type": "application/json"}
-        if headers:
-            hdrs.update(headers)
-        conn.request("POST", path, body=payload, headers=hdrs)
-        resp = conn.getresponse()
-        data = resp.read().decode("utf-8")
-        conn.close()
-        return resp.status, json.loads(data)
+    def test_status_metadata_and_manifest_endpoints(self):
+        status_code, status_data = self._request("GET", "/api/status")
+        self.assertEqual(status_code, 200)
+        self.assertEqual(status_data["status"], "ok")
+        self.assertEqual(status_data["mode"], "local")
+        self.assertEqual(status_data["models_count"], 4)
 
-    def test_status_endpoint(self):
-        status, data = self._get("/api/status")
-        self.assertEqual(status, 200)
-        self.assertEqual(data["status"], "ok")
-        self.assertGreater(data["models_count"], 0)
+        meta_code, meta_data = self._request("GET", "/api/metadata")
+        self.assertEqual(meta_code, 200)
+        self.assertEqual(meta_data["default_target"], SYNTH_TARGET)
+        self.assertEqual(meta_data["default_baseline"], "FluSight-baseline")
+        for key in ("models", "targets", "recommended_models"):
+            self.assertIn(key, meta_data)
 
-    def test_metadata_endpoint(self):
-        status, data = self._get("/api/metadata")
-        self.assertEqual(status, 200)
-        self.assertIn("models", data)
-        self.assertIn("targets", data)
-        self.assertIn("recommended_models", data)
-        self.assertIn("default_target", data)
-        self.assertIn("default_baseline", data)
+        man_code, man_data = self._request("GET", "/api/next/manifest")
+        self.assertEqual(man_code, 200)
+        self.assertFalse(man_data.get("empty"))
+        self.assertEqual(man_data["default_target"], SYNTH_TARGET)
+        self.assertEqual(man_data["baseline"], "FluSight-baseline")
+        self.assertGreaterEqual(len(man_data["locations"]), 7)
+        self.assertEqual(sorted(s["id"] for s in man_data["seasons"]), ["2023-2024", "2024-2025"])
 
-    def test_metrics_endpoint(self):
-        status, data = self._get("/api/metrics", {
-            "models": "UMass-flusion_spatial2_prod,UMass-AR6_pooled",
+    def test_metrics_and_next_metrics_endpoints(self):
+        status, data = self._request("GET", "/api/metrics", query={
+            "models": "Model-Alpha,Model-Beta",
             "date": "2024-01-13",
             "location": "states",
             "fair": "false",
         })
         self.assertEqual(status, 200)
-        self.assertIn("rankings", data)
         self.assertEqual(len(data["rankings"]), 2)
-        flusion = next(r for r in data["rankings"] if r["model_id"] == "UMass-flusion_spatial2_prod")
-        self.assertIsNotNone(flusion["wis"])
+        alpha = next(r for r in data["rankings"] if r["model_id"] == "Model-Alpha")
+        self.assertIsNotNone(alpha["wis"])
 
-    def test_spatial_endpoint(self):
-        status, data = self._get("/api/spatial", {
-            "models": "UMass-flusion_spatial2_prod",
+        next_status, next_data = self._request("GET", "/api/next/metrics", query={
+            "models": "Model-Alpha,Model-Beta",
             "date": "2024-01-13",
-            "target": "wk inc flu hosp",
-            "horizon": "1",
+            "location": "states",
+            "horizons": "0,1",
+            "fair": "true",
         })
-        self.assertEqual(status, 200)
-        self.assertIn("states", data)
-        self.assertEqual(data["selected_horizon"], "1")
+        self.assertEqual(next_status, 200)
+        next_alpha = next(r for r in next_data["rankings"] if r["model_id"] == "Model-Alpha")
+        self.assertEqual(next_alpha["count"], 10)  # 5 shared states * 2 horizons
+
+    def test_spatial_and_next_spatial_endpoints(self):
+        for route in ("/api/spatial", "/api/next/spatial"):
+            status, data = self._request("GET", route, query={
+                "models": "Model-Alpha",
+                "date": "2024-01-13",
+                "target": SYNTH_TARGET,
+                "horizon": "1",
+            })
+            self.assertEqual(status, 200)
+            self.assertIn("states", data)
+            self.assertEqual(data["selected_horizon"], "1")
 
     def test_cache_refresh_endpoint(self):
-        # GET should be rejected with 405 Method Not Allowed
-        get_status, get_data = self._get("/api/cache/refresh")
+        get_status, get_data = self._request("GET", "/api/cache/refresh")
         self.assertEqual(get_status, 405)
         self.assertIn("error", get_data)
 
-        # POST should succeed with 200 OK
-        post_status, post_data = self._post("/api/cache/refresh")
+        post_status, post_data = self._request("POST", "/api/cache/refresh", body={})
         self.assertEqual(post_status, 200)
         self.assertEqual(post_data["status"], "ok")
 
-    def test_ensemble_endpoints(self):
-        # 1. Preview
-        prev_status, prev_data = self._post("/api/ensemble/preview", {
-            "models": ["UMass-flusion_spatial2_prod", "UMass-AR6_pooled"],
+    def test_ensemble_http_lifecycle(self):
+        prev_status, prev_data = self._request("POST", "/api/ensemble/preview", body={
+            "models": ["Model-Alpha", "Model-Beta"],
             "method": "median",
         })
         self.assertEqual(prev_status, 200)
         self.assertTrue(prev_data.get("valid"))
         self.assertEqual(prev_data.get("model_count"), 2)
 
-        # 2. Create
-        create_status, create_data = self._post("/api/ensemble/create", {
+        create_status, create_data = self._request("POST", "/api/ensemble/create", body={
             "name": "Integration Test Ensemble",
             "method": "median",
-            "models": ["UMass-flusion_spatial2_prod", "UMass-AR6_pooled"],
+            "models": ["Model-Alpha", "Model-Beta"],
         })
         self.assertEqual(create_status, 200)
         self.assertEqual(create_data.get("status"), "ok")
         ens_id = create_data["ensemble"]["id"]
         self.assertTrue(ens_id.startswith("synth_"))
 
-        # 3. List
-        list_status, list_data = self._get("/api/ensemble/list")
+        list_status, list_data = self._request("GET", "/api/ensemble/list")
         self.assertEqual(list_status, 200)
-        found = any(e["id"] == ens_id for e in list_data.get("ensembles", []))
-        self.assertTrue(found)
+        self.assertTrue(any(e["id"] == ens_id for e in list_data.get("ensembles", [])))
 
-        # 4. Delete
-        del_status, del_data = self._post("/api/ensemble/delete", {"ensemble_id": ens_id})
+        del_status, del_data = self._request("POST", "/api/ensemble/delete", body={"ensemble_id": ens_id})
         self.assertEqual(del_status, 200)
         self.assertEqual(del_data.get("status"), "ok")
 
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -1,9 +1,10 @@
 """
-Unit and integration tests for self-contained surveillance data handling and rebuild utility.
-Compatible with both standard library unittest and pytest test runners.
+Self-contained unit and integration tests for surveillance data handling,
+oracle-to-admissions synthesis, initial/revised streams, and as-of vintage cutoffs.
 """
 
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -14,154 +15,123 @@ _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from conftest import APP_DIR, resolve_sandbox_hub  # noqa: E402
+from conftest import APP_DIR, SYNTH_TARGET, build_synthetic_hub  # noqa: E402
 from viz.core.cache_manager import ParquetCacheManager  # noqa: E402
 from viz.core.data_loader import SandboxDataLoader  # noqa: E402
 from viz.rebuild_surveillance import (  # noqa: E402
-    validate_admissions_csv,
     synthesize_admissions_from_oracle,
+    validate_admissions_csv,
 )
-
-BASE_DIR = resolve_sandbox_hub()
 
 
 class TestSurveillanceRebuild(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.repo_root = BASE_DIR
+        cls._tmp = Path(tempfile.mkdtemp(prefix="viz-surv-test-")).resolve()
+        cls.hub_dir = build_synthetic_hub(cls._tmp / "hub", with_surveillance_vintages=True)
+        cls.empty_surv_dir = cls._tmp / "empty-surv"
+        cls.empty_surv_dir.mkdir(parents=True, exist_ok=True)
+        cls.synth_surv_dir = cls._tmp / "synth-surv"
+        cls.synth_surv_dir.mkdir(parents=True, exist_ok=True)
+
+        oracle_csv = cls.hub_dir / "target-data" / "oracle-output.csv"
+        adm_csv = cls.synth_surv_dir / "target-hospital-admissions.csv"
+        synthesize_admissions_from_oracle(oracle_csv, adm_csv)
+        # Create an initial-admissions stream scaled down by 10% relative to settled admissions.
+        pl.read_csv(adm_csv, schema_overrides={"location": pl.String}).with_columns(
+            (pl.col("value") * 0.9).round(1).alias("value")
+        ).write_csv(cls.synth_surv_dir / "initial-hospital-admissions.csv")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._tmp, ignore_errors=True)
 
     def test_validate_admissions_csv(self):
-        adm_csv = APP_DIR / "data" / "surveillance" / "target-hospital-admissions.csv"
-        if adm_csv.exists():
-            result = validate_admissions_csv(adm_csv)
-            self.assertTrue(result["valid"])
-            self.assertGreater(result["total_rows"], 0)
-            self.assertGreaterEqual(result["distinct_locations"], 50)
-            self.assertIsNotNone(result["min_date"])
-            self.assertIsNotNone(result["max_date"])
+        synth_adm = self.synth_surv_dir / "target-hospital-admissions.csv"
+        res_synth = validate_admissions_csv(synth_adm)
+        self.assertTrue(res_synth["valid"])
+        self.assertGreater(res_synth["total_rows"], 0)
+        self.assertEqual(res_synth["distinct_locations"], 7)
 
-    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
+        bundled = APP_DIR / "data" / "surveillance" / "target-hospital-admissions.csv"
+        if bundled.exists():
+            res_bundled = validate_admissions_csv(bundled)
+            self.assertTrue(res_bundled["valid"])
+            self.assertGreaterEqual(res_bundled["distinct_locations"], 50)
+
     def test_synthesize_admissions_from_oracle(self):
-        oracle_csv = self.repo_root / "target-data" / "oracle-output.csv"
-        if not oracle_csv.exists():
-            self.skipTest("oracle-output.csv not found")
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            dest_csv = Path(tmp_dir) / "synth_admissions.csv"
-            ok = synthesize_admissions_from_oracle(oracle_csv, dest_csv)
-            self.assertTrue(ok)
-            self.assertTrue(dest_csv.exists())
-
-            df = pl.read_csv(dest_csv, schema_overrides={"location": pl.String})
-            self.assertIn("date", df.columns)
-            self.assertIn("location", df.columns)
-            self.assertIn("value", df.columns)
-            self.assertGreater(len(df), 0)
-
-    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
-    def test_cache_manager_self_contained_surveillance(self):
-        cm = ParquetCacheManager(self.repo_root)
-        self.assertTrue(cm.surveillance_dir.exists())
-        self.assertTrue(cm.surveillance_dir.is_dir())
-
-        pq = cm.get_admissions_parquet()
-        self.assertIsNotNone(pq)
-        self.assertTrue(pq.exists())
-
-        lf = cm.scan_admissions()
-        self.assertIsNotNone(lf)
-        df = lf.collect()
-        self.assertIn("target_end_date", df.columns)
-        self.assertIn("location", df.columns)
-        self.assertIn("oracle_value", df.columns)
+        oracle_csv = self.hub_dir / "target-data" / "oracle-output.csv"
+        dest_csv = self._tmp / "re-synth-admissions.csv"
+        self.assertTrue(synthesize_admissions_from_oracle(oracle_csv, dest_csv))
+        self.assertTrue(dest_csv.exists())
+        df = pl.read_csv(dest_csv, schema_overrides={"location": pl.String})
+        self.assertEqual(set(["date", "location", "value"]).issubset(df.columns), True)
         self.assertGreater(len(df), 0)
 
-    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
-    def test_cache_manager_initial_admissions(self):
-        cm = ParquetCacheManager(self.repo_root)
-        pq = cm.get_initial_admissions_parquet()
-        self.assertIsNotNone(pq)
-        self.assertTrue(pq.exists())
+    def test_cache_manager_admissions_and_initial_admissions(self):
+        cm = ParquetCacheManager(
+            self.hub_dir,
+            include_remote=False,
+            cache_dir=self._tmp / "cm-cache",
+            surveillance_dir=self.synth_surv_dir,
+        )
+        adm_pq = cm.get_admissions_parquet(target=SYNTH_TARGET)
+        self.assertIsNotNone(adm_pq)
+        self.assertTrue(adm_pq.exists())
+        adm_df = cm.scan_admissions(target=SYNTH_TARGET).collect()
+        for col in ("target_end_date", "location", "oracle_value"):
+            self.assertIn(col, adm_df.columns)
+        self.assertGreater(len(adm_df), 0)
 
-        lf = cm.scan_initial_admissions()
-        self.assertIsNotNone(lf)
-        df = lf.collect()
-        self.assertIn("target_end_date", df.columns)
-        self.assertIn("location", df.columns)
-        self.assertIn("oracle_value", df.columns)
-        self.assertGreater(len(df), 0)
+        init_pq = cm.get_initial_admissions_parquet()
+        self.assertIsNotNone(init_pq)
+        self.assertTrue(init_pq.exists())
+        init_df = cm.scan_initial_admissions().collect()
+        for col in ("target_end_date", "location", "oracle_value"):
+            self.assertIn(col, init_df.columns)
+        self.assertGreater(len(init_df), 0)
 
-    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
-    def test_data_loader_surveillance_streams(self):
-        dl = SandboxDataLoader(base_dir=self.repo_root)
-        surv = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2024-01-13")
-
+    def test_surveillance_streams_nssp_and_historical_seasons(self):
+        dl = SandboxDataLoader(
+            self.hub_dir,
+            include_remote=False,
+            cache_dir=self._tmp / "dl-cache-1",
+            surveillance_dir=self.empty_surv_dir,
+        )
+        surv = dl.get_surveillance_streams(target=SYNTH_TARGET, location="US", reference_date="2025-01-18")
         self.assertEqual(surv["location"], "US")
-        self.assertEqual(surv["reference_date"], "2024-01-13")
-        self.assertIn("nssp", surv)
-        self.assertIn("historical_seasons", surv)
-        self.assertGreater(len(surv["historical_seasons"]), 0)
-        self.assertIn("unrevised", surv)
+        self.assertEqual(surv["reference_date"], "2025-01-18")
+        self.assertTrue(surv["nssp"]["available"])
+        self.assertGreater(len(surv["nssp"]["data"]), 0)
+        self.assertIn("2023-2024", surv["historical_seasons"])
+        self.assertTrue(surv["prior_season"]["available"])
         self.assertTrue(surv["unrevised"]["available"])
-        self.assertGreater(len(surv["unrevised"]["data"]), 0)
-        self.assertEqual(surv["unrevised"]["season"], "2023/24")
-        self.assertTrue(all(d["date"] <= surv["reference_date"] for d in surv["unrevised"]["data"]))
+        self.assertEqual(surv["unrevised"]["season"], "2024-2025")
 
-    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
-    def test_data_loader_unrevised_stream_latest_season(self):
-        dl = SandboxDataLoader(base_dir=self.repo_root)
-        surv = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2026-05-30")
-        self.assertIn("unrevised", surv)
-        self.assertTrue(surv["unrevised"]["available"])
-        self.assertGreater(len(surv["unrevised"]["data"]), 0)
-        self.assertEqual(surv["unrevised"]["season"], "2025/26")
-        self.assertTrue(all(d["date"] <= "2026-05-30" for d in surv["unrevised"]["data"]))
+    def test_as_of_vintage_revisions_and_cutoff(self):
+        """Past observation weeks revise upward across successive reference dates and respect cutoffs."""
+        dl = SandboxDataLoader(
+            self.hub_dir,
+            include_remote=False,
+            cache_dir=self._tmp / "dl-cache-2",
+            surveillance_dir=self.empty_surv_dir,
+        )
+        jan04 = dl.get_surveillance_streams(target=SYNTH_TARGET, location="US", reference_date="2025-01-04")
+        jan11 = dl.get_surveillance_streams(target=SYNTH_TARGET, location="US", reference_date="2025-01-11")
+        jan18 = dl.get_surveillance_streams(target=SYNTH_TARGET, location="US", reference_date="2025-01-18")
 
-        # Verify dynamic update and cutoff termination for a mid-season reference date (2026-01-24)
-        surv_mid = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2026-01-24")
-        self.assertTrue(surv_mid["unrevised"]["available"])
-        mid_dates = [d["date"] for d in surv_mid["unrevised"]["data"]]
-        self.assertIn("2026-01-17", mid_dates)
-        self.assertNotIn("2026-01-24", mid_dates)
-        self.assertNotIn("2026-01-31", mid_dates)
-        self.assertEqual(max(mid_dates), "2026-01-17")  # Exactly terminates at cutoff line
+        for ref, payload in (("2025-01-04", jan04), ("2025-01-11", jan11), ("2025-01-18", jan18)):
+            self.assertTrue(payload["unrevised"]["available"])
+            dates = [d["date"] for d in payload["unrevised"]["data"]]
+            self.assertTrue(all(d < ref for d in dates), f"Expected strictly < {ref}, got {dates}")
 
-        # Verify that unrevised initial report is lower than settled oracle truth for surge weeks
-        truth = dl.get_ground_truth_series(target="wk inc flu hosp", location="US", reference_date="2026-05-30")
-        truth_map = {d["date"]: d["value"] for d in (truth["history"] + truth["future"] + truth["season_remainder"])}
-        unrev_map = {d["date"]: d["value"] for d in surv["unrevised"]["data"]}
+        m04 = {d["date"]: d["value"] for d in jan04["unrevised"]["data"]}
+        m11 = {d["date"]: d["value"] for d in jan11["unrevised"]["data"]}
+        m18 = {d["date"]: d["value"] for d in jan18["unrevised"]["data"]}
 
-        # 2026-01-03 peak: Initial report was ~39,067, settled truth was 42,626
-        if "2026-01-03" in unrev_map and "2026-01-03" in truth_map:
-            self.assertLess(unrev_map["2026-01-03"], truth_map["2026-01-03"])
-
-        # 2026-02-14 surge: Initial report was ~13,812, settled truth was 16,444
-        if "2026-02-14" in unrev_map and "2026-02-14" in truth_map:
-            self.assertLess(unrev_map["2026-02-14"], truth_map["2026-02-14"])
-
-    @unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
-    def test_as_of_vintage_revisions_across_timepoints(self):
-        """Verify that past observation points revise upward/downward as the forecast reference date advances."""
-        dl = SandboxDataLoader(base_dir=self.repo_root)
-        surv_jan17 = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2026-01-17")
-        surv_jan24 = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2026-01-24")
-        surv_feb07 = dl.get_surveillance_streams(target="wk inc flu hosp", location="US", reference_date="2026-02-07")
-
-        jan17_map = {d["date"]: d["value"] for d in surv_jan17["unrevised"]["data"]}
-        jan24_map = {d["date"]: d["value"] for d in surv_jan24["unrevised"]["data"]}
-        feb07_map = {d["date"]: d["value"] for d in surv_feb07["unrevised"]["data"]}
-
-        # 2026-01-10 was reported in Jan 17, revised up in Jan 24, and revised up again in Feb 07
-        self.assertIn("2026-01-10", jan17_map)
-        self.assertIn("2026-01-10", jan24_map)
-        self.assertIn("2026-01-10", feb07_map)
-        self.assertLess(jan17_map["2026-01-10"], jan24_map["2026-01-10"])
-        self.assertLess(jan24_map["2026-01-10"], feb07_map["2026-01-10"])
-
-        # 2026-01-17 was reported on Jan 24, then revised up in Feb 07
-        self.assertIn("2026-01-17", jan24_map)
-        self.assertIn("2026-01-17", feb07_map)
-        self.assertLess(jan24_map["2026-01-17"], feb07_map["2026-01-17"])
+        self.assertLess(m04["2024-12-28"], m11["2024-12-28"])
+        self.assertLess(m11["2024-12-28"], m18["2024-12-28"])
+        self.assertLess(m11["2025-01-04"], m18["2025-01-04"])
 
 
 if __name__ == "__main__":

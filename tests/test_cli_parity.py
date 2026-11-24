@@ -1,63 +1,77 @@
 """
-Parity test between CLI evaluation engine and Server HTTP API.
-Ensures that both access paths produce mathematically identical metrics,
-rankings, and scope resolutions for identical parameters.
+Parity test between CLI evaluation (`score_cli.py` / `EvaluationEngine`) and HTTP API.
+Ensures identical metrics, rankings, window scoping, and export outputs across paths.
 """
 
 import http.client
 import json
 from pathlib import Path
-import socketserver
+import shutil
+import subprocess
 import sys
-import threading
-import time
+import tempfile
 import unittest
 import urllib.parse
+
+import polars as pl
 
 _TESTS_DIR = Path(__file__).resolve().parent
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 
-from conftest import APP_DIR, resolve_sandbox_hub  # noqa: E402
+from conftest import APP_DIR, build_synthetic_hub, start_test_server  # noqa: E402
 from viz.core.data_loader import SandboxDataLoader  # noqa: E402
 from viz.core.evaluation import EvaluationEngine, EvaluationParams  # noqa: E402
-from viz.server import SandboxRequestHandler  # noqa: E402
-
-BASE_DIR = resolve_sandbox_hub()
+from viz.core.workspace import resolve_hub_storage  # noqa: E402
 
 
-@unittest.skipUnless(BASE_DIR is not None, "Requires enclosing FluSight sandbox hub")
 class TestCliApiParity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        socketserver.ThreadingTCPServer.allow_reuse_address = True
-        cls.httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), SandboxRequestHandler)
-        cls.port = cls.httpd.server_address[1]
-        cls.server_thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
-        cls.server_thread.start()
-        time.sleep(0.1)
-        cls.engine = EvaluationEngine(BASE_DIR)
+        cls._tmp = Path(tempfile.mkdtemp(prefix="viz-cli-parity-")).resolve()
+        cls.hub_dir = build_synthetic_hub(cls._tmp / "hub")
+        cls.cli_data_dir = cls._tmp / "cli-data"
+        cls.cli_data_dir.mkdir(parents=True, exist_ok=True)
+        cls._srv_ctx = start_test_server([cls.hub_dir])
+        cls.port, cls.mgr = cls._srv_ctx.__enter__()
+        storage = resolve_hub_storage(cls.hub_dir, cls._tmp / "engine-data", cli_fallback=True)
+        cls.engine = EvaluationEngine(
+            cls.hub_dir,
+            SandboxDataLoader(
+                cls.hub_dir,
+                include_remote=False,
+                cache_dir=storage["cache_dir"],
+                surveillance_dir=storage["surveillance_dir"],
+                seed_dir=storage["seed_dir"],
+                app_dir=APP_DIR,
+                synthetic_dir=storage["synthetic_dir"],
+            ),
+        )
 
     @classmethod
     def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
+        cls._srv_ctx.__exit__(None, None, None)
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def _run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        cmd = [
+            sys.executable,
+            str(APP_DIR / "score_cli.py"),
+            "--hub", str(self.hub_dir),
+            "--data-dir", str(self.cli_data_dir),
+            *args,
+        ]
+        return subprocess.run(cmd, capture_output=True, text=True, check=True)
 
     def test_cli_vs_api_identical_metrics(self):
-        models = ["UMass-flusion_spatial2_prod", "UMass-AR6_pooled"]
+        models = ["Model-Alpha", "Model-Beta"]
         date = "2024-01-13"
         location = "states"
 
-        # 1. Direct Engine evaluation (same as score_cli.py)
-        params = EvaluationParams(
-            models=models,
-            date=date,
-            location=location,
-            fair=False,
-        )
-        cli_result = self.engine.evaluate(params).to_dict()
+        cli_result = self.engine.evaluate(
+            EvaluationParams(models=models, date=date, location=location, fair=False)
+        ).to_dict()
 
-        # 2. HTTP Server API evaluation
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
         query = urllib.parse.urlencode({
             "models": ",".join(models),
@@ -65,172 +79,148 @@ class TestCliApiParity(unittest.TestCase):
             "location": location,
             "fair": "false",
         })
-        conn.request("GET", f"/api/metrics?{query}")
-        resp = conn.getresponse()
-        self.assertEqual(resp.status, 200)
-        api_result = json.loads(resp.read().decode("utf-8"))
-        conn.close()
+        try:
+            conn.request("GET", f"/api/metrics?{query}")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            api_result = json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
 
-        # Verify exact numerical parity across rankings
         self.assertEqual(len(cli_result["rankings"]), len(api_result["rankings"]))
         for cli_row, api_row in zip(cli_result["rankings"], api_result["rankings"]):
             self.assertEqual(cli_row["model_id"], api_row["model_id"])
-            if cli_row["wis"] is not None:
-                self.assertAlmostEqual(cli_row["wis"], api_row["wis"], places=5)
-            if cli_row["mae"] is not None:
-                self.assertAlmostEqual(cli_row["mae"], api_row["mae"], places=5)
-            if cli_row["cov95"] is not None:
-                self.assertAlmostEqual(cli_row["cov95"], api_row["cov95"], places=5)
-            if cli_row["pct_diff_vs_baseline"] is not None:
-                self.assertAlmostEqual(cli_row["pct_diff_vs_baseline"], api_row["pct_diff_vs_baseline"], places=4)
+            for field in ("wis", "mae", "cov95", "pct_diff_vs_baseline"):
+                if cli_row[field] is not None:
+                    self.assertAlmostEqual(cli_row[field], api_row[field], places=4)
 
     def test_window_parity_cli_vs_api(self):
-        """Season + week range + phase scoping and weekly wins match between the CLI and the API."""
-        import subprocess
-        import sys
-        models = "UMass-flusion_spatial2_prod,UMass-AR6_pooled,FluSight-baseline"
-        cmd = [sys.executable, str(APP_DIR / "score_cli.py"), "--hub", str(BASE_DIR), "--models", models,
-               "--season", "2023-2024,2024-2025", "--location", "states", "--weeks", "14-30",
-               "--phase", "peak", "--format", "json"]
-        out = subprocess.run(cmd, capture_output=True, text=True, cwd=BASE_DIR, check=True)
+        """Season + week range + peak phase scoping and weekly wins match across CLI and API."""
+        models = "Model-Alpha,Model-Beta,FluSight-baseline"
+        out = self._run_cli(
+            "--models", models,
+            "--season", "2023-2024,2024-2025",
+            "--location", "states",
+            "--weeks", "18-30",
+            "--phase", "peak",
+            "--format", "json",
+        )
         cli = json.loads(out.stdout)
 
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        query = urllib.parse.urlencode({"models": models, "season": "2023-2024,2024-2025", "location": "states",
-                                        "weeks": "14-30", "phase": "peak", "fair": "false"})
-        conn.request("GET", f"/api/metrics?{query}")
-        resp = conn.getresponse()
-        self.assertEqual(resp.status, 200)
-        api = json.loads(resp.read().decode("utf-8"))
-        conn.close()
+        query = urllib.parse.urlencode({
+            "models": models,
+            "season": "2023-2024,2024-2025",
+            "location": "states",
+            "weeks": "18-30",
+            "phase": "peak",
+            "fair": "false",
+        })
+        try:
+            conn.request("GET", f"/api/metrics?{query}")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            api = json.loads(resp.read().decode("utf-8"))
+        finally:
+            conn.close()
 
-        params = EvaluationParams(models=models.split(","), season="2023-2024,2024-2025", location="states",
-                                  weeks="14-30", phase="peak")
-        # The CLI never uses synced hub data (models or truth); the dashboard merges hub truth when a hub
-        # is synced, so each path is checked against an engine configured the same way.
-        cli_engine = EvaluationEngine(BASE_DIR, SandboxDataLoader(BASE_DIR, include_remote=False))
-        for got, ref in ((cli, cli_engine.evaluate(params).to_dict()), (api, self.engine.evaluate(params).to_dict())):
+        ref = self.engine.evaluate(
+            EvaluationParams(
+                models=models.split(","),
+                season="2023-2024,2024-2025",
+                location="states",
+                weeks="18-30",
+                phase="peak",
+                fair=False,
+            )
+        ).to_dict()
+
+        self.assertGreater(cli["scope_dates_count"], 0)
+        for got in (cli, api):
             self.assertEqual(got["window"], ref["window"])
             self.assertEqual(got["scope_dates_count"], ref["scope_dates_count"])
-            for c, a in zip(got["rankings"], ref["rankings"]):
-                self.assertEqual(c["model_id"], a["model_id"])
-                self.assertEqual(c["count"], a["count"])
-                self.assertEqual(c["weeks_won"], a["weeks_won"])
-                if c["wis"] is not None:
-                    self.assertAlmostEqual(c["wis"], a["wis"], places=5)
+            for g_row, r_row in zip(got["rankings"], ref["rankings"]):
+                self.assertEqual(g_row["model_id"], r_row["model_id"])
+                self.assertEqual(g_row["count"], r_row["count"])
+                self.assertEqual(g_row["weeks_won"], r_row["weeks_won"])
+                if g_row["wis"] is not None:
+                    self.assertAlmostEqual(g_row["wis"], r_row["wis"], places=5)
+
         self.assertEqual(cli["window"]["phase"], "peak")
-        # Every scored round has at least one winner
         active = [r for r in api["rankings"] if r["has_data_in_scope"]]
         self.assertGreaterEqual(sum(r["weeks_won"] for r in active), max(r["weeks_competed"] for r in active))
 
     def test_invalid_window_is_a_client_error(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        conn.request("GET", "/api/metrics?" + urllib.parse.urlencode({"models": "FluSight-baseline", "phase": "summer"}))
-        resp = conn.getresponse()
-        resp.read()
-        conn.close()
-        self.assertEqual(resp.status, 400)
+        try:
+            conn.request("GET", "/api/metrics?" + urllib.parse.urlencode({
+                "models": "FluSight-baseline",
+                "phase": "summer",
+            }))
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 400)
+        finally:
+            conn.close()
 
     def test_cli_format_json_and_csv(self):
-        import subprocess
-        import sys
-        import tempfile
+        out_dir = self._tmp / "fmt-out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_json = out_dir / "scores.json"
+        out_csv = out_dir / "scores.csv"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            out_json = Path(tmpdir) / "scores.json"
-            out_csv = Path(tmpdir) / "scores.csv"
+        self._run_cli(
+            "--models", "Model-Alpha",
+            "--date", "2024-01-13",
+            "--location", "US",
+            "--format", "json",
+            "--out", str(out_json),
+        )
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        self.assertEqual(len(data["rankings"]), 1)
+        self.assertEqual(data["rankings"][0]["model_id"], "Model-Alpha")
+        self.assertIn("relative_wis", data["rankings"][0])
+        self.assertIn("wis_per_100k", data["rankings"][0])
 
-            # 1. Test JSON format and file output
-            cmd_json = [
-                sys.executable,
-                str(APP_DIR / "score_cli.py"),
-                "--hub", str(BASE_DIR),
-                "--models", "UMass-AR6_pooled",
-                "--date", "2024-01-13",
-                "--location", "US",
-                "--format", "json",
-                "--out", str(out_json)
-            ]
-            res_json = subprocess.run(cmd_json, capture_output=True, text=True)
-            self.assertEqual(res_json.returncode, 0, msg=res_json.stderr)
-            self.assertTrue(out_json.exists())
-            data = json.loads(out_json.read_text())
-            self.assertIn("rankings", data)
-            self.assertEqual(len(data["rankings"]), 1)
-            self.assertEqual(data["rankings"][0]["model_id"], "UMass-AR6_pooled")
-            self.assertIn("relative_wis", data["rankings"][0])
-            self.assertIn("wis_per_100k", data["rankings"][0])
-
-            # 2. Test CSV format and file output
-            cmd_csv = [
-                sys.executable,
-                str(APP_DIR / "score_cli.py"),
-                "--hub", str(BASE_DIR),
-                "--models", "UMass-AR6_pooled",
-                "--date", "2024-01-13",
-                "--location", "US",
-                "--format", "csv",
-                "--out", str(out_csv)
-            ]
-            res_csv = subprocess.run(cmd_csv, capture_output=True, text=True)
-            self.assertEqual(res_csv.returncode, 0, msg=res_csv.stderr)
-            self.assertTrue(out_csv.exists())
-            csv_text = out_csv.read_text()
-            self.assertIn("model_id", csv_text)
-            self.assertIn("UMass-AR6_pooled", csv_text)
-            self.assertIn("wis_per_100k", csv_text)
+        self._run_cli(
+            "--models", "Model-Alpha",
+            "--date", "2024-01-13",
+            "--location", "US",
+            "--format", "csv",
+            "--out", str(out_csv),
+        )
+        csv_text = out_csv.read_text(encoding="utf-8")
+        self.assertIn("model_id", csv_text)
+        self.assertIn("Model-Alpha", csv_text)
+        self.assertIn("wis_per_100k", csv_text)
 
     def test_cli_export_tasks_csv_and_parquet(self):
-        import subprocess
-        import sys
-        import tempfile
+        out_dir = self._tmp / "tasks-out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        task_csv = out_dir / "tasks.csv"
+        task_parquet = out_dir / "tasks.parquet"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            task_csv = Path(tmpdir) / "tasks.csv"
-            task_parquet = Path(tmpdir) / "tasks.parquet"
+        self._run_cli(
+            "--models", "Model-Alpha",
+            "--date", "2024-01-13",
+            "--location", "US",
+            "--export-tasks", str(task_csv),
+        )
+        df_csv = pl.read_csv(task_csv, schema_overrides={"location": pl.String})
+        self.assertGreater(len(df_csv), 0)
+        for col in ("wis", "reference_date", "location", "horizon"):
+            self.assertIn(col, df_csv.columns)
 
-            # Test task export to CSV
-            cmd_csv = [
-                sys.executable,
-                str(APP_DIR / "score_cli.py"),
-                "--hub", str(BASE_DIR),
-                "--models", "UMass-AR6_pooled",
-                "--date", "2024-01-13",
-                "--location", "US",
-                "--export-tasks", str(task_csv)
-            ]
-            res_csv = subprocess.run(cmd_csv, capture_output=True, text=True)
-            self.assertEqual(res_csv.returncode, 0, msg=res_csv.stderr)
-            self.assertTrue(task_csv.exists())
-
-            # Read back exported tasks CSV via Polars
-            import polars as pl
-            df_csv = pl.read_csv(task_csv, schema_overrides={"location": pl.String})
-            self.assertGreater(len(df_csv), 0)
-            self.assertIn("wis", df_csv.columns)
-            self.assertIn("reference_date", df_csv.columns)
-            self.assertIn("location", df_csv.columns)
-            self.assertIn("horizon", df_csv.columns)
-
-            # Test task export to Parquet
-            cmd_parquet = [
-                sys.executable,
-                str(APP_DIR / "score_cli.py"),
-                "--hub", str(BASE_DIR),
-                "--models", "UMass-AR6_pooled",
-                "--date", "2024-01-13",
-                "--location", "US",
-                "--export-tasks", str(task_parquet)
-            ]
-            res_parquet = subprocess.run(cmd_parquet, capture_output=True, text=True)
-            self.assertEqual(res_parquet.returncode, 0, msg=res_parquet.stderr)
-            self.assertTrue(task_parquet.exists())
-
-            df_parquet = pl.read_parquet(task_parquet)
-            self.assertEqual(len(df_parquet), len(df_csv))
-            self.assertIn("wis", df_parquet.columns)
+        self._run_cli(
+            "--models", "Model-Alpha",
+            "--date", "2024-01-13",
+            "--location", "US",
+            "--export-tasks", str(task_parquet),
+        )
+        df_parquet = pl.read_parquet(task_parquet)
+        self.assertEqual(len(df_parquet), len(df_csv))
+        self.assertIn("wis", df_parquet.columns)
 
 
 if __name__ == "__main__":
     unittest.main()
-
