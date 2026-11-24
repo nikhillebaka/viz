@@ -509,6 +509,71 @@ details.br-details > summary {
 }
 details.br-details > summary:hover { color: var(--ink-primary); }
 
+/* ---- DRC Ebola Situation Card, Links & Badges ---- */
+.br-don-card {
+  border: 1px solid var(--line-hairline);
+  border-radius: var(--radius-tag);
+  background: var(--surface-raised);
+  padding: var(--space-16) var(--space-20);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+.br-don-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-12);
+  flex-wrap: wrap;
+}
+.br-don-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  flex-wrap: wrap;
+  font-size: var(--text-small);
+  color: var(--ink-tertiary);
+}
+.br-don-kicker {
+  font-size: var(--text-axis);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+.br-don-prose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.br-don-subhead {
+  display: block;
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  color: var(--ink-primary);
+  margin-top: var(--space-4);
+}
+.br-links-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+  padding-top: var(--space-4);
+}
+.br-badge-partial {
+  display: inline-block;
+  margin-left: var(--space-6);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-secondary);
+  border: 1px solid var(--line-hairline);
+  background: var(--fill-field);
+}
+
 @media (max-width: 900px) {
   .br-outlook-grid { grid-template-columns: 1fr; }
   .br-rail { border-left: none; padding-left: 0; border-top: 1px solid var(--line-hairline); padding-top: var(--space-16); }
@@ -577,7 +642,7 @@ details.br-details > summary:hover { color: var(--ink-primary); }
   .app-fixed, .br-scroll-scrim, .br-actions, .br-tabs, .br-toggle, .br-cta-banner,
   .br-hover-readout, .br-head-meta .br-link-btn, .br-row-chart-btn, .br-col-action { display: none !important; }
   .br-page { padding: 0 !important; max-width: none !important; gap: 20px !important; }
-  .br-section, .br-svg-wrap, .br-kpi-strip, .br-subpanel { break-inside: avoid; }
+  .br-section, .br-svg-wrap, .br-kpi-strip, .br-subpanel, .br-don-card { break-inside: avoid; }
   .br-print-footer {
     display: flex;
     justify-content: space-between;

@@ -14,6 +14,7 @@ import { seriesColor } from "../../chart/layout.js";
 import { isCharted, slotOf, chart as chartModel, unchart, setBaseline } from "../../features/selection.js";
 import { classifyHubGeo } from "../../geo/picker_geo.js";
 import { scopeOf, setScope, targetHorizons } from "../scope.js";
+import { horizonUnit } from "../../lib/format.js";
 import { guideLink } from "../shared.js";
 import {
   metricsRequest, rowsFrom, sortRows, SORTS, DEFAULT_SORT, relLevel, coverageLevel, SMALL, DASH,
@@ -75,7 +76,16 @@ export function mount(el, ctx) {
     ? "All countries"
     : geoCls.kind === "us-states"
       ? "All states"
-      : "All locations";
+      : geoCls.kind === "ca-provinces"
+        ? "All provinces"
+        : geoCls.kind === "ca-ontario"
+          ? "All regions"
+          : geoCls.kind === "cd-provinces"
+            ? (geoCls.hasHealthZones ? "All health zones" : "All provinces")
+            : geoCls.kind === "cn-national"
+              ? "China"
+              : "All locations";
+  const hUnit = (st = store.get()) => horizonUnit(manifest.targetById.get(st?.target));
   const offs = [];
 
   /* ---------------- DOM ---------------- */
@@ -281,7 +291,7 @@ export function mount(el, ctx) {
     fDates.textContent = datesLabel(sc, seasonLabel, allSeasons.length);
     const noneScored = shown && rows.length && rows.every((r) => !r.active);
     fDates.className = ["sc-frag", def(!sc.following || sc.weeks || sc.phase), noneScored && "is-warn"].filter(Boolean).join(" ");
-    fHz.textContent = horizonsLabel(sc.horizons, availH());
+    fHz.textContent = horizonsLabel(sc.horizons, availH(), hUnit(st));
     fHz.className = ["sc-frag", def(!!sc.horizons)].filter(Boolean).join(" ");
     const defBase = defaultBase(st, sc);
     const eff = shown?.baseline_model;
@@ -430,9 +440,12 @@ export function mount(el, ctx) {
 
   /* the column titles: a footer that rides the bottom of the screen and rests under the last row */
   function headerRow(cols, ui, sc) {
-    const cat = isCatMode(store.get());
+    const st = store.get();
+    const u = hUnit(st);
+    const cat = isCatMode(st);
     const colLabel = (key) => {
       if (key === "rel" && cat) return shown?.ordinal === false ? "Rel. Log" : "Rel. RPS";
+      if (/^h\d+$/.test(key)) return `${key.slice(1)} ${u}`;
       return COLUMNS[key].label;
     };
     const colTip = (key) => {
@@ -486,8 +499,10 @@ export function mount(el, ctx) {
     const emph = new Set([st.focus].filter(Boolean));
     const o = { emph, hover, onHover: (id) => setHover(id), onPick: (id) => openSheet(id) };
     const one = (svg, draw) => { if (!emphasisOnly || !emphasize(svg, emph, hover)) draw(); };
+    const hzSub = figs.querySelector(".sc-fig:nth-child(2) .sc-fig-sub");
+    if (hzSub) hzSub.textContent = `${cat ? "Rel. score" : "Rel. WIS"} by ${horizonUnit(manifest.targetById.get(st.target), true)} ahead`;
     if (!cat) one(figSvgs.cal, () => calibrationFigure(figSvgs.cal, list, o));
-    one(figSvgs.hz, () => horizonFigure(figSvgs.hz, list, o));
+    one(figSvgs.hz, () => horizonFigure(figSvgs.hz, list, { ...o, hUnit: hUnit(st) }));
     if (!cat) {
       shareBtn.textContent = share ? "Share" : "WIS";
       one(figSvgs.anat, () => anatomyFigure(figSvgs.anat, list, { ...o, share }));
@@ -523,7 +538,7 @@ export function mount(el, ctx) {
     if (geoCls.aggregateId === "US") {
       items.push({ label: "US", checked: sc.place === "US", onSelect: () => setScope(store, { place: "US" }) });
     }
-    if (st.location && st.location !== geoCls.aggregateId) {
+    if (st.location && (geoCls.aggregateId !== "US" || st.location !== "US")) {
       items.push({ label: loc?.name || st.location, shortcut: "chart", checked: sc.place === "current", onSelect: () => setScope(store, { place: "current" }) });
     }
     openMenu(a, { label: "Locations", items });
@@ -536,6 +551,7 @@ export function mount(el, ctx) {
         const wrap = h("div", { class: "sc-chips" });
         const draw = () => {
           const on = scope().horizons || avail;
+          const u = hUnit();
           wrap.replaceChildren(...avail.map((k) => h("button", {
             type: "button", class: "c-chip", "aria-pressed": String(on.includes(k)),
             onclick: () => {
@@ -544,7 +560,7 @@ export function mount(el, ctx) {
               setScope(store, { horizons: next.length === avail.length ? null : next });
               draw();
             },
-          }, `${k} wk`)));
+          }, `${k} ${u}`)));
           layer.place();
         };
         body.append(wrap);
@@ -570,12 +586,13 @@ export function mount(el, ctx) {
   }
   function columnsMenu(a) {
     const st = store.get(), ui = uiOf(st), hs = availH(), cat = isCatMode(st);
+    const u = hUnit(st);
     const opts = cat ? PMF_OPTIONAL_COLS : OPTIONAL_COLS;
     const relPrefix = cat ? (shown?.ordinal === false ? "Rel. Log · " : "Rel. RPS · ") : "Rel. WIS · ";
     openMenu(a, {
       label: "Columns",
       items: opts.filter((c) => colAvailable(c, hs)).map((c) => ({
-        label: /^h\d+$/.test(c) ? `${relPrefix}${c.slice(1)} wk` : COLUMNS[c].tip.split(" · ")[0],
+        label: /^h\d+$/.test(c) ? `${relPrefix}${c.slice(1)} ${u}` : COLUMNS[c].tip.split(" · ")[0],
         toggle: true,
         checked: ui.cols.includes(c),
         onSelect: () => { const cur = uiOf(store.get()).cols; setUi({ cols: cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c] }); },

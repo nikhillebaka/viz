@@ -31,11 +31,9 @@ export function sampleModelsForTarget(manifest, targetId, season = null) {
   return inSeason.length ? inSeason : base;
 }
 
-/** True when a target/hub has at least one model with sample trajectories (or sample output type). */
+/** True when a target/hub has at least one model with sample trajectories. */
 export function hasSampleModels(manifest, targetId) {
-  if (sampleModelsForTarget(manifest, targetId).length > 0) return true;
-  const ot = manifest?.targetById?.get(targetId)?.output_types;
-  return Array.isArray(ot) && ot.includes("sample");
+  return sampleModelsForTarget(manifest, targetId).length > 0;
 }
 
 /** Choose the initial sample model: first currently charted/baseline sample model, else best default. */

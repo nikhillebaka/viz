@@ -15,11 +15,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from datetime import date, datetime, timedelta, timezone
 import gzip
+import html
 import io
 import json
 import logging
 import os
 from pathlib import Path
+import re
 import ssl
 import tempfile
 import threading
@@ -227,6 +229,27 @@ FEED_SPECS: Dict[str, Dict[str, Any]] = {
         "scope": "EU",
         "description": "European sentinel test positivity (Influenza, SARS-CoV-2, RSV), primary care ILI/ARI consultation rates, and SARI hospitalization rates.",
     },
+    "drc_ebola_ocha": {
+        "label": "OCHA / INRB-UMIE DRC Ebola",
+        "source_url": "https://data.humdata.org/dataset/republique-democratique-du-congo-cas-et-deces-d-ebola",
+        "ttl_hours": 6.0,
+        "scope": "CD",
+        "description": "Consolidated DRC Ministry of Health and INRB-UMIE situation report series via OCHA HDX (national and health-zone cases, deaths, and contacts).",
+    },
+    "who_don_drc": {
+        "label": "WHO Disease Outbreak News (DRC Ebola)",
+        "source_url": "https://www.who.int/emergencies/disease-outbreak-news",
+        "ttl_hours": 12.0,
+        "scope": "CD",
+        "description": "Official WHO Disease Outbreak News (DON) situation reports, risk assessments, epidemiology summaries, and cross-border advisories for DRC Bundibugyo Ebola.",
+    },
+    "bdbv_delays": {
+        "label": "BDBV Hub Reporting Delays",
+        "source_url": "https://bdbv-modeling-hub.s3.amazonaws.com/auxiliary-data/weekly-reporting-delays-by-province.csv",
+        "ttl_hours": 12.0,
+        "scope": "CD",
+        "description": "Symptom-onset-to-report delay distribution (median, P75, P90 days) by DRC province and week for tracking recent surveillance backfill.",
+    },
 }
 
 FEED_SCHEMAS: Dict[str, Dict[str, Any]] = {
@@ -318,6 +341,38 @@ FEED_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "value": pl.Float64,
         "unit": pl.Utf8,
     },
+    "drc_ebola_ocha": {
+        "location_level": pl.Utf8,
+        "location_code": pl.Utf8,
+        "location_name": pl.Utf8,
+        "date": pl.Utf8,
+        "measure": pl.Utf8,
+        "classification": pl.Utf8,
+        "value": pl.Float64,
+        "source": pl.Utf8,
+    },
+    "who_don_drc": {
+        "don_id": pl.Utf8,
+        "url_name": pl.Utf8,
+        "title": pl.Utf8,
+        "date": pl.Utf8,
+        "url": pl.Utf8,
+        "overview": pl.Utf8,
+        "summary": pl.Utf8,
+        "epidemiology": pl.Utf8,
+        "assessment": pl.Utf8,
+        "response": pl.Utf8,
+        "advice": pl.Utf8,
+    },
+    "bdbv_delays": {
+        "location_name": pl.Utf8,
+        "date": pl.Utf8,
+        "as_of": pl.Utf8,
+        "median_days": pl.Float64,
+        "p75_days": pl.Float64,
+        "p90_days": pl.Float64,
+        "n_cases": pl.Int64,
+    },
 }
 
 
@@ -354,7 +409,11 @@ def _iso_date_str(val: Any) -> Optional[str]:
         return None
     s = str(val).strip()
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
-        return s[:10]
+        try:
+            date.fromisoformat(s[:10])
+            return s[:10]
+        except ValueError:
+            return None
     return None
 
 
@@ -752,9 +811,199 @@ def fetch_delphi_fluview(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
     )
 
 
+_DRC_OCHA_CSV_URL = (
+    "https://data.humdata.org/dataset/e902b209-b7bc-42f9-893a-294276d7cc62/"
+    "resource/f7c9b552-0d41-4559-9fae-c450175fc39c/download/drc_ebola_cases_consolidated.csv"
+)
+_DRC_OCHA_CKAN_URL = (
+    "https://data.humdata.org/api/3/action/package_show?"
+    "id=republique-democratique-du-congo-cas-et-deces-d-ebola"
+)
+_WHO_DON_DRC_URL = (
+    "https://www.who.int/api/news/diseaseoutbreaknews?"
+    "$top=15&$orderby=PublicationDate%20desc&"
+    "$filter=contains(tolower(Title),%27bundibugyo%27)%20or%20"
+    "(contains(tolower(Title),%27ebola%27)%20and%20contains(tolower(Title),%27congo%27))"
+)
+_BDBV_DELAYS_URL = (
+    "https://bdbv-modeling-hub.s3.amazonaws.com/auxiliary-data/"
+    "weekly-reporting-delays-by-province.csv"
+)
+
+_RE_HTML_BLOCK = re.compile(r"</(?:p|div|li|h[1-6]|tr)>|<br\s*/?>", re.IGNORECASE)
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+
+
+def _decode_bytes(raw: bytes) -> str:
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return raw.decode("utf-8-sig", errors="replace")
+
+
+def _clean_html_text(raw: Any, max_len: int = 4500) -> str:
+    if not raw:
+        return ""
+    s = _RE_HTML_BLOCK.sub("\n", str(raw))
+    s = _RE_HTML_TAG.sub(" ", s)
+    s = html.unescape(s).replace("\xa0", " ")
+    lines = [" ".join(ln.split()) for ln in s.splitlines()]
+    cleaned = "\n".join(ln for ln in lines if ln).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    cut = cleaned[: max_len - 3].rsplit(" ", 1)[0].rstrip(" ,;:")
+    return f"{cut}..."
+
+
+def fetch_drc_ebola_ocha(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    text = ""
+    try:
+        text = _decode_bytes(http_get(_DRC_OCHA_CSV_URL, DEFAULT_HTTP_TIMEOUT_SEC))
+    except Exception as exc:
+        logger.info("Primary OCHA DRC CSV failed (%s); falling back to HDX CKAN lookup", exc)
+
+    header = text.splitlines()[0] if text.strip() else ""
+    if "reference_date" not in header:
+        pkg = json.loads(_decode_bytes(http_get(_DRC_OCHA_CKAN_URL, DEFAULT_HTTP_TIMEOUT_SEC)))
+        resources = ((pkg.get("result") or {}).get("resources") or []) if isinstance(pkg, dict) else []
+        candidates = [
+            r for r in resources
+            if isinstance(r, dict) and r.get("url")
+            and str(r.get("url")).startswith(("https://", "http://"))
+            and (str(r.get("format") or "").upper() == "CSV" or str(r.get("url")).lower().endswith(".csv"))
+        ]
+        candidates.sort(key=lambda r: (0 if "consolidated" in str(r.get("url") or "").lower() else 1))
+        if not candidates:
+            return _empty_df("drc_ebola_ocha")
+        text = _decode_bytes(http_get(str(candidates[0]["url"]), DEFAULT_HTTP_TIMEOUT_SEC))
+
+    dedup: Dict[Tuple[str, str, str, str, str, str], Dict[str, Any]] = {}
+    for rec in csv.DictReader(io.StringIO(text)):
+        tp = str(rec.get("time_period") or "").strip().lower()
+        if tp and tp != "cumulative":
+            continue
+        dt = _iso_date_str(rec.get("reference_date"))
+        measure = str(rec.get("measure") or "").strip().lower()
+        val = _safe_float(rec.get("value"))
+        if not dt or not measure or val is None:
+            continue
+        loc_level = str(rec.get("location_level") or "").strip()
+        loc_code = str(rec.get("location_code") or "").strip()
+        loc_name = str(rec.get("location_name") or "").strip()
+        classification = str(rec.get("case_classification") or "").strip().lower()
+        dedup[(loc_level, loc_code, loc_name, dt, measure, classification)] = {
+            "location_level": loc_level,
+            "location_code": loc_code,
+            "location_name": loc_name,
+            "date": dt,
+            "measure": measure,
+            "classification": classification,
+            "value": val,
+            "source": str(rec.get("source") or "INRB-UMIE").strip(),
+        }
+    if not dedup:
+        return _empty_df("drc_ebola_ocha")
+    return pl.DataFrame(list(dedup.values()), schema=FEED_SCHEMAS["drc_ebola_ocha"]).sort(
+        ["location_level", "location_name", "measure", "classification", "date"],
+        descending=[False, False, False, False, True],
+    )
+
+
+def fetch_who_don_drc(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    payload = json.loads(_decode_bytes(http_get(_WHO_DON_DRC_URL, DEFAULT_HTTP_TIMEOUT_SEC)))
+    values = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        return _empty_df("who_don_drc")
+
+    rows: List[Dict[str, Any]] = []
+    for rec in values:
+        if not isinstance(rec, dict):
+            continue
+        dt = _iso_date_str(rec.get("PublicationDate") or rec.get("PublicationDateAndTime"))
+        title = _clean_html_text(rec.get("Title"), max_len=320)
+        if not dt or not title:
+            continue
+        url_name = str(rec.get("UrlName") or "").strip()
+        don_id = str(rec.get("DonId") or url_name).strip()
+        item_url = (
+            f"https://www.who.int/emergencies/disease-outbreak-news/item/{url_name}"
+            if url_name
+            else "https://www.who.int/emergencies/disease-outbreak-news"
+        )
+        rows.append({
+            "don_id": don_id,
+            "url_name": url_name,
+            "title": title,
+            "date": dt,
+            "url": item_url,
+            "overview": _clean_html_text(rec.get("Overview"), max_len=4500),
+            "summary": _clean_html_text(rec.get("Summary"), max_len=4500),
+            "epidemiology": _clean_html_text(rec.get("Epidemiology"), max_len=4500),
+            "assessment": _clean_html_text(rec.get("Assessment"), max_len=4500),
+            "response": _clean_html_text(rec.get("Response"), max_len=4500),
+            "advice": _clean_html_text(rec.get("Advice"), max_len=2400),
+        })
+    if not rows:
+        return _empty_df("who_don_drc")
+    return pl.DataFrame(rows, schema=FEED_SCHEMAS["who_don_drc"]).sort(
+        ["date", "don_id"], descending=[True, True]
+    )
+
+
+def _agg_delay_frame(df: pl.DataFrame, group_cols: List[str]) -> pl.DataFrame:
+    return df.group_by(group_cols).agg([
+        pl.col("as_of").max().alias("as_of"),
+        pl.col("days").median().round(1).cast(pl.Float64).alias("median_days"),
+        pl.col("days").quantile(0.75, interpolation="linear").round(1).cast(pl.Float64).alias("p75_days"),
+        pl.col("days").quantile(0.90, interpolation="linear").round(1).cast(pl.Float64).alias("p90_days"),
+        pl.len().cast(pl.Int64).alias("n_cases"),
+    ])
+
+
+def fetch_bdbv_delays(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    text = _decode_bytes(http_get(_BDBV_DELAYS_URL, DEFAULT_HTTP_TIMEOUT_SEC))
+    rows: List[Dict[str, Any]] = []
+    for rec in csv.DictReader(io.StringIO(text)):
+        dt = _iso_date_str(rec.get("week_ending"))
+        loc = str(rec.get("location_name") or "").strip()
+        days = _safe_float(rec.get("days_sym_to_report"))
+        if not dt or not loc or days is None or days < 0:
+            continue
+        rows.append({
+            "location_name": loc,
+            "date": dt,
+            "as_of": _iso_date_str(rec.get("as_of")) or "",
+            "days": days,
+        })
+    if not rows:
+        return _empty_df("bdbv_delays")
+
+    raw_df = pl.DataFrame(rows).filter(
+        pl.col("as_of") == pl.col("as_of").max().over("location_name")
+    )
+    prov_df = raw_df.filter(pl.col("location_name") != "DRC")
+    drc_upstream = raw_df.filter(pl.col("location_name") == "DRC")
+    by_loc = _agg_delay_frame(prov_df, ["location_name", "date"]) if not prov_df.is_empty() else _empty_df("bdbv_delays")
+    nat_src = drc_upstream if not drc_upstream.is_empty() else prov_df
+    national = (
+        _agg_delay_frame(nat_src, ["date"])
+        .with_columns(pl.lit("DRC").alias("location_name"))
+        .select(["location_name", "date", "as_of", "median_days", "p75_days", "p90_days", "n_cases"])
+    )
+    frames = [f.select(national.columns) for f in (national, by_loc) if not f.is_empty()]
+    if not frames:
+        return _empty_df("bdbv_delays")
+    out = pl.concat(frames, how="vertical")
+    return out.cast(FEED_SCHEMAS["bdbv_delays"]).sort(
+        ["location_name", "date"], descending=[False, True]
+    )
+
+
 def fetch_who_flunet(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
     min_year = date.today().year - 1
-    flt = f"ISO_YEAR ge {min_year} and (WHOREGION eq 'EUR' or ISO2 eq 'US')"
+    flt = (
+        f"ISO_YEAR ge {min_year} and "
+        "(WHOREGION eq 'EUR' or ISO2 eq 'US' or ISO2 eq 'CA' or ISO2 eq 'CN' or ISO2 eq 'CD')"
+    )
     sel = (
         "ISO2,COUNTRY_AREA_TERRITORY,WHOREGION,ISO_WEEKSTARTDATE,"
         "SPEC_PROCESSED_NB,AH1N12009,AH3,ANOTSUBTYPED,INF_A,INF_B,INF_ALL,RSV,RSV_PROCESSED"
@@ -1159,6 +1408,9 @@ _FEED_FETCHERS: Dict[str, Callable[[Callable[[str, int], bytes]], pl.DataFrame]]
     "ukhsa_resp": fetch_ukhsa_resp,
     "nextstrain_clades": fetch_nextstrain_clades,
     "ecdc_erviss": fetch_ecdc_erviss,
+    "drc_ebola_ocha": fetch_drc_ebola_ocha,
+    "who_don_drc": fetch_who_don_drc,
+    "bdbv_delays": fetch_bdbv_delays,
 }
 
 
@@ -1191,7 +1443,9 @@ class BriefingFeedStore:
         self.meta_path = self.feeds_dir / "feeds_meta.json"
         self._fetcher: Callable[[str, int], bytes] = fetcher or _default_http_get
         self._lock = threading.Lock()
+        self._refresh_lock = threading.Lock()
         self._mem_cache: Dict[str, Tuple[int, pl.DataFrame]] = {}
+        self._active_refreshes = 0
         self._refreshing = False
         self._last_refresh_started: Optional[str] = None
         self._last_refresh_finished: Optional[str] = None
@@ -1306,75 +1560,88 @@ class BriefingFeedStore:
             if fid not in FEED_SPECS:
                 raise ValueError(f"Unknown briefing feed: {fid}")
 
+        with self._lock:
+            self._active_refreshes += 1
+            self._refreshing = True
+            self._last_refresh_started = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._refresh_lock:
+                self._run_refresh_locked(requested, force=force)
+        finally:
+            with self._lock:
+                self._active_refreshes = max(0, self._active_refreshes - 1)
+                self._refreshing = self._active_refreshes > 0
+        return self.get_status()
+
+    def _run_refresh_locked(
+        self,
+        requested: List[str],
+        force: bool = False,
+    ) -> Dict[str, Any]:
         started_iso = datetime.now(timezone.utc).isoformat()
         with self._lock:
             meta = self._load_meta_unlocked()
-            self._refreshing = True
             self._last_refresh_started = started_iso
 
-        try:
-            now_ts = time.time()
+        now_ts = time.time()
+        feeds_meta = dict(meta.get("feeds") or {})
+        to_fetch: List[str] = []
+        for fid in requested:
+            entry = feeds_meta.get(fid) or {}
+            if force or self._is_entry_stale(fid, entry, now_ts):
+                to_fetch.append(fid)
+
+        results: Dict[str, Tuple[Optional[pl.DataFrame], Optional[str]]] = {}
+        if to_fetch:
+            workers = min(4, len(to_fetch))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                fut_map = {
+                    pool.submit(_FEED_FETCHERS[fid], self._fetcher): fid
+                    for fid in to_fetch
+                }
+                for fut in as_completed(fut_map):
+                    fid = fut_map[fut]
+                    try:
+                        df = fut.result()
+                        results[fid] = (df, None)
+                    except Exception as exc:
+                        logger.warning("Briefing feed %s refresh failed: %s", fid, exc)
+                        results[fid] = (None, str(exc))
+
+        finished_iso = datetime.now(timezone.utc).isoformat()
+        finished_epoch = time.time()
+
+        # Persist Parquet files and update metadata cleanly
+        with self._lock:
+            meta = self._load_meta_unlocked()
             feeds_meta = dict(meta.get("feeds") or {})
-            to_fetch: List[str] = []
-            for fid in requested:
-                entry = feeds_meta.get(fid) or {}
-                if force or self._is_entry_stale(fid, entry, now_ts):
-                    to_fetch.append(fid)
-
-            results: Dict[str, Tuple[Optional[pl.DataFrame], Optional[str]]] = {}
-            if to_fetch:
-                workers = min(4, len(to_fetch))
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    fut_map = {
-                        pool.submit(_FEED_FETCHERS[fid], self._fetcher): fid
-                        for fid in to_fetch
+            for fid, (df, err) in results.items():
+                prev = dict(feeds_meta.get(fid) or {})
+                if err is None and df is not None:
+                    pq_path = self.feed_path(fid)
+                    _atomic_write_parquet(df, pq_path)
+                    try:
+                        mtime_ns = pq_path.stat().st_mtime_ns
+                        self._mem_cache[fid] = (mtime_ns, df)
+                    except OSError:
+                        self._mem_cache.pop(fid, None)
+                    feeds_meta[fid] = {
+                        "fetched_at": finished_iso,
+                        "fetched_epoch": finished_epoch,
+                        "rows": int(df.height),
+                        "latest_week": _extract_latest_week(df),
+                        "error": None,
                     }
-                    for fut in as_completed(fut_map):
-                        fid = fut_map[fut]
-                        try:
-                            df = fut.result()
-                            results[fid] = (df, None)
-                        except Exception as exc:
-                            logger.warning("Briefing feed %s refresh failed: %s", fid, exc)
-                            results[fid] = (None, str(exc))
+                else:
+                    prev["error"] = err or "Unknown error"
+                    prev["last_attempt_at"] = finished_iso
+                    feeds_meta[fid] = prev
 
-            finished_iso = datetime.now(timezone.utc).isoformat()
-            finished_epoch = time.time()
-
-            # Persist Parquet files and update metadata cleanly
-            with self._lock:
-                meta = self._load_meta_unlocked()
-                feeds_meta = dict(meta.get("feeds") or {})
-                for fid, (df, err) in results.items():
-                    prev = dict(feeds_meta.get(fid) or {})
-                    if err is None and df is not None:
-                        pq_path = self.feed_path(fid)
-                        _atomic_write_parquet(df, pq_path)
-                        try:
-                            mtime_ns = pq_path.stat().st_mtime_ns
-                            self._mem_cache[fid] = (mtime_ns, df)
-                        except OSError:
-                            self._mem_cache.pop(fid, None)
-                        feeds_meta[fid] = {
-                            "fetched_at": finished_iso,
-                            "fetched_epoch": finished_epoch,
-                            "rows": int(df.height),
-                            "latest_week": _extract_latest_week(df),
-                            "error": None,
-                        }
-                    else:
-                        prev["error"] = err or "Unknown error"
-                        prev["last_attempt_at"] = finished_iso
-                        feeds_meta[fid] = prev
-
-                meta["feeds"] = feeds_meta
-                meta["last_refresh_started"] = started_iso
-                meta["last_refresh_finished"] = finished_iso
-                self._save_meta_unlocked(meta)
-                self._last_refresh_finished = finished_iso
-        finally:
-            with self._lock:
-                self._refreshing = False
+            meta["feeds"] = feeds_meta
+            meta["last_refresh_started"] = started_iso
+            meta["last_refresh_finished"] = finished_iso
+            self._save_meta_unlocked(meta)
+            self._last_refresh_finished = finished_iso
 
         return self.get_status()
 
@@ -1384,19 +1651,28 @@ class BriefingFeedStore:
         force: bool = True,
     ) -> bool:
         """Spawn a non-blocking daemon refresh thread; returns False if already running."""
+        requested = list(feed_ids) if feed_ids else list(FEED_SPECS.keys())
+        for fid in requested:
+            if fid not in FEED_SPECS:
+                raise ValueError(f"Unknown briefing feed: {fid}")
+
         with self._lock:
-            if self._refreshing:
+            if self._refreshing or self._active_refreshes > 0:
                 return False
+            self._active_refreshes += 1
             self._refreshing = True
             self._last_refresh_started = datetime.now(timezone.utc).isoformat()
 
         def _worker() -> None:
             try:
-                self.refresh_sync(feed_ids=feed_ids, force=force)
+                with self._refresh_lock:
+                    self._run_refresh_locked(requested, force=force)
             except Exception as exc:
                 logger.exception("Unhandled error in background briefing feed refresh: %s", exc)
+            finally:
                 with self._lock:
-                    self._refreshing = False
+                    self._active_refreshes = max(0, self._active_refreshes - 1)
+                    self._refreshing = self._active_refreshes > 0
 
         t = threading.Thread(target=_worker, name="briefing-feed-refresh", daemon=True)
         self._refresh_thread = t

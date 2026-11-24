@@ -29,6 +29,9 @@
 }
 .mp-hsa-poly:hover, .mp-hsa-poly:focus-visible { stroke: var(--ink-primary); stroke-width: 2; outline: none; }
 .mp-hsa-poly.is-on { stroke: var(--ink-primary); stroke-width: 2.25; }
+.mp-subbar { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-12); max-width: 580px; }
+.mp-subchip { min-width: 84px; padding: var(--space-6) var(--space-8); }
+.mp-grid-generic { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: var(--space-6); max-width: 580px; }
 .mp-abbr { font-size: var(--text-micro); font-weight: var(--weight-medium); line-height: 1; }
 .mp-val { font-family: var(--font-mono); font-size: var(--text-axis); font-variant-numeric: tabular-nums; line-height: 1; opacity: 0.9; }
 

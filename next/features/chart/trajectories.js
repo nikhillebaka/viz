@@ -2,8 +2,10 @@
  * Loads draws lazily per (target, season, location, settled round, dims) when toggled on
  * (or automatically on sample-only targets) and lays out faint per-series spaghetti paths
  * underneath the charted medians and above the interval bands. */
-import { getActiveHub, loadTrajectories, registerCacheClear } from "../../lib/api.js";
+import { addMonthsUtc, getActiveHub, loadTrajectories, registerCacheClear } from "../../lib/api.js";
 import { DAY, parseIso, toIso } from "../../lib/scale.js";
+
+const horizonTime = (refT, h, offDays, isMonthly) => (isMonthly ? addMonthsUtc(refT, h) : refT + (h * 7 + offDays) * DAY);
 
 const TRAJ_CACHE = 12;
 const MAX_DRAWS_PER_MODEL = 36;
@@ -54,7 +56,7 @@ export class ChartTrajectories {
     const { manifest, store } = this.chart.ctx;
     const s = store.get();
     const tMeta = manifest.targetById.get(s.target);
-    return !!s.trajectories || isSampleOnlyTarget(tMeta);
+    return !!s.trajectories || (isSampleOnlyTarget(tMeta) && !(this.chart.fan?.quantiles?.length > 0));
   }
 
   /** Max forecast target-end timestamp (ms) across loaded sample trajectories, or null. */
@@ -69,7 +71,9 @@ export class ChartTrajectories {
         if (Number.isFinite(h) && h > maxH) maxH = h;
       }
     }
-    return Number.isFinite(maxH) ? refT + (maxH * 7 + offDays) * DAY : null;
+    const tMeta = this.chart.ctx.manifest.targetById.get(this.chart.fan?.target);
+    const isMonthly = (this.chart.fan?.timeUnit || tMeta?.time_unit) === "month";
+    return Number.isFinite(maxH) ? horizonTime(refT, maxH, offDays, isMonthly) : null;
   }
 
   /** Ensures sample trajectories for the currently settled round are loaded when active. */
@@ -146,16 +150,20 @@ export class ChartTrajectories {
       ? [...scene.series.filter((s) => s.id !== scene.focus), ...scene.series.filter((s) => s.id === scene.focus)]
       : scene.series;
 
+    const nonNegFan = fan.horizons?.length ? Math.min(...fan.horizons) >= 0 : true;
+    const isMonthly = fan.timeUnit === "month";
+    const maxAnchorGap = isMonthly ? 35 * DAY : 7 * DAY;
+
     for (const ser of ordered) {
       const entry = this.data.modelTrajectories.get(ser.id);
       if (!entry?.samples?.length || !entry.horizons?.length) continue;
       const anchor = ser.pts?.[0]?.anchor && Number.isFinite(ser.pts[0].med) ? ser.pts[0] : null;
       const anchorX = anchor ? scene.x(anchor.t) : NaN;
       const anchorY = anchor ? scene.y(anchor.med) : NaN;
-      const firstH = entry.horizons[0];
-      const firstT = refT + (firstH * 7 + offDays) * DAY;
-      const useAnchor = anchor && Number.isFinite(anchorX) && Number.isFinite(anchorY)
-        && anchor.t < firstT && (firstT - anchor.t) <= 7 * DAY;
+      const firstH = nonNegFan ? entry.horizons.find((h) => h >= 0) : entry.horizons[0];
+      const firstT = Number.isFinite(firstH) ? horizonTime(refT, firstH, offDays, isMonthly) : NaN;
+      const useAnchor = anchor && Number.isFinite(anchorX) && Number.isFinite(anchorY) && Number.isFinite(firstT)
+        && anchor.t < firstT && (firstT - anchor.t) <= maxAnchorGap;
 
       const alpha = (hasFocus ? (ser.id === scene.focus ? 0.28 : 0.045) : 0.16) * scrubFade * (ser.open ?? 1);
       const w = ser.id === scene.focus ? 1.15 : 0.9;
@@ -168,9 +176,10 @@ export class ChartTrajectories {
         const xy = [];
         if (useAnchor) xy.push(anchorX, anchorY);
         for (let k = 0; k < entry.horizons.length; k++) {
+          if (nonNegFan && entry.horizons[k] < 0) continue;
           const val = samp.values[k];
           if (!Number.isFinite(val)) continue;
-          const pt = refT + (entry.horizons[k] * 7 + offDays) * DAY;
+          const pt = horizonTime(refT, entry.horizons[k], offDays, isMonthly);
           xy.push(scene.x(pt), scene.y(val));
         }
         if (xy.length >= 4) out.push({ xy, c: ser.c, alpha, w });

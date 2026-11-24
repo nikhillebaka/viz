@@ -1,6 +1,7 @@
 /* An expanded leaderboard row: one model's detail. Anatomy by horizon, coverage curve against the baseline's, a state tile grid in the score
  * colors, one tick per round, and facts from /api/model-details. Paper, not a panel. */
 import { h } from "../../lib/dom.js";
+import { horizonText } from "../../lib/format.js";
 import { linear } from "../../lib/scale.js";
 import { tooltip } from "../../ui/floating.js";
 import { TILES, COLUMNS } from "../../features/LocationPicker.js";
@@ -32,10 +33,11 @@ export function detail(row, base, { ctx, scope, baseline, goTo }) {
   const hs = Object.keys(row.byH || {}).map(Number).filter((k) => Number.isFinite(k) && row.byH[k]?.wis != null).sort((a, b) => a - b);
   const tot = (c) => (c.spread || 0) + (c.over || 0) + (c.under || 0);
   const max = Math.max(1e-9, ...hs.map((k) => tot(row.byH[k].comp)));
+  const tMeta = manifest.targetById.get(store.get().target);
   const anatomy = h("div", { class: "sc-anat" }, hs.length ? hs.map((k) => {
     const c = row.byH[k].comp, t = tot(c);
     return h("div", { class: "sc-anat-row" },
-      h("span", { class: "sc-anat-h mono" }, `${k} wk`),
+      h("span", { class: "sc-anat-h mono" }, horizonText(k, tMeta, { short: true })),
       h("span", { class: "sc-anat-bar", style: { "--w": `${(t / max) * 100}%` } },
         ...[["spread", "sc-c1"], ["over", "sc-c2"], ["under", "sc-c3"]].map(([key, cls]) => h("i", { class: cls, style: { flexGrow: String(t ? (c[key] || 0) / t : 0) } }))),
       h("span", { class: "sc-anat-v mono" }, fmtScore(t)));
@@ -135,13 +137,13 @@ function buildTileLayout(geoCls, manifest, byAbbr) {
       }),
     };
   }
-  if (geoCls.kind === "generic") {
+  if (geoCls.kind !== "us-states" && geoCls.kind !== "us-metrocast") {
+    const leaves = (manifest.locations || []).filter((l) => !l.is_aggregate);
+    const list = leaves.length ? leaves : (manifest.locations || []);
     return {
       tileClass: "is-generic",
       gridCols: null,
-      items: (manifest.locations || [])
-        .filter((l) => l.level !== "country" && l.level !== "national")
-        .map((loc) => ({ key: loc.abbr || loc.id, loc, label: loc.name || loc.id, col: null, row: null, w: 1, h: 1 })),
+      items: list.slice(0, 60).map((loc) => ({ key: loc.abbr || loc.id, loc, label: loc.name || loc.id, col: null, row: null, w: 1, h: 1 })),
     };
   }
   return {

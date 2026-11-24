@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+import re
 
 import polars as pl
 
 NULL_VALUES = ["", "NA", "null", "NaN", "None", "NULL"]
 ORACLE_KEYS = ["target", "target_end_date", "location", "horizon", "output_type", "output_type_id"]
 ADMISSIONS_KEYS = ["target", "location", "target_end_date", "horizon"]
+DATE_COL_ALIASES = ("target_end_date", "truth_date", "date", "time_value", "time")
+LOC_COL_ALIASES = ("location", "geo_value", "geo_abbr")
 TRUTH_EXTRA_IGNORE = frozenset({
     "year_week",
     "data_source",
@@ -31,6 +34,11 @@ TRUTH_EXTRA_IGNORE = frozenset({
     "state",
     "state_abb",
     "location_name",
+    "location_type",
+    "geo_type",
+    "geo_name",
+    "season",
+    "Season",
     "population",
 })
 _TRUTH_CORE_COLS = frozenset({
@@ -94,24 +102,152 @@ def _frame_max_date(df: pl.DataFrame, col: str = "target_end_date") -> str:
     return str(val)[:10] if val else ""
 
 
+_WIDE_PATHOGEN_ALIASES: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"sarscov2|sars_cov_2|covid19|covid"), "covid"),
+    (re.compile(r"influenza|\bflu\b"), "flu"),
+    (re.compile(r"\brsv\b"), "rsv"),
+    (re.compile(r"dengue"), "dengue"),
+    (re.compile(r"ebola|\bbdbv\b|\bbvbd\b"), "ebola"),
+    (re.compile(r"\bili\b"), "ili"),
+    (re.compile(r"\bari\b"), "ari"),
+)
+
+
+def _truth_pathogen(text: str) -> Optional[str]:
+    norm = re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+    for pat, label in _WIDE_PATHOGEN_ALIASES:
+        if pat.search(norm):
+            return label
+    return None
+
+
+def _match_wide_column_to_target(col_name: str, target_ids: Sequence[str]) -> Optional[str]:
+    weekly = [str(t).strip() for t in target_ids if str(t).strip() and not str(t).strip().lower().startswith("peak ")]
+    candidates = weekly or [str(t).strip() for t in target_ids if str(t).strip()]
+    if not candidates:
+        return None
+    col_low = col_name.lower()
+    col_toks = set(re.sub(r"[^a-z0-9]+", " ", col_low).split())
+    col_path = _truth_pathogen(col_low)
+    best_tgt: Optional[str] = None
+    best_score = -1000
+    for t in candidates:
+        t_low = t.lower()
+        t_toks = set(re.sub(r"[^a-z0-9]+", " ", t_low).split())
+        t_path = _truth_pathogen(t_low)
+        if col_path and t_path and col_path != t_path:
+            continue
+        score = 0
+        if col_path and col_path == t_path:
+            score += 10
+        if (col_toks & {"pct", "positive", "prop", "percent"}) and (t_toks & {"pct", "prop", "positive", "percent"}):
+            score += 3
+        if (col_toks & {"hosp", "hospitalization", "bed"}) and (t_toks & {"hosp", "admit", "admissions"}):
+            score += 3
+        if "ed" in col_toks and "ed" in t_toks:
+            score += 3
+        if "case" in col_low and "case" in t_low:
+            score += 3
+        if t_low == col_low:
+            score += 20
+        if t_low.startswith("peak "):
+            score -= 5
+        if score > best_score:
+            best_score = score
+            best_tgt = t
+    if best_score >= 10:
+        return best_tgt
+    if len(candidates) == 1 and col_low in ("value", "observation", "admissions", "cases", "count"):
+        return candidates[0]
+    return None
+
+
+def unpivot_wide_truth(df: pl.DataFrame, target_ids: Sequence[str] = ()) -> Optional[pl.DataFrame]:
+    """
+    Convert wide multi-target Hubverse surveillance CSVs (e.g. `time_value, geo_value, flu_pct_positive,
+    rsv_pct_positive, sarscov2_pct_positive` or `time, geo_value, covid, flu, rsv`) into long
+    `["target", "location", "target_end_date", "oracle_value"]` frames without hardcoding column names.
+    Returns `None` if `df` is already long-form or cannot be unambiguously matched.
+    """
+    if df is None or df.is_empty():
+        return None
+    if "target" in df.columns and any(c in df.columns for c in ("oracle_value", "observation", "value")):
+        return None
+    if not target_ids:
+        return None
+
+    date_col = next((c for c in DATE_COL_ALIASES if c in df.columns), None)
+    loc_col = next((c for c in LOC_COL_ALIASES if c in df.columns), None)
+    if date_col is None or loc_col is None:
+        return None
+
+    skip = set(DATE_COL_ALIASES) | set(LOC_COL_ALIASES) | TRUTH_EXTRA_IGNORE | {
+        "as_of", "horizon", "output_type", "output_type_id", "target", "oracle_value", "observation", "value",
+    }
+    col_map: Dict[str, str] = {}
+    used_targets: Set[str] = set()
+    for col in df.columns:
+        if col in skip:
+            continue
+        tgt = _match_wide_column_to_target(col, target_ids)
+        if tgt and tgt not in used_targets:
+            col_map[col] = tgt
+            used_targets.add(tgt)
+    if not col_map:
+        return None
+
+    renames: Dict[str, str] = {}
+    if loc_col != "location":
+        renames[loc_col] = "location"
+    if date_col != "target_end_date":
+        renames[date_col] = "target_end_date"
+    work = df.rename(renames) if renames else df
+
+    id_cols = [c for c in ("as_of", "location", "target_end_date") if c in work.columns]
+    val_cols = list(col_map.keys())
+    work = work.with_columns([pl.col(c).cast(pl.Float64, strict=False) for c in val_cols])
+    long = work.unpivot(
+        index=id_cols,
+        on=val_cols,
+        variable_name="_wide_col",
+        value_name="oracle_value",
+    )
+    out = long.with_columns(
+        pl.col("_wide_col").replace_strict(col_map, return_dtype=pl.String).alias("target")
+    ).drop("_wide_col").drop_nulls(subset=["oracle_value", "target_end_date", "location"])
+    cols = (["as_of"] if "as_of" in out.columns else []) + ["target", "location", "target_end_date", "oracle_value"]
+    return out.select(cols) if not out.is_empty() else None
+
+
 def _standardize_truth_frame(
     df: pl.DataFrame,
     target_default: Optional[str] = None,
     *,
     pad_single_digit_fips: bool = True,
+    target_ids: Optional[Sequence[str]] = None,
 ) -> Optional[pl.DataFrame]:
-    """Normalize column names (`observation`/`value`, `truth_date`/`date`) and dtypes for truth frames."""
+    """Normalize column names (`observation`/`value`, `truth_date`/`date`/`time_value`, `geo_value`) and dtypes."""
     if df is None or df.is_empty():
         return None
+    if target_ids and "target" not in df.columns and not any(c in df.columns for c in ("oracle_value", "observation", "value")):
+        wide = unpivot_wide_truth(df, target_ids)
+        if wide is not None:
+            df = wide
+
     rename_map: Dict[str, str] = {}
+    if "location" not in df.columns:
+        for alt in LOC_COL_ALIASES:
+            if alt != "location" and alt in df.columns:
+                rename_map[alt] = "location"
+                break
     if "oracle_value" not in df.columns:
         for alt in ("observation", "value"):
             if alt in df.columns:
                 rename_map[alt] = "oracle_value"
                 break
     if "target_end_date" not in df.columns:
-        for alt in ("truth_date", "date"):
-            if alt in df.columns:
+        for alt in DATE_COL_ALIASES:
+            if alt != "target_end_date" and alt in df.columns:
                 rename_map[alt] = "target_end_date"
                 break
     if rename_map:
@@ -300,6 +436,7 @@ def reconcile_truth_sources(
     target_default: Optional[str] = None,
     conflict_callback: Optional[Callable[[str], None]] = None,
     pad_single_digit_fips: bool = True,
+    target_ids: Optional[Sequence[str]] = None,
 ) -> pl.DataFrame:
     """
     Reconcile normalized truth frames across local repos, S3 hubs, sibling workspace hubs, and archives.
@@ -307,11 +444,13 @@ def reconcile_truth_sources(
     """
     prepared: List[Tuple[TruthSource, pl.DataFrame]] = []
     extra_cols_set: Set[str] = set()
+    eff_target_ids = list(target_ids) if target_ids is not None else (sorted(allowed_targets) if allowed_targets else None)
     for src, raw in sources:
         df = _standardize_truth_frame(
             raw,
             target_default=target_default,
             pad_single_digit_fips=pad_single_digit_fips,
+            target_ids=eff_target_ids,
         )
         if df is None:
             continue

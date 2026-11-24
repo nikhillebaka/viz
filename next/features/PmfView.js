@@ -5,6 +5,7 @@
  *   - Bars: discrete 5-bin / K-bin probability histograms with 50% dashed rule */
 import { h, on, cssColor, onThemeChange } from "../lib/dom.js";
 import { apiUrl, loadPmf, registerCacheClear } from "../lib/api.js";
+import { horizonText } from "../lib/format.js";
 import { seriesColor } from "../chart/layout.js";
 import { slotOf } from "./selection.js";
 import { guideLink, fragment, action, setLine, linkStyle, fitCanvas, perFrame, resetColors, sortHeader, onDprChange } from "../sections/shared.js";
@@ -343,7 +344,10 @@ export function mountPmfView(host, ctx) {
     }),
     horizon: fragment({
       label: "Horizon", title: "Horizon",
-      items: () => (data?.horizons || [0, 1, 2, 3]).map((x) => ({ value: x, label: `${x} wk ahead` })),
+      items: () => {
+        const tm = manifest.targetById.get(store.get().target);
+        return (data?.horizons || [0, 1, 2, 3]).map((x) => ({ value: x, label: horizonText(x, tm) }));
+      },
       value: () => horizon,
       isDefault: () => horizon === (data?.horizons?.includes(1) ? 1 : data?.horizons?.[0] ?? 1),
       onSelect: (v) => { horizon = v; renderAll(); },
@@ -1129,21 +1133,23 @@ export function mountPmfView(host, ctx) {
       const nCards = Math.max(1, hzs.length);
       const cardW = (W - padL - padR - gap * (nCards - 1)) / nCards;
       hzs.forEach((hz, hi) => {
+        const tm = manifest.targetById.get(store.get().target);
         const entry = rec?.models?.[focusModel]?.[hz];
         const cx0 = padL + hi * (cardW + gap);
         g.font = `500 11px ${pal.fontSans}`;
         g.textAlign = "left";
         g.textBaseline = "bottom";
         g.fillStyle = pal.inkPrimary;
-        g.fillText(`${hz} wk ahead · ${date}`, cx0, cardsY + 8, cardW);
+        g.fillText(`${horizonText(hz, tm)} · ${date}`, cx0, cardsY + 8, cardW);
         if (!entry) return;
         drawMiniHistogram(cx0, cardsY + 12, cardW, cardsH - 12, entry.probs, entry.obsIdx, {
-          key: `bar:${focusModel}:${hz}`, title: mLabel, sub: `${hz} wk · ${date}`, rps: entry.rps, logScore: entry.logScore,
+          key: `bar:${focusModel}:${hz}`, title: mLabel, sub: `${horizonText(hz, tm, { short: true })} · ${date}`, rps: entry.rps, logScore: entry.logScore,
         }, cardW >= 120);
       });
     } else {
       const date = data.rounds[roundIdx];
       const rec = data.byRound[date];
+      const tm = manifest.targetById.get(store.get().target);
       const padL = 124, padR = 14, padT = 26, padB = 10;
       const colGap = 18, rowGap = 14;
       const nCols = Math.max(1, hzs.length);
@@ -1155,7 +1161,7 @@ export function mountPmfView(host, ctx) {
         g.textAlign = "center";
         g.textBaseline = "bottom";
         g.fillStyle = pal.inkSecondary;
-        g.fillText(`${hz} wk`, padL + hi * (colW + colGap) + colW * 0.5, padT - 6);
+        g.fillText(horizonText(hz, tm, { short: true }), padL + hi * (colW + colGap) + colW * 0.5, padT - 6);
       });
       cmp.forEach((mid, mi) => {
         const ry0 = padT + mi * (rowH + rowGap);

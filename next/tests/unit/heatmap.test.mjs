@@ -73,3 +73,9 @@ test("coverage tones saturate 20 points off 95, as the scores' steps", () => {
   const g = buildGrid(r, { rows: "model", cols: "location", metric: "cov95", sort: "alpha", scale: "none" }, {});
   assert.equal(g.tone(0, 0).t, 1); assert.equal(g.tone(0, 1).t, 0);
 });
+
+test("normalizeView preserves dynamic negative and extended horizons", () => {
+  assert.equal(normalizeView({ horizon: -1 }, true).horizon, -1);
+  assert.equal(normalizeView({ horizon: 4 }, true).horizon, 4);
+  assert.equal(normalizeView({ horizon: "bad" }, true).horizon, 1);
+});

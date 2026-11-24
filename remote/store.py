@@ -35,6 +35,10 @@ _BUILTIN_DEFAULT_TARGETS: Dict[str, Set[str]] = {
     "rsv": {"wk inc rsv hosp"},
     "respicast_syndromic": {"ILI incidence", "ARI incidence"},
     "respicast_covid19": {"wk inc covid cases", "wk inc covid deaths", "wk inc covid hosp"},
+    "china_id": {"wk inc covid prop ili", "wk inc flu prop ili", "mo inc dengue cases"},
+    "canada_rvdss": {"pct wk flu lab det", "pct wk covid lab det", "pct wk rsv lab det"},
+    "ontario_hosp": {"wk inc flu hosp", "wk inc covid hosp", "wk inc rsv hosp"},
+    "bdbv_drc": {"wk inc confirmed cases", "wk R_t"},
 }
 
 TRUTH_FILES = {
@@ -82,7 +86,31 @@ class RemoteStore:
             reg = {}
         reg.setdefault("custom_hubs", [])
         reg.setdefault("enabled", {})
+        if not isinstance(reg.get("settings"), dict):
+            reg["settings"] = {}
         return reg
+
+    def get_settings(self) -> Dict[str, Any]:
+        """Return persistent remote-sync preferences stored in hubs.json."""
+        s = self._registry().get("settings") or {}
+        return {
+            "auto_update_daily": bool(s.get("auto_update_daily", False)),
+            "last_auto_update": str(s["last_auto_update"]) if s.get("last_auto_update") else None,
+        }
+
+    def set_auto_update_daily(self, enabled: bool) -> Dict[str, Any]:
+        with _write_lock:
+            reg = self._registry()
+            reg["settings"]["auto_update_daily"] = bool(enabled)
+            _atomic_write_json(self.registry_path, reg)
+            return self.get_settings()
+
+    def record_auto_update(self, ts_iso: str) -> Dict[str, Any]:
+        with _write_lock:
+            reg = self._registry()
+            reg["settings"]["last_auto_update"] = str(ts_iso)
+            _atomic_write_json(self.registry_path, reg)
+            return self.get_settings()
 
     def hub_specs(self) -> List[HubSpec]:
         specs = list(BUILTIN_HUBS)

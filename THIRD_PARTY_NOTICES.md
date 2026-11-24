@@ -9,6 +9,9 @@ files, which remain under their own licenses:
 | `next/fonts/geist-mono-latin.woff2` | [Geist Mono](https://github.com/vercel/geist-font) (Latin subset, as served by Google Fonts), © The Geist Project Authors | SIL OFL 1.1 | [next/fonts/OFL-GeistMono.txt](next/fonts/OFL-GeistMono.txt) |
 | `next/geo/world-countries-50m.json` | [world-atlas](https://github.com/topojson/world-atlas) v2 (`countries-50m.json`; [Natural Earth](https://www.naturalearthdata.com/) 1:50m public-domain geometry, TopoJSON packaging © Mike Bostock) | ISC / Public Domain | [next/geo/ISC-TopoJSON.txt](next/geo/ISC-TopoJSON.txt) |
 | `next/geo/us-counties-10m.json` | [us-atlas](https://github.com/topojson/us-atlas) v3 (`counties-10m.json`; U.S. Census Bureau TIGER/Line public-domain geometry, TopoJSON packaging © Mike Bostock) | ISC / Public Domain | [next/geo/ISC-TopoJSON.txt](next/geo/ISC-TopoJSON.txt) |
+| `next/geo/ca-provinces.json` | [Natural Earth](https://www.naturalearthdata.com/) 1:50m Admin-1 States & Provinces (Canada subset, quantized TopoJSON) | Public Domain | — |
+| `next/geo/ca-ontario-oh.json` | [Land Information Ontario](https://geohub.lio.gov.on.ca/) Ontario Health Region boundaries (quantized TopoJSON) | Open Government Licence – Ontario | — |
+| `next/geo/cd-provinces.json` | [geoBoundaries](https://www.geoboundaries.org/) (`gbOpen/COD/ADM1` DRC 26 provinces, quantized TopoJSON) | ODbL 1.0 | — |
 
 ## Data
 

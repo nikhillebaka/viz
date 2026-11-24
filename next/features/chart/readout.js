@@ -2,7 +2,7 @@
  * A solid kit panel (.c-readout), never glass. Built from hoverInfo() (chart/layout.js); its DOM is
  * rebuilt only when what it says changes, and moved only when its place changes. */
 import { h, tokenNum } from "../../lib/dom.js";
-import { fmtDay } from "../../lib/format.js";
+import { fmtDay, horizonText } from "../../lib/format.js";
 import { seriesColor } from "../../chart/layout.js";
 
 const DASH = "–";
@@ -93,7 +93,7 @@ export class Readout {
     const hasObs = obs !== undefined;
     if (!rows.length && !more && !hasObs) return null;
     return {
-      head: `${fmtDay(info.t)} · ${info.h === 0 ? "this week" : `${info.h} wk ahead`}`,
+      head: `${fmtDay(info.t)} · ${horizonText(info.h, o.target)}`,
       right: range ? levelsText(L) : "",
       range: range ? L.length : 0, width, rows, more,
       obs: hasObs ? v(obs) : null,

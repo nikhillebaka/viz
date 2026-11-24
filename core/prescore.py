@@ -191,7 +191,7 @@ class PreScoreStore:
             if not info or info.get("is_synthetic"):
                 return False
             ots = info.get("output_types") or []
-            if ots and "quantile" not in ots:
+            if ots and "quantile" not in ots and "sample" not in ots and not info.get("from_samples"):
                 return False
             tgts = info.get("targets") or []
             if tgts and target not in tgts:

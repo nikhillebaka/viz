@@ -23,6 +23,7 @@ from viz.core.calendar import CalendarSpec
 from viz.core.data_loader import SandboxDataLoader, date_to_season_and_week
 from viz.core.metrics import (
     TASK_KEY_COLS,
+    attach_wis_per_100k,
     compute_pairwise_relative_wis,
     compute_pairwise_relative_wis_indexed,
     find_common_tasks,
@@ -330,7 +331,7 @@ class EvaluationEngine:
         self.base_dir = Path(base_dir).resolve()
         self.loader = data_loader or SandboxDataLoader(self.base_dir)
         self.config = self.loader.config
-        self.prescore = PreScoreStore(self.loader.cache_mgr.cache_dir, self.loader)
+        self.prescore = getattr(self.loader, "prescore", None) or PreScoreStore(self.loader.cache_mgr.cache_dir, self.loader)
         self._eval_cache: "OrderedDict[str, EvaluationResult]" = OrderedDict()
         self._eval_cache_size = 64
         self._eval_cache_lock = threading.Lock()
@@ -342,6 +343,7 @@ class EvaluationEngine:
         self._sample_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._sample_eval_cache_size = 32
         self._sample_eval_cache_lock = threading.Lock()
+        self._sample_eval_inflight: Dict[str, threading.Event] = {}
 
     def clear_cache(self) -> None:
         """Clear leaderboard, per-location, and sample-trajectory evaluation caches."""
@@ -402,7 +404,7 @@ class EvaluationEngine:
                     mtimes.append(f"{mid}:pmf:{p_m}")
                 else:
                     ots = (info or {}).get("output_types") or []
-                    if ots and "quantile" not in ots:
+                    if ots and "quantile" not in ots and "sample" not in ots and not (info or {}).get("from_samples"):
                         continue
                     pq = self.loader.cache_mgr.get_model_parquet(raw_id, is_local=is_local)
                     q_m = pq.stat().st_mtime if pq and pq.exists() else 0.0
@@ -626,7 +628,7 @@ class EvaluationEngine:
             if info.get("is_synthetic"):
                 return True
             ots = info.get("output_types") or []
-            if ots and "quantile" not in ots:
+            if ots and "quantile" not in ots and "sample" not in ots and not info.get("from_samples"):
                 return False
             tgts = info.get("targets") or []
             if tgts and sc.target not in tgts:
@@ -705,7 +707,8 @@ class EvaluationEngine:
         scope_idxs = [model_idx_map[m] for m in sc.requested_model_ids if m in model_idx_map] if sc.fair_flag else []
         per_model: Dict[str, Dict[str, Dict[str, Any]]] = {m: {} for m in model_list}
 
-        for loc_key, g in parts.items():
+        def _score_one_location(item: Tuple[Any, pl.DataFrame]) -> Optional[Tuple[str, Dict[str, Dict[str, Any]]]]:
+            loc_key, g = item
             loc = str(loc_key[0] if isinstance(loc_key, tuple) else loc_key)
             if sc.fair_flag and len(scope_idxs) > 1:
                 shared = (
@@ -718,7 +721,7 @@ class EvaluationEngine:
                     .select(task_cols)
                 )
                 if shared.is_empty():
-                    continue
+                    return None
                 g = g.join(shared, on=task_cols, how="semi")
 
             stats = g.group_by("_m").agg(
@@ -732,8 +735,9 @@ class EvaluationEngine:
             rel_log, dir_log = compute_pairwise_relative_wis_indexed(
                 g, n_models, base_idx, "wis_log", task_cols
             )
+            loc_entries: Dict[str, Dict[str, Any]] = {}
             for m_idx, w, wl, cnt in stats.iter_rows():
-                per_model[model_list[m_idx]][loc] = {
+                loc_entries[model_list[m_idx]] = {
                     "rel_wis": rel_lin.get(m_idx),
                     "rel_wis_log": rel_log.get(m_idx),
                     "wis": _finite_or_none(w),
@@ -742,6 +746,14 @@ class EvaluationEngine:
                     "direct_pct_log": dir_log.get(m_idx),
                     "n": int(cnt),
                 }
+            return loc, loc_entries
+
+        for res_loc in ordered_map(_score_one_location, list(parts.items())):
+            if res_loc is None:
+                continue
+            loc_s, loc_entries = res_loc
+            for m_name, entry in loc_entries.items():
+                per_model[m_name][loc_s] = entry
 
         return {"target": sc.target, "baseline": sc.baseline_id, "models": per_model}
 
@@ -1085,7 +1097,7 @@ class EvaluationEngine:
             if info.get("is_synthetic"):
                 return True
             ots = info.get("output_types") or []
-            if ots and "quantile" not in ots:
+            if ots and "quantile" not in ots and "sample" not in ots and not info.get("from_samples"):
                 return False
             tgts = info.get("targets") or []
             if tgts and target not in tgts:
@@ -1672,7 +1684,13 @@ class EvaluationEngine:
             lf = self.loader.cache_mgr.scan_model_pmf(raw_id, is_local=is_local)
             df = None
             if lf is not None:
-                df = lf.filter((pl.col("target") == target) & pl.col("reference_date").is_in(eval_dates)).collect()
+                pred = (pl.col("target") == target) & pl.col("reference_date").is_in(eval_dates)
+                names = set(lf.collect_schema().names())
+                if locations_filter and "location" in names:
+                    pred = pred & pl.col("location").cast(pl.String).is_in(locations_filter)
+                if horizon_set is not None and "horizon" in names:
+                    pred = pred & pl.col("horizon").cast(pl.Int64).is_in(horizon_set)
+                df = lf.filter(pred).collect()
             if df is None or df.is_empty():
                 raw_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
                 if raw_df is not None and not raw_df.is_empty() and "output_type" in raw_df.columns:
@@ -1681,6 +1699,7 @@ class EvaluationEngine:
                 return None
             return self._filter_df_scope(
                 df,
+                locations=locations_filter,
                 horizons=horizon_set,
                 dim_filter=dim_filter,
                 window_filter=window_filter,
@@ -1855,38 +1874,81 @@ class EvaluationEngine:
         pop_map = self._population_map(target)
         target_non_neg = self.config.is_target_non_negative(target)
         common_tasks_arg = _common_tasks_frame(result.common_task_set, extra_task_ids=result.extra_task_ids)
+        all_models = self.loader.scan_models()
 
-        def _task_scores(mid: str) -> Optional[pl.DataFrame]:
-            df = self.loader.load_combined_forecasts(mid, result.scope_dates, as_polars=True)
-            if df is None or df.is_empty():
-                return None
-            df = self._filter_df_scope(
-                df,
-                horizons=params.horizons,
-                dim_filter=result.dim_filter,
-                window_filter=result.window_filter,
-            )
-            if df.is_empty():
-                return None
-            sc = score_forecasts(
-                df,
-                oracle,
-                target=target,
-                locations=result.locations_filter,
-                reference_dates=result.scope_dates,
-                horizons=params.horizons,
-                common_tasks=common_tasks_arg,
-                non_negative=target_non_neg,
-                population_map=pop_map,
-                extra_task_ids=result.extra_task_ids or None,
-                aggregate_locations=result.aggregate_locations,
-                return_task_df=True,
-            )
-            if sc and "task_df" in sc and sc["task_df"] is not None:
-                return sc["task_df"].with_columns(pl.lit(mid).alias("model_id"))
-            return None
+        prescored = self.prescore.get_model_task_scores(
+            target,
+            active_mids,
+            all_models,
+            oracle,
+            non_negative=target_non_neg,
+            extra_task_ids=result.extra_task_ids,
+        )
 
-        dfs = [t_df for t_df in ordered_map(_task_scores, active_mids) if t_df is not None]
+        dfs: List[pl.DataFrame] = []
+        fallback_mids: List[str] = []
+        for mid in active_mids:
+            if mid in prescored:
+                tdf_full, _ = prescored[mid]
+                if tdf_full.is_empty():
+                    continue
+                sub = self._filter_df_scope(
+                    tdf_full,
+                    locations=result.locations_filter,
+                    reference_dates=result.scope_dates,
+                    horizons=params.horizons,
+                    dim_filter=result.dim_filter,
+                    window_filter=result.window_filter,
+                )
+                if sub.is_empty():
+                    continue
+                if isinstance(common_tasks_arg, pl.DataFrame):
+                    join_cols = [c for c in list(TASK_KEY_COLS) + list(result.extra_task_ids) if c in sub.columns and c in common_tasks_arg.columns]
+                    sub = sub.join(common_tasks_arg, on=join_cols, how="semi")
+                elif common_tasks_arg is not None and len(common_tasks_arg) == 0:
+                    continue
+                if sub.is_empty():
+                    continue
+                sub = attach_wis_per_100k(sub, pop_map)
+                dfs.append(sub.with_columns(pl.lit(mid).alias("model_id")))
+            else:
+                fallback_mids.append(mid)
+
+        if fallback_mids:
+            def _task_scores(mid: str) -> Optional[pl.DataFrame]:
+                df = self.loader.load_combined_forecasts(mid, result.scope_dates, as_polars=True)
+                if df is None or df.is_empty():
+                    return None
+                df = self._filter_df_scope(
+                    df,
+                    horizons=params.horizons,
+                    dim_filter=result.dim_filter,
+                    window_filter=result.window_filter,
+                )
+                if df.is_empty():
+                    return None
+                sc = score_forecasts(
+                    df,
+                    oracle,
+                    target=target,
+                    locations=result.locations_filter,
+                    reference_dates=result.scope_dates,
+                    horizons=params.horizons,
+                    common_tasks=common_tasks_arg,
+                    non_negative=target_non_neg,
+                    population_map=pop_map,
+                    extra_task_ids=result.extra_task_ids or None,
+                    aggregate_locations=result.aggregate_locations,
+                    return_task_df=True,
+                )
+                if sc and "task_df" in sc and sc["task_df"] is not None:
+                    return sc["task_df"].with_columns(pl.lit(mid).alias("model_id"))
+                return None
+
+            for t_df in ordered_map(_task_scores, fallback_mids):
+                if t_df is not None:
+                    dfs.append(t_df)
+
         if params.horizons is None and (
             self._target_has_non_negative_horizon(self.config.get_target_metadata(target))
             or self._has_non_negative_horizon(dfs)
@@ -1899,14 +1961,20 @@ class EvaluationEngine:
             return None
         return pl.concat(dfs, how="diagonal")
 
-    def evaluate_samples(self, params: EvaluationParams) -> Dict[str, Any]:
+    def evaluate_samples(self, params: EvaluationParams, force_refresh: bool = False) -> Dict[str, Any]:
         """Evaluate sample-trajectory forecasts using exact empirical CRPS and multi-horizon Energy Score."""
         cache_key = "samp|" + self._compute_cache_key(params, mode="samples")
-        with self._sample_eval_cache_lock:
-            hit = self._sample_eval_cache.get(cache_key)
-            if hit is not None:
-                self._sample_eval_cache.move_to_end(cache_key)
-                return hit
+        return self._cache_get_or_run(
+            self._sample_eval_cache,
+            self._sample_eval_cache_lock,
+            self._sample_eval_inflight,
+            self._sample_eval_cache_size,
+            cache_key,
+            force_refresh,
+            lambda: self._evaluate_samples_uncached(params),
+        )
+
+    def _evaluate_samples_uncached(self, params: EvaluationParams) -> Dict[str, Any]:
 
         sc_res = self._resolve_eval_scope(params)
         target = sc_res.target
@@ -1946,7 +2014,13 @@ class EvaluationEngine:
             lf = self.loader.cache_mgr.scan_model_samples(raw_id, is_local=is_local)
             df = None
             if lf is not None:
-                df = lf.filter((pl.col("target") == target) & pl.col("reference_date").is_in(eval_dates)).collect()
+                pred = (pl.col("target") == target) & pl.col("reference_date").is_in(eval_dates)
+                names = set(lf.collect_schema().names())
+                if locations_filter and "location" in names:
+                    pred = pred & pl.col("location").cast(pl.String).is_in(locations_filter)
+                if horizon_set is not None and "horizon" in names:
+                    pred = pred & pl.col("horizon").cast(pl.Int64).is_in(horizon_set)
+                df = lf.filter(pred).collect()
             if df is None or df.is_empty():
                 raw_df = self.loader.load_combined_forecasts(mid, eval_dates, as_polars=True)
                 if raw_df is not None and not raw_df.is_empty() and "output_type" in raw_df.columns:
@@ -1955,6 +2029,7 @@ class EvaluationEngine:
                 return None
             return self._filter_df_scope(
                 df,
+                locations=locations_filter,
                 horizons=horizon_set,
                 dim_filter=dim_filter,
                 window_filter=window_filter,
@@ -2104,7 +2179,7 @@ class EvaluationEngine:
             )
         )
 
-        payload = {
+        return {
             "target": target,
             "location_filter": sc_res.loc_param,
             "date_filter": sc_res.date_param,
@@ -2114,9 +2189,3 @@ class EvaluationEngine:
             "baseline_model": effective_baseline,
             "rankings": rankings,
         }
-        with self._sample_eval_cache_lock:
-            self._sample_eval_cache[cache_key] = payload
-            self._sample_eval_cache.move_to_end(cache_key)
-            while len(self._sample_eval_cache) > self._sample_eval_cache_size:
-                self._sample_eval_cache.popitem(last=False)
-        return payload

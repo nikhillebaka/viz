@@ -9,7 +9,8 @@ feeds into a strictly factual, place-first JSON payload served at
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from bisect import bisect_right
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import logging
 import math
@@ -25,6 +26,13 @@ from viz.core.briefing_feeds import (
 )
 from viz.core.catalog import display_model_name, rank_ensemble_candidates
 from viz.core.geo import EUROPE_REF, HHS_REGIONS, US_STATES_REF
+from viz.core.next_api import _resolve_effective_scale
+
+_INTL_COUNTRY_NAMES: Dict[str, str] = {
+    "CA": "Canada",
+    "CN": "China",
+    "CD": "DR Congo",
+}
 
 logger = logging.getLogger("viz.briefings")
 
@@ -80,7 +88,7 @@ def _fmt_date_short(iso: Optional[str], ref_iso: Optional[str] = None) -> str:
 def _clean_signal_label(t_short: str, pathogen_label: str, pathogen: str) -> str:
     s = (t_short or "").strip()
     low = s.lower()
-    if any(k in low for k in ("flu", "covid", "rsv", "ili", "ari")):
+    if any(k in low for k in ("flu", "covid", "rsv", "ili", "ari", "dengue", "bdbv", "ebola")):
         return s
     p = (pathogen_label or pathogen or "").strip()
     if not p or p.lower() in low:
@@ -120,10 +128,40 @@ def _pick_latest_round_for_target(
         get_meta=ctx.loader.get_model_metadata,
         hub_id=hub_id,
     )
+    latest_any: Optional[str] = None
+    latest_official_ens: Optional[str] = None
+    latest_any_ens: Optional[str] = None
     for mid in ranked:
         dates = (models.get(mid) or {}).get("dates") or []
-        if dates:
-            return max(dates)
+        if not dates:
+            continue
+        m_max = max(dates)
+        if latest_any is None or m_max > latest_any:
+            latest_any = m_max
+        meta = ctx.loader.get_model_metadata(mid) or {}
+        low = mid.split(":", 1)[-1].lower()
+        team, sep, suff = low.partition("-")
+        is_official = bool(meta.get("ensemble_of_hub_models")) or (
+            bool(sep)
+            and (team.endswith("hub") or team == "respicast" or "hubensemble" in low)
+            and ("ensemble" in suff or suff.endswith("_ens"))
+        )
+        is_ens = is_official or ("ensemble" in low) or low.endswith("_ens")
+        if is_official and (latest_official_ens is None or m_max > latest_official_ens):
+            latest_official_ens = m_max
+        if is_ens and (latest_any_ens is None or m_max > latest_any_ens):
+            latest_any_ens = m_max
+
+    latest_ens = latest_official_ens or latest_any_ens
+    if latest_any:
+        if latest_ens:
+            try:
+                gap = (date.fromisoformat(latest_any[:10]) - date.fromisoformat(latest_ens[:10])).days
+                if gap <= 14:
+                    return latest_ens
+            except ValueError:
+                return latest_ens
+        return latest_any
     for s in sorted(ctx.loader.get_forecast_seasons() or [], reverse=True):
         rs = ctx.loader.get_dates_for_season(s)
         if rs:
@@ -185,10 +223,18 @@ def _resolve_jurisdiction(place_info: Dict[str, Any]) -> Dict[str, Any]:
             "hhs_region_short": None,
         }
 
+    intl_iso2 = (
+        "CA" if (geo_kind in ("ca-provinces", "ca-ontario") or pkey == "CA" or str(pkey).startswith("CA-") or str(pkey).startswith("CA:")) else
+        "CD" if (geo_kind == "cd-provinces" or pkey == "CD" or str(pkey).startswith("CD-")) else
+        "CN" if (geo_kind == "cn-national" or pkey == "CN") else
+        None
+    )
+    intl_scope_map = {"CA": "ca", "CD": "cd", "CN": "cn"}
+    intl_clade_map = {"CA": "North America"}
     return {
-        "jurisdiction_scope": "other",
-        "country_iso2": None,
-        "clade_region": None,
+        "jurisdiction_scope": intl_scope_map.get(intl_iso2, "other"),
+        "country_iso2": intl_iso2,
+        "clade_region": intl_clade_map.get(intl_iso2),
         "us_feed_loc": None,
         "us_feed_loc_name": None,
         "hhs_region": None,
@@ -321,9 +367,6 @@ class BriefingBuilder:
         curves_seasons = all_seasons[:4] if season in all_seasons else [season, *all_seasons[:3]]
 
         per_100k = bool(tm.get("per_100k_capable", False) and _finite(population) and float(population) > 1)
-        is_proportion = (tm.get("scale") == "proportion") and not per_100k
-        scale_factor = (1e5 / float(population)) if per_100k else (100.0 if is_proportion else 1.0)
-        unit = "%" if is_proportion else _short_unit(tm.get("unit") or "", per_100k=per_100k)
         ranked_models = rank_ensemble_candidates(
             ctx.loader.scan_models(),
             target_id,
@@ -333,9 +376,10 @@ class BriefingBuilder:
         )
         model_id = ranked_models[0] if ranked_models else None
 
-        # 1. Observed + Prior Seasons via get_season_curves
-        observed: List[Dict[str, Any]] = []
-        prior_seasons: List[Dict[str, Any]] = []
+        # 1. Observed + Prior Seasons via get_season_curves (resolve scale_factor after reading raw magnitudes)
+        raw_observed: List[Dict[str, Any]] = []
+        raw_prior_seasons: List[Dict[str, Any]] = []
+        raw_values: List[float] = []
         week_dates: List[str] = []
         season_curves_data: Dict[str, Any] = {}
         try:
@@ -347,7 +391,6 @@ class BriefingBuilder:
                     {
                         "week": int(p["week"]),
                         "date": str(p["date"])[:10],
-                        "value": round(float(p["value"]) * scale_factor, 3),
                         "raw_value": float(p["value"]),
                         "phase": p.get("phase"),
                     }
@@ -356,48 +399,90 @@ class BriefingBuilder:
                 ]
                 if not pts:
                     continue
+                raw_values.extend(p["raw_value"] for p in pts)
                 if s_name == season:
-                    observed = pts
+                    raw_observed = pts
                 else:
-                    # Align onto focal season calendar week dates for X-axis overlay
-                    aligned_pts = []
-                    for pt in pts:
-                        wk_idx = int(pt["week"]) - 1
-                        mapped_date = week_dates[wk_idx] if 0 <= wk_idx < len(week_dates) else None
-                        if mapped_date:
-                            aligned_pts.append({
-                                "week": pt["week"],
-                                "date": mapped_date,
-                                "orig_date": pt["date"],
-                                "value": pt["value"],
-                            })
-                    peak_pt = max(pts, key=lambda x: x["value"])
-                    prior_seasons.append({
-                        "season": s_name,
-                        "peak_value": peak_pt["value"],
-                        "peak_date": peak_pt["date"],
-                        "peak_week": peak_pt["week"],
-                        "points": aligned_pts,
-                    })
+                    raw_prior_seasons.append({"season": s_name, "points": pts})
         except Exception as exc:
             logger.debug("Season curves failed for %s/%s: %s", target_id, location_id, exc)
 
         # Fall back to _weekly_truth tail if focal season not in get_season_curves yet
-        if not observed:
+        if not raw_observed:
             try:
                 wt = ctx.loader._weekly_truth(target_id)
                 sub = wt.filter(pl.col("location") == str(location_id)).sort("target_end_date").tail(26)
                 for idx, (d, v) in enumerate(sub.select(["target_end_date", "value"]).iter_rows()):
                     if _finite(v):
-                        observed.append({
+                        rv = float(v)
+                        raw_values.append(rv)
+                        raw_observed.append({
                             "week": idx + 1,
                             "date": str(d)[:10],
-                            "value": round(float(v) * scale_factor, 3),
-                            "raw_value": float(v),
+                            "raw_value": rv,
                             "phase": None,
                         })
             except Exception:
                 pass
+
+        if not raw_values and _finite((stream_summary or {}).get("observed")):
+            raw_values.append(float(stream_summary["observed"]))
+
+        hub_obs = (
+            ctx.next_data._observed(target_id)
+            if hasattr(ctx, "next_data") and hasattr(ctx.next_data, "_observed")
+            else None
+        )
+        if not hub_obs and raw_values:
+            hub_obs = {"raw": ([], raw_values)}
+        eff_scale, resolved_unit = _resolve_effective_scale(tm, hub_obs)
+        if eff_scale == "proportion" and (stream_summary or {}).get("scale") == "percentage":
+            eff_scale = "percentage"
+            resolved_unit = "%"
+        is_proportion = (eff_scale == "proportion") and not per_100k
+        is_percent = (eff_scale in ("proportion", "percentage")) and not per_100k
+        scale_factor = (1e5 / float(population)) if per_100k else (100.0 if is_proportion else 1.0)
+        unit = "%" if is_percent else _short_unit(resolved_unit or tm.get("unit") or "", per_100k=per_100k)
+
+        observed: List[Dict[str, Any]] = [
+            {
+                "week": p["week"],
+                "date": p["date"],
+                "value": round(p["raw_value"] * scale_factor, 3),
+                "raw_value": p["raw_value"],
+                "phase": p.get("phase"),
+            }
+            for p in raw_observed
+        ]
+        prior_seasons: List[Dict[str, Any]] = []
+        for c in raw_prior_seasons:
+            scaled_pts = [
+                {
+                    "week": pt["week"],
+                    "date": pt["date"],
+                    "value": round(pt["raw_value"] * scale_factor, 3),
+                }
+                for pt in c["points"]
+            ]
+            aligned_pts = []
+            for pt in scaled_pts:
+                wk_idx = int(pt["week"]) - 1
+                mapped_date = week_dates[wk_idx] if 0 <= wk_idx < len(week_dates) else None
+                if mapped_date:
+                    aligned_pts.append({
+                        "week": pt["week"],
+                        "date": mapped_date,
+                        "orig_date": pt["date"],
+                        "value": pt["value"],
+                    })
+            peak_pt = max(scaled_pts, key=lambda x: x["value"])
+            prior_seasons.append({
+                "season": c["season"],
+                "peak_value": peak_pt["value"],
+                "peak_date": peak_pt["date"],
+                "peak_week": peak_pt["week"],
+                "points": aligned_pts,
+            })
 
         # 2. Representative Official Ensemble Forecast Fan (fall through ranked candidates if top lacks this location)
         fan_payload: Optional[Dict[str, Any]] = None
@@ -467,7 +552,7 @@ class BriefingBuilder:
         rate_change_pmf: Optional[Dict[str, Any]] = None
         tid_low = str(target_id or "").lower()
         cid_low = str(concept_id or "").lower()
-        is_ed_prop = is_proportion or ("ed" in tid_low and "hosp" not in tid_low)
+        is_ed_prop = is_percent or ("ed" in tid_low and "hosp" not in tid_low)
 
         def _cat_matches(c: Dict[str, Any]) -> bool:
             c_tid = str(c.get("target_id") or "").lower()
@@ -616,7 +701,7 @@ class BriefingBuilder:
             "ref_date": ref_date,
             "obs_date": obs_date,
             "horizon_offset_days": int(cal.horizon_offset_days),
-            "scale": tm.get("scale") or "count",
+            "scale": eff_scale,
             "unit": unit,
             "raw_unit": tm.get("unit") or "",
             "per_100k": per_100k,
@@ -889,8 +974,13 @@ class BriefingBuilder:
                 }
         elif iso2 and df_who is not None and df_who.height > 0:
             sub_w = df_who.filter(pl.col("location_id") == iso2).sort("week_start").tail(16)
-            geo_scope = EUROPE_REF.get(iso2, {}).get("name") or iso2
-            if sub_w.is_empty():
+            geo_scope = (
+                (str(sub_w["country_name"][-1]) if not sub_w.is_empty() and sub_w["country_name"][-1] else None)
+                or EUROPE_REF.get(iso2, {}).get("name")
+                or _INTL_COUNTRY_NAMES.get(iso2)
+                or iso2
+            )
+            if sub_w.is_empty() and (scope in ("eu", "gb") or iso2 in EUROPE_REF):
                 # Aggregate WHO European Region counts cleanly when country hasn't reported individually
                 eur_df = df_who.filter(pl.col("who_region") == "EUR")
                 if eur_df.height > 0:
@@ -1001,8 +1091,9 @@ class BriefingBuilder:
                         "latest_shares": latest_shares,
                     })
 
-        # 8. European ECDC ERVISS Surveillance (+ WHO FluNet positivity fallback)
+        # 8. European ECDC ERVISS Surveillance (+ WHO FluNet positivity for non-US countries)
         ecdc_items: List[Dict[str, Any]] = []
+        seen_ecdc_keys: set[Tuple[str, str]] = set()
         if scope in ("eu", "gb") or (iso2 and iso2 in EUROPE_REF):
             df_ecdc = self.feed_store.read_feed("ecdc_erviss")
             ecdc_specs = (
@@ -1013,7 +1104,6 @@ class BriefingBuilder:
                 ("ari_rate", "syndromic", "ARI consultation rate", "per 100k"),
                 ("sari_rate", "syndromic", "SARI hospitalization rate", "per 100k"),
             )
-            seen_ecdc_keys: set[Tuple[str, str]] = set()
             if df_ecdc is not None and df_ecdc.height > 0:
                 country_label = EUROPE_REF.get(iso2 or "", {}).get("name") or iso2 or "Europe"
                 for ind, pval, lbl, unit in ecdc_specs:
@@ -1049,35 +1139,40 @@ class BriefingBuilder:
                             "series": pts,
                         })
 
-            if iso2 and df_who is not None and df_who.height > 0:
-                sub_w = df_who.filter(pl.col("location_id") == iso2).sort("week_start").tail(16)
-                country_label = EUROPE_REF.get(iso2, {}).get("name") or iso2
-                if not sub_w.is_empty():
-                    for pval, num_col, den_col, lbl in (
-                        ("flu", "inf_all", "spec_processed", "Influenza virological positivity"),
-                        ("rsv", "rsv", "rsv_processed", "RSV virological positivity"),
-                    ):
-                        if ("sentinel_positivity", pval) in seen_ecdc_keys:
-                            continue
-                        pts = []
-                        for wk_s, nv, dv in sub_w.select(["week_start", num_col, den_col]).iter_rows():
-                            if dv and dv > 0 and nv is not None and nv >= 0:
-                                pts.append({"date": str(wk_s)[:10], "value": round((float(nv) / float(dv)) * 100.0, 2)})
-                        if pts:
-                            cur = pts[-1]
-                            prev = pts[-2] if len(pts) >= 2 else None
-                            ecdc_items.append({
-                                "indicator": "sentinel_positivity",
-                                "pathogen": pval,
-                                "label": lbl,
-                                "unit": "%",
-                                "source": "WHO FluNet",
-                                "geo_scope": country_label,
-                                "latest_date": cur["date"],
-                                "latest_value": cur["value"],
-                                "pct_1wk": _pct_delta(cur["value"], prev["value"] if prev else None),
-                                "series": pts,
-                            })
+        if scope != "us" and scope != "cd" and iso2 and df_who is not None and df_who.height > 0:
+            sub_w = df_who.filter(pl.col("location_id") == iso2).sort("week_start").tail(16)
+            country_label = (
+                (str(sub_w["country_name"][-1]) if not sub_w.is_empty() and sub_w["country_name"][-1] else None)
+                or EUROPE_REF.get(iso2, {}).get("name")
+                or _INTL_COUNTRY_NAMES.get(iso2)
+                or iso2
+            )
+            if not sub_w.is_empty():
+                for pval, num_col, den_col, lbl in (
+                    ("flu", "inf_all", "spec_processed", "Influenza virological positivity"),
+                    ("rsv", "rsv", "rsv_processed", "RSV virological positivity"),
+                ):
+                    if ("sentinel_positivity", pval) in seen_ecdc_keys:
+                        continue
+                    pts = []
+                    for wk_s, nv, dv in sub_w.select(["week_start", num_col, den_col]).iter_rows():
+                        if dv and dv > 0 and nv is not None and nv >= 0:
+                            pts.append({"date": str(wk_s)[:10], "value": round((float(nv) / float(dv)) * 100.0, 2)})
+                    if pts:
+                        cur = pts[-1]
+                        prev = pts[-2] if len(pts) >= 2 else None
+                        ecdc_items.append({
+                            "indicator": "sentinel_positivity",
+                            "pathogen": pval,
+                            "label": lbl,
+                            "unit": "%",
+                            "source": "WHO FluNet",
+                            "geo_scope": country_label,
+                            "latest_date": cur["date"],
+                            "latest_value": cur["value"],
+                            "pct_1wk": _pct_delta(cur["value"], prev["value"] if prev else None),
+                            "series": pts,
+                        })
 
         return {
             "cfa_rt": cfa_rt_items,
@@ -1254,9 +1349,16 @@ class BriefingBuilder:
 
                     (sub_hub, sub_target), _ = max(pair_counts.items(), key=_pair_rank)
                     tm0, sample_p = pair_meta[(sub_hub, sub_target)]
+                    sub_obs_map = (
+                        ctxs[sub_hub].next_data._observed(sub_target)
+                        if hasattr(ctxs[sub_hub], "next_data") and hasattr(ctxs[sub_hub].next_data, "_observed")
+                        else None
+                    )
+                    sub_eff_scale, sub_res_unit = _resolve_effective_scale(tm0, sub_obs_map)
                     sub_per_100k = bool(tm0.get("per_100k_capable")) and bool(sample_p.get("population"))
-                    sub_is_prop = (tm0.get("scale") == "proportion") and not sub_per_100k
-                    sub_unit = "%" if sub_is_prop else _short_unit(tm0.get("unit") or "", per_100k=sub_per_100k)
+                    sub_is_prop = (sub_eff_scale == "proportion") and not sub_per_100k
+                    sub_is_pct = (sub_eff_scale in ("proportion", "percentage")) and not sub_per_100k
+                    sub_unit = "%" if sub_is_pct else _short_unit(sub_res_unit or tm0.get("unit") or "", per_100k=sub_per_100k)
             subregion_rows = _make_peer_rows(child_keys, sub_hub, sub_target, sub_per_100k, is_proportion=sub_is_prop)
             if pkey == "US":
                 subregion_label = "By State"
@@ -1278,11 +1380,376 @@ class BriefingBuilder:
         return {"title": "", "unit": "", "focal_key": pkey, "rows": [], "total_count": 0}
 
     @staticmethod
+    def _drc_national_and_zones(
+        df_ocha: Optional[pl.DataFrame],
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+        if df_ocha is None or df_ocha.is_empty():
+            return None, [], {"latest_date": None, "total_zones": 0, "active_zones_14d": 0, "rows": []}
+
+        lvl0 = df_ocha.filter(pl.col("location_level") == "0")
+        cases_map: Dict[str, float] = {}
+        deaths_map: Dict[str, float] = {}
+        susp_cases: Optional[Tuple[str, float]] = None
+        susp_deaths: Optional[Tuple[str, float]] = None
+        src_name = "INRB-UMIE"
+        for dt_s, meas, cls, val, src in lvl0.sort("date").select(
+            ["date", "measure", "classification", "value", "source"]
+        ).iter_rows():
+            dt = str(dt_s)[:10]
+            if not _finite(val):
+                continue
+            fv = float(val)
+            if cls == "confirmed" and meas == "cases":
+                cases_map[dt] = fv
+                if src:
+                    src_name = str(src)
+            elif cls == "confirmed" and meas == "deaths":
+                deaths_map[dt] = fv
+            elif cls == "suspected" and meas == "cases":
+                susp_cases = (dt, fv)
+            elif cls == "suspected" and meas == "deaths":
+                susp_deaths = (dt, fv)
+
+        all_dates = sorted(set(cases_map.keys()) | set(deaths_map.keys()))
+        c_dates = sorted(cases_map.keys())
+        d_dates = sorted(deaths_map.keys())
+
+        def _window_delta(val_map: Dict[str, float], sdates: List[str], dt: str, days: int) -> Optional[float]:
+            cur_v = val_map.get(dt)
+            if cur_v is None or not sdates:
+                return None
+            target_prior = (date.fromisoformat(dt) - timedelta(days=days)).isoformat()
+            idx = bisect_right(sdates, target_prior) - 1
+            if idx < 0:
+                return None
+            p_dt = sdates[idx]
+            gap = (date.fromisoformat(dt) - date.fromisoformat(p_dt)).days
+            if gap <= 0 or gap > days + 5:
+                return None
+            raw_d = cur_v - val_map[p_dt]
+            scaled = raw_d * (float(days) / float(gap)) if gap != days else raw_d
+            return max(0.0, round(scaled))
+
+        epi_curve: List[Dict[str, Any]] = []
+        for dt in all_dates:
+            c_val = cases_map.get(dt)
+            d_val = deaths_map.get(dt)
+            w7_c = _window_delta(cases_map, c_dates, dt, 7)
+            w7_d = _window_delta(deaths_map, d_dates, dt, 7)
+            epi_curve.append({
+                "date": dt,
+                "cum_cases": int(round(c_val)) if c_val is not None else None,
+                "cum_deaths": int(round(d_val)) if d_val is not None else None,
+                "new_cases_7d": int(w7_c) if w7_c is not None else None,
+                "new_deaths_7d": int(w7_d) if w7_d is not None else None,
+            })
+
+        national: Optional[Dict[str, Any]] = None
+        if c_dates:
+            lat_dt = c_dates[-1]
+            cum_c = int(round(cases_map[lat_dt]))
+            cum_d = int(round(deaths_map.get(lat_dt, deaths_map.get(d_dates[-1], 0)))) if d_dates else 0
+            new7 = _window_delta(cases_map, c_dates, lat_dt, 7)
+            new14 = _window_delta(cases_map, c_dates, lat_dt, 14)
+            new_d7 = _window_delta(deaths_map, d_dates, lat_dt, 7) if lat_dt in deaths_map else None
+            prior7_dt = (date.fromisoformat(lat_dt) - timedelta(days=7)).isoformat()
+            p7_idx = bisect_right(c_dates, prior7_dt) - 1
+            prev7 = _window_delta(cases_map, c_dates, c_dates[p7_idx], 7) if p7_idx >= 0 else None
+            national = {
+                "date": lat_dt,
+                "cum_cases": cum_c,
+                "cum_deaths": cum_d,
+                "cfr_pct": round((cum_d / cum_c) * 100.0, 1) if cum_c > 0 else None,
+                "new_cases_7d": int(new7) if new7 is not None else None,
+                "prev_cases_7d": int(prev7) if prev7 is not None else None,
+                "pct_cases_7d": _pct_delta(new7, prev7),
+                "new_cases_14d": int(new14) if new14 is not None else None,
+                "new_deaths_7d": int(new_d7) if new_d7 is not None else None,
+                "suspected_cases": int(round(susp_cases[1])) if susp_cases else None,
+                "suspected_deaths": int(round(susp_deaths[1])) if susp_deaths else None,
+                "suspected_date": susp_cases[0] if susp_cases else None,
+                "source": src_name,
+            }
+
+        # Health-zone breakdown (location_level == "3")
+        lvl3 = df_ocha.filter(
+            (pl.col("location_level") == "3")
+            & (pl.col("classification") == "confirmed")
+            & pl.col("measure").is_in(["cases", "deaths"])
+        )
+        zones_payload: Dict[str, Any] = {"latest_date": None, "total_zones": 0, "active_zones_14d": 0, "rows": []}
+        if not lvl3.is_empty():
+            z_max_dt = str(lvl3["date"].max())[:10]
+            z_14_dt = (date.fromisoformat(z_max_dt) - timedelta(days=14)).isoformat()
+            latest_l3 = (
+                lvl3.sort("date")
+                .group_by(["location_code", "location_name", "measure"])
+                .agg([pl.col("date").last().alias("date"), pl.col("value").last().alias("val")])
+            )
+            prior_l3 = (
+                lvl3.filter((pl.col("measure") == "cases") & (pl.col("date") <= z_14_dt))
+                .sort("date")
+                .group_by(["location_code", "location_name"])
+                .agg(pl.col("value").last().alias("prior_cases"))
+            )
+            zone_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            for code, zname, meas, zdt, zval in latest_l3.iter_rows():
+                key = (str(code), str(zname))
+                ent = zone_map.setdefault(
+                    key,
+                    {"location_code": str(code), "name": str(zname), "latest_date": str(zdt)[:10], "cases": 0, "deaths": 0},
+                )
+                ent["latest_date"] = max(ent["latest_date"], str(zdt)[:10])
+                if meas == "cases":
+                    ent["cases"] = int(round(float(zval or 0)))
+                elif meas == "deaths":
+                    ent["deaths"] = int(round(float(zval or 0)))
+            prior_map = {(str(c), str(n)): float(pv) for c, n, pv in prior_l3.iter_rows() if _finite(pv)}
+            all_zones: List[Dict[str, Any]] = []
+            for key, ent in zone_map.items():
+                c_n = ent["cases"]
+                d_n = ent["deaths"]
+                pv = prior_map.get(key)
+                c14 = max(0, int(round(c_n - pv))) if pv is not None else c_n
+                all_zones.append({
+                    **ent,
+                    "cfr_pct": round((d_n / c_n) * 100.0, 1) if c_n > 0 else None,
+                    "cases_14d": c14,
+                })
+            all_zones.sort(key=lambda r: (-r["cases"], -r["deaths"], r["name"]))
+            zones_payload = {
+                "latest_date": z_max_dt,
+                "total_zones": sum(1 for r in all_zones if r["cases"] > 0),
+                "active_zones_14d": sum(1 for r in all_zones if (r.get("cases_14d") or 0) > 0),
+                "rows": all_zones[:20],
+            }
+
+        return national, epi_curve, zones_payload
+
+    @staticmethod
+    def _drc_delays_summary(df_del: Optional[pl.DataFrame]) -> Optional[Dict[str, Any]]:
+        if df_del is None or df_del.is_empty():
+            return None
+        nat = df_del.filter(pl.col("location_name") == "DRC").sort("date", descending=True).head(8)
+        nat_rows = [
+            {
+                "date": str(r["date"])[:10],
+                "as_of": str(r["as_of"] or "")[:10],
+                "median_days": float(r["median_days"]),
+                "p75_days": float(r["p75_days"]),
+                "p90_days": float(r["p90_days"]),
+                "n_cases": int(r["n_cases"]),
+            }
+            for r in nat.iter_rows(named=True)
+        ]
+        max_n = max((r["n_cases"] for r in nat_rows), default=0)
+        threshold = max(50, int(0.45 * max_n))
+        for r in nat_rows:
+            r["is_partial"] = bool(max_n > 0 and r["n_cases"] < threshold)
+        mature_week = next((r for r in nat_rows if not r["is_partial"]), nat_rows[0] if nat_rows else None)
+
+        prov_rows: List[Dict[str, Any]] = []
+        sub_prov = df_del.filter(pl.col("location_name") != "DRC")
+        if not sub_prov.is_empty():
+            target_dt = mature_week["date"] if mature_week else None
+            at_dt = sub_prov.filter(pl.col("date") == target_dt) if target_dt else pl.DataFrame()
+            if at_dt.is_empty():
+                at_dt = (
+                    sub_prov.filter(pl.col("n_cases") >= 5)
+                    .sort("date")
+                    .group_by("location_name")
+                    .last()
+                )
+            for r in at_dt.iter_rows(named=True):
+                prov_rows.append({
+                    "location_name": str(r["location_name"]),
+                    "date": str(r["date"])[:10],
+                    "median_days": float(r["median_days"]),
+                    "p75_days": float(r["p75_days"]),
+                    "p90_days": float(r["p90_days"]),
+                    "n_cases": int(r["n_cases"]),
+                })
+            prov_rows.sort(key=lambda x: (-x["p90_days"], -x["median_days"], x["location_name"]))
+
+        return {
+            "as_of": nat_rows[0]["as_of"] if nat_rows else None,
+            "mature_week": mature_week,
+            "national_weeks": nat_rows,
+            "by_province": prov_rows,
+        }
+
+    def _drc_hub_provinces(
+        self,
+        catalog: Dict[str, Any],
+        ctxs: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        places = catalog.get("places") or {}
+        drc_ctx = None
+        drc_hub_id = None
+        cd_entry = places.get("CD")
+        if cd_entry:
+            for h in cd_entry.get("hubs") or []:
+                hid = h.get("hub_id")
+                if hid in ctxs:
+                    drc_ctx = ctxs[hid]
+                    drc_hub_id = hid
+                    break
+        if drc_ctx is None:
+            for h in catalog.get("hubs") or []:
+                hid = h.get("id")
+                if h.get("geo_kind") == "cd-provinces" and hid in ctxs:
+                    drc_ctx = ctxs[hid]
+                    drc_hub_id = hid
+                    break
+        if drc_ctx is None:
+            return [], None
+
+        loc_name_map: Dict[str, Tuple[str, str]] = {}
+        for k, ent in places.items():
+            if not isinstance(ent, dict) or not (k == "CD" or str(k).startswith("CD-")):
+                continue
+            for h in ent.get("hubs") or []:
+                if h.get("hub_id") == drc_hub_id:
+                    loc_name_map[str(h.get("location_id"))] = (k, str(ent.get("name") or k))
+
+        provinces: List[Dict[str, Any]] = []
+        rt_summary: Optional[Dict[str, Any]] = None
+        targets = drc_ctx.config.get_targets() or []
+        case_tid = next((t for t in targets if "case" in t.lower() and "inc" in t.lower()), None)
+        rt_tid = next((t for t in targets if "r_t" in t.lower()), None)
+
+        if case_tid:
+            try:
+                wt = drc_ctx.loader._weekly_truth(case_tid)
+                if wt is not None and wt.height > 0:
+                    for (loc_id,), grp in wt.filter(pl.col("location") != "CD").sort("target_end_date").group_by(["location"], maintain_order=True):
+                        lid = str(loc_id)
+                        if lid.count("-") > 1:
+                            continue
+                        pairs = [
+                            (str(d)[:10], float(v))
+                            for d, v in grp.select(["target_end_date", "value"]).iter_rows()
+                            if d and _finite(v)
+                        ]
+                        if not pairs:
+                            continue
+                        dts = [p[0] for p in pairs]
+                        vals = [p[1] for p in pairs]
+                        lat_v = vals[-1]
+                        prev_v = vals[-2] if len(vals) >= 2 else None
+                        tot_4wk = sum(vals[-4:])
+                        tot_all = sum(vals)
+                        pkey, pname = loc_name_map.get(lid, (lid, lid))
+                        provinces.append({
+                            "location_id": lid,
+                            "place_key": pkey,
+                            "name": pname,
+                            "latest_date": dts[-1],
+                            "latest_cases": int(round(lat_v)),
+                            "pct_1wk": _pct_delta(lat_v, prev_v),
+                            "cases_4wk": int(round(tot_4wk)),
+                            "cum_hub_cases": int(round(tot_all)),
+                        })
+                    provinces.sort(key=lambda r: (-r["cases_4wk"], -r["latest_cases"], r["name"]))
+            except Exception as exc:
+                logger.debug("DRC province hub aggregation failed: %s", exc)
+
+        if rt_tid:
+            try:
+                rt_wt = drc_ctx.loader._weekly_truth(rt_tid)
+                if rt_wt is not None and rt_wt.height > 0:
+                    cd_rt = rt_wt.filter(pl.col("location") == "CD").sort("target_end_date")
+                    if not cd_rt.is_empty():
+                        row = cd_rt.tail(1).to_dicts()[0]
+                        if _finite(row.get("value")):
+                            rt_summary = {
+                                "date": str(row.get("target_end_date"))[:10],
+                                "value": round(float(row["value"]), 2),
+                                "source": "BDBV Hub truth",
+                            }
+            except Exception:
+                pass
+
+        return provinces, rt_summary
+
+    def _build_drc_ebola_payload(
+        self,
+        juris: Dict[str, Any],
+        catalog: Dict[str, Any],
+        ctxs: Dict[str, Any],
+        feed_status: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if juris.get("jurisdiction_scope") != "cd":
+            return None
+
+        feeds_map = feed_status.get("feeds") or {}
+        drc_feed_ids = ("drc_ebola_ocha", "who_don_drc", "bdbv_delays")
+        feeds_cached = any((feeds_map.get(fid) or {}).get("cached") for fid in drc_feed_ids)
+
+        df_ocha = self.feed_store.read_feed("drc_ebola_ocha")
+        national, epi_curve, health_zones = self._drc_national_and_zones(df_ocha)
+
+        df_don = self.feed_store.read_feed("who_don_drc")
+        who_timeline: List[Dict[str, Any]] = []
+        if df_don is not None and df_don.height > 0:
+            for r in df_don.sort("date", descending=True).iter_rows(named=True):
+                who_timeline.append({
+                    "don_id": str(r.get("don_id") or ""),
+                    "url_name": str(r.get("url_name") or ""),
+                    "title": str(r.get("title") or ""),
+                    "date": str(r.get("date") or "")[:10],
+                    "url": str(r.get("url") or ""),
+                    "overview": str(r.get("overview") or ""),
+                    "summary": str(r.get("summary") or ""),
+                    "epidemiology": str(r.get("epidemiology") or ""),
+                    "assessment": str(r.get("assessment") or ""),
+                    "response": str(r.get("response") or ""),
+                    "advice": str(r.get("advice") or ""),
+                })
+        latest_don = who_timeline[0] if who_timeline else None
+
+        delays = self._drc_delays_summary(self.feed_store.read_feed("bdbv_delays"))
+        provinces, rt_summary = self._drc_hub_provinces(catalog, ctxs)
+
+        links = [
+            {
+                "label": f"WHO {latest_don['don_id']}" if latest_don and latest_don.get("don_id") else "WHO Disease Outbreak News",
+                "url": latest_don["url"] if latest_don and latest_don.get("url") else "https://www.who.int/emergencies/disease-outbreak-news",
+            },
+            {
+                "label": "OCHA HDX / INRB-UMIE SitRep Data",
+                "url": "https://data.humdata.org/dataset/republique-democratique-du-congo-cas-et-deces-d-ebola",
+            },
+            {
+                "label": "BDBV Modeling Hub",
+                "url": "https://github.com/InsightNet-US/BDBV-Modeling-Hub",
+            },
+            {
+                "label": "Africa CDC Outbreak Briefs",
+                "url": "https://africacdc.org/disease-outbreak/",
+            },
+        ]
+
+        return {
+            "feeds_cached": feeds_cached,
+            "national": national,
+            "epi_curve": epi_curve,
+            "health_zones": health_zones,
+            "latest_don": latest_don,
+            "who_timeline": who_timeline,
+            "reporting_delays": delays,
+            "provinces": provinces,
+            "rt_summary": rt_summary,
+            "external_links": links,
+        }
+
+    @staticmethod
     def _compose_summary(
         place_info: Dict[str, Any],
         juris: Dict[str, Any],
         signals: List[Dict[str, Any]],
         ext: Dict[str, Any],
+        drc_ebola: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Generate one concise, plain-English factual summary without boilerplate."""
         name = place_info["name"]
@@ -1336,6 +1803,36 @@ class BriefingBuilder:
             elif rt_bits:
                 sentences.append(f"CDC CFA estimates {', '.join(rt_bits)}.")
 
+        if drc_ebola:
+            nat = drc_ebola.get("national")
+            zones = drc_ebola.get("health_zones") or {}
+            if nat and nat.get("cum_cases"):
+                bits = [
+                    f"{nat['cum_cases']:,} cumulative confirmed cases and {nat['cum_deaths']:,} confirmed deaths",
+                ]
+                if nat.get("cfr_pct") is not None:
+                    bits[0] += f" ({nat['cfr_pct']:.1f}% case fatality rate)"
+                meta_parts = [f"through {_fmt_date_short(nat['date'])}"]
+                if zones.get("total_zones"):
+                    meta_parts.append(f"across {zones['total_zones']} affected health zones")
+                if nat.get("new_cases_7d") is not None:
+                    meta_parts.append(f"with {nat['new_cases_7d']:,} confirmed cases added over the latest 7 days")
+                sentences.append(
+                    f"INRB-UMIE situation reports via OCHA record {bits[0]} {', '.join(meta_parts)}."
+                )
+            don = drc_ebola.get("latest_don")
+            if don and don.get("don_id"):
+                sentences.append(
+                    f"WHO Disease Outbreak News ({don['don_id']}, {_fmt_date_short(don.get('date'))}) documents {don.get('title', '').rstrip('.')}."
+                )
+            mw = (drc_ebola.get("reporting_delays") or {}).get("mature_week")
+            if mw and _finite(mw.get("median_days")):
+                sentences.append(
+                    f"Symptom-onset-to-report lag runs a median of {mw['median_days']:.0f} days "
+                    f"(90th percentile {mw['p90_days']:.0f} days as of {_fmt_date_short(mw.get('date'))}), "
+                    f"so recent weekly counts reflect incomplete reporting."
+                )
+
         return {
             "headline": name,
             "paragraphs": sentences,
@@ -1351,6 +1848,7 @@ class BriefingBuilder:
         place_info: Dict[str, Any],
         signals: List[Dict[str, Any]],
         ext: Dict[str, Any],
+        drc_ebola: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         kpis: List[Dict[str, Any]] = []
         lead = next((s for s in signals if _finite(s.get("latest_obs"))), signals[0] if signals else None)
@@ -1377,6 +1875,37 @@ class BriefingBuilder:
                     "unit": u if "%" not in u else "",
                     "sub": f"{fd:+.1f}% vs {obs_dt or 'latest'}" if fd is not None else m_disp,
                     "signal_id": lead.get("signal_id"),
+                })
+
+        if drc_ebola:
+            nat = drc_ebola.get("national")
+            zones = drc_ebola.get("health_zones") or {}
+            mw = (drc_ebola.get("reporting_delays") or {}).get("mature_week")
+            if nat and nat.get("cum_cases"):
+                cfr_txt = f"{nat['cfr_pct']:.1f}% CFR" if nat.get("cfr_pct") is not None else None
+                kpis.append({
+                    "label": "Confirmed cases (OCHA)",
+                    "value": f"{nat['cum_cases']:,}",
+                    "unit": "",
+                    "sub": " · ".join(x for x in [f"{nat['cum_deaths']:,} deaths", cfr_txt, _fmt_date_short(nat.get("date"))] if x),
+                })
+                if nat.get("new_cases_7d") is not None:
+                    p7d = nat.get("pct_cases_7d")
+                    kpis.append({
+                        "label": "7d confirmed cases",
+                        "value": f"{nat['new_cases_7d']:,}",
+                        "unit": "",
+                        "sub": " · ".join(x for x in [
+                            f"{p7d:+.1f}% vs prior 7d" if p7d is not None else None,
+                            f"{zones['active_zones_14d']} active zones" if zones.get("active_zones_14d") else None,
+                        ] if x),
+                    })
+            if len(kpis) < 4 and mw and _finite(mw.get("median_days")):
+                kpis.append({
+                    "label": "Onset-to-report lag",
+                    "value": f"{mw['median_days']:.0f}d",
+                    "unit": "median",
+                    "sub": f"P90 {mw['p90_days']:.0f}d · {_fmt_date_short(mw.get('date'))}",
                 })
 
         raw_p = str(lead.get("pathogen") or "").lower() if lead else "flu"
@@ -1541,8 +2070,8 @@ class BriefingBuilder:
                     stream_summary=stream_by_sig.get(sig_id),
                     target_id=tid,
                     cat_streams=cat_streams,
-                    pathogen=h_ent["pathogen"],
-                    pathogen_label=h_ent["pathogen_label"],
+                    pathogen=t_ent.get("pathogen") or h_ent["pathogen"],
+                    pathogen_label=t_ent.get("pathogen_label") or h_ent["pathogen_label"],
                     concept_id=t_ent.get("concept_id"),
                     geo_kind=hub_geo_kind.get(hid),
                     ctxs=ctxs,
@@ -1569,7 +2098,7 @@ class BriefingBuilder:
 
         # Deduplicate signals sharing a canonical concept at state/national level (e.g. FluSight + MetroCast)
         place_level = str(place_info.get("level") or "")
-        deduped: Dict[str, Dict[str, Any]] = {}
+        deduped: Dict[Tuple[str, str], Dict[str, Any]] = {}
         def _cand_quality(s: Dict[str, Any]) -> Tuple[Any, ...]:
             is_substate_hub = s.get("geo_kind") == "us-metrocast"
             prefer_broad_hub = 0 if (is_substate_hub and place_level in ("state", "country", "nation")) else 1
@@ -1582,7 +2111,10 @@ class BriefingBuilder:
             )
 
         for s in raw_signals:
-            dkey = str(s.get("concept_id") or s.get("label") or s.get("signal_id")).lower()
+            dkey = (
+                str(s.get("pathogen") or "").lower(),
+                str(s.get("concept_id") or s.get("label") or s.get("signal_id")).lower(),
+            )
             prev = deduped.get(dkey)
             if prev is None or _cand_quality(s) > _cand_quality(prev):
                 deduped[dkey] = s
@@ -1637,6 +2169,7 @@ class BriefingBuilder:
         calibrations: List[Dict[str, Any]] = []
 
         ext = self._build_external_feeds_payload(juris)
+        drc_ebola = self._build_drc_ebola_payload(juris, catalog, ctxs, feed_status)
         peers = self._build_peers_section(
             place_info,
             juris,
@@ -1645,8 +2178,8 @@ class BriefingBuilder:
             ctxs,
             signals[0] if signals else None,
         )
-        summary = self._compose_summary(place_info, juris, signals, ext)
-        kpis = self._compose_kpis(place_info, signals, ext)
+        summary = self._compose_summary(place_info, juris, signals, ext, drc_ebola=drc_ebola)
+        kpis = self._compose_kpis(place_info, signals, ext, drc_ebola=drc_ebola)
 
         # Determine reporting week across signals + external feeds
         all_dates = [
@@ -1727,12 +2260,13 @@ class BriefingBuilder:
             "kpis": kpis,
             "signals": signals,
             "peers": peers,
+            "drc_ebola": drc_ebola,
             "virology": {
                 "feeds_cached": feed_status["any_cached"],
                 "refreshing": feed_status["refreshing"],
                 **ext,
-                "vaccine_season": current_vacc_season,
-                "vaccine_reference": WHO_NH_VACCINE_REFERENCE,
+                "vaccine_season": current_vacc_season if juris["jurisdiction_scope"] != "cd" else None,
+                "vaccine_reference": WHO_NH_VACCINE_REFERENCE if juris["jurisdiction_scope"] != "cd" else [],
             },
             "calibration": calibrations,
             "sources": {

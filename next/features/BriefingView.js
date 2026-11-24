@@ -363,6 +363,171 @@ function renderLargeSubtypeSvg(series, onReadout) {
   return { svg, legend: g.legend };
 }
 
+function _niceAxisMax(rawMax) {
+  const m = Math.max(1, Number(rawMax) || 1);
+  const exp = Math.floor(Math.log10(m));
+  const base = 10 ** exp;
+  const frac = m / base;
+  const nice = frac <= 1 ? 1 : (frac <= 2 ? 2 : (frac <= 2.5 ? 2.5 : (frac <= 5 ? 5 : 10)));
+  return nice * base;
+}
+
+function renderDrcEpiCurveSvg(curve, mode, onReadout) {
+  const isNew7d = mode === "new_7d";
+  const pts = (curve || []).filter((p) =>
+    isNew7d ? (p.new_cases_7d != null && Number.isFinite(p.new_cases_7d)) : (p.cum_cases != null && Number.isFinite(p.cum_cases)),
+  );
+  if (pts.length < 2) return null;
+
+  const width = 760;
+  const height = 240;
+  const pad = { t: 18, r: 24, b: 28, l: 54 };
+  const innerW = width - pad.l - pad.r;
+  const innerH = height - pad.t - pad.b;
+
+  const primaryVals = pts.map((p) => (isNew7d ? p.new_cases_7d : p.cum_cases));
+  const secondaryVals = pts.map((p) => (isNew7d ? p.new_deaths_7d : p.cum_deaths)).filter(Number.isFinite);
+  const yMax = _niceAxisMax(Math.max(...primaryVals, ...(secondaryVals.length ? secondaryVals : [0]), 1));
+  const xOf = (i) => Number((pad.l + (i / (pts.length - 1)) * innerW).toFixed(2));
+  const yOf = (v) => Number((pad.t + (1 - Math.max(0, v) / yMax) * innerH).toFixed(2));
+  const baseY = pad.t + innerH;
+
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    class: "br-svg",
+    role: "img",
+    "aria-label": isNew7d ? "DRC Bundibugyo Ebola 7-day new confirmed cases" : "DRC Bundibugyo Ebola cumulative cases and deaths",
+  });
+
+  for (let i = 0; i <= 4; i++) {
+    const val = (yMax * i) / 4;
+    const y = yOf(val);
+    svg.appendChild(svgEl("line", { x1: pad.l, x2: width - pad.r, y1: y, y2: y, class: "br-grid-line" }));
+    svg.appendChild(svgEl("text", { x: pad.l - 8, y: y + 3.5, "text-anchor": "end", class: "br-axis-text" }, Math.round(val).toLocaleString("en-US")));
+  }
+
+  const xTickIdxs = [];
+  const tickCount = Math.min(5, pts.length);
+  for (let t = 0; t < tickCount; t++) {
+    const idx = Math.round((t / Math.max(1, tickCount - 1)) * (pts.length - 1));
+    if (!xTickIdxs.includes(idx)) xTickIdxs.push(idx);
+  }
+  for (const idx of xTickIdxs) {
+    svg.appendChild(svgEl("text", {
+      x: xOf(idx),
+      y: height - 6,
+      "text-anchor": idx === 0 ? "start" : (idx === pts.length - 1 ? "end" : "middle"),
+      class: "br-axis-text",
+    }, formatIsoShort(pts[idx].date, idx === 0 || idx === pts.length - 1)));
+  }
+
+  if (isNew7d) {
+    const barW = Math.max(1.8, Math.min(12, (innerW / pts.length) * 0.72));
+    pts.forEach((p, i) => {
+      const cx = xOf(i);
+      const y = yOf(p.new_cases_7d);
+      svg.appendChild(svgEl("rect", {
+        x: Number((cx - barW / 2).toFixed(2)),
+        y,
+        width: Number(barW.toFixed(2)),
+        height: Math.max(0, Number((baseY - y).toFixed(2))),
+        fill: "var(--series-1)",
+        opacity: 0.78,
+        rx: 1,
+      }));
+    });
+    const dPathParts = [];
+    pts.forEach((p, i) => {
+      if (p.new_deaths_7d == null || !Number.isFinite(p.new_deaths_7d)) return;
+      dPathParts.push(`${dPathParts.length ? "L" : "M"}${xOf(i)},${yOf(p.new_deaths_7d)}`);
+    });
+    if (dPathParts.length > 1) {
+      svg.appendChild(svgEl("path", {
+        d: dPathParts.join(" "),
+        fill: "none",
+        stroke: "var(--score-9)",
+        "stroke-width": 1.8,
+      }));
+    }
+  } else {
+    const cPath = pts.map((p, i) => `${i === 0 ? "M" : "L"}${xOf(i)},${yOf(p.cum_cases)}`).join(" ");
+    const areaD = `${cPath} L${xOf(pts.length - 1)},${baseY} L${xOf(0)},${baseY} Z`;
+    svg.appendChild(svgEl("path", { d: areaD, fill: "var(--series-1)", opacity: 0.08 }));
+    svg.appendChild(svgEl("path", { d: cPath, fill: "none", stroke: "var(--series-1)", "stroke-width": 2.2 }));
+
+    const dPathParts = [];
+    let lastDeathIdx = -1;
+    pts.forEach((p, i) => {
+      if (p.cum_deaths == null || !Number.isFinite(p.cum_deaths)) return;
+      dPathParts.push(`${dPathParts.length ? "L" : "M"}${xOf(i)},${yOf(p.cum_deaths)}`);
+      lastDeathIdx = i;
+    });
+    if (dPathParts.length > 1) {
+      svg.appendChild(svgEl("path", { d: dPathParts.join(" "), fill: "none", stroke: "var(--score-9)", "stroke-width": 2.0 }));
+      const ld = pts[lastDeathIdx];
+      svg.appendChild(svgEl("circle", { cx: xOf(lastDeathIdx), cy: yOf(ld.cum_deaths), r: 3, fill: "var(--score-9)" }));
+    }
+    const lc = pts[pts.length - 1];
+    svg.appendChild(svgEl("circle", { cx: xOf(pts.length - 1), cy: yOf(lc.cum_cases), r: 3, fill: "var(--series-1)" }));
+  }
+
+  if (onReadout) {
+    const hoverLine = svgEl("line", {
+      x1: 0, x2: 0, y1: pad.t, y2: baseY,
+      stroke: "var(--ink-primary)", "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0,
+    });
+    const dotPrimary = svgEl("circle", { cx: 0, cy: 0, r: 3.5, fill: "var(--series-1)", opacity: 0 });
+    const dotSecondary = svgEl("circle", { cx: 0, cy: 0, r: 3.5, fill: "var(--score-9)", opacity: 0 });
+    svg.append(hoverLine, dotPrimary, dotSecondary);
+
+    const hitRect = svgEl("rect", {
+      x: pad.l, y: pad.t, width: innerW, height: innerH,
+      fill: "transparent", style: "cursor:crosshair",
+    });
+    hitRect.addEventListener("pointermove", (ev) => {
+      const r = svg.getBoundingClientRect();
+      if (!r.width) return;
+      const sx = ((ev.clientX - r.left) / r.width) * width;
+      const ratio = Math.max(0, Math.min(1, (sx - pad.l) / innerW));
+      const idx = Math.round(ratio * (pts.length - 1));
+      const p = pts[idx];
+      const cx = xOf(idx);
+      const pv = isNew7d ? p.new_cases_7d : p.cum_cases;
+      const sv = isNew7d ? p.new_deaths_7d : p.cum_deaths;
+      hoverLine.setAttribute("x1", cx);
+      hoverLine.setAttribute("x2", cx);
+      hoverLine.setAttribute("opacity", "0.55");
+      dotPrimary.setAttribute("cx", cx);
+      dotPrimary.setAttribute("cy", yOf(pv));
+      dotPrimary.setAttribute("opacity", "1");
+      if (sv != null && Number.isFinite(sv)) {
+        dotSecondary.setAttribute("cx", cx);
+        dotSecondary.setAttribute("cy", yOf(sv));
+        dotSecondary.setAttribute("opacity", "1");
+      } else {
+        dotSecondary.setAttribute("opacity", "0");
+      }
+      if (isNew7d) {
+        const dTxt = sv != null ? ` · ${sv.toLocaleString("en-US")} deaths (7d)` : "";
+        onReadout(`${formatIsoShort(p.date, true)} · ${pv.toLocaleString("en-US")} new confirmed cases (7d)${dTxt}`);
+      } else {
+        const cfr = pv > 0 && sv != null ? ` (${((sv / pv) * 100).toFixed(1)}% CFR)` : "";
+        const n7 = p.new_cases_7d != null ? ` · +${p.new_cases_7d.toLocaleString("en-US")} (7d)` : "";
+        onReadout(`${formatIsoShort(p.date, true)} · ${pv.toLocaleString("en-US")} cases · ${sv != null ? `${sv.toLocaleString("en-US")} deaths${cfr}` : "—"}${n7}`);
+      }
+    });
+    hitRect.addEventListener("pointerleave", () => {
+      hoverLine.setAttribute("opacity", "0");
+      dotPrimary.setAttribute("opacity", "0");
+      dotSecondary.setAttribute("opacity", "0");
+      onReadout("");
+    });
+    svg.appendChild(hitRect);
+  }
+
+  return svg;
+}
+
 function renderRtMiniChart(rtItem) {
   const series = rtItem?.series || [];
   if (!series.length) return null;
@@ -405,6 +570,8 @@ export function mountBriefing(
   let activeSignalIdx = 0;
   let activeCladeIdx = 0;
   let showPriorSeasons = false;
+  let drcCurveMode = "cumulative";
+  let drcDonTab = "summary";
   let loadToken = 0;
   let pollTimer = null;
   let refreshing = false;
@@ -480,6 +647,10 @@ export function mountBriefing(
       if (prevSubtype && Array.isArray(res?.virology?.clades)) {
         const cIdx = res.virology.clades.findIndex((c) => c.subtype === prevSubtype);
         if (cIdx >= 0) activeCladeIdx = cIdx;
+      }
+      if (!preserveTabs) {
+        drcCurveMode = "cumulative";
+        drcDonTab = "summary";
       }
       onPlaceChange?.(currentPlace);
       render();
@@ -669,6 +840,246 @@ export function mountBriefing(
         ));
       }
       page.appendChild(summaryEl);
+    }
+
+    // 2b. DRC BUNDIBUGYO EBOLA EPIDEMIC SITUATION (dedicated OCHA / WHO DON / reporting-lag consolidation)
+    const drc = data.drc_ebola;
+    if (drc) {
+      const drcSec = h("section", { class: "br-section", "aria-label": "DRC Bundibugyo Ebola situation" },
+        h("div", { class: "br-section-head" },
+          h("h2", { class: "br-h2" }, "DRC Bundibugyo Ebola Situation"),
+          h("div", { class: "br-head-meta" },
+            h("span", null, drc.national?.date ? `SitRep through ${formatIsoShort(drc.national.date, true)}` : "INRB-UMIE · WHO · BDBV Hub"),
+          ),
+        ),
+      );
+
+      if (!drc.feeds_cached && !isWeb) {
+        drcSec.appendChild(h("div", { class: "br-cta-banner" },
+          h("div", { class: "br-cta-copy" },
+            h("strong", null, "External DRC outbreak feeds are not yet cached locally."),
+            h("span", null, "Fetch OCHA / INRB-UMIE daily situation reports, WHO Disease Outbreak News risk assessments, and BDBV Hub reporting-delay statistics."),
+          ),
+          h("button", {
+            type: "button",
+            class: "br-btn is-primary",
+            disabled: refreshing,
+            onclick: triggerRefresh,
+          }, refreshing ? "Fetching…" : "Fetch live DRC feeds"),
+        ));
+      }
+
+      if (drc.epi_curve?.length) {
+        const curveReadout = h("div", { class: "br-hover-readout", "aria-live": "polite" }, "");
+        const curveSvg = renderDrcEpiCurveSvg(drc.epi_curve, drcCurveMode, (txt) => { curveReadout.textContent = txt; });
+        const nat = drc.national;
+        drcSec.appendChild(h("div", { class: "br-subpanel" },
+          h("div", { class: "br-subhead" },
+            h("h3", { class: "br-h3" }, "National Confirmed Epidemic Trajectory"),
+            nat ? h("span", { class: "br-scope-note" }, `${nat.source || "INRB-UMIE"} · ${nat.cum_cases.toLocaleString("en-US")} cases · ${nat.cum_deaths.toLocaleString("en-US")} deaths (${nat.cfr_pct != null ? `${nat.cfr_pct.toFixed(1)}%` : "—"} CFR)`) : null,
+          ),
+          h("div", { class: "br-tabs", role: "tablist", "aria-label": "DRC epidemic curve metric" },
+            [
+              ["cumulative", "Cumulative cases & deaths"],
+              ["new_7d", "7-day new confirmed cases"],
+            ].map(([mId, mLbl]) => h("button", {
+              type: "button",
+              role: "tab",
+              class: "br-tab",
+              "aria-selected": String(drcCurveMode === mId),
+              onclick: () => {
+                drcCurveMode = mId;
+                render();
+              },
+            }, mLbl)),
+          ),
+          curveSvg ? h("div", { class: "br-svg-wrap" }, curveSvg) : null,
+          curveReadout,
+          h("div", { class: "br-legend-row" },
+            h("span", { class: "br-legend-item" },
+              h("span", { class: "br-swatch", style: { background: "var(--series-1)" } }),
+              drcCurveMode === "new_7d" ? "New confirmed cases (7d)" : "Cumulative confirmed cases",
+            ),
+            h("span", { class: "br-legend-item" },
+              h("span", { class: "br-swatch", style: { background: "var(--score-9)" } }),
+              drcCurveMode === "new_7d" ? "New confirmed deaths (7d)" : "Cumulative confirmed deaths",
+            ),
+          ),
+        ));
+      }
+
+      const don = drc.latest_don;
+      if (don) {
+        const donSections = [
+          ["summary", "Situation Summary", don.summary],
+          ["assessment", "WHO Risk Assessment", don.assessment],
+          ["overview", "Regional & Cross-Border", don.overview],
+          ["response", "Public Health Response", don.response],
+        ].filter(([, , txt]) => !!txt);
+        const activeTab = donSections.find(([k]) => k === drcDonTab) || donSections[0];
+        const activeParas = (activeTab?.[2] || "").split("\n").map((s) => s.trim()).filter(Boolean);
+
+        drcSec.appendChild(h("article", { class: "br-don-card", "aria-label": "WHO Disease Outbreak News" },
+          h("div", { class: "br-don-head" },
+            h("div", { class: "br-don-meta" },
+              h("span", { class: "br-don-kicker" }, "WHO Disease Outbreak News"),
+              h("span", { class: "br-mono" }, `${don.don_id} · ${formatIsoShort(don.date, true)}`),
+            ),
+            don.url ? h("a", {
+              href: don.url,
+              target: "_blank",
+              rel: "noopener noreferrer",
+              class: "br-link-btn is-accent",
+            }, "WHO Report ↗") : null,
+          ),
+          h("h3", { class: "br-h3" }, don.title),
+          donSections.length > 1 ? h("div", { class: "br-tabs", role: "tablist", "aria-label": "WHO report sections" },
+            donSections.map(([k, lbl]) => h("button", {
+              type: "button",
+              role: "tab",
+              class: "br-tab",
+              "aria-selected": String(activeTab && activeTab[0] === k),
+              onclick: () => {
+                drcDonTab = k;
+                render();
+              },
+            }, lbl)),
+          ) : null,
+          h("div", { class: "br-don-prose" },
+            activeParas.slice(0, 6).map((p) => h("p", { class: "br-prose" }, p)),
+          ),
+          (don.epidemiology || don.advice || (drc.who_timeline?.length > 1)) ? h("details", { class: "br-details" },
+            h("summary", null,
+              h("span", null, `Epidemiology, WHO Advice & Archive (${drc.who_timeline?.length || 1} DON reports)`),
+              h("span", { class: "br-mono" }, "Expand"),
+            ),
+            h("div", { class: "br-don-prose", style: { paddingTop: "10px" } },
+              don.epidemiology ? [h("strong", { class: "br-don-subhead" }, "Epidemiology & Clinical Context"), ...don.epidemiology.split("\n").filter(Boolean).slice(0, 4).map((p) => h("p", { class: "br-prose" }, p))] : null,
+              don.advice ? [h("strong", { class: "br-don-subhead" }, "WHO Advice"), ...don.advice.split("\n").filter(Boolean).slice(0, 3).map((p) => h("p", { class: "br-prose" }, p))] : null,
+              drc.who_timeline?.length ? h("div", { class: "br-table-wrap", style: { marginTop: "8px" } },
+                h("table", { class: "br-table" },
+                  h("thead", null, h("tr", null,
+                    h("th", null, "Published"),
+                    h("th", null, "DON ID"),
+                    h("th", null, "Report Title"),
+                    h("th", { class: "num" }, "Link"),
+                  )),
+                  h("tbody", null, drc.who_timeline.map((item) => h("tr", null,
+                    h("td", { class: "br-mono" }, formatIsoShort(item.date, true)),
+                    h("td", { class: "br-mono" }, item.don_id),
+                    h("td", null, item.title),
+                    h("td", { class: "num" }, item.url ? h("a", { href: item.url, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, "Open ↗") : "—"),
+                  ))),
+                ),
+              ) : null,
+            ),
+          ) : null,
+        ));
+      }
+
+      const hz = drc.health_zones;
+      if (hz?.rows?.length) {
+        drcSec.appendChild(h("div", { class: "br-subpanel" },
+          h("div", { class: "br-subhead" },
+            h("h3", { class: "br-h3" }, "Top Affected Health Zones"),
+            h("span", { class: "br-scope-note" }, `${hz.total_zones} zones reported · ${hz.active_zones_14d} with new confirmed cases in past 14d · through ${formatIsoShort(hz.latest_date, true)}`),
+          ),
+          h("div", { class: "br-table-wrap" },
+            h("table", { class: "br-table" },
+              h("thead", null, h("tr", null,
+                h("th", null, "Health Zone"),
+                h("th", { class: "num" }, "Confirmed Cases"),
+                h("th", { class: "num" }, "Deaths"),
+                h("th", { class: "num" }, "CFR"),
+                h("th", { class: "num" }, "New (14d)"),
+              )),
+              h("tbody", null, hz.rows.slice(0, 15).map((r) => h("tr", null,
+                h("td", null, r.name, r.location_code ? h("span", { class: "br-scope-note", style: { marginLeft: "6px" } }, r.location_code) : null),
+                h("td", { class: "num br-mono" }, r.cases.toLocaleString("en-US")),
+                h("td", { class: "num br-mono" }, r.deaths.toLocaleString("en-US")),
+                h("td", { class: "num br-mono" }, r.cfr_pct != null ? `${r.cfr_pct.toFixed(1)}%` : "—"),
+                h("td", { class: "num br-mono" }, r.cases_14d != null ? (r.cases_14d > 0 ? `+${r.cases_14d.toLocaleString("en-US")}` : "0") : "—"),
+              ))),
+            ),
+          ),
+        ));
+      }
+
+      const del = drc.reporting_delays;
+      if (del && (del.national_weeks?.length || del.by_province?.length)) {
+        const mw = del.mature_week;
+        drcSec.appendChild(h("div", { class: "br-subpanel" },
+          h("div", { class: "br-subhead" },
+            h("h3", { class: "br-h3" }, "Surveillance Reporting Lag & Backfill"),
+            h("span", { class: "br-scope-note" }, del.as_of ? `BDBV Hub delay snapshots as of ${formatIsoShort(del.as_of, true)}` : "BDBV Hub delay distribution"),
+          ),
+          mw ? h("p", { class: "br-scope-note" },
+            `Confirmed case counts undergo multi-week reporting backfill (median ${mw.median_days.toFixed(0)} days, P75 ${mw.p75_days.toFixed(0)} days, P90 ${mw.p90_days.toFixed(0)} days from symptom onset to report as of ${formatIsoShort(mw.date, true)}). Most recent incomplete weeks are marked partial.`,
+          ) : null,
+          del.national_weeks?.length ? h("div", { class: "br-table-wrap" },
+            h("table", { class: "br-table" },
+              h("thead", null, h("tr", null,
+                h("th", null, "Week Ending"),
+                h("th", { class: "num" }, "Cases Captured"),
+                h("th", { class: "num" }, "Median Lag"),
+                h("th", { class: "num" }, "P75 Lag"),
+                h("th", { class: "num" }, "P90 Lag"),
+              )),
+              h("tbody", null, del.national_weeks.slice(0, 6).map((w) => h("tr", null,
+                h("td", { class: "br-mono" },
+                  formatIsoShort(w.date, true),
+                  w.is_partial ? h("span", { class: "br-badge-partial" }, "partial") : null,
+                ),
+                h("td", { class: "num br-mono" }, w.n_cases.toLocaleString("en-US")),
+                h("td", { class: "num br-mono" }, `${w.median_days.toFixed(1)}d`),
+                h("td", { class: "num br-mono" }, `${w.p75_days.toFixed(1)}d`),
+                h("td", { class: "num br-mono" }, `${w.p90_days.toFixed(1)}d`),
+              ))),
+            ),
+          ) : null,
+          del.by_province?.length ? h("details", { class: "br-details" },
+            h("summary", null,
+              h("span", null, `Provincial Delay Breakdown (${del.by_province.length} provinces)`),
+              h("span", { class: "br-mono" }, del.mature_week ? formatIsoShort(del.mature_week.date) : "Latest"),
+            ),
+            h("div", { class: "br-table-wrap", style: { marginTop: "8px" } },
+              h("table", { class: "br-table" },
+                h("thead", null, h("tr", null,
+                  h("th", null, "Province"),
+                  h("th", { class: "num" }, "Cases"),
+                  h("th", { class: "num" }, "Median"),
+                  h("th", { class: "num" }, "P75"),
+                  h("th", { class: "num" }, "P90"),
+                )),
+                h("tbody", null, del.by_province.map((pr) => {
+                  const isFocal = pr.location_name.toLowerCase() === String(place.name || "").toLowerCase();
+                  return h("tr", { class: isFocal ? "is-focal" : null },
+                    h("td", null, pr.location_name),
+                    h("td", { class: "num br-mono" }, pr.n_cases.toLocaleString("en-US")),
+                    h("td", { class: "num br-mono" }, `${pr.median_days.toFixed(1)}d`),
+                    h("td", { class: "num br-mono" }, `${pr.p75_days.toFixed(1)}d`),
+                    h("td", { class: "num br-mono" }, `${pr.p90_days.toFixed(1)}d`),
+                  );
+                })),
+              ),
+            ),
+          ) : null,
+        ));
+      }
+
+      if (drc.external_links?.length) {
+        drcSec.appendChild(h("div", { class: "br-links-bar" },
+          h("span", { class: "br-scope-note" }, "Official DRC & Outbreak References:"),
+          drc.external_links.map((lk) => h("a", {
+            href: lk.url,
+            target: "_blank",
+            rel: "noopener noreferrer",
+            class: "br-btn",
+          }, lk.label, " ↗")),
+        ));
+      }
+
+      page.appendChild(drcSec);
     }
 
     // 3. FORECAST OUTLOOK
@@ -1081,7 +1492,9 @@ export function mountBriefing(
       ));
     }
 
-    page.appendChild(virSec);
+    if (place.jurisdiction_scope !== "cd") {
+      page.appendChild(virSec);
+    }
 
     // 6. COLLAPSIBLE DATA SOURCES AUDIT
     const feedList = sources.feeds || [];

@@ -115,6 +115,8 @@ export const ISO_NUM_TO_ALPHA2 = Object.freeze({
   "440": "LT", "442": "LU", "428": "LV", "470": "MT", "528": "NL",
   "578": "NO", "616": "PL", "620": "PT", "642": "RO", "752": "SE",
   "705": "SI", "703": "SK", "804": "UA", "840": "US",
+  "124": "CA", "156": "CN", "180": "CD", "036": "AU", "076": "BR",
+  "356": "IN", "392": "JP", "410": "KR", "484": "MX", "710": "ZA",
 });
 
 /** Built-in European EEA/EU/UK reference metadata matching core/geo.py `EUROPE_REF`. */

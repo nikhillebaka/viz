@@ -74,25 +74,53 @@ export function classifyHubGeo(manifest) {
   const stateByAbbr = new Map();
   const hsasByStateFips = new Map();
   const fipsById = new Map();
+  const drcProvinces = [];
+  const drcZonesByProvince = new Map();
 
   let stateMatchCount = 0;
   let subStateCount = 0;
   let euMatchCount = 0;
   let ukSplitAvailable = false;
+  let hasOntarioRegions = false;
+  let caMatchCount = 0;
+  let hasDrc = false;
+  let hasHealthZones = false;
 
   for (const loc of locs) {
+    const cid = String(loc.canonical_id || "");
     if (loc.id === "GB-ENG" || loc.id === "GB-SCT" || loc.id === "GB-WLS" || loc.id === "GB-NIR") {
       ukSplitAvailable = true;
     }
     if (EU_TILES_PROPORTIONED[loc.id] || EU_TILES_PROPORTIONED_UK_SPLIT[loc.id] || EU_META[loc.id]) {
       euMatchCount++;
     }
+    if (loc.id === "CD" || loc.level === "health_zone" || /^CD-[A-Z]{2}(?:-\d+)?$/.test(loc.id) || cid.startsWith("CD:")) {
+      hasDrc = true;
+      if (loc.level === "health_zone" || /^CD-[A-Z]{2}-\d+/.test(loc.id)) {
+        hasHealthZones = true;
+        const pid = loc.parent_id || (loc.id.length >= 5 ? loc.id.slice(0, 5) : null);
+        if (pid) {
+          let arr = drcZonesByProvince.get(pid);
+          if (!arr) { arr = []; drcZonesByProvince.set(pid, arr); }
+          arr.push(loc);
+        }
+      } else if (loc.id !== "CD" && (loc.level === "province" || /^CD-[A-Z]{2}$/.test(loc.id))) {
+        drcProvinces.push(loc);
+      }
+      continue;
+    }
+    if (["Central", "East", "North East", "North West", "Toronto", "West"].includes(loc.id)) {
+      hasOntarioRegions = true;
+    }
+    if (loc.id === "ca" || cid === "CA" || cid.startsWith("CA:")) {
+      caMatchCount++;
+    }
     if (loc.id === "US") continue;
 
     const fips = parseFips(loc, byId);
     if (fips) fipsById.set(loc.id, fips);
 
-    const isSubState = SUBSTATE_LEVELS.has(loc.level) || /^US:\d{2}:/.test(String(loc.canonical_id || ""));
+    const isSubState = SUBSTATE_LEVELS.has(loc.level) || /^US:\d{2}:/.test(cid);
     if (isSubState && fips) {
       subStateCount++;
       let arr = hsasByStateFips.get(fips);
@@ -108,22 +136,52 @@ export function classifyHubGeo(manifest) {
   for (const arr of hsasByStateFips.values()) {
     arr.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
   }
+  drcProvinces.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  for (const arr of drcZonesByProvince.values()) {
+    arr.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  }
 
   const coveredStateFips = new Set([...stateByFips.keys(), ...hsasByStateFips.keys()]);
-  const aggregateId = byId.has("US") ? "US" : null;
   const stateFipsOf = (idOrLoc) => {
     const id = typeof idOrLoc === "string" ? idOrLoc : idOrLoc?.id;
     return (id && fipsById.get(id)) || (typeof idOrLoc === "object" ? parseFips(idOrLoc, byId) : null);
   };
+  const drcProvinceOf = (idOrLoc) => {
+    const id = typeof idOrLoc === "string" ? idOrLoc : idOrLoc?.id;
+    if (!id || id === "CD") return null;
+    if (/^CD-[A-Z]{2}$/.test(id)) return id;
+    const loc = byId.get(id);
+    if (loc?.parent_id && /^CD-[A-Z]{2}$/.test(loc.parent_id)) return loc.parent_id;
+    const m = /^(CD-[A-Z]{2})-\d+/.exec(id);
+    return m ? m[1] : null;
+  };
 
   let kind = "generic";
-  if (subStateCount >= 1 && hsasByStateFips.size >= 1) {
+  if (hasDrc) {
+    kind = "cd-provinces";
+  } else if (byId.has("Ontario") && hasOntarioRegions) {
+    kind = "ca-ontario";
+  } else if (caMatchCount >= 2 && !byId.has("US")) {
+    kind = "ca-provinces";
+  } else if (subStateCount >= 1 && hsasByStateFips.size >= 1) {
     kind = "us-metrocast";
   } else if (euMatchCount >= 5 && subStateCount === 0) {
     kind = "eu-countries";
   } else if (manifest?.geo?.uses_us_fips || stateMatchCount >= 10) {
     kind = "us-states";
+  } else if (byId.has("CN") && !byId.has("US") && euMatchCount === 0) {
+    kind = "cn-national";
   }
+
+  const aggregateId = kind === "cd-provinces"
+    ? (byId.has("CD") ? "CD" : null)
+    : kind === "ca-ontario"
+      ? (byId.has("Ontario") ? "Ontario" : null)
+      : kind === "ca-provinces"
+        ? (byId.has("ca") ? "ca" : null)
+        : (byId.has("US") ? "US" : null);
+
+  const aggregateLocs = locs.filter((l) => l.is_aggregate);
 
   return {
     kind,
@@ -131,9 +189,14 @@ export function classifyHubGeo(manifest) {
     stateByFips,
     stateByAbbr,
     hsasByStateFips,
+    drcProvinces,
+    drcZonesByProvince,
+    hasHealthZones,
     ukSplitAvailable,
     aggregateId,
+    aggregateLocs,
     stateFipsOf,
+    drcProvinceOf,
   };
 }
 
@@ -308,6 +371,167 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
       path.addEventListener("click", () => onPick(targetId, loc || m));
       path.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(targetId, loc || m); }
+      });
+    }
+    svg.append(path);
+  }
+  return svg;
+}
+
+const REGION_TOPO_SPECS = Object.freeze({
+  "ca-provinces": { file: "./ca-provinces.json", object: "provinces", label: "Canada provinces" },
+  "ca-ontario": { file: "./ca-ontario-oh.json", object: "regions", label: "Ontario Health regions" },
+  "cd-provinces": { file: "./cd-provinces.json", object: "provinces", label: "DRC provinces" },
+  "cn-national": { file: "./world-countries-50m.json", object: "countries", onlyIsoNum: "156", fixedId: "CN", fixedName: "China", label: "China" },
+});
+
+const regionGeoCache = new Map();
+
+/**
+ * Lazily fetch and cache a regional TopoJSON asset (`ca-provinces`, `ca-ontario`, `cd-provinces`, `cn-national`),
+ * decoding both 2D `[lon, lat]` rings for SVG maps and 3D unit-sphere polygons/mesh for GlobeView.
+ */
+export function loadRegionGeo(kind) {
+  const spec = REGION_TOPO_SPECS[kind];
+  if (!spec) return Promise.resolve(null);
+  let p = regionGeoCache.get(kind);
+  if (!p) {
+    const url = new URL(spec.file, import.meta.url).href;
+    p = fetch(url)
+      .then((r) => { if (!r.ok) throw new Error(`${kind}: ${r.status}`); return r.json(); })
+      .then((topo) => {
+        const decodedArcs = decodeArcs(topo);
+        const unitArcs = arcsToUnitSphere(decodedArcs);
+        const raw2d = extractLonLatFeatures(topo, spec.object, decodedArcs);
+        let features3d = extractPolygons(topo, spec.object, unitArcs);
+        if (spec.onlyIsoNum) {
+          features3d = features3d
+            .filter((f) => String(f.id) === spec.onlyIsoNum)
+            .map((f) => ({ ...f, id: spec.fixedId || f.id, name: spec.fixedName || f.name }));
+        }
+        const features = features3d.map((f) => {
+          const srcKey = spec.onlyIsoNum || f.id;
+          return {
+            id: f.id,
+            name: f.name || f.properties?.name || f.id,
+            abbr: f.properties?.abbr || f.id,
+            props: f.properties || {},
+            lonLatRings: raw2d.get(String(srcKey)) || [],
+            rings: f.rings,
+            cx: f.cx,
+            cy: f.cy,
+            cz: f.cz,
+            alpha: f.alpha,
+            cosAlpha: f.cosAlpha,
+            sinAlpha: f.sinAlpha,
+            centroidLonLat: f.centroidLonLat,
+          };
+        });
+        const mesh = spec.onlyIsoNum ? [] : extractMesh(topo, spec.object, unitArcs);
+        return { kind, label: spec.label, features, byId: new Map(features.map((f) => [f.id, f])), mesh };
+      })
+      .catch((err) => {
+        regionGeoCache.delete(kind);
+        throw err;
+      });
+    regionGeoCache.set(kind, p);
+  }
+  return p;
+}
+
+/**
+ * Aspect-corrected monochrome SVG vector choropleth for Canada provinces, Ontario Health regions,
+ * DRC 26 provinces, or China national boundaries.
+ */
+export function renderRegionSvg(regionGeo, manifestLocations, opts = {}) {
+  const {
+    activeId = null,
+    className = "lp-hsa-svg",
+    polyClass = "lp-hsa-poly",
+    ariaLabel = regionGeo?.label || "Region map",
+    fillFor = null,
+    textColorFor = null,
+    onPick = null,
+    onHover = null,
+    width = 360,
+    height = 196,
+  } = opts;
+
+  const features = (regionGeo?.features || []).filter((f) => f.lonLatRings?.length);
+  if (!features.length) return null;
+
+  const manifestById = manifestLocations instanceof Map
+    ? manifestLocations
+    : new Map((manifestLocations || []).map((l) => [l.id, l]));
+
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  for (const f of features) {
+    for (const r of f.lonLatRings) {
+      for (let i = 0; i < r.length; i += 2) {
+        if (r[i] < minLon) minLon = r[i];
+        if (r[i] > maxLon) maxLon = r[i];
+        if (r[i + 1] < minLat) minLat = r[i + 1];
+        if (r[i + 1] > maxLat) maxLat = r[i + 1];
+      }
+    }
+  }
+  if (!Number.isFinite(minLon)) return null;
+
+  const cosLat = Math.max(0.25, Math.cos(((minLat + maxLat) * 0.5) * (Math.PI / 180)));
+  const spanX = Math.max(0.1, (maxLon - minLon) * cosLat);
+  const spanY = Math.max(0.1, maxLat - minLat);
+  const pad = 12;
+  const scale = Math.min((width - 2 * pad) / spanX, (height - 2 * pad) / spanY);
+  const ox = (width - spanX * scale) * 0.5;
+  const oy = (height - spanY * scale) * 0.5;
+  const ringsToPath = (rings) => rings.map((r) => {
+    let d = "";
+    for (let i = 0; i < r.length; i += 2) {
+      const px = ox + (r[i] - minLon) * cosLat * scale;
+      const py = oy + (maxLat - r[i + 1]) * scale;
+      d += `${i === 0 ? "M" : "L"}${px.toFixed(1)},${py.toFixed(1)}`;
+    }
+    return `${d}Z`;
+  }).join(" ");
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", className);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", ariaLabel);
+
+  for (const f of features) {
+    const loc = manifestById.get(f.id);
+    const targetId = loc?.id || f.id;
+    const label = loc?.name || f.name || targetId;
+    const isSelected = targetId === activeId
+      || (activeId && loc && String(activeId).startsWith(`${targetId}-`));
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("class", isSelected ? `${polyClass} is-on` : polyClass);
+    path.setAttribute("data-loc", targetId);
+    path.setAttribute("fill-rule", "evenodd");
+    path.setAttribute("d", ringsToPath(f.lonLatRings));
+    path.setAttribute("aria-label", label);
+    path.setAttribute("tabindex", "0");
+
+    if (fillFor) {
+      const fill = fillFor(targetId, loc || f);
+      if (fill) path.style.fill = fill;
+      const tc = textColorFor?.(targetId, fill);
+      if (tc) path.style.color = tc;
+    }
+
+    const tip = document.createElementNS(SVG_NS, "title");
+    tip.textContent = label;
+    path.append(tip);
+    if (onHover) {
+      path.addEventListener("pointerenter", () => onHover(targetId, label));
+      path.addEventListener("focus", () => onHover(targetId, label));
+    }
+    if (onPick) {
+      path.addEventListener("click", () => onPick(targetId, loc || f));
+      path.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(targetId, loc || f); }
       });
     }
     svg.append(path);

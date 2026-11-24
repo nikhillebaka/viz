@@ -6,7 +6,7 @@ one canonical pipeline supporting quantiles, sample trajectories, PMFs, derived 
 and extra Hubverse task IDs.
 """
 
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Set, Tuple
 
 import polars as pl
 
@@ -18,6 +18,7 @@ from viz.core.ingest import (
     normalize_forecast_frame,
     read_forecast_bytes,
 )
+from viz.core.truth import DATE_COL_ALIASES, LOC_COL_ALIASES, TRUTH_EXTRA_IGNORE, unpivot_wide_truth
 
 FORECAST_COLUMNS = CORE_FORECAST_COLUMNS
 REQUIRED_COLUMNS = REQUIRED_INPUT_COLUMNS
@@ -79,19 +80,28 @@ def normalize_oracle(
     *,
     pad_single_digit_fips: bool = True,
     default_target: Optional[str] = None,
+    target_ids: Optional[Sequence[str]] = None,
 ) -> pl.DataFrame:
-    """Coerce a hub oracle / time-series / latest truth table to canonical oracle schema."""
-    from viz.core.truth import TRUTH_EXTRA_IGNORE
+    """Coerce a hub oracle / time-series / wide multi-target surveillance table to canonical oracle schema."""
+    if target_ids and "target" not in df.columns and not any(c in df.columns for c in ("oracle_value", "observation", "value")):
+        wide = unpivot_wide_truth(df, target_ids)
+        if wide is not None:
+            df = wide
 
     rename_map = {}
+    if "location" not in df.columns:
+        for alt in LOC_COL_ALIASES:
+            if alt != "location" and alt in df.columns:
+                rename_map[alt] = "location"
+                break
     if "oracle_value" not in df.columns:
         for alt in ("observation", "value"):
             if alt in df.columns:
                 rename_map[alt] = "oracle_value"
                 break
     if "target_end_date" not in df.columns:
-        for alt in ("truth_date", "date"):
-            if alt in df.columns:
+        for alt in DATE_COL_ALIASES:
+            if alt != "target_end_date" and alt in df.columns:
                 rename_map[alt] = "target_end_date"
                 break
     if rename_map:
@@ -131,7 +141,7 @@ def normalize_oracle(
     df = df.with_columns(exprs)
     return df.select([
         "as_of", "target", "target_end_date", "location", "horizon", "output_type", "output_type_id", "oracle_value",
-    ] + extra_cols)
+    ] + extra_cols).drop_nulls(subset=["target", "target_end_date", "location", "oracle_value"])
 
 
 def normalize_admissions(

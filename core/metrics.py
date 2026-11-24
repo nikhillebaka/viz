@@ -13,6 +13,7 @@ Implements Hubverse & FluSight evaluation methodology (Bracher et al. 2021, Cram
 
 from __future__ import annotations
 
+import functools
 import math
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
@@ -55,6 +56,7 @@ _NON_TASK_COLS = frozenset({
     "location_name",
     "abbreviation",
 })
+_INT_DTYPES = (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64)
 
 
 def find_quantile_column(columns: List[str], q_val: float) -> Optional[str]:
@@ -99,6 +101,88 @@ def _to_polars_df(data: Any) -> Optional[pl.DataFrame]:
         except Exception:
             return None
     return None
+
+
+def _prepare_oracle_frame(oracle_df: Any, target: Optional[str]) -> Optional[pl.DataFrame]:
+    """Push `target` filter onto a LazyFrame oracle before collecting; keep eager DataFrames as-is for memoization."""
+    if oracle_df is None:
+        return None
+    if isinstance(oracle_df, pl.LazyFrame):
+        if target is not None:
+            schema = oracle_df.collect_schema()
+            if "target" in schema:
+                t_expr = (
+                    pl.col("target") == target
+                    if schema["target"] == pl.String
+                    else (pl.col("target").cast(pl.String) == target)
+                )
+                oracle_df = oracle_df.filter(t_expr)
+        return oracle_df.collect()
+    return _to_polars_df(oracle_df)
+
+
+def _prepare_forecast_frame(
+    data: Any,
+    *,
+    target: Optional[str] = None,
+    output_type: Optional[str] = None,
+    locations: Optional[Sequence[str]] = None,
+    reference_dates: Optional[Sequence[str]] = None,
+    horizons: Optional[Sequence[int]] = None,
+) -> Optional[pl.DataFrame]:
+    """Push target/output_type/scope predicates down onto a LazyFrame before `.collect()` (or filter DataFrame once)."""
+    if data is None:
+        return None
+    is_lazy = isinstance(data, pl.LazyFrame)
+    if not is_lazy and not isinstance(data, pl.DataFrame):
+        data = _to_polars_df(data)
+        if data is None:
+            return None
+    if not is_lazy and data.is_empty():
+        return data
+
+    schema = data.collect_schema() if is_lazy else data.schema
+    preds: List[pl.Expr] = []
+    if target is not None and "target" in schema:
+        preds.append(
+            (pl.col("target") == target)
+            if schema["target"] == pl.String
+            else (pl.col("target").cast(pl.String) == target)
+        )
+    if output_type is not None and "output_type" in schema:
+        preds.append(
+            (pl.col("output_type") == output_type)
+            if schema["output_type"] == pl.String
+            else (pl.col("output_type").cast(pl.String) == output_type)
+        )
+    if locations is not None and len(locations) > 0 and "all" not in locations and "location" in schema:
+        locs_str = [str(x) for x in locations]
+        preds.append(
+            pl.col("location").is_in(locs_str)
+            if schema["location"] == pl.String
+            else pl.col("location").cast(pl.String).is_in(locs_str)
+        )
+    if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates and "reference_date" in schema:
+        rds_str = [str(x) for x in reference_dates]
+        preds.append(
+            pl.col("reference_date").is_in(rds_str)
+            if schema["reference_date"] == pl.String
+            else pl.col("reference_date").cast(pl.String).is_in(rds_str)
+        )
+    if horizons is not None and len(horizons) > 0 and "horizon" in schema:
+        hs_int = [int(h) for h in horizons]
+        h_dt = schema["horizon"]
+        h_col = pl.col("horizon").fill_null(0)
+        if h_dt not in _INT_DTYPES:
+            h_col = h_col.cast(pl.Int64)
+        preds.append(h_col.is_in(hs_int))
+
+    if preds:
+        expr = preds[0]
+        for p in preds[1:]:
+            expr = expr & p
+        data = data.filter(expr)
+    return data.collect() if is_lazy else data
 
 
 def _resolve_extra_task_ids(
@@ -184,6 +268,153 @@ def _prepared_oracle(
     return prepared, join_keys
 
 
+_PMF_ORACLE_MEMO: Dict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]] = {}
+_PMF_ORACLE_MEMO_LOCK = threading.Lock()
+
+
+def _prepare_pmf_oracle(
+    o: pl.DataFrame,
+    target: str,
+    extra_task_ids: Optional[Sequence[str]] = None,
+) -> Tuple[pl.DataFrame, List[str]]:
+    """Extract canonical `(join_keys + ["true_category"])` truth table for PMF targets."""
+    if "target" in o.columns:
+        o = o.filter(pl.col("target") == target)
+    if "output_type" in o.columns and not o.filter(pl.col("output_type") == "pmf").head(1).is_empty():
+        o = o.filter(pl.col("output_type") == "pmf")
+    if o.is_empty():
+        return pl.DataFrame(), []
+
+    extra_cols = [str(c) for c in (extra_task_ids or ()) if c in o.columns]
+    o = o.with_columns(
+        [
+            pl.col("location").cast(pl.String),
+            pl.col("target_end_date").cast(pl.String),
+            pl.col("output_type_id").cast(pl.String).str.strip_chars().alias("true_category"),
+            pl.col("oracle_value").cast(pl.Float64),
+        ]
+        + ([pl.col("horizon").cast(pl.Int32)] if "horizon" in o.columns else [])
+        + [pl.col(ec).cast(pl.String) for ec in extra_cols]
+    )
+
+    base_okeys = ["target_end_date", "location"] + extra_cols
+    use_h_key = False
+    if "horizon" in o.columns:
+        valid_h = o.filter(pl.col("horizon").is_not_null())
+        if valid_h.height > 0:
+            use_h_key = valid_h.select(base_okeys + ["horizon"]).n_unique() > valid_h.select(base_okeys).n_unique()
+    okeys = base_okeys + (["horizon"] if use_h_key else [])
+    sort_cols = okeys + (["as_of"] if "as_of" in o.columns else []) + ["oracle_value"]
+    o_true = (
+        o.filter(pl.col("oracle_value") > 0)
+        .sort(sort_cols)
+        .group_by(okeys, maintain_order=False)
+        .last()
+        .select(okeys + ["true_category"])
+        .drop_nulls()
+    )
+    return o_true, okeys
+
+
+def _prepared_pmf_oracle(
+    o: pl.DataFrame,
+    target: str,
+    extra_task_ids: Optional[Sequence[str]] = None,
+) -> Tuple[pl.DataFrame, List[str]]:
+    extra_key = tuple(sorted(str(c) for c in (extra_task_ids or ()) if c in o.columns))
+    key = (id(o), target, extra_key)
+    with _PMF_ORACLE_MEMO_LOCK:
+        hit = _PMF_ORACLE_MEMO.get(key)
+    if hit is not None and hit[0] is o:
+        return hit[1], list(hit[2])
+    prepared, join_keys = _prepare_pmf_oracle(o, target, extra_task_ids=extra_key)
+    with _PMF_ORACLE_MEMO_LOCK:
+        if len(_PMF_ORACLE_MEMO) >= _ORACLE_MEMO_MAX:
+            _PMF_ORACLE_MEMO.clear()
+        _PMF_ORACLE_MEMO[key] = (o, prepared, list(join_keys))
+    return prepared, join_keys
+
+
+def attach_wis_per_100k(df: pl.DataFrame, population_map: Optional[Dict[str, int]]) -> pl.DataFrame:
+    """Attach population-normalized `wis_per_100k` using vectorized mapping without a join DataFrame."""
+    if df.is_empty():
+        return df if "wis_per_100k" in df.columns else df.with_columns(pl.lit(None, dtype=pl.Float64).alias("wis_per_100k"))
+    if population_map:
+        pop_floats = {str(k): float(v) for k, v in population_map.items() if v is not None and v > 0}
+        if pop_floats:
+            pop_expr = pl.col("location").cast(pl.String).replace_strict(pop_floats, default=None, return_dtype=pl.Float64)
+            return df.with_columns(
+                pl.when(pop_expr.is_not_null())
+                .then((pl.col("wis") / pop_expr) * 100000.0)
+                .otherwise(None)
+                .alias("wis_per_100k")
+            )
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("wis_per_100k"))
+    if "wis_per_100k" not in df.columns:
+        return df.with_columns(pl.lit(None, dtype=pl.Float64).alias("wis_per_100k"))
+    return df
+
+
+_SUMMARY_MEAN_COLS = (
+    ("wis", "wis"),
+    ("wis_log", "wis_log"),
+    ("wis_7", "wis_7"),
+    ("wis_per_100k", "wis_per_100k"),
+    ("mae", "mae"),
+    ("mae_log", "mae_log"),
+    ("cov95", "cov95"),
+    ("cov50", "cov50"),
+    ("sharpness", "sharpness"),
+    ("decomp_sharpness", "sharpness_component"),
+    ("decomp_overpred", "overprediction_penalty"),
+    ("decomp_underpred", "underprediction_penalty"),
+)
+
+
+def _finite_float(v: Any) -> Optional[float]:
+    return float(v) if v is not None and not np.isnan(v) else None
+
+
+def _build_summary_agg_exprs(cols: Sequence[str], calib_specs: Sequence[Tuple[float, str]]) -> List[pl.Expr]:
+    col_set = set(cols)
+    exprs: List[pl.Expr] = [
+        pl.col(c).mean().alias(c) if c in col_set else pl.lit(None, dtype=pl.Float64).alias(c)
+        for c, _ in _SUMMARY_MEAN_COLS
+    ]
+    exprs.append(pl.len().alias("count"))
+    for _, col_name in calib_specs:
+        if col_name in col_set:
+            exprs.append(pl.col(col_name).mean().alias(col_name))
+    return exprs
+
+
+def _summary_from_row(res_row: Dict[str, Any], calib_specs: Sequence[Tuple[float, str]]) -> Dict[str, Any]:
+    cov95_raw = _finite_float(res_row.get("cov95"))
+    cov50_raw = _finite_float(res_row.get("cov50"))
+    calib_dict: Dict[float, float] = {}
+    for nom_level, col_name in calib_specs:
+        val = _finite_float(res_row.get(col_name))
+        if val is not None:
+            calib_dict[float(nom_level)] = round(val * 100.0, 1)
+
+    return {
+        "wis": _finite_float(res_row.get("wis")),
+        "wis_log": _finite_float(res_row.get("wis_log")),
+        "wis_7": _finite_float(res_row.get("wis_7")),
+        "wis_per_100k": _finite_float(res_row.get("wis_per_100k")),
+        "mae": _finite_float(res_row.get("mae")),
+        "mae_log": _finite_float(res_row.get("mae_log")),
+        "cov95": cov95_raw * 100.0 if cov95_raw is not None else None,
+        "cov50": cov50_raw * 100.0 if cov50_raw is not None else None,
+        "sharpness": _finite_float(res_row.get("sharpness")),
+        "sharpness_component": _finite_float(res_row.get("decomp_sharpness")),
+        "overprediction_penalty": _finite_float(res_row.get("decomp_overpred")),
+        "underprediction_penalty": _finite_float(res_row.get("decomp_underpred")),
+        "calibration": calib_dict,
+        "count": int(res_row["count"]),
+    }
+
+
 def summarize_scored_tasks(
     eval_df: pl.DataFrame,
     *,
@@ -202,31 +433,14 @@ def summarize_scored_tasks(
     if eval_df.is_empty():
         return {}
 
-    df = eval_df
-    if population_map:
-        pop_df = pl.DataFrame({
-            "location": [str(k) for k in population_map.keys()],
-            "population": [int(v) for v in population_map.values()],
-        })
-        if "population" in df.columns:
-            df = df.drop("population")
-        if "wis_per_100k" in df.columns:
-            df = df.drop("wis_per_100k")
-        df = df.join(pop_df, on="location", how="left")
-        df = df.with_columns(
-            pl.when((pl.col("population").is_not_null()) & (pl.col("population") > 0))
-            .then((pl.col("wis") / pl.col("population")) * 100000.0)
-            .otherwise(None)
-            .alias("wis_per_100k")
-        )
-    elif "wis_per_100k" not in df.columns:
-        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("wis_per_100k"))
+    df = attach_wis_per_100k(eval_df, population_map)
 
     agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
     agg_list = sorted(agg_set)
     is_agg_expr = pl.col("location").is_in(agg_list) if agg_list else pl.lit(False)
-    has_primary = bool(df.select((~is_agg_expr).any()).item())
-    has_agg = bool(df.select(is_agg_expr.any()).item())
+    has_primary_val, has_agg_val = df.select((~is_agg_expr).any().alias("_hp"), is_agg_expr.any().alias("_ha")).row(0)
+    has_primary = bool(has_primary_val)
+    has_agg = bool(has_agg_val)
     primary_eval = df.filter(~is_agg_expr) if has_primary else df.filter(is_agg_expr)
 
     # Infer calibration levels from sym_pairs or cov_<pct> columns present on the task DataFrame
@@ -243,6 +457,8 @@ def summarize_scored_tasks(
                 if 1 <= pct <= 99:
                     calib_specs.append((round(pct / 100.0, 3), col))
         calib_specs.sort(key=lambda item: item[0], reverse=True)
+
+    agg_exprs = _build_summary_agg_exprs(df.columns, calib_specs)
 
     def _summarize_df(df_slice: pl.DataFrame) -> Dict[str, Any]:
         if df_slice.is_empty():
@@ -262,76 +478,42 @@ def summarize_scored_tasks(
                 "calibration": {},
                 "count": 0,
             }
-
-        agg_exprs = [
-            pl.col("wis").mean().alias("wis"),
-            pl.col("wis_log").mean().alias("wis_log") if "wis_log" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("wis_log"),
-            pl.col("wis_7").mean().alias("wis_7") if "wis_7" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("wis_7"),
-            pl.col("wis_per_100k").mean().alias("wis_per_100k"),
-            pl.col("mae").mean().alias("mae") if "mae" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("mae"),
-            pl.col("mae_log").mean().alias("mae_log") if "mae_log" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("mae_log"),
-            pl.col("cov95").mean().alias("cov95") if "cov95" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("cov95"),
-            pl.col("cov50").mean().alias("cov50") if "cov50" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("cov50"),
-            pl.col("sharpness").mean().alias("sharpness") if "sharpness" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("sharpness"),
-            pl.col("decomp_sharpness").mean().alias("decomp_sharpness") if "decomp_sharpness" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("decomp_sharpness"),
-            pl.col("decomp_overpred").mean().alias("decomp_overpred") if "decomp_overpred" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("decomp_overpred"),
-            pl.col("decomp_underpred").mean().alias("decomp_underpred") if "decomp_underpred" in df_slice.columns else pl.lit(None, dtype=pl.Float64).alias("decomp_underpred"),
-            pl.len().alias("count"),
-        ]
-        for _, col_name in calib_specs:
-            if col_name in df_slice.columns:
-                agg_exprs.append(pl.col(col_name).mean().alias(col_name))
-
-        res_row = df_slice.select(agg_exprs).to_dicts()[0]
-
-        def _f(v: Any) -> Optional[float]:
-            return float(v) if v is not None and not np.isnan(v) else None
-
-        cov95_raw = _f(res_row.get("cov95"))
-        cov50_raw = _f(res_row.get("cov50"))
-        calib_dict = {}
-        for nom_level, col_name in calib_specs:
-            val = _f(res_row.get(col_name))
-            if val is not None:
-                calib_dict[float(nom_level)] = round(val * 100.0, 1)
-
-        return {
-            "wis": _f(res_row.get("wis")),
-            "wis_log": _f(res_row.get("wis_log")),
-            "wis_7": _f(res_row.get("wis_7")),
-            "wis_per_100k": _f(res_row.get("wis_per_100k")),
-            "mae": _f(res_row.get("mae")),
-            "mae_log": _f(res_row.get("mae_log")),
-            "cov95": cov95_raw * 100.0 if cov95_raw is not None else None,
-            "cov50": cov50_raw * 100.0 if cov50_raw is not None else None,
-            "sharpness": _f(res_row.get("sharpness")),
-            "sharpness_component": _f(res_row.get("decomp_sharpness")),
-            "overprediction_penalty": _f(res_row.get("decomp_overpred")),
-            "underprediction_penalty": _f(res_row.get("decomp_underpred")),
-            "calibration": calib_dict,
-            "count": int(res_row["count"]),
-        }
+        return _summary_from_row(df_slice.select(agg_exprs).to_dicts()[0], calib_specs)
 
     q_list = list(present_quantiles or [])
     q_count = len(q_list)
     has_std_7 = set(STANDARD_7_QUANTILES).issubset(set(q_list)) if q_list else False
     has_std_23 = set(STANDARD_23_QUANTILES).issubset(set(q_list)) if q_list else False
 
-    overall_summary = _summarize_df(primary_eval)
-    overall_summary["quantile_count"] = q_count
-    overall_summary["has_23_quantiles"] = has_std_23
-    overall_summary["has_7_quantiles"] = has_std_7
+    primary_base = _summarize_df(primary_eval)
+    overall_summary = {
+        **primary_base,
+        "quantile_count": q_count,
+        "has_23_quantiles": has_std_23,
+        "has_7_quantiles": has_std_7,
+    }
 
-    primary_summary = _summarize_df(df.filter(~is_agg_expr)) if has_primary else None
-    agg_summary = _summarize_df(df.filter(is_agg_expr)) if has_agg else None
+    primary_summary = dict(primary_base) if has_primary else None
+    if has_agg:
+        agg_summary = _summarize_df(df.filter(is_agg_expr)) if has_primary else dict(primary_base)
+    else:
+        agg_summary = None
 
-    by_horizon = {}
-    for h in sorted(primary_eval.select(pl.col("horizon").unique()).to_series().to_list()):
-        hdf = primary_eval.filter(pl.col("horizon") == h)
-        by_horizon[int(h)] = _summarize_df(hdf)
+    by_horizon: Dict[int, Dict[str, Any]] = {}
+    if not primary_eval.is_empty():
+        h_rows = (
+            primary_eval.group_by("horizon")
+            .agg(agg_exprs)
+            .sort("horizon")
+            .to_dicts()
+        )
+        for row_dict in h_rows:
+            h_val = row_dict.get("horizon")
+            if h_val is not None:
+                by_horizon[int(h_val)] = _summary_from_row(row_dict, calib_specs)
 
-    evaluated_dates = sorted(df.select(pl.col("reference_date").unique()).to_series().to_list())
-    distinct_locs = sorted(df.select(pl.col("location").unique()).to_series().to_list())
+    evaluated_dates = sorted(df.get_column("reference_date").unique().to_list())
+    distinct_locs = sorted(df.get_column("location").unique().to_list())
 
     result_dict: Dict[str, Any] = {
         "overall": overall_summary,
@@ -363,28 +545,39 @@ def summarize_scored_tasks(
     return result_dict
 
 
-def score_forecasts(
+def _norm_and_join_quantiles(
     forecast_df: Union[pl.DataFrame, pl.LazyFrame, Any],
     oracle_df: Union[pl.DataFrame, pl.LazyFrame, Any],
-    target: str = "wk inc flu hosp",
+    *,
+    target: str,
     locations: Optional[List[str]] = None,
     reference_dates: Optional[List[str]] = None,
     horizons: Optional[List[int]] = None,
     common_tasks: Optional[Union[Set[Tuple[Any, ...]], pl.DataFrame, List[Tuple[Any, ...]]]] = None,
     non_negative: Optional[bool] = None,
-    population_map: Optional[Dict[str, int]] = None,
-    return_task_df: bool = False,
     extra_task_ids: Optional[Sequence[str]] = None,
-    aggregate_locations: Optional[Iterable[str]] = None,
-) -> Dict[str, Any]:
-    """Score quantile forecasts against oracle truth with Polars SIMD execution."""
-    f = _to_polars_df(forecast_df)
-    o = _to_polars_df(oracle_df)
-
+    preserve_cols: Optional[Sequence[str]] = None,
+    count_negatives: bool = False,
+) -> Optional[Tuple[pl.DataFrame, List[str], List[str], bool, int]]:
+    """Shared predicate pushdown, quantile normalization, optional negative count, and oracle inner join."""
+    f = _prepare_forecast_frame(
+        forecast_df,
+        target=target,
+        output_type="quantile",
+        locations=locations,
+        reference_dates=reference_dates,
+        horizons=horizons,
+    )
+    o = _prepare_oracle_frame(oracle_df, target)
     if f is None or o is None or f.is_empty() or o.is_empty():
-        return {}
+        return None
 
     extra_cols = _resolve_extra_task_ids(f.columns, o.columns, extra_task_ids)
+    p_cols = [
+        str(c)
+        for c in (preserve_cols or ())
+        if c in f.columns and c not in extra_cols and c not in TASK_KEY_COLS and c != "target_end_date"
+    ]
 
     cast_exprs = [
         pl.col("location").cast(pl.String),
@@ -394,34 +587,25 @@ def score_forecasts(
         pl.col("reference_date").cast(pl.String),
         pl.col("target_end_date").cast(pl.String),
         pl.col("target").cast(pl.String),
-    ] + [pl.col(ec).cast(pl.String) for ec in extra_cols]
+    ] + [pl.col(ec).cast(pl.String) for ec in extra_cols + p_cols]
     f = f.with_columns([c for c in cast_exprs if c.meta.output_name() in f.columns])
-
-    f = f.filter(pl.col("target") == target)
-    if "output_type" in f.columns:
-        f = f.filter(pl.col("output_type") == "quantile")
-
-    f = f.drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"] + extra_cols)
+    f = f.drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"] + extra_cols + p_cols)
 
     is_non_neg = non_negative if non_negative is not None else any(
         k in target.lower() for k in ["hosp", "inc", "count", "prop", "visit", "death", "case", "admiss", "pct", "rate"]
     )
     neg_clipped_count = 0
-    if is_non_neg:
-        neg_clipped_count = f.filter(pl.col("value") < 0.0).height
-        if neg_clipped_count > 0:
+    if is_non_neg and not f.is_empty():
+        if count_negatives:
+            neg_clipped_count = int(f.select((pl.col("value") < 0.0).sum()).item() or 0)
+            if neg_clipped_count > 0:
+                f = f.with_columns(pl.col("value").clip(lower_bound=0.0))
+        else:
             f = f.with_columns(pl.col("value").clip(lower_bound=0.0))
-
-    if locations is not None and len(locations) > 0 and "all" not in locations:
-        f = f.filter(pl.col("location").is_in(locations))
-    if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates:
-        f = f.filter(pl.col("reference_date").is_in(reference_dates))
-    if horizons is not None and len(horizons) > 0:
-        f = f.filter(pl.col("horizon").is_in(horizons))
 
     if common_tasks is not None:
         if len(common_tasks) == 0:
-            return {}
+            return None
         if isinstance(common_tasks, pl.DataFrame):
             task_df = common_tasks
             join_on = [c for c in TASK_KEY_COLS + extra_cols if c in task_df.columns]
@@ -442,32 +626,99 @@ def score_forecasts(
         f = f.join(task_df, on=join_on, how="inner")
 
     if f.is_empty():
-        return {}
-
-    present_quantiles = sorted(f.select(pl.col("output_type_id").unique()).to_series().to_list())
-    has_std_7 = set(STANDARD_7_QUANTILES).issubset(set(present_quantiles))
+        return None
 
     o_prep, join_keys = _prepared_oracle(o, target, extra_task_ids=extra_cols)
     merged = f.join(o_prep, on=join_keys, how="inner")
     if merged.is_empty():
-        return {}
+        return None
 
-    group_keys = ["reference_date", "location", "horizon", "target_end_date"] + extra_cols
+    group_keys = p_cols + ["reference_date", "location", "horizon", "target_end_date"] + extra_cols
     if merged.select(group_keys + ["output_type_id"]).is_duplicated().any():
         merged = merged.unique(subset=group_keys + ["output_type_id"], keep="first", maintain_order=True)
 
-    loss_cols: List[pl.Expr] = [
-        (
-            2.0
-            * ((pl.col("oracle_value") < pl.col("value")).cast(pl.Float64) - pl.col("output_type_id"))
-            * (pl.col("value") - pl.col("oracle_value"))
-        ).alias("qloss")
-    ]
+    return merged, group_keys, extra_cols, is_non_neg, neg_clipped_count
+
+
+def score_task_wis(
+    forecast_df: Union[pl.DataFrame, pl.LazyFrame, Any],
+    oracle_df: Union[pl.DataFrame, pl.LazyFrame, Any],
+    target: str = "wk inc flu hosp",
+    *,
+    locations: Optional[List[str]] = None,
+    reference_dates: Optional[List[str]] = None,
+    horizons: Optional[List[int]] = None,
+    non_negative: Optional[bool] = None,
+    extra_task_ids: Optional[Sequence[str]] = None,
+    preserve_cols: Optional[Sequence[str]] = None,
+) -> pl.DataFrame:
+    """Fast per-task WIS scorer: computes exact pinball-mean `wis` without pivots or summaries."""
+    prepared = _norm_and_join_quantiles(
+        forecast_df,
+        oracle_df,
+        target=target,
+        locations=locations,
+        reference_dates=reference_dates,
+        horizons=horizons,
+        non_negative=non_negative,
+        extra_task_ids=extra_task_ids,
+        preserve_cols=preserve_cols,
+        count_negatives=False,
+    )
+    if prepared is None:
+        return pl.DataFrame()
+    merged, group_keys, _, _, _ = prepared
+    qloss_expr = (
+        2.0
+        * ((pl.col("oracle_value") < pl.col("value")).cast(pl.Float64) - pl.col("output_type_id"))
+        * (pl.col("value") - pl.col("oracle_value"))
+    )
+    return merged.group_by(group_keys).agg(qloss_expr.mean().alias("wis"))
+
+
+def score_forecasts(
+    forecast_df: Union[pl.DataFrame, pl.LazyFrame, Any],
+    oracle_df: Union[pl.DataFrame, pl.LazyFrame, Any],
+    target: str = "wk inc flu hosp",
+    locations: Optional[List[str]] = None,
+    reference_dates: Optional[List[str]] = None,
+    horizons: Optional[List[int]] = None,
+    common_tasks: Optional[Union[Set[Tuple[Any, ...]], pl.DataFrame, List[Tuple[Any, ...]]]] = None,
+    non_negative: Optional[bool] = None,
+    population_map: Optional[Dict[str, int]] = None,
+    return_task_df: bool = False,
+    extra_task_ids: Optional[Sequence[str]] = None,
+    aggregate_locations: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """Score quantile forecasts against oracle truth with Polars SIMD execution."""
+    prepared = _norm_and_join_quantiles(
+        forecast_df,
+        oracle_df,
+        target=target,
+        locations=locations,
+        reference_dates=reference_dates,
+        horizons=horizons,
+        common_tasks=common_tasks,
+        non_negative=non_negative,
+        extra_task_ids=extra_task_ids,
+        count_negatives=True,
+    )
+    if prepared is None:
+        return {}
+    merged, group_keys, extra_cols, is_non_neg, neg_clipped_count = prepared
+
+    present_quantiles = sorted(merged.get_column("output_type_id").unique().to_list())
+    has_std_7 = set(STANDARD_7_QUANTILES).issubset(set(present_quantiles))
+
+    qloss_expr = (
+        2.0
+        * ((pl.col("oracle_value") < pl.col("value")).cast(pl.Float64) - pl.col("output_type_id"))
+        * (pl.col("value") - pl.col("oracle_value"))
+    )
+    loss_cols: List[pl.Expr] = [qloss_expr.alias("qloss")]
     if is_non_neg:
-        oracle_nonneg = pl.col("oracle_value").clip(lower_bound=0.0)
-        pred_nonneg = pl.col("value").clip(lower_bound=0.0)
-        log_oracle = (oracle_nonneg + 1.0).log()
-        log_pred = (pred_nonneg + 1.0).log()
+        log_oracle = (pl.col("oracle_value").clip(lower_bound=0.0) + 1.0).log()
+        log_pred = (pl.col("value").clip(lower_bound=0.0) + 1.0).log()
         loss_cols.append(
             (
                 2.0
@@ -475,25 +726,19 @@ def score_forecasts(
                 * (log_pred - log_oracle)
             ).alias("qloss_log")
         )
-    else:
-        loss_cols.append(pl.lit(None, dtype=pl.Float64).alias("qloss_log"))
 
     merged = merged.with_columns(loss_cols)
 
-    wis_series = merged.group_by(group_keys).agg([
+    wis_aggs: List[pl.Expr] = [
         pl.col("qloss").mean().alias("wis"),
         pl.col("qloss_log").mean().alias("wis_log") if is_non_neg else pl.lit(None, dtype=pl.Float64).alias("wis_log"),
-    ])
-
-    if has_std_7:
-        wis7_df = (
-            merged.filter(pl.col("output_type_id").is_in(STANDARD_7_QUANTILES))
-            .group_by(group_keys)
-            .agg([pl.col("qloss").mean().alias("wis_7")])
-        )
-        wis_series = wis_series.join(wis7_df, on=group_keys, how="left")
-    else:
-        wis_series = wis_series.with_columns(pl.lit(None, dtype=pl.Float64).alias("wis_7"))
+        (
+            pl.col("qloss").filter(pl.col("output_type_id").is_in(STANDARD_7_QUANTILES)).mean().alias("wis_7")
+            if has_std_7
+            else pl.lit(None, dtype=pl.Float64).alias("wis_7")
+        ),
+    ]
+    wis_series = merged.group_by(group_keys).agg(wis_aggs)
 
     piv = merged.pivot(
         on="output_type_id",
@@ -620,69 +865,39 @@ def score_pmf_forecasts(
     return_task_df: bool = False,
 ) -> Dict[str, Any]:
     """
-    Score categorical or ordinal PMF forecasts (Ranked Probability Score, Log Score, Brier Score, Hit Rate).
+    Score categorical or ordinal PMF forecasts (Ranked Probability Score, Log Score, Brier Score, Hit Rate)
+    using vectorized Polars category aggregation and NumPy matrix operations.
     """
-    f = _to_polars_df(forecast_df)
-    o = _to_polars_df(oracle_df)
+    f = _prepare_forecast_frame(
+        forecast_df,
+        target=target,
+        output_type="pmf",
+        locations=locations,
+        reference_dates=reference_dates,
+        horizons=horizons,
+    )
+    o = _prepare_oracle_frame(oracle_df, target)
     if f is None or o is None or f.is_empty() or o.is_empty():
         return {}
 
     extra_cols = _resolve_extra_task_ids(f.columns, o.columns, extra_task_ids)
-    f = f.with_columns([
-        pl.col("location").cast(pl.String),
-        pl.col("horizon").fill_null(0).cast(pl.Int32),
-        pl.col("output_type_id").cast(pl.String).str.strip_chars(),
-        pl.col("value").cast(pl.Float64),
-        pl.col("reference_date").cast(pl.String),
-        pl.col("target_end_date").cast(pl.String),
-        pl.col("target").cast(pl.String),
-    ] + [pl.col(ec).cast(pl.String) for ec in extra_cols if ec in f.columns])
-
-    f = f.filter(pl.col("target") == target)
-    if "output_type" in f.columns:
-        f = f.filter(pl.col("output_type") == "pmf")
-    if locations is not None and len(locations) > 0 and "all" not in locations:
-        f = f.filter(pl.col("location").is_in(locations))
-    if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates:
-        f = f.filter(pl.col("reference_date").is_in(reference_dates))
-    if horizons is not None and len(horizons) > 0:
-        f = f.filter(pl.col("horizon").is_in(horizons))
-    f = f.drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"])
+    f = f.with_columns(
+        [
+            pl.col("location").cast(pl.String),
+            pl.col("horizon").fill_null(0).cast(pl.Int32),
+            pl.col("output_type_id").cast(pl.String).str.strip_chars(),
+            pl.col("value").cast(pl.Float64),
+            pl.col("reference_date").cast(pl.String),
+            pl.col("target_end_date").cast(pl.String),
+            pl.col("target").cast(pl.String),
+        ]
+        + [pl.col(ec).cast(pl.String) for ec in extra_cols]
+    )
+    f = f.drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"] + extra_cols)
     if f.is_empty():
         return {}
 
-    # Prepare categorical oracle observations
-    if "target" in o.columns:
-        o = o.filter(pl.col("target") == target)
-    if "output_type" in o.columns and not o.filter(pl.col("output_type") == "pmf").is_empty():
-        o = o.filter(pl.col("output_type") == "pmf")
-    if o.is_empty():
-        return {}
-
-    # Extract true category per truth key where oracle_value == 1 (or max oracle_value)
-    o = o.with_columns([
-        pl.col("location").cast(pl.String),
-        pl.col("target_end_date").cast(pl.String),
-        pl.col("output_type_id").cast(pl.String).str.strip_chars().alias("true_category"),
-        pl.col("oracle_value").cast(pl.Float64),
-    ] + ([pl.col("horizon").cast(pl.Int32)] if "horizon" in o.columns else []) + [pl.col(ec).cast(pl.String) for ec in extra_cols if ec in o.columns])
-
-    base_okeys = ["target_end_date", "location"] + extra_cols
-    use_h_key = "horizon" in o.columns and o.filter(pl.col("horizon").is_not_null()).height > 0 and (
-        o.select(base_okeys + ["horizon"]).n_unique() > o.select(base_okeys).n_unique()
-    )
-    okeys = base_okeys + (["horizon"] if use_h_key else [])
-    if "as_of" in o.columns:
-        o = o.sort("as_of")
-    sort_cols = okeys + (["as_of"] if "as_of" in o.columns else []) + ["oracle_value"]
-    o_true = (
-        o.filter(pl.col("oracle_value") > 0)
-        .sort(sort_cols)
-        .group_by(okeys, maintain_order=True)
-        .last()
-        .select(okeys + ["true_category"])
-        .drop_nulls()
-    )
+    o_true, okeys = _prepared_pmf_oracle(o, target, extra_task_ids=extra_cols)
     if o_true.is_empty():
         return {}
 
@@ -690,84 +905,133 @@ def score_pmf_forecasts(
     if merged.is_empty():
         return {}
 
-    cat_order = [str(c) for c in categories] if categories else sorted(
-        set(merged.get_column("output_type_id").to_list()) | set(merged.get_column("true_category").to_list())
-    )
-    cat_idx = {c: i for i, c in enumerate(cat_order)}
+    if categories:
+        cat_order = [str(c) for c in categories]
+    else:
+        cat_order = sorted(
+            set(merged.get_column("output_type_id").unique().to_list())
+            | set(merged.get_column("true_category").unique().to_list())
+        )
     K = len(cat_order)
+    if K == 0:
+        return {}
+    cat_idx = {c: i for i, c in enumerate(cat_order)}
     group_keys = ["reference_date", "location", "horizon", "target_end_date"] + extra_cols
 
-    task_rows: List[Dict[str, Any]] = []
-    for keys, g in merged.group_by(group_keys, maintain_order=True):
-        probs = np.zeros(K, dtype=np.float64)
-        for oid, val in zip(g.get_column("output_type_id").to_list(), g.get_column("value").to_list()):
-            idx = cat_idx.get(str(oid))
-            if idx is not None and val is not None and np.isfinite(val):
-                probs[idx] += max(0.0, float(val))
-        s = float(probs.sum())
-        if s > 0 and abs(s - 1.0) > 1e-6:
-            probs /= s
-        true_cat = str(g.get_column("true_category")[0])
-        y_idx = cat_idx.get(true_cat)
-        if y_idx is None:
-            continue
-        p_true = float(probs[y_idx])
-        log_score = float(-math.log(max(p_true, LOG_SCORE_FLOOR)))
-        y_vec = np.zeros(K, dtype=np.float64)
-        y_vec[y_idx] = 1.0
-        brier = float(np.sum((probs - y_vec) ** 2))
-        if ordinal and K > 1:
-            cdf = np.cumsum(probs)
-            truth_cdf = (np.arange(K) >= y_idx).astype(np.float64)
-            rps = float(np.sum((cdf - truth_cdf) ** 2))
-        else:
-            rps = None
-        pred_idx = int(np.argmax(probs))
-        hit_mode = 1.0 if pred_idx == y_idx else 0.0
-
-        row: Dict[str, Any] = dict(zip(group_keys, keys))
-        row.update({
-            "true_category": true_cat,
-            "p_observed": p_true,
-            "rps": rps,
-            "log_score": log_score,
-            "brier": brier,
-            "hit_mode": hit_mode,
-        })
-        task_rows.append(row)
-
-    if not task_rows:
+    # Keep all tasks with a valid observed category (even if all predicted probabilities are 0 / unmapped)
+    with_y = merged.with_columns(
+        pl.col("true_category").replace_strict(cat_idx, default=-1, return_dtype=pl.Int32).alias("_y_idx"),
+        pl.col("output_type_id").replace_strict(cat_idx, default=-1, return_dtype=pl.Int32).alias("_c_idx"),
+    ).filter(pl.col("_y_idx") >= 0)
+    if with_y.is_empty():
         return {}
-    task_df = pl.DataFrame(task_rows)
-    agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
-    is_agg = task_df["location"].is_in(sorted(agg_set)) if agg_set else pl.Series(values=[False] * task_df.height)
-    primary_df = task_df.filter(~is_agg) if (~is_agg).any() else task_df.filter(is_agg)
-    has_primary = bool((~is_agg).any())
-    has_agg = bool(is_agg.any())
 
-    def _agg_pmf(sub: pl.DataFrame) -> Dict[str, Any]:
-        if sub.is_empty():
+    tasks = (
+        with_y.group_by(group_keys, maintain_order=True)
+        .agg(
+            pl.col("_y_idx").first().alias("_y_idx"),
+            pl.col("true_category").first().alias("true_category"),
+        )
+        .with_row_index("_tid")
+    )
+    n_tasks = tasks.height
+    if n_tasks == 0:
+        return {}
+
+    valid_mass = (
+        with_y.filter((pl.col("_c_idx") >= 0) & pl.col("value").is_finite() & (pl.col("value") > 0.0))
+        .group_by(group_keys + ["_c_idx"], maintain_order=False)
+        .agg(pl.col("value").sum().alias("_p"))
+    )
+    P = np.zeros((n_tasks, K), dtype=np.float64)
+    if not valid_mass.is_empty():
+        indexed = valid_mass.join(tasks.select(group_keys + ["_tid"]), on=group_keys, how="inner")
+        if not indexed.is_empty():
+            P[
+                indexed.get_column("_tid").to_numpy(),
+                indexed.get_column("_c_idx").to_numpy(),
+            ] = indexed.get_column("_p").to_numpy()
+
+    y_idx = tasks.get_column("_y_idx").to_numpy()
+    totals = P.sum(axis=1)
+    need_norm = (totals > 0.0) & (np.abs(totals - 1.0) > 1e-6)
+    if np.any(need_norm):
+        P[need_norm] /= totals[need_norm, None]
+
+    row_ar = np.arange(n_tasks)
+    p_obs = P[row_ar, y_idx]
+    log_score = -np.log(np.maximum(p_obs, LOG_SCORE_FLOOR))
+    brier = np.sum(P * P, axis=1) - 2.0 * p_obs + 1.0
+    hit_mode = ((totals > 0.0) & (np.argmax(P, axis=1) == y_idx)).astype(np.float64)
+
+    task_cols: List[Any] = [
+        pl.Series("p_observed", p_obs, dtype=pl.Float64),
+        pl.Series("log_score", log_score, dtype=pl.Float64),
+        pl.Series("brier", brier, dtype=pl.Float64),
+        pl.Series("hit_mode", hit_mode, dtype=pl.Float64),
+    ]
+    if ordinal and K > 1:
+        cdf = np.cumsum(P, axis=1)
+        truth_cdf = (np.arange(K)[None, :] >= y_idx[:, None]).astype(np.float64)
+        rps = np.sum((cdf - truth_cdf) ** 2, axis=1)
+        task_cols.append(pl.Series("rps", rps, dtype=pl.Float64))
+    else:
+        task_cols.append(pl.lit(None, dtype=pl.Float64).alias("rps"))
+
+    task_df = tasks.drop(["_tid", "_y_idx"]).with_columns(task_cols)
+
+    agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
+    agg_list = sorted(agg_set)
+    is_agg_expr = pl.col("location").is_in(agg_list) if agg_list else pl.lit(False)
+    has_primary_val, has_agg_val = task_df.select((~is_agg_expr).any().alias("_hp"), is_agg_expr.any().alias("_ha")).row(0)
+    has_primary = bool(has_primary_val)
+    has_agg = bool(has_agg_val)
+    primary_df = task_df.filter(~is_agg_expr) if has_primary else task_df.filter(is_agg_expr)
+
+    pmf_aggs = [
+        (pl.col("rps").mean().alias("rps") if (ordinal and K > 1) else pl.lit(None, dtype=pl.Float64).alias("rps")),
+        pl.col("log_score").mean().alias("log_score"),
+        pl.col("brier").mean().alias("brier"),
+        (pl.col("hit_mode").mean() * 100.0).alias("hit_mode"),
+        pl.len().alias("count"),
+    ]
+
+    def _pmf_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+        if not row or int(row.get("count") or 0) == 0:
             return {"rps": None, "log_score": None, "brier": None, "hit_mode": None, "count": 0}
         return {
-            "rps": float(sub["rps"].mean()) if ordinal and sub["rps"].drop_nulls().len() else None,
-            "log_score": float(sub["log_score"].mean()),
-            "brier": float(sub["brier"].mean()),
-            "hit_mode": float(sub["hit_mode"].mean()) * 100.0,
-            "count": int(sub.height),
+            "rps": _finite_float(row.get("rps")) if (ordinal and K > 1) else None,
+            "log_score": float(row["log_score"]),
+            "brier": float(row["brier"]),
+            "hit_mode": float(row["hit_mode"]),
+            "count": int(row["count"]),
         }
 
-    overall = _agg_pmf(primary_df)
-    by_horizon = {
-        int(h): _agg_pmf(primary_df.filter(pl.col("horizon") == h))
-        for h in sorted(primary_df.get_column("horizon").unique().to_list())
-    }
+    overall = _pmf_row_to_dict(primary_df.select(pmf_aggs).to_dicts()[0]) if not primary_df.is_empty() else _pmf_row_to_dict({})
+    states_summary = dict(overall) if has_primary else None
+    if has_agg:
+        us_summary = (
+            _pmf_row_to_dict(task_df.filter(is_agg_expr).select(pmf_aggs).to_dicts()[0])
+            if has_primary
+            else dict(overall)
+        )
+    else:
+        us_summary = None
+
+    by_horizon: Dict[int, Dict[str, Any]] = {}
+    if not primary_df.is_empty():
+        for row in primary_df.group_by("horizon").agg(pmf_aggs).sort("horizon").to_dicts():
+            h_val = row.get("horizon")
+            if h_val is not None:
+                by_horizon[int(h_val)] = _pmf_row_to_dict(row)
+
     evaluated_dates = sorted(task_df.get_column("reference_date").unique().to_list())
     distinct_locs = sorted(task_df.get_column("location").unique().to_list())
 
     out: Dict[str, Any] = {
         "overall": overall,
-        "states": _agg_pmf(task_df.filter(~is_agg)) if has_primary else None,
-        "us": _agg_pmf(task_df.filter(is_agg)) if has_agg else None,
+        "states": states_summary,
+        "us": us_summary,
         "by_horizon": by_horizon,
         "metadata": {
             "evaluated_dates": evaluated_dates,
@@ -778,7 +1042,7 @@ def score_pmf_forecasts(
             "is_categorical": True,
             "ordinal": ordinal,
             "categories": cat_order,
-            "aggregate_locations": sorted(agg_set),
+            "aggregate_locations": agg_list,
             "has_us_data": has_agg,
             "has_states_data": has_primary,
         },
@@ -806,6 +1070,12 @@ def crps_ensemble_1d(samples: np.ndarray, y: float) -> float:
     return max(0.0, term1 - term2)
 
 
+@functools.lru_cache(maxsize=64)
+def _triu_idx(m: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Cached strictly-upper-triangular index pairs for exact pairwise Euclidean sums."""
+    return np.triu_indices(m, k=1)
+
+
 def energy_score(trajectories: np.ndarray, y_vec: np.ndarray) -> float:
     """
     Multi-horizon Energy Score over M trajectories in R^D (trajectories shape `(M, D)`, `y_vec` shape `(D,)`):
@@ -819,9 +1089,18 @@ def energy_score(trajectories: np.ndarray, y_vec: np.ndarray) -> float:
     term1 = float(np.mean(np.linalg.norm(X - y, axis=1)))
     if m == 1:
         return term1
-    diffs = X[:, None, :] - X[None, :, :]
-    pair_norms = np.linalg.norm(diffs, axis=2)
-    term2 = 0.5 * float(np.mean(pair_norms))
+    if m <= 256:
+        iu, ju = _triu_idx(m)
+        pair_dists = np.linalg.norm(X[iu] - X[ju], axis=1)
+        term2 = float(pair_dists.sum()) / (m * m)
+    else:
+        total_pair = 0.0
+        step = 128
+        for start in range(0, m, step):
+            stop = min(m, start + step)
+            diffs = X[start:stop, None, :] - X[None, :, :]
+            total_pair += float(np.linalg.norm(diffs, axis=2).sum())
+        term2 = 0.5 * total_pair / (m * m)
     return max(0.0, term1 - term2)
 
 
@@ -838,33 +1117,33 @@ def score_sample_forecasts(
     compute_energy_score: bool = True,
     return_task_df: bool = False,
 ) -> Dict[str, Any]:
-    """Score probabilistic sample trajectories via exact empirical CRPS and multi-horizon Energy Score."""
-    f = _to_polars_df(sample_df)
-    o = _to_polars_df(oracle_df)
+    """Score probabilistic sample trajectories via pure-Polars exact O(M log M) CRPS and batched Energy Score."""
+    f = _prepare_forecast_frame(
+        sample_df,
+        target=target,
+        output_type="sample",
+        locations=locations,
+        reference_dates=reference_dates,
+        horizons=horizons,
+    )
+    o = _prepare_oracle_frame(oracle_df, target)
     if f is None or o is None or f.is_empty() or o.is_empty():
         return {}
 
     extra_cols = _resolve_extra_task_ids(f.columns, o.columns, extra_task_ids)
-    f = f.with_columns([
-        pl.col("location").cast(pl.String),
-        pl.col("horizon").fill_null(0).cast(pl.Int32),
-        pl.col("output_type_id").cast(pl.String),
-        pl.col("value").cast(pl.Float64),
-        pl.col("reference_date").cast(pl.String),
-        pl.col("target_end_date").cast(pl.String),
-        pl.col("target").cast(pl.String),
-    ] + [pl.col(ec).cast(pl.String) for ec in extra_cols if ec in f.columns])
-
-    f = f.filter(pl.col("target") == target)
-    if "output_type" in f.columns:
-        f = f.filter(pl.col("output_type") == "sample")
-    if locations is not None and len(locations) > 0 and "all" not in locations:
-        f = f.filter(pl.col("location").is_in(locations))
-    if reference_dates is not None and len(reference_dates) > 0 and "all" not in reference_dates:
-        f = f.filter(pl.col("reference_date").is_in(reference_dates))
-    if horizons is not None and len(horizons) > 0:
-        f = f.filter(pl.col("horizon").is_in(horizons))
-    f = f.drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"])
+    f = f.with_columns(
+        [
+            pl.col("location").cast(pl.String),
+            pl.col("horizon").fill_null(0).cast(pl.Int32),
+            pl.col("output_type_id").cast(pl.String),
+            pl.col("value").cast(pl.Float64),
+            pl.col("reference_date").cast(pl.String),
+            pl.col("target_end_date").cast(pl.String),
+            pl.col("target").cast(pl.String),
+        ]
+        + [pl.col(ec).cast(pl.String) for ec in extra_cols]
+    )
+    f = f.drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"] + extra_cols)
     if f.is_empty():
         return {}
 
@@ -873,77 +1152,135 @@ def score_sample_forecasts(
     if merged.is_empty():
         return {}
 
-    group_keys = ["reference_date", "location", "horizon", "target_end_date"] + extra_cols
-    crps_rows: List[Dict[str, Any]] = []
-    for keys, g in merged.group_by(group_keys, maintain_order=True):
-        vals = g.get_column("value").to_numpy()
-        y_val = float(g.get_column("oracle_value")[0])
-        row = dict(zip(group_keys, keys))
-        row["oracle_value"] = y_val
-        row["crps"] = crps_ensemble_1d(vals, y_val)
-        row["n_samples"] = int(vals.size)
-        crps_rows.append(row)
+    valid = merged.filter(pl.col("value").is_finite() & pl.col("oracle_value").is_finite())
+    if valid.is_empty():
+        return {}
 
-    task_df = pl.DataFrame(crps_rows)
+    group_keys = ["reference_date", "location", "horizon", "target_end_date"] + extra_cols
+    m_expr = pl.len().over(group_keys).cast(pl.Float64)
+    task_df = (
+        valid.sort(group_keys + ["value"])
+        .with_columns(
+            pl.int_range(0, pl.len()).over(group_keys).cast(pl.Float64).alias("_i"),
+            m_expr.alias("_m"),
+        )
+        .group_by(group_keys, maintain_order=True)
+        .agg(
+            pl.col("oracle_value").first().alias("oracle_value"),
+            (
+                (pl.col("value") - pl.col("oracle_value")).abs().mean()
+                - ((2.0 * pl.col("_i") - pl.col("_m") + 1.0) * pl.col("value")).sum()
+                / (pl.col("_m").first() * pl.col("_m").first())
+            )
+            .clip(lower_bound=0.0)
+            .alias("crps"),
+            pl.len().cast(pl.Int64).alias("n_samples"),
+        )
+    )
+
     agg_set = {str(x) for x in aggregate_locations} if aggregate_locations is not None else {"US"}
-    is_agg = task_df["location"].is_in(sorted(agg_set)) if agg_set else pl.Series(values=[False] * task_df.height)
-    primary_df = task_df.filter(~is_agg) if (~is_agg).any() else task_df.filter(is_agg)
-    has_primary = bool((~is_agg).any())
+    agg_list = sorted(agg_set)
+    is_agg_expr = pl.col("location").is_in(agg_list) if agg_list else pl.lit(False)
+    has_primary = bool(task_df.select((~is_agg_expr).any()).item())
+    primary_df = task_df.filter(~is_agg_expr) if has_primary else task_df.filter(is_agg_expr)
 
     mean_energy: Optional[float] = None
-    energy_rows: List[Dict[str, Any]] = []
-    if compute_energy_score and merged.height > 0:
-        es_vals: List[float] = []
+    energy_df: Optional[pl.DataFrame] = None
+    if compute_energy_score and valid.height > 0:
         round_keys = ["reference_date", "location"] + extra_cols
-        for rk_vals, rg in merged.group_by(round_keys, maintain_order=True):
-            piv = rg.pivot(
-                on="horizon",
-                index="output_type_id",
-                values="value",
-                aggregate_function="first",
+        piv_x = valid.pivot(
+            on="horizon",
+            index=round_keys + ["output_type_id"],
+            values="value",
+            aggregate_function="first",
+        )
+        h_cols = [c for c in piv_x.columns if c not in round_keys and c != "output_type_id"]
+        if len(h_cols) >= 2:
+            tasks_es = (
+                valid.group_by(round_keys + ["horizon"], maintain_order=True)
+                .agg(pl.col("oracle_value").first())
+                .pivot(on="horizon", index=round_keys, values="oracle_value", aggregate_function="first")
+                .with_row_index("_gid")
             )
-            h_cols = [c for c in piv.columns if c != "output_type_id"]
-            if len(h_cols) < 2:
-                continue
-            piv_clean = piv.drop_nulls(subset=h_cols)
-            if piv_clean.height < 2:
-                continue
-            obs_by_h = {
-                str(r["horizon"]): float(r["oracle_value"])
-                for r in rg.select(["horizon", "oracle_value"]).unique().iter_rows(named=True)
-            }
-            if not all(hc in obs_by_h for hc in h_cols):
-                continue
-            mat = piv_clean.select(h_cols).to_numpy()
-            if mat.shape[0] > 200:
-                idx = np.linspace(0, mat.shape[0] - 1, 200, dtype=int)
-                mat = mat[idx]
-            y_vec = np.asarray([obs_by_h[hc] for hc in h_cols], dtype=np.float64)
-            es_v = energy_score(mat, y_vec)
-            if math.isfinite(es_v):
-                rk_tuple = rk_vals if isinstance(rk_vals, tuple) else (rk_vals,)
-                erow = dict(zip(round_keys, rk_tuple))
-                erow["horizon"] = 0
-                erow["energy_score"] = es_v
-                energy_rows.append(erow)
-                if not has_primary or str(erow["location"]) not in agg_set:
-                    es_vals.append(es_v)
-        if es_vals:
-            mean_energy = float(np.mean(es_vals))
+            y_sel = [
+                pl.col(c).cast(pl.Float64) if c in tasks_es.columns else pl.lit(None, dtype=pl.Float64).alias(c)
+                for c in h_cols
+            ]
+            Y_all = tasks_es.select(y_sel).to_numpy()
+            piv_x_g = (
+                piv_x.join(tasks_es.select(round_keys + ["_gid"]), on=round_keys, how="inner")
+                .sort("_gid", maintain_order=True)
+            )
+            gids_arr = piv_x_g.get_column("_gid").to_numpy()
+            n_rows_x = len(gids_arr)
+            if n_rows_x > 0:
+                X_all = piv_x_g.select([pl.col(c).cast(pl.Float64) for c in h_cols]).to_numpy()
+                locs_list = tasks_es.get_column("location").to_list()
+                chg = np.flatnonzero(gids_arr[1:] != gids_arr[:-1]) + 1
+                starts = np.concatenate(([0], chg))
+                ends = np.concatenate((chg, [n_rows_x]))
+                kept_gids: List[int] = []
+                kept_scores: List[float] = []
+                primary_es_vals: List[float] = []
+
+                for s_idx, e_idx in zip(starts, ends):
+                    if e_idx - s_idx < 2:
+                        continue
+                    gid = int(gids_arr[s_idx])
+                    X_g = X_all[s_idx:e_idx]
+                    y_g = Y_all[gid]
+                    present_h = ~np.all(np.isnan(X_g), axis=0) & np.isfinite(y_g)
+                    if int(present_h.sum()) < 2:
+                        continue
+                    X_sub = X_g[:, present_h]
+                    valid_rows = np.all(np.isfinite(X_sub), axis=1)
+                    if not np.all(valid_rows):
+                        if int(valid_rows.sum()) < 2:
+                            continue
+                        X_sub = X_sub[valid_rows]
+                    if X_sub.shape[0] > 200:
+                        idx = np.linspace(0, X_sub.shape[0] - 1, 200, dtype=int)
+                        X_sub = X_sub[idx]
+                    es_v = energy_score(X_sub, y_g[present_h])
+                    if math.isfinite(es_v):
+                        kept_gids.append(gid)
+                        kept_scores.append(es_v)
+                        if not has_primary or str(locs_list[gid]) not in agg_set:
+                            primary_es_vals.append(es_v)
+
+                if primary_es_vals:
+                    mean_energy = float(np.mean(primary_es_vals))
+                if kept_gids and return_task_df:
+                    energy_df = (
+                        tasks_es[kept_gids]
+                        .select(round_keys)
+                        .with_columns(
+                            pl.lit(0, dtype=pl.Int64).alias("horizon"),
+                            pl.Series("energy_score", kept_scores, dtype=pl.Float64),
+                        )
+                    )
+
+    by_horizon: Dict[int, Dict[str, Any]] = {}
+    if not primary_df.is_empty():
+        for h_val, crps_mean, cnt in (
+            primary_df.group_by("horizon")
+            .agg(pl.col("crps").mean().alias("crps"), pl.len().alias("count"))
+            .sort("horizon")
+            .iter_rows()
+        ):
+            by_horizon[int(h_val)] = {"crps": float(crps_mean), "count": int(cnt)}
 
     evaluated_dates = sorted(task_df.get_column("reference_date").unique().to_list())
     distinct_locs = sorted(task_df.get_column("location").unique().to_list())
+    overall_crps = primary_df.select(pl.col("crps").mean()).item() if not primary_df.is_empty() else None
 
     out: Dict[str, Any] = {
         "overall": {
-            "crps": float(primary_df["crps"].mean()),
+            "crps": float(overall_crps) if overall_crps is not None else float("nan"),
             "energy_score": mean_energy,
             "count": int(primary_df.height),
         },
-        "by_horizon": {
-            int(h): {"crps": float(primary_df.filter(pl.col("horizon") == h)["crps"].mean()), "count": int(primary_df.filter(pl.col("horizon") == h).height)}
-            for h in sorted(primary_df.get_column("horizon").unique().to_list())
-        },
+        "by_horizon": by_horizon,
         "metadata": {
             "evaluated_dates": evaluated_dates,
             "dates_count": len(evaluated_dates),
@@ -954,11 +1291,8 @@ def score_sample_forecasts(
     }
     if return_task_df:
         out["task_df"] = task_df
-        out["energy_df"] = pl.DataFrame(energy_rows) if energy_rows else None
+        out["energy_df"] = energy_df
     return out
-
-
-_INT_DTYPES = (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32)
 
 
 def _canonical_task_frame(

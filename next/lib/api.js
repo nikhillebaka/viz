@@ -13,6 +13,22 @@ const TOL = 1e-6; // quantile levels are matched within this
 // interval level → its lower and upper quantile
 const LEVEL_Q = (level) => [(1 - level) / 2, 1 - (1 - level) / 2];
 
+/**
+ * Add signed calendar months in UTC, preserving day-of-month clamped to the target month length.
+ * @param {number} ms UTC epoch ms
+ * @param {number} months signed month offset
+ * @returns {number} UTC epoch ms
+ */
+export function addMonthsUtc(ms, months) {
+  if (!Number.isFinite(ms)) return NaN;
+  const d = new Date(ms);
+  const targetM = d.getUTCMonth() + Math.trunc(months);
+  const y = d.getUTCFullYear() + Math.floor(targetM / 12);
+  const m = ((targetM % 12) + 12) % 12;
+  const maxDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return Date.UTC(y, m, Math.min(d.getUTCDate(), maxDay));
+}
+
 let activeHubId = typeof location !== "undefined" ? (new URLSearchParams(location.search).get("hub") || null) : null;
 
 /** Current workspace hub id (from `?hub=` or the loaded manifest). */
@@ -268,6 +284,7 @@ export class Fan {
     this.target = head.target;
     this.season = head.season;
     this.location = head.location;
+    this.timeUnit = head.time_unit === "month" ? "month" : "week";
     this.horizonOffsetDays = Number.isFinite(head.horizon_offset_days) ? head.horizon_offset_days : 0;
     this.dims = head.dims ? Object.freeze({ ...head.dims }) : null;
     this.rounds = Object.freeze([...head.rounds]);
@@ -277,12 +294,26 @@ export class Fan {
     this.start = parseIso(head.start);
     this.end = parseIso(head.end);
 
-    // the timeline: every week from the first round to the last; rounds off the grid snap to it
+    // the timeline: every week (or month when timeUnit === "month") from first round to last
     const rt = this.rounds.map(parseIso);
-    const t0 = rt[0], N = rt.length ? Math.round((rt.at(-1) - t0) / WEEK) + 1 : 0;
-    this.dates = Object.freeze(Array.from({ length: N }, (_, i) => t0 + i * WEEK));
-    this.roundAt = new Int16Array(N).fill(-1);
-    rt.forEach((t, r) => { const di = Math.round((t - t0) / WEEK); if (this.roundAt[di] < 0) this.roundAt[di] = r; });
+    this.#roundMs = rt;
+    const t0 = rt[0];
+    if (this.timeUnit === "month" && rt.length) {
+      const d0 = new Date(t0), dN = new Date(rt.at(-1));
+      const N = Math.max(1, (dN.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (dN.getUTCMonth() - d0.getUTCMonth()) + 1);
+      this.dates = Object.freeze(Array.from({ length: N }, (_, i) => addMonthsUtc(t0, i)));
+      this.roundAt = new Int16Array(N).fill(-1);
+      rt.forEach((t, r) => {
+        const dt = new Date(t);
+        const di = Math.max(0, Math.min(N - 1, (dt.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (dt.getUTCMonth() - d0.getUTCMonth())));
+        if (this.roundAt[di] < 0) this.roundAt[di] = r;
+      });
+    } else {
+      const N = rt.length ? Math.round((rt.at(-1) - t0) / WEEK) + 1 : 0;
+      this.dates = Object.freeze(Array.from({ length: N }, (_, i) => t0 + i * WEEK));
+      this.roundAt = new Int16Array(N).fill(-1);
+      rt.forEach((t, r) => { const di = Math.round((t - t0) / WEEK); if (this.roundAt[di] < 0) this.roundAt[di] = r; });
+    }
 
     const od = head.observed?.dates || [], off = head.observed?.offset ?? 0, len = head.observed?.length ?? od.length;
     const obs = [];
@@ -312,16 +343,17 @@ export class Fan {
     this.present = new Set([...this.#models].filter(([, m]) => m.rounds.size).map(([id]) => id));
     this.#med = this.#qIndex(0.5);
 
-    const offsetMs = this.horizonOffsetDays * DAY;
+    const offsetMs = this.timeUnit === "month" ? 0 : this.horizonOffsetDays * DAY;
     this.gridOrigin = obs.length ? obs[0].t : (Number.isFinite(t0) ? t0 + offsetMs : NaN);
     const lastH = this.horizons.length ? Math.max(...this.horizons) : 0;
-    const lastRound = rt.length ? this.dates.at(-1) : NaN;
-    const first = obs.length ? obs[0].t : t0 - WEEK;
-    const last = Math.max(obs.length ? obs.at(-1).t : -Infinity, lastRound + lastH * WEEK + offsetMs);
+    const lastRound = rt.length ? rt.at(-1) : NaN;
+    const first = obs.length ? obs[0].t : (this.timeUnit === "month" ? addMonthsUtc(t0, -1) : t0 - WEEK);
+    const tail = this.timeUnit === "month" ? addMonthsUtc(lastRound, lastH) : (lastRound + lastH * WEEK + offsetMs);
+    const last = Math.max(obs.length ? obs.at(-1).t : -Infinity, tail);
     this.window = Object.freeze([first, last]);
   }
 
-  #body; #Q; #med; #models; #obsAt;
+  #body; #Q; #med; #models; #obsAt; #roundMs;
   #pts = new Map();   // id → level → (FanPoint[] | null | undefined)[] by timeline index
   #ymax = new Map();
   #qi = new Map();
@@ -334,16 +366,21 @@ export class Fan {
 
   /**
    * @param {string} iso
-   * @returns {number} the timeline index of that week (within half a week), or -1
+   * @returns {number} the timeline index of that round/week (or month when monthly), or -1
    */
   indexOf(iso) {
     const t = parseIso(iso);
     if (!Number.isFinite(t) || !this.dates.length) return -1;
+    if (this.timeUnit === "month") {
+      const d0 = new Date(this.dates[0]), dt = new Date(t);
+      const i = (dt.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (dt.getUTCMonth() - d0.getUTCMonth());
+      return i >= 0 && i < this.dates.length && Math.abs(t - this.dates[i]) < 16 * DAY ? i : -1;
+    }
     const i = Math.round((t - this.dates[0]) / WEEK);
     return i >= 0 && i < this.dates.length && Math.abs(t - this.dates[i]) < WEEK / 2 ? i : -1;
   }
 
-  /** @param {number} t ms @returns {number | undefined} the observed value for that week */
+  /** @param {number} t ms @returns {number | undefined} the observed value for that week/month */
   observedAt(t) { return this.#obsAt.get(t); }
 
   /** @param {string} id @param {number} di timeline index @returns {boolean} a forecast from that model on that week */
@@ -352,20 +389,19 @@ export class Fan {
     return r >= 0 && r !== undefined && !!this.#models.get(id)?.rounds.has(r);
   }
 
-  // the last observed week strictly before firstT, provided the gap is at most 1 week
+  // the last observed point strictly before firstT, provided the gap is at most 1 step (1 wk or 1 mo)
   #anchorBefore(firstT) {
     const o = this.observed;
     let lo = 0, hi = o.length;               // first index with t >= firstT
     while (lo < hi) { const mid = (lo + hi) >> 1; if (o[mid].t < firstT) lo = mid + 1; else hi = mid; }
     const a = lo > 0 ? o[lo - 1] : null;
-    if (!a || firstT - a.t > WEEK) return null;
+    const maxGap = this.timeUnit === "month" ? 35 * DAY : WEEK;
+    if (!a || firstT - a.t > maxGap) return null;
     return a;
   }
 
   /**
-   * A model's forecast on one timeline week at one interval level: the anchor (the last observed week
-   * at most 7 days before the first forecast point, if any), then one point per horizon with a median.
-   * lo/hi are NaN when the model lacks that level's quantiles (and always for level 0).
+   * A model's forecast on one timeline week/month at one interval level.
    * @param {string} id
    * @param {number} di timeline index
    * @param {number} level 0.95 | 0.8 | 0.5 | 0
@@ -390,14 +426,16 @@ export class Fan {
     if (localR === undefined || this.#med < 0) return null;
     const [ql, qh] = level ? LEVEL_Q(level) : [NaN, NaN];
     const li = level ? this.#qIndex(ql) : -1, hi = level ? this.#qIndex(qh) : -1;
-    const B = this.#body, mH = m.horizons.length, Q = this.#Q, ref = this.dates[di];
-    const offsetMs = this.horizonOffsetDays * DAY;
+    const B = this.#body, mH = m.horizons.length, Q = this.#Q;
+    const ref = this.timeUnit === "month" && Number.isFinite(this.#roundMs[r]) ? this.#roundMs[r] : this.dates[di];
+    const offsetMs = this.timeUnit === "month" ? 0 : this.horizonOffsetDays * DAY;
     const out = [];
     for (let k = 0; k < mH; k++) {
       const base = m.offset + (localR * mH + k) * Q, med = B[base + this.#med];
       if (!Number.isFinite(med)) continue;
       const h = m.horizons[k];
-      out.push(Object.freeze({ t: ref + h * WEEK + offsetMs, h, lo: li < 0 ? NaN : B[base + li], hi: hi < 0 ? NaN : B[base + hi], med }));
+      const t = this.timeUnit === "month" ? addMonthsUtc(ref, h) : (ref + h * WEEK + offsetMs);
+      out.push(Object.freeze({ t, h, lo: li < 0 ? NaN : B[base + li], hi: hi < 0 ? NaN : B[base + hi], med }));
     }
     if (!out.length) return null;
     const a = this.#anchorBefore(out[0].t);

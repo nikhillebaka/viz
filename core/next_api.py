@@ -11,6 +11,7 @@ Endpoints:
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
+from datetime import timedelta
 import json
 import logging
 import re
@@ -42,6 +43,25 @@ def _resolve_horizon_offset(frames: Sequence[pl.DataFrame], default_offset: int)
             except Exception:
                 pass
     return counts.most_common(1)[0][0] if counts else int(default_offset)
+
+
+def _resolve_effective_scale(
+    meta: Dict[str, Any],
+    obs_by_loc: Optional[Dict[str, Tuple[List[str], List[float]]]],
+) -> Tuple[str, str]:
+    """Auto-promote 0-100 values mislabeled as `proportion` (e.g. China ILI) to `percentage`."""
+    scale = str(meta.get("scale") or "count")
+    unit = str(meta.get("unit") or "")
+    if scale == "proportion" and obs_by_loc:
+        peak = max(
+            (float(v) for _, vals in obs_by_loc.values() for v in vals if v is not None and np.isfinite(v)),
+            default=0.0,
+        )
+        if peak > 1.5:
+            scale = "percentage"
+            if not unit.startswith("%"):
+                unit = "%"
+    return scale, unit
 
 FAN_MAGIC_V1 = b"VZF1"
 FAN_MAGIC_V2 = b"VZF2"
@@ -218,19 +238,23 @@ class NextData:
         for t in config.get_weekly_targets():
             m = config.get_target_metadata(t)
             vlocs = self.valid_locations_for_target(t)
+            obs_by_loc = None if m.get("is_categorical") else self._observed(t)
+            eff_scale, eff_unit = _resolve_effective_scale(m, obs_by_loc)
             t_obj = {
                 "id": t,
                 "label": m.get("display_name") or t,
                 "short": m.get("short_name") or (m.get("display_name") or t),
-                "unit": m.get("unit") or "",
+                "unit": eff_unit,
                 "is_rate": bool(m.get("is_rate")),
                 "is_categorical": bool(m.get("is_categorical")),
-                "scale": m.get("scale") or "count",
+                "has_peaks": bool(loader.peaks.is_available(t)),
+                "scale": eff_scale,
                 "non_negative": bool(m.get("is_non_negative", True)),
                 "per_100k_capable": bool(m.get("per_100k_capable", False)),
                 "output_types": list(m.get("output_types") or ["quantile"]),
                 "categories": list(m.get("categories") or []),
                 "dimensions": m.get("dimensions") or {},
+                "time_unit": m.get("time_unit") or "week",
                 "horizons": m.get("horizons") or {"required": [], "optional": []},
             }
             if vlocs and len(vlocs) < len(all_locs_set):
@@ -441,7 +465,7 @@ class NextData:
                 try:
                     cols = lf_o.collect_schema().names()
                     q = lf_o.filter(pl.col("target") == target)
-                    if "output_type" in cols and not q.filter(pl.col("output_type") == "pmf").collect().is_empty():
+                    if "output_type" in cols and not q.filter(pl.col("output_type") == "pmf").head(1).collect().is_empty():
                         q = q.filter(pl.col("output_type") == "pmf")
                     obs_locs = {
                         str(x) for x in q.select(pl.col("location").cast(pl.String)).unique().collect().get_column("location").to_list()
@@ -451,20 +475,34 @@ class NextData:
                     obs_locs = set()
             if not obs_locs:
                 models = self.loader.scan_models()
+                loc_queries: List[pl.LazyFrame] = []
                 for mid, info in models.items():
                     if info.get("targets") and target not in info["targets"]:
                         continue
                     lf_p = self.loader.cache_mgr.scan_model_pmf(info.get("raw_name", mid), is_local=info.get("is_local", False))
-                    if lf_p is None:
-                        continue
-                    try:
-                        obs_locs.update(
-                            str(x)
-                            for x in lf_p.filter(pl.col("target") == target).select(pl.col("location").cast(pl.String)).unique().collect().get_column("location").to_list()
-                            if x and str(x) in hub_locs
+                    if lf_p is not None:
+                        loc_queries.append(
+                            lf_p.filter(pl.col("target") == target)
+                            .select(pl.col("location").cast(pl.String))
+                            .unique()
                         )
+                if loc_queries:
+                    try:
+                        for ldf in pl.collect_all(loc_queries):
+                            obs_locs.update(
+                                str(x) for x in ldf.get_column("location").to_list()
+                                if x and str(x) in hub_locs
+                            )
                     except Exception:
-                        pass
+                        for lq in loc_queries:
+                            try:
+                                ldf = lq.collect()
+                                obs_locs.update(
+                                    str(x) for x in ldf.get_column("location").to_list()
+                                    if x and str(x) in hub_locs
+                                )
+                            except Exception:
+                                pass
         else:
             obs_locs = {k for k in self._observed(target).keys() if k in hub_locs}
 
@@ -497,12 +535,13 @@ class NextData:
         if lf is None or not rounds:
             return out
         start, end = loader.get_season_bounds(season)
+        max_asof = (parse_iso_date(rounds[-1]) + timedelta(days=1)).isoformat()
         try:
             df = (
                 lf.filter(
                     (pl.col("target") == target)
                     & (pl.col("location") == str(location))
-                    & (pl.col("as_of").cast(pl.Utf8) <= rounds[-1])
+                    & (pl.col("as_of").cast(pl.Utf8) <= max_asof)
                     & (pl.col("target_end_date").cast(pl.Utf8) >= str(start))
                     & (pl.col("target_end_date").cast(pl.Utf8) <= str(end))
                 )
@@ -522,7 +561,8 @@ class NextData:
         keys = sorted(snaps)
         k = -1
         for r in rounds:
-            while k + 1 < len(keys) and keys[k + 1] <= r:
+            cutoff_asof = (parse_iso_date(r) + timedelta(days=1)).isoformat()
+            while k + 1 < len(keys) and keys[k + 1] <= cutoff_asof:
                 k += 1
             if k < 0:
                 continue
@@ -593,6 +633,8 @@ class NextData:
         rounds = sorted(loader.get_dates_for_season(season))
         if not rounds:
             return None
+        tmeta = self.config.get_target_metadata(target)
+        time_unit = str(tmeta.get("time_unit") or "week")
         cal = loader.get_calendar()
         start, end = cal.season_bounds(season)
         prev_start, prev_end = cal.season_bounds(cal.prev_season(season))
@@ -622,6 +664,7 @@ class NextData:
                 & (pl.col("target") == target)
                 & (pl.col("location") == str(location))
                 & (pl.col("output_type") == "quantile")
+                & pl.col("horizon").is_not_null()
             )
             for dcol, dval in resolved_dims.items():
                 if dcol in names:
@@ -650,7 +693,7 @@ class NextData:
             if not df.is_empty():
                 present.append((mid, df))
 
-        resolved_offset = _resolve_horizon_offset([df for _, df in present], cal.horizon_offset_days)
+        resolved_offset = 0 if time_unit == "month" else _resolve_horizon_offset([df for _, df in present], cal.horizon_offset_days)
 
         d_all, v_all = self._observed(target).get(str(location), ([], []))
         obs = [(d, v) for d, v in zip(d_all, v_all) if start <= d <= end]
@@ -737,6 +780,7 @@ class NextData:
                 "location": str(location),
                 "start": start,
                 "end": end,
+                "time_unit": time_unit,
                 "horizon_offset_days": resolved_offset,
                 "dims": resolved_dims,
                 "rounds": rounds,
@@ -795,6 +839,7 @@ class NextData:
                 (pl.col("reference_date") == round_date)
                 & (pl.col("target") == target)
                 & (pl.col("location") == str(location))
+                & pl.col("horizon").is_not_null()
             )
             for dcol, dval in resolved_dims.items():
                 if dcol in names:
@@ -812,7 +857,9 @@ class NextData:
 
         collected = pl.collect_all(frames) if frames else []
         present = [(mid, df) for mid, df in zip(ids, collected) if not df.is_empty()]
-        resolved_offset = _resolve_horizon_offset([df for _, df in present], cal.horizon_offset_days)
+        traj_tmeta = self.config.get_target_metadata(target)
+        traj_time_unit = str(traj_tmeta.get("time_unit") or "week")
+        resolved_offset = 0 if traj_time_unit == "month" else _resolve_horizon_offset([df for _, df in present], cal.horizon_offset_days)
 
         global_h = sorted({int(h) for _, df in present for h in df.get_column("horizon").unique().to_list() if h is not None})
         body: List[np.ndarray] = []

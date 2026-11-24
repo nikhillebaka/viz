@@ -21,16 +21,24 @@ import tempfile
 import unittest
 from unittest import mock
 
+import numpy as np
 import polars as pl
 
 import conftest  # noqa: F401
 from viz.core.data_loader import SandboxDataLoader
 from viz.core.evaluation import EvaluationEngine, EvaluationParams, _shared_task_wis
 from viz.core.metrics import (
+    LOG_SCORE_FLOOR,
     _pairwise_relative_wis_reference,
     compute_pairwise_relative_wis,
+    crps_ensemble_1d,
+    energy_score,
     find_common_tasks,
     score_forecasts,
+    score_pmf_forecasts,
+    score_sample_forecasts,
+    score_task_wis,
+    summarize_scored_tasks,
 )
 
 TARGET = "wk inc flu hosp"
@@ -327,6 +335,342 @@ class TestOracleMemo(unittest.TestCase):
             o = oracle_frame().with_columns(pl.col("oracle_value") * scale)
             fresh = score_forecasts(df, o.clone(), target=TARGET)["overall"]["wis"]
             self.assertEqual(score_forecasts(df, o, target=TARGET)["overall"]["wis"], fresh)
+
+    def test_loader_get_oracle_caches_identity_and_refreshes_on_rewrite(self):
+        with tempfile.TemporaryDirectory(prefix="viz-ora-cache-") as tmp:
+            base = Path(tmp)
+            (base / "viz").mkdir()
+            (base / "auxiliary-data").mkdir()
+            (base / "target-data").mkdir()
+            pl.DataFrame({
+                "abbreviation": LOCATIONS,
+                "location": LOCATIONS,
+                "location_name": LOCATIONS,
+                "population": [POPULATION[x] for x in LOCATIONS],
+            }).write_csv(base / "auxiliary-data" / "locations.csv")
+            o1 = oracle_frame()
+            ora_csv = base / "target-data" / "oracle-output.csv"
+            o1.write_csv(ora_csv)
+            loader = SandboxDataLoader(base, include_remote=False, cache_dir=base / "cache", surveillance_dir=base / "surv")
+            first = loader.get_oracle(as_polars=True)
+            second = loader.get_oracle(as_polars=True)
+            self.assertIs(first, second)
+            pq = loader.cache_mgr.get_oracle_parquet()
+            o2 = o1.with_columns(pl.col("oracle_value") * 2.0)
+            o2.write_parquet(pq)
+            # Ensure bumped mtime & distinct size trigger fresh read immediately
+            refreshed = loader.get_oracle(as_polars=True)
+            self.assertIsNot(first, refreshed)
+            self.assertAlmostEqual(
+                float(refreshed["oracle_value"].sum()),
+                float(first["oracle_value"].sum()) * 2.0,
+                places=6,
+            )
+
+
+def _reference_pmf_loop(
+    f: pl.DataFrame,
+    o: pl.DataFrame,
+    target: str,
+    categories,
+    ordinal: bool,
+    extra_cols=(),
+    aggregate_locations=("US",),
+):
+    """Exact original Python group_by PMF loop reference."""
+    merged = (
+        f.filter((pl.col("target") == target) & (pl.col("output_type") == "pmf"))
+        .with_columns(
+            pl.col("location").cast(pl.String),
+            pl.col("horizon").fill_null(0).cast(pl.Int32),
+            pl.col("output_type_id").cast(pl.String).str.strip_chars(),
+            pl.col("value").cast(pl.Float64),
+            pl.col("reference_date").cast(pl.String),
+            pl.col("target_end_date").cast(pl.String),
+            *[pl.col(c).cast(pl.String) for c in extra_cols],
+        )
+        .drop_nulls(subset=["value", "output_type_id", "target_end_date", "location", "horizon"])
+        .join(
+            o.filter(pl.col("target") == target)
+            .with_columns(
+                pl.col("location").cast(pl.String),
+                pl.col("target_end_date").cast(pl.String),
+                pl.col("output_type_id").cast(pl.String).str.strip_chars().alias("true_category"),
+                pl.col("oracle_value").cast(pl.Float64),
+                *[pl.col(c).cast(pl.String) for c in extra_cols],
+            )
+            .filter(pl.col("oracle_value") > 0)
+            .select(["target_end_date", "location", *extra_cols, "true_category"]),
+            on=["target_end_date", "location", *extra_cols],
+            how="inner",
+        )
+    )
+    if merged.is_empty():
+        return {}
+    cat_order = [str(c) for c in categories] if categories else sorted(
+        set(merged.get_column("output_type_id").to_list()) | set(merged.get_column("true_category").to_list())
+    )
+    cat_idx = {c: i for i, c in enumerate(cat_order)}
+    K = len(cat_order)
+    group_keys = ["reference_date", "location", "horizon", "target_end_date", *extra_cols]
+    task_rows = []
+    for keys, g in merged.group_by(group_keys, maintain_order=True):
+        probs = np.zeros(K, dtype=np.float64)
+        for oid, val in zip(g.get_column("output_type_id").to_list(), g.get_column("value").to_list()):
+            idx = cat_idx.get(str(oid))
+            if idx is not None and val is not None and np.isfinite(val):
+                probs[idx] += max(0.0, float(val))
+        s = float(probs.sum())
+        if s > 0 and abs(s - 1.0) > 1e-6:
+            probs /= s
+        true_cat = str(g.get_column("true_category")[0])
+        y_idx = cat_idx.get(true_cat)
+        if y_idx is None:
+            continue
+        p_true = float(probs[y_idx])
+        log_score = float(-math.log(max(p_true, LOG_SCORE_FLOOR)))
+        y_vec = np.zeros(K, dtype=np.float64)
+        y_vec[y_idx] = 1.0
+        brier = float(np.sum((probs - y_vec) ** 2))
+        rps = float(np.sum((np.cumsum(probs) - (np.arange(K) >= y_idx).astype(np.float64)) ** 2)) if (ordinal and K > 1) else None
+        hit_mode = 1.0 if (s > 0.0 and int(np.argmax(probs)) == y_idx) else 0.0
+        row = dict(zip(group_keys, keys))
+        row.update({"true_category": true_cat, "p_observed": p_true, "rps": rps, "log_score": log_score, "brier": brier, "hit_mode": hit_mode})
+        task_rows.append(row)
+    if not task_rows:
+        return {}
+    task_df = pl.DataFrame(task_rows)
+    agg_set = set(aggregate_locations)
+    is_agg = task_df["location"].is_in(sorted(agg_set))
+    has_primary = bool((~is_agg).any())
+    primary_df = task_df.filter(~is_agg) if has_primary else task_df.filter(is_agg)
+
+    def _agg(sub):
+        return {
+            "rps": float(sub["rps"].mean()) if ordinal and K > 1 else None,
+            "log_score": float(sub["log_score"].mean()),
+            "brier": float(sub["brier"].mean()),
+            "hit_mode": float(sub["hit_mode"].mean()) * 100.0,
+            "count": int(sub.height),
+        }
+
+    return {
+        "overall": _agg(primary_df),
+        "states": _agg(task_df.filter(~is_agg)) if has_primary else None,
+        "us": _agg(task_df.filter(is_agg)) if bool(is_agg.any()) else None,
+        "by_horizon": {int(h): _agg(primary_df.filter(pl.col("horizon") == h)) for h in sorted(primary_df.get_column("horizon").unique().to_list())},
+        "task_rows": task_df.sort(group_keys).to_dicts(),
+    }
+
+
+class TestPmfVectorizedMatchesReference(unittest.TestCase):
+    def test_pmf_randomized_edge_cases_and_lazy(self):
+        rng = random.Random(20261124)
+        cats = ["large_decrease", "decrease", "stable", "increase", "large_increase"]
+        target = "wk flu hosp rate change"
+        for trial in range(25):
+            ordinal = trial % 3 != 0
+            use_extra = trial % 2 == 0
+            refs = WEEKS[:4]
+            o_rows = []
+            f_rows = []
+            for d in WEEKS[:8]:
+                for loc in LOCATIONS[:4]:
+                    ages = ["overall", "0-17"] if use_extra else [None]
+                    for age in ages:
+                        tc = rng.choice(cats)
+                        row = {"target": target, "target_end_date": d.isoformat(), "location": loc,
+                               "output_type": "pmf", "output_type_id": tc, "oracle_value": 1.0}
+                        if use_extra:
+                            row["age_group"] = age
+                        o_rows.append(row)
+            for ref in refs:
+                for loc in LOCATIONS[:4]:
+                    ages = ["overall", "0-17"] if use_extra else [None]
+                    for age in ages:
+                        for h in (0, 1, 2):
+                            ted = ref + timedelta(weeks=h)
+                            if ted not in WEEKS[:8] or rng.random() < 0.2:
+                                continue
+                            mode = rng.choice(["normal", "unnorm", "zero", "dup", "partial"])
+                            if mode == "zero":
+                                vals = [0.0, -0.1, 0.0, float("nan"), 0.0]
+                            elif mode == "unnorm":
+                                raw = [rng.uniform(0.1, 5.0) for _ in cats]
+                                vals = raw
+                            else:
+                                raw = [rng.random() for _ in cats]
+                                s = sum(raw) or 1.0
+                                vals = [x / s for x in raw]
+                            used_cats = cats[:3] if mode == "partial" else cats
+                            for idx, cat in enumerate(used_cats):
+                                fr = {"target": target, "reference_date": ref.isoformat(), "horizon": h,
+                                      "location": loc, "target_end_date": ted.isoformat(), "output_type": "pmf",
+                                      "output_type_id": cat, "value": vals[idx]}
+                                if use_extra:
+                                    fr["age_group"] = age
+                                f_rows.append(fr)
+                            if mode == "dup":
+                                dup = dict(f_rows[-1])
+                                dup["value"] = 0.25
+                                f_rows.append(dup)
+            f_df = pl.DataFrame(f_rows, schema_overrides={"horizon": pl.Int32})
+            o_df = pl.DataFrame(o_rows)
+            extra = ["age_group"] if use_extra else None
+            ref_out = _reference_pmf_loop(f_df, o_df, target, cats, ordinal, extra_cols=extra or ())
+            got = score_pmf_forecasts(f_df, o_df, target, categories=cats, ordinal=ordinal, extra_task_ids=extra, return_task_df=True)
+            got_lazy = score_pmf_forecasts(f_df.lazy(), o_df.lazy(), target, categories=cats, ordinal=ordinal, extra_task_ids=extra, return_task_df=True)
+            group_keys = ["reference_date", "location", "horizon", "target_end_date", *(extra or ())]
+            for cand in (got, got_lazy):
+                with self.subTest(trial=trial):
+                    for k in ("overall", "states", "us", "by_horizon"):
+                        assert_equivalent(self, cand[k], ref_out[k], f"pmf.{k}")
+                    cand_rows = cand["task_df"].select(group_keys + ["true_category", "p_observed", "rps", "log_score", "brier", "hit_mode"]).sort(group_keys).to_dicts()
+                    assert_equivalent(self, cand_rows, ref_out["task_rows"], "pmf.task_rows")
+
+
+class TestSampleVectorizedMatchesReference(unittest.TestCase):
+    def test_crps_and_energy_score_equivalence_heterogeneous_horizons(self):
+        rng = random.Random(99)
+        o_df = oracle_frame()
+        # Homogeneous + heterogeneous horizons across locations/dates, plus M=1/2/50/260
+        rows = []
+        for idx, ref in enumerate(WEEKS[:4]):
+            for loc in LOCATIONS[:4]:
+                hs = (0, 1) if (idx + LOCATIONS.index(loc)) % 3 == 0 else (0, 1, 2, 3)
+                m = 1 if (loc == "02" and idx == 3) else 45
+                for sid in range(m):
+                    for h in hs:
+                        if sid == 0 and h == 2 and loc == "01":
+                            continue  # missing one horizon on one sample id
+                        ted = ref + timedelta(weeks=h)
+                        if ted not in WEEKS:
+                            continue
+                        val = truth_value(loc, ted) * rng.uniform(0.7, 1.3)
+                        rows.append({
+                            "target": TARGET,
+                            "reference_date": ref.isoformat(),
+                            "horizon": h,
+                            "location": loc,
+                            "target_end_date": ted.isoformat(),
+                            "output_type": "sample",
+                            "output_type_id": f"s{sid}",
+                            "value": val,
+                        })
+        s_df = pl.DataFrame(rows, schema_overrides={"horizon": pl.Int32})
+        got = score_sample_forecasts(s_df, o_df, TARGET, compute_energy_score=True, return_task_df=True)
+        got_lazy = score_sample_forecasts(s_df.lazy(), o_df.lazy(), TARGET, compute_energy_score=True, return_task_df=True)
+        assert_equivalent(self, {k: got[k] for k in ("overall", "by_horizon", "metadata")}, {k: got_lazy[k] for k in ("overall", "by_horizon", "metadata")})
+
+        # Reference per-task CRPS via crps_ensemble_1d + naive energy_score
+        merged = s_df.join(o_df.select(["target_end_date", "location", "oracle_value"]), on=["target_end_date", "location"], how="inner")
+        ref_crps = {}
+        for (rd, loc, h, ted), g in merged.group_by(["reference_date", "location", "horizon", "target_end_date"]):
+            ref_crps[(rd, loc, int(h), ted)] = crps_ensemble_1d(g["value"].to_numpy(), float(g["oracle_value"][0]))
+        for row in got["task_df"].iter_rows(named=True):
+            key = (row["reference_date"], row["location"], int(row["horizon"]), row["target_end_date"])
+            self.assertAlmostEqual(row["crps"], ref_crps[key], delta=1e-12 * max(1.0, abs(ref_crps[key])))
+
+        # Reference naive Energy Score per (reference_date, location)
+        ref_es = {}
+        for (rd, loc), rg in merged.group_by(["reference_date", "location"], maintain_order=True):
+            piv = rg.pivot(on="horizon", index="output_type_id", values="value", aggregate_function="first")
+            h_cols = [c for c in piv.columns if c != "output_type_id"]
+            if len(h_cols) < 2:
+                continue
+            piv_clean = piv.drop_nulls(subset=h_cols)
+            if piv_clean.height < 2:
+                continue
+            obs_by_h = {str(r["horizon"]): float(r["oracle_value"]) for r in rg.select(["horizon", "oracle_value"]).unique().iter_rows(named=True)}
+            mat = piv_clean.select(h_cols).to_numpy()
+            y_vec = np.asarray([obs_by_h[hc] for hc in h_cols], dtype=np.float64)
+            # Naive N^2 Energy Score
+            t1 = float(np.mean(np.linalg.norm(mat - y_vec, axis=1)))
+            t2 = 0.5 * float(np.mean(np.linalg.norm(mat[:, None, :] - mat[None, :, :], axis=2)))
+            ref_es[(rd, loc)] = max(0.0, t1 - t2)
+        for row in got["energy_df"].iter_rows(named=True):
+            exp = ref_es[(row["reference_date"], row["location"])]
+            self.assertAlmostEqual(row["energy_score"], exp, delta=1e-12 * max(1.0, abs(exp)))
+
+        # Exercise energy_score chunked path (m > 256) vs exact N^2 formula
+        mat_big = np.random.default_rng(1).normal(1000.0, 0.01, size=(270, 4))
+        y_big = np.array([1000.0, 1000.0, 1000.0, 1000.0])
+        exact_big = max(0.0, float(np.mean(np.linalg.norm(mat_big - y_big, axis=1))) - 0.5 * float(np.mean(np.linalg.norm(mat_big[:, None, :] - mat_big[None, :, :], axis=2))))
+        self.assertAlmostEqual(energy_score(mat_big, y_big), exact_big, delta=1e-12)
+
+
+class TestQuantileFastPathsAndLazyPushdown(unittest.TestCase):
+    def test_score_task_wis_and_lazy_pushdown_match_score_forecasts(self):
+        rng = random.Random(17)
+        o_df = oracle_frame()
+        f1 = random_forecasts(rng, WEEKS[:5], LOCATIONS, QUANTILES_23, skip=0.2)
+        f2 = random_forecasts(rng, WEEKS[:5], LOCATIONS, QUANTILES_7, skip=0.3)
+
+        locs = ["01", "02", "05"]
+        refs = [WEEKS[1].isoformat(), WEEKS[3].isoformat()]
+        hs = [0, 2]
+        eager = score_forecasts(f1, o_df, TARGET, locations=locs, reference_dates=refs, horizons=hs, non_negative=True, return_task_df=True)
+        lazy = score_forecasts(f1.lazy(), o_df.lazy(), TARGET, locations=locs, reference_dates=refs, horizons=hs, non_negative=True, return_task_df=True)
+        for sec in ("overall", "states", "us", "by_horizon", "metadata"):
+            assert_equivalent(self, lazy[sec], eager[sec], f"lazy.{sec}")
+
+        # Single-model score_task_wis
+        tw1 = score_task_wis(f1.lazy(), o_df, TARGET, locations=locs, reference_dates=refs, horizons=hs, non_negative=True)
+        want1 = {
+            (r["reference_date"], r["location"], int(r["horizon"]), r["target_end_date"]): r["wis"]
+            for r in eager["task_df"].iter_rows(named=True)
+        }
+        for r in tw1.iter_rows(named=True):
+            k = (r["reference_date"], r["location"], int(r["horizon"]), r["target_end_date"])
+            self.assertAlmostEqual(r["wis"], want1[k], delta=1e-12)
+        self.assertEqual(tw1.height, len(want1))
+
+        # Batched multi-model score_task_wis with preserve_cols=["_mid"]
+        eager2 = score_forecasts(f2, o_df, TARGET, locations=locs, reference_dates=refs, horizons=hs, non_negative=True, return_task_df=True)
+        want2 = {
+            (r["reference_date"], r["location"], int(r["horizon"]), r["target_end_date"]): r["wis"]
+            for r in eager2["task_df"].iter_rows(named=True)
+        }
+        batch = pl.concat([f1.with_columns(pl.lit("m1").alias("_mid")), f2.with_columns(pl.lit("m2").alias("_mid"))])
+        tw_batch = score_task_wis(batch, o_df, TARGET, locations=locs, reference_dates=refs, horizons=hs, non_negative=True, preserve_cols=["_mid"])
+        self.assertEqual(tw_batch.height, len(want1) + len(want2))
+        for r in tw_batch.iter_rows(named=True):
+            ref_map = want1 if r["_mid"] == "m1" else want2
+            k = (r["reference_date"], r["location"], int(r["horizon"]), r["target_end_date"])
+            self.assertAlmostEqual(r["wis"], ref_map[k], delta=1e-12)
+
+        # summarize_scored_tasks direct equivalence on overall vs states/us/by_horizon
+        res_sum = summarize_scored_tasks(eager["task_df"], population_map=POPULATION)
+        self.assertIsNotNone(res_sum["states"])
+        self.assertAlmostEqual(res_sum["overall"]["wis"], res_sum["states"]["wis"], places=12)
+
+    def test_pmf_all_zero_probabilities_hit_mode_is_zero(self):
+        from viz.core.metrics import score_pmf_forecasts
+        cats = ["decrease", "stable", "increase"]
+        # Task predicts 0 mass across all categories while oracle is index 0 ("decrease")
+        f_df = pl.DataFrame({
+            "reference_date": ["2026-11-14"] * 3,
+            "target": ["wk flu hosp rate change"] * 3,
+            "horizon": [0, 0, 0],
+            "target_end_date": ["2026-11-14"] * 3,
+            "location": ["25"] * 3,
+            "output_type": ["pmf"] * 3,
+            "output_type_id": cats,
+            "value": [0.0, 0.0, 0.0],
+        })
+        o_df = pl.DataFrame({
+            "target": ["wk flu hosp rate change"],
+            "location": ["25"],
+            "target_end_date": ["2026-11-14"],
+            "oracle_value": [1.0],
+            "output_type": ["pmf"],
+            "output_type_id": ["decrease"],
+        })
+        res = score_pmf_forecasts(
+            f_df, o_df, "wk flu hosp rate change",
+            categories=cats,
+        )
+        self.assertAlmostEqual(res["overall"]["hit_mode"], 0.0, places=6)
 
 
 if __name__ == "__main__":

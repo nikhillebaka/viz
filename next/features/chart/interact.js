@@ -94,6 +94,27 @@ export class Interaction {
     return lineUnder(s, px, py, this.chart.ctx.store.get().focus);
   }
 
+  #snapTime(fan, nav, rawT) {
+    if (fan.timeUnit !== "month") {
+      const g0 = Number.isFinite(fan.gridOrigin) ? fan.gridOrigin : fan.dates[0];
+      return g0 + Math.round((rawT - g0) / WEEK) * WEEK;
+    }
+    let bestT = NaN, bestDist = 18 * 864e5;
+    for (const o of fan.observed) {
+      const d = Math.abs(o.t - rawT);
+      if (d < bestDist) { bestDist = d; bestT = o.t; }
+    }
+    for (const m of fan.present) {
+      const pts = fan.points(m, nav.week, 0);
+      if (!pts) continue;
+      for (const p of pts) {
+        const d = Math.abs(p.t - rawT);
+        if (d < bestDist) { bestDist = d; bestT = p.t; }
+      }
+    }
+    return bestT;
+  }
+
   /**
    * Re-reads everything under the pointer against the last frame; requests a frame when the hovered
    * week, the preview or the lifted grey line changed. Runs on pointer moves and after every frame.
@@ -103,11 +124,11 @@ export class Interaction {
     let t = null, preview = null, hot = null, cursor = "";
     if (this.mouse && s && nav && !nav.moving && !activeLayer()) {
       const [px, py] = this.local(this.mouse.x, this.mouse.y);
-      const g0 = Number.isFinite(chart.fan.gridOrigin) ? chart.fan.gridOrigin : chart.fan.dates[0];
-      const wk = g0 + Math.round((s.x.invert(px) - g0) / WEEK) * WEEK, xw = s.x(wk);
+      const snapped = this.#snapTime(chart.fan, nav, s.x.invert(px));
+      const xw = Number.isFinite(snapped) ? s.x(snapped) : NaN;
       const hit = this.#hit(px, py);
       if (hit) { cursor = "pointer"; if (hit.ctx) hot = hit.id; else preview = hit.id; }
-      if (xw >= 0 && xw <= s.w && py <= s.ay && (hit || nearMark(s, px, py))) t = wk;
+      if (Number.isFinite(xw) && xw >= 0 && xw <= s.w && py <= s.ay && (hit || nearMark(s, px, py))) t = snapped;
     }
     if (cursor !== this.cursor) { this.cursor = cursor; chart.canvas.style.cursor = cursor; }
     if (t !== this.hoverT || preview !== this.preview || hot !== this.hot) {

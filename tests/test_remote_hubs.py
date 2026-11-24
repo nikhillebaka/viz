@@ -472,6 +472,65 @@ class TestSyncLifecycle(unittest.TestCase):
         finally:
             self.mgr._client_factory = orig_factory
 
+    def test_settings_batch_sync_and_local_auto_updater(self):
+        from types import SimpleNamespace
+        from viz.remote.sync import LocalAutoUpdater
+
+        # 1. Persistent settings on RemoteStore
+        s0 = self.mgr.store.get_settings()
+        self.assertFalse(s0["auto_update_daily"])
+        self.assertIsNone(s0["last_auto_update"])
+        self.mgr.store.set_auto_update_daily(True)
+        self.assertTrue(self.mgr.store.get_settings()["auto_update_daily"])
+
+        # 2. Sequential batch sync (`start_sync_all`) syncs requested built-in hub cleanly
+        batch = self.mgr.start_sync_all(["flusight"])
+        self.assertIn(batch["total"], (0, 1))
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            cur = self.mgr.batch_status()
+            if cur is None or not cur.get("running"):
+                break
+            time.sleep(0.05)
+        cur = self.mgr.batch_status()
+        self.assertFalse(cur["running"])
+        self.assertIn("flusight", cur["completed"])
+
+        # 3. LocalAutoUpdater checks enabled hubs when due and updates stale ones
+        self.s3.put("model-output/Team-a/2026-10-31-Team-a.parquet", forecast_parquet("Team-a", "2026-10-31"))
+        fake_app = SimpleNamespace(remote_store=self.mgr.store, shared_remote_mgr=self.mgr)
+        updater = LocalAutoUpdater(fake_app, interval_seconds=86400.0, poll_seconds=60.0)
+        self.assertTrue(updater.is_due())
+        did_run = updater.run_once()
+        self.assertTrue(did_run)
+        self.assertIsNotNone(self.mgr.store.get_settings()["last_auto_update"])
+        self.assertFalse(updater.is_due())
+        self.assertIn("model-output/Team-a/2026-10-31-Team-a.parquet", self.mgr.store.load_manifest("flusight")["files"])
+
+        # 4. start_sync during an active batch (even with no job yet) raises RuntimeError cleanly, not StopIteration
+        with self.mgr._lock:
+            self.mgr._batch = {"running": True, "total": 1, "done": 0, "queued": ["flusight"], "completed": [], "errors": {}, "cancelled": False}
+        with self.assertRaises(RuntimeError):
+            self.mgr.start_sync("flusight")
+        self.assertTrue(self.mgr.cancel_all())
+        with self.mgr._lock:
+            self.mgr._batch = None
+
+        # 5. LocalAutoUpdater does not advance last_auto_update when all hub checks fail offline
+        import json as _json
+        reg = _json.loads(self.mgr.store.registry_path.read_text(encoding="utf-8"))
+        reg["settings"] = {"auto_update_daily": True, "last_auto_update": None}
+        self.mgr.store.registry_path.write_text(_json.dumps(reg), encoding="utf-8")
+        orig_check = self.mgr.check
+        def _fail_check(_hid):
+            raise RuntimeError("offline")
+        self.mgr.check = _fail_check
+        try:
+            self.assertFalse(updater.run_once())
+            self.assertIsNone(self.mgr.store.get_settings()["last_auto_update"])
+        finally:
+            self.mgr.check = orig_check
+
 
 if __name__ == "__main__":
     unittest.main()

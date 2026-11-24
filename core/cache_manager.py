@@ -1006,6 +1006,8 @@ class ParquetCacheManager:
                 path,
                 schema_overrides={
                     "location": pl.String,
+                    "geo_value": pl.String,
+                    "geo_abbr": pl.String,
                     "horizon": pl.Int32,
                     "oracle_value": pl.Float64,
                     "observation": pl.Float64,
@@ -1013,11 +1015,15 @@ class ParquetCacheManager:
                     "target_end_date": pl.String,
                     "truth_date": pl.String,
                     "date": pl.String,
+                    "time_value": pl.String,
+                    "time": pl.String,
                     "target": pl.String,
                     "as_of": pl.String,
                     "output_type": pl.String,
                     "output_type_id": pl.String,
                     "age_group": pl.String,
+                    "Season": pl.String,
+                    "season": pl.String,
                 },
                 null_values=NULL_VALUES,
                 ignore_errors=False,
@@ -1082,6 +1088,32 @@ class ParquetCacheManager:
                         priority=PRIORITY_REPO - 2,
                         path=p_respi,
                     ))
+            if not sources:
+                season_files = sorted(
+                    p for p in self.target_data_dir.glob("season_*/*")
+                    if p.is_file()
+                    and p.suffix.lower() in (".csv", ".parquet")
+                    and not p.name.endswith("-status.csv")
+                    and not p.name.startswith("influenza-admissions")
+                )
+                if season_files and self.auxiliary_data_dir.is_dir():
+                    for p_aux in sorted(self.auxiliary_data_dir.glob("concatenated_*data*")):
+                        if p_aux.is_file() and p_aux.suffix.lower() in (".csv", ".parquet"):
+                            sources.append(TruthSource(
+                                source_id=f"repo_concat:{p_aux.name}",
+                                label=p_aux.stem,
+                                kind="latest",
+                                priority=PRIORITY_REPO - 4,
+                                path=p_aux,
+                            ))
+                for p_s in season_files:
+                    sources.append(TruthSource(
+                        source_id=f"repo_season:{p_s.parent.name}/{p_s.name}",
+                        label=p_s.parent.name,
+                        kind="latest",
+                        priority=PRIORITY_REPO - 3,
+                        path=p_s,
+                    ))
 
         remote_ids = self.active_remote_hub_ids()
         for hub_id in remote_ids:
@@ -1129,7 +1161,9 @@ class ParquetCacheManager:
 
         def _build_reconciled() -> Optional[pl.DataFrame]:
             from viz.core.config import VizConfig
-            default_target = VizConfig(self.base_dir).get_default_target()
+            cfg = VizConfig(self.base_dir)
+            default_target = cfg.get_default_target()
+            all_target_ids = cfg.get_targets()
             self.warning_registry.clear("truth")
             pairs: List[Tuple[TruthSource, pl.DataFrame]] = []
             for src in sources:
@@ -1150,6 +1184,7 @@ class ParquetCacheManager:
                 target_default=default_target,
                 conflict_callback=lambda msg: self.warning_registry.add_warning("truth", msg),
                 pad_single_digit_fips=pad_fips,
+                target_ids=all_target_ids,
             )
 
         return self._build_cached_table(cache_name, file_paths, _build_reconciled)

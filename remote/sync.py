@@ -69,7 +69,10 @@ def _is_known_skip(skipped: Dict[str, Any], o: RemoteObject) -> bool:
     )
 
 
-def _resolve_truth_plan(t_objs: Dict[str, RemoteObject]) -> Dict[str, Dict[str, Any]]:
+def _resolve_truth_plan(
+    t_objs: Dict[str, RemoteObject],
+    aux_objs: Optional[Dict[str, RemoteObject]] = None,
+) -> Dict[str, Dict[str, Any]]:
     """Build canonical manifest descriptors for each supported upstream target-data layout."""
     plan: Dict[str, Dict[str, Any]] = {}
     oracle_obj = t_objs.get("target-data/oracle-output.parquet") or t_objs.get("target-data/oracle-output.csv")
@@ -104,13 +107,31 @@ def _resolve_truth_plan(t_objs: Dict[str, RemoteObject]) -> Dict[str, Dict[str, 
             (o for k, o in t_objs.items() if k.startswith("target-data/latest-") and k.endswith((".csv", ".parquet"))),
             key=lambda o: o.key,
         )
-        if respi_objs:
-            lms = [o.last_modified for o in respi_objs if o.last_modified]
+        nested_objs = sorted(
+            (
+                o for k, o in t_objs.items()
+                if k.startswith("target-data/season_")
+                and k.endswith((".csv", ".parquet"))
+                and not k.endswith("-status.csv")
+                and not Path(k).name.startswith("influenza-admissions")
+            ),
+            key=lambda o: o.key,
+        )
+        concat_objs = sorted(
+            (
+                o for k, o in (aux_objs or {}).items()
+                if re.match(r"^auxiliary-data/concatenated_[^/]+data\.(csv|parquet)$", k)
+            ),
+            key=lambda o: o.key,
+        ) if nested_objs else []
+        multi_objs = respi_objs or (concat_objs + nested_objs)
+        if multi_objs:
+            lms = [o.last_modified for o in multi_objs if o.last_modified]
             plan["latest"] = {
-                "key": ",".join(o.key for o in respi_objs),
-                "etag": "|".join(f"{o.key}:{o.etag}" for o in respi_objs),
+                "key": ",".join(o.key for o in multi_objs),
+                "etag": "|".join(f"{o.key}:{o.etag}" for o in multi_objs),
                 "last_modified": max(lms) if lms else "",
-                "objs": respi_objs,
+                "objs": multi_objs,
                 "multi": True,
             }
     adm_obj = t_objs.get("target-data/target-hospital-admissions.csv")
@@ -261,6 +282,8 @@ class RemoteManager:
         self._is_compatible = is_compatible
         self._transport_factory = transport_factory
         self._jobs: Dict[str, SyncJob] = {}
+        self._batch: Optional[Dict[str, Any]] = None
+        self._batch_cancel = threading.Event()
         self._lock = threading.Lock()
         self._listing_cache: Dict[str, Tuple[float, List[Tuple[RemoteObject, str]]]] = {}
 
@@ -315,8 +338,23 @@ class RemoteManager:
         job = self._jobs.get(hub_id)
         return job.to_dict() if job else None
 
+    def batch_status(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            if self._batch is None:
+                return None
+            return {
+                **self._batch,
+                "queued": list(self._batch.get("queued") or []),
+                "completed": list(self._batch.get("completed") or []),
+                "errors": dict(self._batch.get("errors") or {}),
+            }
+
+    def _is_busy_unlocked(self) -> bool:
+        return any(j.status == "running" for j in self._jobs.values()) or bool(self._batch and self._batch.get("running"))
+
     def is_busy(self) -> bool:
-        return any(j.status == "running" for j in self._jobs.values())
+        with self._lock:
+            return self._is_busy_unlocked()
 
     def warnings(self, hub_id: str) -> List[Dict[str, Any]]:
         man = self.store.load_manifest(hub_id)
@@ -539,6 +577,12 @@ class RemoteManager:
                 t_objs = {}
             man_truth = man.get("truth", {})
             truth_plan = _resolve_truth_plan(t_objs)
+            if t_objs and (not truth_plan or any(k.startswith("target-data/season_") for k in t_objs)):
+                try:
+                    aux_for_truth = {o.key: o for o in client.list("auxiliary-data/")}
+                except TransportError:
+                    aux_for_truth = {}
+                truth_plan = _resolve_truth_plan(t_objs, aux_objs=aux_for_truth)
             for kind, t_desc in truth_plan.items():
                 lm = t_desc.get("last_modified")
                 if lm and (truth_last_modified is None or lm > truth_last_modified):
@@ -596,9 +640,11 @@ class RemoteManager:
     def start_sync(self, hub_id: str, seasons: Optional[List[str]] = None) -> Dict[str, Any]:
         spec = self._require(hub_id)
         with self._lock:
-            if self.is_busy():
-                running = next(j for j in self._jobs.values() if j.status == "running")
-                raise RuntimeError(f"A sync for '{running.hub_id}' is already running")
+            if self._is_busy_unlocked():
+                running = next((j for j in self._jobs.values() if j.status == "running"), None)
+                if running:
+                    raise RuntimeError(f"A sync for '{running.hub_id}' is already running")
+                raise RuntimeError("A batch sync is already in progress")
             if not seasons:
                 man = self.store.load_manifest(hub_id)
                 cal = self._hub_calendar(hub_id)
@@ -617,6 +663,119 @@ class RemoteManager:
             job.cancel_event.set()
             return True
         return False
+
+    def start_sync_all(self, hub_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Sequentially sync missing built-in hubs (or the supplied list of hub ids)."""
+        with self._lock:
+            if self._is_busy_unlocked():
+                raise RuntimeError("A hub sync is already running")
+            specs_by_id = {s.id: s for s in self.store.hub_specs()}
+            if hub_ids:
+                dedup_ids = list(dict.fromkeys(str(hid) for hid in hub_ids))
+                targets = [specs_by_id[hid] for hid in dedup_ids if hid in specs_by_id]
+            else:
+                targets = [s for s in self.store.hub_specs() if s.builtin and not self.store.has_data(s.id)]
+                if not targets:
+                    targets = [s for s in self.store.hub_specs() if s.builtin]
+            if not targets:
+                return {
+                    "running": False,
+                    "total": 0,
+                    "done": 0,
+                    "current_hub": None,
+                    "current_label": None,
+                    "queued": [],
+                    "completed": [],
+                    "errors": {},
+                    "cancelled": False,
+                }
+            self._batch_cancel.clear()
+            self._batch = {
+                "running": True,
+                "total": len(targets),
+                "done": 0,
+                "current_hub": targets[0].id,
+                "current_label": targets[0].label,
+                "queued": [s.id for s in targets],
+                "completed": [],
+                "errors": {},
+                "cancelled": False,
+                "started_at": _utcnow(),
+                "finished_at": None,
+            }
+        threading.Thread(target=self._run_batch, args=(targets,), daemon=True, name="sync-all").start()
+        return self.batch_status()  # type: ignore[return-value]
+
+    def cancel_all(self) -> bool:
+        self._batch_cancel.set()
+        any_hit = False
+        for job in list(self._jobs.values()):
+            if job.status == "running":
+                job.cancel_event.set()
+                any_hit = True
+        with self._lock:
+            if self._batch and self._batch.get("running"):
+                self._batch["cancelled"] = True
+                any_hit = True
+        return any_hit
+
+    def _run_batch(self, specs: List[HubSpec]):
+        try:
+            for spec in specs:
+                if self._batch_cancel.is_set():
+                    with self._lock:
+                        if self._batch:
+                            self._batch["cancelled"] = True
+                    break
+                with self._lock:
+                    if self._batch:
+                        self._batch["current_hub"] = spec.id
+                        self._batch["current_label"] = spec.label
+                seasons: List[str] = []
+                try:
+                    if self.store.has_data(spec.id):
+                        seasons = list(self.store.load_manifest(spec.id).get("seasons") or [])
+                    if not seasons:
+                        chk = self.check(spec.id)
+                        avail = sorted(str(s["season"]) for s in (chk.get("seasons") or []) if s.get("season"))
+                        if avail:
+                            seasons = [avail[-1]]
+                except Exception:
+                    seasons = []
+                if self._batch_cancel.is_set():
+                    with self._lock:
+                        if self._batch:
+                            self._batch["cancelled"] = True
+                    break
+                if not seasons:
+                    cal = self._hub_calendar(spec.id)
+                    seasons = [current_season(calendar=cal)]
+                seasons = sorted({str(s) for s in seasons if re.match(r"^\d{4}(-\d{4})?$", str(s))}) or [current_season()]
+
+                job = SyncJob(spec.id, seasons)
+                with self._lock:
+                    self._jobs[spec.id] = job
+                if self._batch_cancel.is_set():
+                    job.cancel_event.set()
+                self._run_sync(spec, job)
+                with self._lock:
+                    if self._batch:
+                        self._batch["done"] += 1
+                        if job.status == "done":
+                            self._batch["completed"].append(spec.id)
+                        elif job.status == "cancelled":
+                            self._batch["cancelled"] = True
+                        else:
+                            self._batch["errors"][spec.id] = job.error or "Sync failed"
+                if self._batch_cancel.is_set():
+                    break
+        finally:
+            with self._lock:
+                if self._batch:
+                    self._batch["running"] = False
+                    self._batch["current_hub"] = None
+                    self._batch["current_label"] = None
+                    self._batch["finished_at"] = _utcnow()
 
     def remove(self, hub_id: str):
         self._require(hub_id)
@@ -861,7 +1020,14 @@ class RemoteManager:
         # 5. Truth data across all supported target-data layouts
         job.phase = "Truth data"
         truth_updated = self._sync_truth(
-            client, spec, man, job, cal=cal, pad_single_digit_fips=hub_geo.uses_us_fips, aux_objs=aux_objs
+            client,
+            spec,
+            man,
+            job,
+            cal=cal,
+            pad_single_digit_fips=hub_geo.uses_us_fips,
+            aux_objs=aux_objs,
+            target_ids=info.get("targets"),
         )
 
         man["last_sync"] = _utcnow()
@@ -1020,12 +1186,13 @@ class RemoteManager:
         cal: CalendarSpec = DEFAULT_FLUSIGHT_CALENDAR,
         pad_single_digit_fips: bool = True,
         aux_objs: Optional[Dict[str, RemoteObject]] = None,
+        target_ids: Optional[List[str]] = None,
     ) -> bool:
         truth = man.setdefault("truth", {})
         objs = {o.key: o for o in client.list("target-data/")}
         today_iso = _utcnow()[:10]
         null_vals = ["", "NA", "null", "NaN", "None", "NULL"]
-        plan = _resolve_truth_plan(objs)
+        plan = _resolve_truth_plan(objs, aux_objs=aux_objs)
         truth_updated = False
 
         def _read_truth_bytes(key: str, data: bytes) -> pl.DataFrame:
@@ -1042,19 +1209,34 @@ class RemoteManager:
                 frames = []
                 for ro in entry["objs"]:
                     raw = _read_truth_bytes(ro.key, client.get(ro.key))
-                    stem = Path(ro.key).stem[len("latest-"):].replace("_", " ")
+                    fname = Path(ro.key).stem
+                    stem = fname[len("latest-"):].replace("_", " ") if fname.startswith("latest-") else None
                     fallback = ro.last_modified[:10] if ro.last_modified else today_iso
-                    ldf = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips, default_target=stem)
+                    ldf = normalize_oracle(
+                        raw,
+                        fallback,
+                        pad_single_digit_fips=pad_single_digit_fips,
+                        default_target=stem,
+                        target_ids=target_ids,
+                    )
                     if not ldf.is_empty():
                         frames.append(ldf)
                 if not frames:
                     return False
                 df = pl.concat(frames, how="diagonal_relaxed")
+                dedup_cols = [c for c in df.columns if c not in ("as_of", "oracle_value")]
+                if dedup_cols:
+                    df = df.unique(subset=dedup_cols, keep="last", maintain_order=True)
             else:
                 obj = entry["objs"][0]
                 raw = _read_truth_bytes(obj.key, client.get(obj.key))
                 fallback = obj.last_modified[:10] if obj.last_modified else today_iso
-                df = normalize_oracle(raw, fallback, pad_single_digit_fips=pad_single_digit_fips)
+                df = normalize_oracle(
+                    raw,
+                    fallback,
+                    pad_single_digit_fips=pad_single_digit_fips,
+                    target_ids=target_ids,
+                )
                 if df.is_empty():
                     if required:
                         raise NormalizationError("hub oracle-output has no rows" if kind == "oracle" else f"hub {kind} has no rows")
@@ -1130,3 +1312,139 @@ class RemoteManager:
             truth_updated = True
 
         return truth_updated
+
+
+class LocalAutoUpdater:
+    """Background daemon that checks and updates synced enabled hubs once per day in local mode."""
+
+    DEFAULT_INTERVAL_SECONDS = 86400.0
+    DEFAULT_POLL_SECONDS = 900.0
+
+    def __init__(
+        self,
+        hub_manager: Any,
+        *,
+        interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+        poll_seconds: float = DEFAULT_POLL_SECONDS,
+    ):
+        self.mgr = hub_manager
+        self.interval_seconds = max(60.0, float(interval_seconds))
+        self.poll_seconds = max(1.0, float(poll_seconds))
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_event.clear()
+            self._wake_event.clear()
+            t = threading.Thread(target=self._loop, name="local-auto-updater", daemon=True)
+            self._thread = t
+            t.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._wake_event.set()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)
+
+    def wake(self) -> None:
+        self._wake_event.set()
+
+    def is_due(self) -> bool:
+        settings = self.mgr.remote_store.get_settings()
+        if not settings.get("auto_update_daily"):
+            return False
+        last = settings.get("last_auto_update")
+        if not last:
+            return True
+        dt = _parse_s3_time(str(last))
+        if dt is None:
+            return True
+        return (datetime.now(timezone.utc) - dt).total_seconds() >= self.interval_seconds
+
+    def run_once(self) -> bool:
+        """Check and incrementally sync enabled synced hubs when daily auto-update is active."""
+        settings = self.mgr.remote_store.get_settings()
+        if not settings.get("auto_update_daily"):
+            return False
+        rmgr = self.mgr.shared_remote_mgr
+        if rmgr.is_busy():
+            return False
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+
+        succeeded = False
+        try:
+            specs = [
+                s for s in self.mgr.remote_store.hub_specs()
+                if self.mgr.remote_store.has_data(s.id) and self.mgr.remote_store.is_enabled(s.id)
+            ]
+            for spec in specs:
+                if self._stop_event.is_set() or rmgr.is_busy():
+                    break
+                try:
+                    chk = rmgr.check(spec.id)
+                    p = chk.get("pending") or {}
+                    needs = (p.get("new", 0) + p.get("changed", 0) + p.get("removed", 0)) > 0 or bool(p.get("truth_changed"))
+                    if needs:
+                        rmgr.start_sync(spec.id)
+                        job = None
+                        while not self._stop_event.is_set():
+                            job = rmgr.get_job(spec.id)
+                            if not job or job.get("status") != "running":
+                                break
+                            time.sleep(0.25)
+                        if self._stop_event.is_set():
+                            rmgr.cancel(spec.id)
+                            break
+                        if job and job.get("status") == "done":
+                            succeeded = True
+                    else:
+                        succeeded = True
+                except Exception as exc:
+                    logger.warning("Local auto-update failed for hub %s: %s", spec.id, exc)
+
+            if not self._stop_event.is_set() and hasattr(self.mgr, "briefing_feeds"):
+                try:
+                    st = self.mgr.briefing_feeds.get_status()
+                    feeds = st.get("feeds") or {}
+                    stale_ids = [fid for fid, f in feeds.items() if f.get("cached") and f.get("stale")]
+                    if stale_ids:
+                        after = self.mgr.briefing_feeds.refresh_sync(feed_ids=stale_ids, force=False)
+                        after_feeds = after.get("feeds") or {}
+                        if any((after_feeds.get(fid) or {}).get("error") is None for fid in stale_ids):
+                            succeeded = True
+                except Exception as exc:
+                    logger.warning("Local auto-update briefing refresh failed: %s", exc)
+
+            if succeeded and not self._stop_event.is_set():
+                self.mgr.remote_store.record_auto_update(_utcnow())
+            return succeeded
+        finally:
+            with self._lock:
+                self._running = False
+
+    def _loop(self) -> None:
+        if self._stop_event.wait(5.0):
+            return
+        while not self._stop_event.is_set():
+            try:
+                if self.is_due():
+                    self.run_once()
+            except Exception as exc:
+                logger.warning("Local auto-update cycle error: %s", exc)
+            self._wake_event.wait(self.poll_seconds)
+            self._wake_event.clear()

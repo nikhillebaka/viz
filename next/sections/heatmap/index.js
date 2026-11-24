@@ -3,7 +3,7 @@
  * model), then the page scrolls up to the chart. Pure logic is in model.js. */
 import { scopeOf, seasonWeekOf, startYearOf, targetHorizons } from "../scope.js";
 import { onThemeChange, cssColor, reducedMotion } from "../../lib/dom.js";
-import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
+import { valueFormat, fmtDay, fmtLong, horizonUnit, horizonText } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
 import { US_STATE_META } from "../../geo/eu_tiles.js";
 import { chartFonts, canvasMeasure } from "../../chart/render.js";
@@ -27,7 +27,10 @@ export function mount(el, ctx) {
   const { manifest, store } = ctx;
   const P = places(manifest);
   const f = frame(el, "Heatmap", "heatmap");
-  const counts = () => manifest.targetById.get(store.get().target)?.scale !== "proportion";
+  const counts = () => {
+    const t = manifest.targetById.get(store.get().target);
+    return !t?.is_rate && t?.scale !== "proportion" && t?.scale !== "percentage";
+  };
   const vs = viewState(store, "heatmap", KEY);
   let view = normalizeView(Object.keys(vs.initial).length ? vs.initial : DEFAULT_VIEW, counts());
   let resp = null, grid = null, lay = null, reqKey = "", hover = null;
@@ -62,7 +65,10 @@ export function mount(el, ctx) {
       isDefault: () => view.cols === AXES[view.rows][0], onSelect: (cols) => setView({ cols }) }),
     model: fragment({ label: "Model", title: "Model", items: modelChoices, value: () => view.model,
       isDefault: () => view.model === "truth", onSelect: (model) => setView({ model }) }),
-    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => targetHorizons(manifest, store.get().target).map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk` })),
+    horizon: fragment({ label: "Horizon", title: "Horizon", items: () => {
+      const tMeta = manifest.targetById.get(store.get().target);
+      return targetHorizons(manifest, store.get().target).map((x) => ({ value: x, label: horizonText(x, tMeta), short: horizonText(x, tMeta, { short: true }) }));
+    },
       value: () => view.horizon, isDefault: () => view.horizon === 1, onSelect: (horizon) => setView({ horizon }) }),
     metric: fragment({ label: "Metric", title: "Metric", items: () => metricsFor(view, counts()).map((m) => ({ value: m, label: METRICS[m].label })),
       value: () => view.metric, isDefault: () => view.metric === metricsFor(view, counts())[0], onSelect: (metric) => setView({ metric }) }),
@@ -111,7 +117,7 @@ export function mount(el, ctx) {
     const s = store.get(), sc = scopeOf(s, manifest);
     const tMeta = manifest.targetById.get(s.target);
     const none = (text) => { slot._ctl?.abort(); reqKey = ""; resp = grid = null; lay = null; f.loading(false); f.empty(text); };
-    if (tMeta?.is_categorical || (tMeta?.output_types?.length && !tMeta.output_types.includes("quantile"))) {
+    if (tMeta?.is_categorical || (tMeta?.output_types?.length && !tMeta.output_types.includes("quantile") && !tMeta.output_types.includes("sample"))) {
       none("Categorical target — inspect rate-change probabilities above");
       return;
     }
@@ -214,11 +220,11 @@ export function mount(el, ctx) {
     if (axis === "model") return manifest.label(k, among);
     if (axis === "location") return P.byAbbr.get(k)?.name ?? k;
     if (axis === "date") return fmtDay(parseIso(k));
-    if (axis === "horizon") return `${k} wk`;
+    if (axis === "horizon") return `${k} ${horizonUnit(manifest.targetById.get(store.get().target))}`;
     return String(k);
   }
   const shortCol = (axis, k, among) => (axis === "location" ? k : labelOf(axis, k, among));
-  const longOf = (axis, k) => (axis === "date" ? fmtLong(parseIso(k)) : axis === "horizon" ? `${k} wk ahead` : labelOf(axis, k, grid.ids));
+  const longOf = (axis, k) => (axis === "date" ? fmtLong(parseIso(k)) : axis === "horizon" ? horizonText(k, manifest.targetById.get(store.get().target)) : labelOf(axis, k, grid.ids));
 
   function fmtMetric(id, x) {
     if (!fin(x)) return "–";

@@ -98,6 +98,12 @@
 }
 .mo-toggle:hover { color: var(--ink-primary); }
 .mo-toggle:disabled { opacity: var(--opacity-disabled); cursor: default; }
+.mo-hub-tools {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-10, 10px);
+  padding: var(--space-4) var(--space-8) var(--space-8);
+}
+.mo-auto-toggle { margin: 0; }
+.mo-hub-tools-right { margin-left: auto; display: inline-flex; align-items: center; gap: var(--space-8); }
 .mo-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12); margin-top: var(--space-8); }
 .mo-season-check {
   display: inline-flex; align-items: center; gap: var(--space-4); margin: 0; padding: 0; border: 0; background: none;

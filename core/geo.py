@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import logging
+import math
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -172,6 +173,105 @@ _LEGACY_US_SUBNATIONAL_REF: Dict[str, Dict[str, Any]] = {
     "ogden": {"abbr": "Ogden", "name": "Ogden, UT", "level": "hsa", "region": "UT", "state_abb": "UT", "parent_hint": "utah", "lat": 41.22, "lon": -111.97},
 }
 
+# Built-in non-EU/non-US country references for CSV-free national hubs (e.g. China)
+WORLD_COUNTRIES_REF: Dict[str, Dict[str, Any]] = {
+    "CN": {"abbr": "CN", "name": "China", "level": "country", "parent_id": None, "region": "East Asia", "canonical_id": "CN", "population": 1_409_670_000, "lat": 36.56, "lon": 103.82},
+}
+
+# Built-in Canadian national, regional, and province/territory metadata (e.g. PHAC RVDSS)
+CANADA_REF: Dict[str, Dict[str, Any]] = {
+    "ca": {"abbr": "CA", "name": "Canada", "level": "country", "parent_id": None, "region": "National", "canonical_id": "CA", "population": 41_288_599, "lat": 61.36, "lon": -98.31, "is_hub_aggregate": True},
+    "atlantic": {"abbr": "ATL", "name": "Atlantic", "level": "region", "parent_id": "ca", "region": "Atlantic", "canonical_id": "CA:atlantic", "population": 2_654_526, "lat": 47.50, "lon": -63.50, "is_hub_aggregate": True},
+    "prairies": {"abbr": "PRA", "name": "Prairies", "level": "region", "parent_id": "ca", "region": "Prairies", "canonical_id": "CA:prairies", "population": 7_622_889, "lat": 54.80, "lon": -106.00, "is_hub_aggregate": True},
+    "territories": {"abbr": "TER", "name": "Territories", "level": "region", "parent_id": "ca", "region": "Territories", "canonical_id": "CA:territories", "population": 132_623, "lat": 66.50, "lon": -115.00, "is_hub_aggregate": True},
+    "ab": {"abbr": "AB", "name": "Alberta", "level": "province", "parent_id": "prairies", "region": "Prairies", "canonical_id": "CA:AB", "population": 4_888_723, "lat": 55.17, "lon": -114.52},
+    "bc": {"abbr": "BC", "name": "British Columbia", "level": "province", "parent_id": "ca", "region": "British Columbia", "canonical_id": "CA:BC", "population": 5_698_430, "lat": 54.78, "lon": -124.73},
+    "mb": {"abbr": "MB", "name": "Manitoba", "level": "province", "parent_id": "prairies", "region": "Prairies", "canonical_id": "CA:MB", "population": 1_494_301, "lat": 54.92, "lon": -97.43},
+    "nb": {"abbr": "NB", "name": "New Brunswick", "level": "province", "parent_id": "atlantic", "region": "Atlantic", "canonical_id": "CA:NB", "population": 854_355, "lat": 46.63, "lon": -66.39},
+    "nl": {"abbr": "NL", "name": "Newfoundland and Labrador", "level": "province", "parent_id": "atlantic", "region": "Atlantic", "canonical_id": "CA:NL", "population": 545_247, "lat": 52.87, "lon": -60.47},
+    "ns": {"abbr": "NS", "name": "Nova Scotia", "level": "province", "parent_id": "atlantic", "region": "Atlantic", "canonical_id": "CA:NS", "population": 1_076_374, "lat": 45.15, "lon": -63.34},
+    "nt": {"abbr": "NT", "name": "Northwest Territories", "level": "territory", "parent_id": "territories", "region": "Territories", "canonical_id": "CA:NT", "population": 44_760, "lat": 66.34, "lon": -119.01},
+    "nu": {"abbr": "NU", "name": "Nunavut", "level": "territory", "parent_id": "territories", "region": "Territories", "canonical_id": "CA:NU", "population": 41_159, "lat": 71.04, "lon": -88.90},
+    "on": {"abbr": "ON", "name": "Ontario", "level": "province", "parent_id": "ca", "region": "Ontario", "canonical_id": "CA:ON", "population": 16_124_116, "lat": 50.07, "lon": -85.83},
+    "pe": {"abbr": "PE", "name": "Prince Edward Island", "level": "province", "parent_id": "atlantic", "region": "Atlantic", "canonical_id": "CA:PE", "population": 178_550, "lat": 46.40, "lon": -63.25},
+    "qc": {"abbr": "QC", "name": "Quebec", "level": "province", "parent_id": "ca", "region": "Quebec", "canonical_id": "CA:QC", "population": 9_056_044, "lat": 53.39, "lon": -71.76},
+    "sk": {"abbr": "SK", "name": "Saskatchewan", "level": "province", "parent_id": "prairies", "region": "Prairies", "canonical_id": "CA:SK", "population": 1_239_865, "lat": 54.42, "lon": -105.90},
+    "yt": {"abbr": "YT", "name": "Yukon", "level": "territory", "parent_id": "territories", "region": "Territories", "canonical_id": "CA:YT", "population": 46_704, "lat": 63.63, "lon": -135.51},
+}
+
+# Built-in Ontario Health Regions metadata (Ontario Hospitalization Forecast Hub)
+ONTARIO_OH_REF: Dict[str, Dict[str, Any]] = {
+    "Ontario": {"abbr": "ON", "name": "Ontario", "level": "province", "parent_id": None, "region": "Ontario", "canonical_id": "CA:ON", "population": 16_124_116, "lat": 50.07, "lon": -85.83, "is_hub_aggregate": True},
+    "Central": {"abbr": "CEN", "name": "Central", "level": "region", "parent_id": "Ontario", "region": "Ontario", "canonical_id": "CA:ON:Central", "population": 5_100_000, "lat": 44.46, "lon": -79.66},
+    "East": {"abbr": "EST", "name": "East", "level": "region", "parent_id": "Ontario", "region": "Ontario", "canonical_id": "CA:ON:East", "population": 3_950_000, "lat": 44.89, "lon": -77.18},
+    "North East": {"abbr": "NE", "name": "North East", "level": "region", "parent_id": "Ontario", "region": "Ontario", "canonical_id": "CA:ON:NE", "population": 580_000, "lat": 50.28, "lon": -82.94},
+    "North West": {"abbr": "NW", "name": "North West", "level": "region", "parent_id": "Ontario", "region": "Ontario", "canonical_id": "CA:ON:NW", "population": 240_000, "lat": 51.89, "lon": -90.25},
+    "Toronto": {"abbr": "TOR", "name": "Toronto", "level": "region", "parent_id": "Ontario", "region": "Ontario", "canonical_id": "CA:ON:Toronto", "population": 3_025_000, "lat": 43.73, "lon": -79.39},
+    "West": {"abbr": "WST", "name": "West", "level": "region", "parent_id": "Ontario", "region": "Ontario", "canonical_id": "CA:ON:West", "population": 3_230_000, "lat": 43.36, "lon": -81.08},
+}
+
+# Built-in Democratic Republic of the Congo national & 26-province reference metadata (BDBV Modeling Hub)
+DRC_REF: Dict[str, Dict[str, Any]] = {
+    "CD": {"abbr": "CD", "name": "Democratic Republic of the Congo", "level": "country", "parent_id": None, "region": "DRC", "canonical_id": "CD", "population": 105_789_731, "lat": -2.88, "lon": 23.64, "is_hub_aggregate": True},
+    "CD-BC": {"abbr": "BC", "name": "Kongo Central", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-BC", "population": 6_800_000, "lat": -5.28, "lon": 14.32},
+    "CD-BU": {"abbr": "BU", "name": "Bas Uele", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-BU", "population": 1_500_000, "lat": 3.62, "lon": 25.15},
+    "CD-EQ": {"abbr": "EQ", "name": "Equateur", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-EQ", "population": 2_100_000, "lat": 0.20, "lon": 18.93},
+    "CD-HK": {"abbr": "HK", "name": "Haut Katanga", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-HK", "population": 5_700_000, "lat": -10.47, "lon": 27.83},
+    "CD-HL": {"abbr": "HL", "name": "Haut Lomami", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-HL", "population": 3_400_000, "lat": -8.21, "lon": 25.45},
+    "CD-HU": {"abbr": "HU", "name": "Haut Uele", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-HU", "population": 2_400_000, "lat": 3.35, "lon": 28.58},
+    "CD-IT": {"abbr": "IT", "name": "Ituri", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-IT", "population": 4_900_000, "lat": 1.77, "lon": 29.44},
+    "CD-KC": {"abbr": "KC", "name": "Kasai Central", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-KC", "population": 4_100_000, "lat": -6.23, "lon": 22.50},
+    "CD-KE": {"abbr": "KE", "name": "Kasai Oriental", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-KE", "population": 4_000_000, "lat": -6.16, "lon": 23.52},
+    "CD-KG": {"abbr": "KG", "name": "Kwango", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-KG", "population": 2_900_000, "lat": -6.45, "lon": 17.86},
+    "CD-KL": {"abbr": "KL", "name": "Kwilu", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-KL", "population": 6_600_000, "lat": -4.79, "lon": 18.64},
+    "CD-KN": {"abbr": "KN", "name": "Kinshasa", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-KN", "population": 17_000_000, "lat": -4.45, "lon": 15.90},
+    "CD-KS": {"abbr": "KS", "name": "Kasai", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-KS", "population": 3_900_000, "lat": -4.97, "lon": 21.10},
+    "CD-LO": {"abbr": "LO", "name": "Lomami", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-LO", "population": 3_500_000, "lat": -6.24, "lon": 24.68},
+    "CD-LU": {"abbr": "LU", "name": "Lualaba", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-LU", "population": 3_200_000, "lat": -9.84, "lon": 23.91},
+    "CD-MA": {"abbr": "MA", "name": "Maniema", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-MA", "population": 3_000_000, "lat": -3.07, "lon": 26.38},
+    "CD-MN": {"abbr": "MN", "name": "Mai Ndombe", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-MN", "population": 2_500_000, "lat": -2.73, "lon": 18.51},
+    "CD-MO": {"abbr": "MO", "name": "Mongala", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-MO", "population": 2_300_000, "lat": 2.10, "lon": 21.51},
+    "CD-NK": {"abbr": "NK", "name": "Nord Kivu", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-NK", "population": 9_800_000, "lat": -0.60, "lon": 28.67},
+    "CD-NU": {"abbr": "NU", "name": "Nord Ubangi", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-NU", "population": 1_900_000, "lat": 3.87, "lon": 21.10},
+    "CD-SA": {"abbr": "SA", "name": "Sankuru", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-SA", "population": 2_600_000, "lat": -3.52, "lon": 23.61},
+    "CD-SK": {"abbr": "SK", "name": "Sud Kivu", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-SK", "population": 7_800_000, "lat": -3.16, "lon": 28.20},
+    "CD-SU": {"abbr": "SU", "name": "Sud Ubangi", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-SU", "population": 3_200_000, "lat": 3.09, "lon": 19.35},
+    "CD-TA": {"abbr": "TA", "name": "Tanganyika", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-TA", "population": 3_600_000, "lat": -6.54, "lon": 28.05},
+    "CD-TO": {"abbr": "TO", "name": "Tshopo", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-TO", "population": 3_100_000, "lat": 0.51, "lon": 25.22},
+    "CD-TU": {"abbr": "TU", "name": "Tshuapa", "level": "province", "parent_id": "CD", "region": "DRC", "canonical_id": "CD:CD-TU", "population": 2_100_000, "lat": -0.70, "lon": 21.81},
+}
+
+_ALWAYS_INTL_REF_TABLES: Tuple[Tuple[Dict[str, Dict[str, Any]], str], ...] = (
+    (EUROPE_REF, "EU"),
+    (DRC_REF, "CD"),
+    (WORLD_COUNTRIES_REF, "WORLD"),
+)
+
+
+def _lookup_intl_ref(
+    loc_id: str,
+    *,
+    allow_ontario: bool = False,
+    allow_canada: bool = False,
+) -> Optional[Tuple[Dict[str, Any], str]]:
+    for table, prefix in _ALWAYS_INTL_REF_TABLES:
+        if loc_id in table:
+            return table[loc_id], prefix
+    if allow_canada and loc_id in CANADA_REF:
+        return CANADA_REF[loc_id], "CA"
+    if allow_ontario and loc_id in ONTARIO_OH_REF:
+        return ONTARIO_OH_REF[loc_id], "CA"
+    return None
+
+
+def _normalize_geo_level(raw_level: str) -> str:
+    low = (raw_level or "").strip().lower()
+    if low == "nation":
+        return "country"
+    if low == "health zone":
+        return "health_zone"
+    return low.replace(" ", "_") if low else "custom"
+
 
 def _short_substate_abbr(loc_id: str, name: str, state_abb: Optional[str]) -> str:
     clean = re.sub(r",\s*[A-Z]{2}$", "", (name or "").strip())
@@ -304,11 +404,12 @@ class GeoGraph:
         if low == "aggregates":
             return sorted(aggs) if aggs else []
         if low == "states":
-            # Backwards-compatible: US FIPS states if present, else any level=='state', else primary leaves
-            fips_states = [k for k in scope_set if k != "US" and (k in US_STATES_REF or self.nodes.get(k, GeoNode(k, k, k, k)).level in ("state", "territory"))]
+            # Backwards-compatible: US FIPS states if present, else state/province/territory leaves
+            state_like = {"state", "province", "territory"}
+            fips_states = [k for k in scope_set if k != "US" and (k in US_STATES_REF or self.nodes.get(k, GeoNode(k, k, k, k)).level in state_like)]
             if fips_states:
                 return sorted(fips_states)
-            state_lvl = [k for k in scope_set if self.nodes.get(k) and self.nodes[k].level == "state"]
+            state_lvl = [k for k in scope_set if self.nodes.get(k) and self.nodes[k].level in state_like]
             return sorted(state_lvl) if state_lvl else leaves
         if low.startswith("level:"):
             lvl = spec[6:].strip().lower()
@@ -407,50 +508,124 @@ def build_geo_graph(
     nodes: Dict[str, GeoNode] = {}
     csv_raw_ids: Set[str] = set()
 
-    # 1. Read auxiliary-data/locations.csv if present
+    # 1. Read auxiliary-data/locations.csv if present (FluSight, MetroCast, RVDSS, BDBV, etc.)
     rows: List[Dict[str, Any]] = []
     if locations_csv is not None and Path(locations_csv).is_file():
         try:
             df = pl.read_csv(
                 locations_csv,
-                schema_overrides={"location": pl.String, "original_location_code": pl.String},
+                schema_overrides={
+                    "location": pl.String,
+                    "original_location_code": pl.String,
+                    "geo_value": pl.String,
+                    "geo_abbr": pl.String,
+                    "parent": pl.String,
+                    "parent_id": pl.String,
+                },
                 null_values=NULL_VALUES,
                 ignore_errors=False,
             )
-            if "population" in df.columns:
-                df = df.with_columns(pl.col("population").cast(pl.Float64, strict=False))
+            for num_col in ("population", "lat", "lon"):
+                if num_col in df.columns:
+                    df = df.with_columns(pl.col(num_col).cast(pl.Float64, strict=False))
             rows = df.to_dicts()
         except Exception as exc:
             logger.warning("Error reading %s: %s", locations_csv, exc)
 
-    # First pass: inspect whether CSV rows look like US FIPS vs MetroCast vs custom
-    raw_ids = [str(r.get("location") or "").strip() for r in rows if r.get("location") is not None]
+    def _row_loc_id(row: Dict[str, Any]) -> str:
+        for key in ("location", "geo_value", "geo_abbr"):
+            val = str(row.get(key) or "").strip()
+            if val:
+                return val
+        return ""
+
+    def _safe_float(val: Any) -> Optional[float]:
+        if val is None or val == "":
+            return None
+        try:
+            num = float(val)
+            return None if not math.isfinite(num) else num
+        except (TypeError, ValueError):
+            return None
+
+    # First pass: inspect whether CSV rows look like US FIPS vs MetroCast/international schemas
+    raw_ids = [lid for r in rows if (lid := _row_loc_id(r))]
     task_locs = _tasks_locations(tasks_config)
     obs_locs = [str(x).strip() for x in (observed_locations or []) if x is not None and str(x).strip()]
     all_raw_ids = raw_ids + task_locs + obs_locs
 
     fips_hits = sum(1 for lid in all_raw_ids if (lid.zfill(2) if len(lid) == 1 and lid.isdigit() else lid) in US_STATES_REF)
-    has_metrocast_cols = any("original_location_code" in r or "state_abb" in r or "location_type" in r for r in rows)
-    uses_us_fips = (not has_metrocast_cols) and fips_hits >= max(1, min(3, len(all_raw_ids)))
+    has_non_fips_cols = any(
+        k in r
+        for r in rows
+        for k in ("original_location_code", "state_abb", "location_type", "geo_type", "geo_abbr", "parent", "parent_id")
+    )
+    uses_us_fips = (not has_non_fips_cols) and fips_hits >= max(1, min(3, len(all_raw_ids)))
+
+    normalized_all_ids = {
+        (lid.zfill(2) if (uses_us_fips and len(lid) == 1 and lid.isdigit()) else lid)
+        for lid in all_raw_ids
+        if lid
+    }
+    def _has_us_state(r: Dict[str, Any]) -> bool:
+        return bool(str(r.get("state_abb") or r.get("state_name") or "").strip())
+
+    is_us_hub = (
+        uses_us_fips
+        or ("US" in normalized_all_ids)
+        or any(_has_us_state(r) for r in rows)
+    )
+    has_ontario_ctx = (not is_us_hub) and (
+        ("Ontario" in normalized_all_ids)
+        or any(
+            str(r.get("location_name") or r.get("geo_name") or "").strip() == "Ontario"
+            and not _has_us_state(r)
+            for r in rows
+        )
+    )
+    _ca_prov_abbrs = {"ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt"}
+    has_canada_ctx = (not is_us_hub) and (
+        ("ca" in normalized_all_ids)
+        or (
+            bool(normalized_all_ids & _ca_prov_abbrs)
+            and any(
+                str(r.get("geo_type") or r.get("location_type") or "").strip().lower() in ("nation", "province", "territory")
+                for r in rows
+            )
+        )
+    )
+    csv_name_to_id: Dict[str, str] = {}
+    for r in rows:
+        raw_id = _row_loc_id(r)
+        if not raw_id:
+            continue
+        lid = raw_id.zfill(2) if (uses_us_fips and len(raw_id) == 1 and raw_id.isdigit()) else raw_id
+        rname = str(r.get("location_name") or r.get("geo_name") or "").strip()
+        if rname:
+            csv_name_to_id.setdefault(rname.lower(), lid)
+        intl = _lookup_intl_ref(lid, allow_ontario=has_ontario_ctx, allow_canada=has_canada_ctx)
+        if intl and intl[0].get("name"):
+            csv_name_to_id.setdefault(str(intl[0]["name"]).lower(), lid)
 
     # Track statewide aggregate rows (MetroCast original_location_code == 'All') keyed by state_abb
     state_agg_by_abb: Dict[str, str] = {}
     pending_rows: List[Tuple[str, Dict[str, Any]]] = []
 
     for r in rows:
-        raw_id = str(r.get("location") or "").strip()
+        raw_id = _row_loc_id(r)
         if not raw_id:
             continue
         loc_id = raw_id.zfill(2) if (uses_us_fips and len(raw_id) == 1 and raw_id.isdigit()) else raw_id
         csv_raw_ids.add(loc_id)
 
-        pop_raw = r.get("population")
-        pop = int(round(float(pop_raw))) if pop_raw is not None and str(pop_raw) != "nan" else None
+        pop_num = _safe_float(r.get("population"))
+        pop = int(round(pop_num)) if pop_num is not None else None
         orig_code = str(r.get("original_location_code") or "").strip()
         state_name = str(r.get("state") or "").strip() or None
         state_abb = str(r.get("state_abb") or "").strip().upper() or None
-        loc_type = str(r.get("location_type") or "").strip().lower()
-        loc_name = str(r.get("location_name") or "").strip() or loc_id
+        loc_type = str(r.get("location_type") or r.get("geo_type") or "").strip().lower()
+        loc_name = str(r.get("location_name") or r.get("geo_name") or "").strip() or loc_id
+        raw_parent = str(r.get("parent_id") or r.get("parent") or "").strip() or None
         counties_raw = str(r.get("hsa_counties") or "").strip()
         counties = [c.strip() for c in counties_raw.split(",") if c.strip()] if counties_raw else None
 
@@ -498,8 +673,26 @@ def build_geo_graph(
 
         pending_rows.append((loc_id, {
             "r": r, "pop": pop, "state_name": state_name, "state_abb": state_abb,
-            "loc_type": loc_type, "loc_name": loc_name, "counties": counties,
+            "loc_type": loc_type, "loc_name": loc_name, "raw_parent": raw_parent,
+            "counties": counties,
         }))
+
+    def _resolve_parent_ref(loc_id: str, raw_parent: Optional[str], state_abb: Optional[str], ref: Dict[str, Any]) -> Optional[str]:
+        if raw_parent:
+            norm_p = raw_parent.zfill(2) if (uses_us_fips and len(raw_parent) == 1 and raw_parent.isdigit()) else raw_parent
+            if norm_p in normalized_all_ids:
+                return norm_p
+            by_name = csv_name_to_id.get(raw_parent.lower())
+            if by_name:
+                return by_name
+        if state_abb and state_abb in state_agg_by_abb:
+            return state_agg_by_abb[state_abb]
+        p_hint = ref.get("parent_id")
+        if p_hint and p_hint in normalized_all_ids:
+            return p_hint
+        if has_canada_ctx and loc_id in CANADA_REF and loc_id != "ca" and "ca" in normalized_all_ids:
+            return "ca"
+        return None
 
     for loc_id, meta in pending_rows:
         r = meta["r"]
@@ -507,35 +700,64 @@ def build_geo_graph(
         state_name = meta["state_name"]
         loc_type = meta["loc_type"]
         loc_name = meta["loc_name"]
-        parent_id = state_agg_by_abb.get(state_abb or "")
+        raw_parent = meta["raw_parent"]
+
+        row_is_us = bool(state_abb or state_name)
+        intl = _lookup_intl_ref(
+            loc_id,
+            allow_ontario=has_ontario_ctx and not row_is_us,
+            allow_canada=has_canada_ctx and not row_is_us,
+        )
+        intl_ref, intl_prefix = intl if intl else ({}, "")
+        ref = intl_ref or _LEGACY_US_SUBNATIONAL_REF.get(loc_id) or {}
+        parent_id = _resolve_parent_ref(loc_id, raw_parent, state_abb, ref)
         st_canon = _canonical_us_state(state_abb, state_name) or "US"
+
         if "ca_region" in loc_type or "nc_flu_region" in loc_type or "ut_region" in loc_type:
             level = "region"
         elif "hsa" in loc_type:
             level = "hsa"
-        elif loc_id in EUROPE_REF:
-            level = EUROPE_REF[loc_id]["level"]
+        elif loc_type and any(tok in loc_type for tok in ("nation", "country", "province", "territory", "health", "region", "state", "metro", "borough")):
+            level = _normalize_geo_level(loc_type)
+        elif intl_ref:
+            level = intl_ref["level"]
         else:
             level = "subnational" if parent_id else "custom"
-        explicit_abbr = r.get("abbreviation")
-        abbr = str(explicit_abbr).strip() if explicit_abbr else _short_substate_abbr(loc_id, loc_name, state_abb)
-        ref = EUROPE_REF.get(loc_id) or _LEGACY_US_SUBNATIONAL_REF.get(loc_id) or {}
+
+        explicit_abbr = r.get("abbreviation") or r.get("abbr")
+        if explicit_abbr:
+            abbr = str(explicit_abbr).strip()
+        elif intl_ref:
+            abbr = intl_ref["abbr"]
+        else:
+            abbr = _short_substate_abbr(loc_id, loc_name, state_abb)
+
+        if intl_ref:
+            canonical_id = intl_ref.get("canonical_id") or f"{intl_prefix}:{loc_id}"
+        elif parent_id and parent_id in DRC_REF:
+            canonical_id = f"CD:{loc_id}"
+        else:
+            canonical_id = ref.get("canonical_id") or f"{st_canon}:{loc_id}"
+
+        row_lat = _safe_float(r.get("lat"))
+        row_lon = _safe_float(r.get("lon"))
+        region_val = ref.get("region") or state_abb or (raw_parent if parent_id and parent_id in DRC_REF else None)
         nodes[loc_id] = GeoNode(
             id=loc_id,
-            canonical_id=ref.get("canonical_id") or (f"EU:{loc_id}" if loc_id in EUROPE_REF else f"{st_canon}:{loc_id}"),
-            abbr=ref.get("abbr") if not explicit_abbr and loc_id in EUROPE_REF else abbr,
-            name=loc_name,
+            canonical_id=canonical_id,
+            abbr=abbr,
+            name=loc_name if loc_name != loc_id or not intl_ref else intl_ref["name"],
             level=level,
-            parent_id=parent_id or (ref.get("parent_id") if ref.get("parent_id") in all_raw_ids else None),
-            region=ref.get("region") or state_abb,
+            parent_id=parent_id,
+            region=region_val,
             population=meta["pop"] if meta["pop"] is not None else ref.get("population"),
-            lat=ref.get("lat"),
-            lon=ref.get("lon"),
+            lat=row_lat if row_lat is not None else ref.get("lat"),
+            lon=row_lon if row_lon is not None else ref.get("lon"),
             counties=meta["counties"],
             is_hub_aggregate=bool(ref.get("is_hub_aggregate", False)),
         )
 
-    # 2. Supplement any locations declared in tasks.json or observed in data (crucial for RespiCast & MetroCast legacy rounds)
+    # 2. Supplement any locations declared in tasks.json or observed in data (crucial for RespiCast, China, Ontario & legacy rounds)
     extra_ids = []
     for raw in task_locs + obs_locs:
         lid = raw.zfill(2) if (uses_us_fips and len(raw) == 1 and raw.isdigit()) else raw
@@ -559,20 +781,23 @@ def build_geo_graph(
                 lon=ref.get("lon"),
                 is_hub_aggregate=(lid == "US"),
             )
-        elif lid in EUROPE_REF:
-            ref = EUROPE_REF[lid]
+        elif (intl := _lookup_intl_ref(lid, allow_ontario=has_ontario_ctx, allow_canada=has_canada_ctx)) is not None:
+            ref, prefix = intl
             p_hint = ref.get("parent_id")
+            if p_hint not in extra_set:
+                p_hint = "ca" if (has_canada_ctx and lid in CANADA_REF and lid != "ca" and "ca" in extra_set) else None
             nodes[lid] = GeoNode(
                 id=lid,
-                canonical_id=f"EU:{lid}",
+                canonical_id=ref.get("canonical_id") or f"{prefix}:{lid}",
                 abbr=ref["abbr"],
                 name=ref["name"],
                 level=ref["level"],
-                parent_id=p_hint if p_hint in extra_set else None,
+                parent_id=p_hint,
                 region=ref.get("region"),
                 population=ref.get("population"),
                 lat=ref.get("lat"),
                 lon=ref.get("lon"),
+                is_hub_aggregate=bool(ref.get("is_hub_aggregate", False)),
             )
         elif lid in _LEGACY_US_SUBNATIONAL_REF:
             ref = _LEGACY_US_SUBNATIONAL_REF[lid]

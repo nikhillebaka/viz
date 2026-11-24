@@ -22,7 +22,8 @@ from viz.core.cache_manager import ParquetCacheManager, NULL_VALUES, filter_quan
 from viz.core.calendar import CalendarSpec, infer_calendar
 from viz.core.config import VizConfig
 from viz.core.geo import GeoGraph, HHS_REGIONS, STATE_TO_HHS_REGION, build_geo_graph
-from viz.core.metrics import find_quantile_column, score_forecasts
+from viz.core.metrics import attach_wis_per_100k, find_quantile_column, score_forecasts, score_task_wis
+from viz.core.parallel import ordered_map
 from viz.core.peak_data import PeakService
 from viz.core.peaks import is_peak_target
 from viz.core.synthetic_ensemble import SyntheticEnsembleManager, SyntheticEnsembleConfig
@@ -97,6 +98,83 @@ def _flu_season_for_date_str(date_str: str) -> str:
 
 
 _is_flu_hosp_target = is_flu_hosp_target
+
+
+_COMPACT_HEATMAP_META_KEYS = frozenset({
+    "median", "rate", "count", "trend", "q025", "q975", "wis", "error", "truth",
+    "target_end_date", "wis_rate", "mae", "cov95", "sharpness", "task_count",
+})
+
+
+def _oracle_value_map(
+    oracle: Optional[pl.DataFrame],
+    target: str,
+    *,
+    locations: Optional[Sequence[str]] = None,
+    min_ted: Optional[str] = None,
+    target_end_dates: Optional[Sequence[str]] = None,
+) -> Dict[Tuple[str, str], float]:
+    """Reconciled latest-vintage `(location, target_end_date) -> oracle_value` map from an in-memory oracle."""
+    if oracle is None or oracle.is_empty():
+        return {}
+    q = oracle.filter(pl.col("target") == target) if "target" in oracle.columns else oracle
+    if "output_type" in q.columns:
+        q = q.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
+    if locations:
+        q = q.filter(pl.col("location").cast(pl.String).is_in([str(x) for x in locations]))
+    if min_ted:
+        q = q.filter(pl.col("target_end_date").cast(pl.String) >= str(min_ted))
+    if target_end_dates is not None:
+        q = q.filter(pl.col("target_end_date").cast(pl.String).is_in([str(d) for d in target_end_dates]))
+    if q.is_empty():
+        return {}
+    if "as_of" in q.columns:
+        q = q.sort("as_of").group_by(["location", "target_end_date"]).last()
+    out: Dict[Tuple[str, str], float] = {}
+    for loc, ted, val in q.select(["location", "target_end_date", "oracle_value"]).iter_rows():
+        if val is not None and not np.isnan(val):
+            out[(str(loc), str(ted))] = float(val)
+    return out
+
+
+def _agg_heatmap_group(
+    tdf: pl.DataFrame,
+    group_col: str,
+    *,
+    wis_digits: int = 2,
+    key_cast: Any = str,
+) -> Dict[Any, Dict[str, Any]]:
+    """Aggregate scored task rows along a single heatmap axis (`location`, `horizon`, or `reference_date`)."""
+    if tdf is None or tdf.is_empty():
+        return {}
+    agg = tdf.group_by(group_col).agg([
+        pl.col("wis").mean().alias("wis"),
+        pl.col("wis_per_100k").mean().alias("wis_rate") if "wis_per_100k" in tdf.columns else pl.lit(None, dtype=pl.Float64).alias("wis_rate"),
+        pl.col("mae").mean().alias("mae") if "mae" in tdf.columns else pl.lit(None, dtype=pl.Float64).alias("mae"),
+        pl.col("cov95").mean().alias("cov95") if "cov95" in tdf.columns else pl.lit(None, dtype=pl.Float64).alias("cov95"),
+        pl.col("sharpness").mean().alias("sharpness") if "sharpness" in tdf.columns else pl.lit(None, dtype=pl.Float64).alias("sharpness"),
+        pl.len().alias("task_count"),
+    ])
+    out: Dict[Any, Dict[str, Any]] = {}
+    for row in agg.iter_rows(named=True):
+        raw_k = row[group_col]
+        if raw_k is None:
+            continue
+        k = key_cast(raw_k)
+        w = row["wis"]
+        wr = row.get("wis_rate")
+        m = row.get("mae")
+        c95 = row.get("cov95")
+        sh = row.get("sharpness")
+        out[k] = {
+            "wis": round(float(w), wis_digits) if w is not None and not np.isnan(w) else None,
+            "wis_rate": round(float(wr), 2) if wr is not None and not np.isnan(wr) else None,
+            "mae": round(float(m), 2) if m is not None and not np.isnan(m) else None,
+            "cov95": round(float(c95) * 100, 1) if c95 is not None and not np.isnan(c95) else None,
+            "sharpness": round(float(sh), 1) if sh is not None and not np.isnan(sh) else None,
+            "task_count": int(row.get("task_count", 0)),
+        }
+    return out
 
 
 class SandboxDataLoader:
@@ -175,6 +253,21 @@ class SandboxDataLoader:
         self._dedup_lock = threading.Lock()
         self._phase_cache: Dict[str, Tuple[Tuple[Any, ...], pl.DataFrame]] = {}
         self._phase_cache_lock = threading.Lock()
+        self._oracle_cache: Optional[Tuple[Tuple[str, int, int], pl.DataFrame]] = None
+        self._oracle_cache_lock = threading.Lock()
+        self._prescore_instance: Optional[Any] = None
+        self._prescore_lock = threading.Lock()
+
+    @property
+    def prescore(self):
+        """Shared target-level incremental score store."""
+        if self._prescore_instance is not None:
+            return self._prescore_instance
+        with self._prescore_lock:
+            if self._prescore_instance is None:
+                from viz.core.prescore import PreScoreStore
+                self._prescore_instance = PreScoreStore(self.cache_mgr.cache_dir, self)
+            return self._prescore_instance
 
     def get_calendar(self) -> CalendarSpec:
         """Return the inferred or configured CalendarSpec for this hub."""
@@ -260,7 +353,21 @@ class SandboxDataLoader:
         return pl.DataFrame()
 
     def get_oracle(self, as_polars: bool = True) -> pl.DataFrame:
-        """Load oracle ground truth via accelerated Parquet cache."""
+        """Load oracle ground truth via mtime-keyed cache over the accelerated Parquet cache."""
+        pq_path = self.cache_mgr.get_oracle_parquet()
+        if pq_path is not None and pq_path.exists():
+            try:
+                st = pq_path.stat()
+                sig = (str(pq_path), st.st_mtime_ns, int(st.st_size))
+                with self._oracle_cache_lock:
+                    if self._oracle_cache is not None and self._oracle_cache[0] == sig:
+                        return self._oracle_cache[1]
+                df = pl.scan_parquet(pq_path).collect()
+                with self._oracle_cache_lock:
+                    self._oracle_cache = (sig, df)
+                return df
+            except OSError:
+                pass
         lf = self.cache_mgr.scan_oracle()
         if lf is not None:
             return lf.collect()
@@ -446,30 +553,52 @@ class SandboxDataLoader:
             pl.col("target_end_date").replace_strict({d: v[1] for d, v in sw.items()}, return_dtype=pl.Int32).alias("season_week"),
         ).sort(["location", "season", "season_week"])
 
-        phase_frames = []
-        for (loc, season), g in weekly.group_by(["location", "season"], maintain_order=True):
-            vals = g.get_column("value").to_list()
-            n = len(vals)
-            phases = [None] * n
-            peak_val = max(vals) if vals else 0
+        season_end_dt = {
+            s: datetime.strptime(cal.season_bounds(s)[1], "%Y-%m-%d")
+            for s in weekly.get_column("season").unique().to_list()
+        }
+        locs_col = weekly.get_column("location").to_list()
+        seasons_col = weekly.get_column("season").to_list()
+        teds_col = weekly.get_column("target_end_date").to_list()
+        vals_col = weekly.get_column("value").to_list()
+        n_total = len(vals_col)
+        out_phases: List[Optional[str]] = [None] * n_total
+        peak_frac = self.PEAK_FRACTION
+
+        start = 0
+        while start < n_total:
+            cur_loc = locs_col[start]
+            cur_season = seasons_col[start]
+            end = start + 1
+            while end < n_total and locs_col[end] == cur_loc and seasons_col[end] == cur_season:
+                end += 1
+            n = end - start
+            seg_vals = vals_col[start:end]
+            peak_val = max(seg_vals) if seg_vals else 0
             if n >= 3 and peak_val and peak_val > 0:
-                i = vals.index(peak_val)
-                season_end = cal.season_bounds(season)[1]
-                last_obs = g.get_column("target_end_date")[-1]
-                still_open = (datetime.strptime(season_end, "%Y-%m-%d") - datetime.strptime(last_obs, "%Y-%m-%d")).days > 21
+                i = seg_vals.index(peak_val)
+                season_end = season_end_dt[cur_season]
+                last_obs_dt = datetime.strptime(teds_col[end - 1], "%Y-%m-%d")
+                still_open = (season_end - last_obs_dt).days > 21
                 if still_open and i >= n - 2:
-                    phases = ["pre"] * n
+                    for idx in range(start, end):
+                        out_phases[idx] = "pre"
                 else:
                     a = b = i
-                    floor = self.PEAK_FRACTION * peak_val
-                    while a - 1 >= 0 and vals[a - 1] >= floor:
+                    floor = peak_frac * peak_val
+                    while a - 1 >= 0 and seg_vals[a - 1] >= floor:
                         a -= 1
-                    while b + 1 < n and vals[b + 1] >= floor:
+                    while b + 1 < n and seg_vals[b + 1] >= floor:
                         b += 1
-                    phases = ["pre"] * a + ["peak"] * (b - a + 1) + ["post"] * (n - b - 1)
-            phase_frames.append(g.with_columns(pl.Series("phase", phases, dtype=pl.String)))
+                    for idx in range(start, start + a):
+                        out_phases[idx] = "pre"
+                    for idx in range(start + a, start + b + 1):
+                        out_phases[idx] = "peak"
+                    for idx in range(start + b + 1, end):
+                        out_phases[idx] = "post"
+            start = end
 
-        result = pl.concat(phase_frames, how="vertical_relaxed").select(list(out_schema)).cast(out_schema)
+        result = weekly.with_columns(pl.Series("phase", out_phases, dtype=pl.String)).select(list(out_schema)).cast(out_schema)
         with self._phase_cache_lock:
             if len(self._phase_cache) >= 32:
                 self._phase_cache.clear()
@@ -612,6 +741,8 @@ class SandboxDataLoader:
         self._calendar_cache = None
         with self._phase_cache_lock:
             self._phase_cache.clear()
+        with self._oracle_cache_lock:
+            self._oracle_cache = None
 
     def _models_from_remote_manifest(
         self,
@@ -1898,20 +2029,28 @@ class SandboxDataLoader:
             "q50_upper": get_col_list(0.75),
         }
 
-    def _task_wis_lookup(self, forecast_df: pl.DataFrame, target: str) -> Dict[Tuple[str, str, int], float]:
-        """True WIS per (location, reference_date, horizon) task, scored exactly as on the leaderboard."""
-        sc = score_forecasts(
+    def _task_wis_lookup(
+        self,
+        forecast_df: pl.DataFrame,
+        target: str,
+        *,
+        oracle: Optional[pl.DataFrame] = None,
+    ) -> Dict[Tuple[str, str, int], float]:
+        """True WIS per (location, reference_date, horizon) task, scored identically to the leaderboard."""
+        ora = oracle if oracle is not None else self.get_oracle(as_polars=True)
+        if ora is None or ora.is_empty():
+            return {}
+        tdf = score_task_wis(
             forecast_df,
-            self.get_oracle(as_polars=True),
+            ora,
             target=target,
             non_negative=self.config.is_target_non_negative(target),
-            return_task_df=True,
         )
-        if not sc:
+        if tdf.is_empty():
             return {}
         return {
             (str(loc), str(rd), int(h)): float(w)
-            for loc, rd, h, w in sc["task_df"].select(["location", "reference_date", "horizon", "wis"]).iter_rows()
+            for loc, rd, h, w in tdf.select(["location", "reference_date", "horizon", "wis"]).iter_rows()
             if w is not None
         }
 
@@ -1921,7 +2060,7 @@ class SandboxDataLoader:
     ) -> Dict[str, Any]:
         """
         Extract multi-model spatial predictions, population-adjusted rates,
-        growth trajectories, and evaluation metrics across all 50 states + DC + PR.
+        growth trajectories, and evaluation metrics across all locations in scope.
 
         precise=True leaves forecast values, errors and WIS unrounded (the default rounds them, which
         turns proportion targets into 0.0); the default output is unchanged.
@@ -1932,30 +2071,21 @@ class SandboxDataLoader:
             return v if precise else round(v, n)
 
         locations = self.get_locations()
-        # Per-100k rates only make sense for counts; rate/proportion targets are already normalized
         per_100k = not self.config.get_target_metadata(target)["is_rate"]
 
-        # Oracle truth (include -14d window so negative horizon_offset_days such as RespiCast h=0 are retained)
         try:
             obs_since = (date.fromisoformat(str(reference_date)[:10]) - timedelta(days=14)).isoformat()
         except ValueError:
             obs_since = reference_date
-        lf_o = self.cache_mgr.scan_oracle()
-        o_sub = pl.DataFrame()
-        if lf_o is not None:
-            o_sub = (
-                lf_o.filter((pl.col("target") == target) & (pl.col("target_end_date") >= obs_since))
-                .collect()
-            )
-            if not o_sub.is_empty():
-                if "as_of" in o_sub.columns:
-                    o_sub = o_sub.sort("as_of").group_by(["location", "target_end_date"]).last()
-                o_sub = o_sub.select(["location", "target_end_date", "oracle_value"]).drop_nulls()
 
         geo = self.get_geo_graph()
         primary_ids = set(geo.resolve_pool("all") or [l for l in locations if l != "US"])
         agg_ids = set(geo.aggregate_locations_in_scope())
         spatial_ids = primary_ids | agg_ids
+        spatial_list = sorted(spatial_ids)
+
+        oracle_full = self.get_oracle(as_polars=True)
+        o_map = _oracle_value_map(oracle_full, target, locations=spatial_list, min_ted=obs_since)
 
         states_data = {}
         locations_data = {}
@@ -1978,50 +2108,112 @@ class SandboxDataLoader:
             if loc_id in primary_ids and abbr not in states_data:
                 states_data[abbr] = rec
 
-        if not o_sub.is_empty():
-            for row in o_sub.iter_rows(named=True):
-                loc = str(row["location"])
-                if loc in locations and loc in spatial_ids:
-                    val = float(row["oracle_value"]) if row["oracle_value"] is not None and not np.isnan(row["oracle_value"]) else None
-                    ted = str(row["target_end_date"])
-                    pop = locations[loc].get("population") or 1
-                    rate = round((val / pop) * 100000, 2) if per_100k and val is not None and pop > 1 else None
-                    locations_data[loc]["truth"][ted] = val
-                    locations_data[loc]["truth_rate"][ted] = rate
+        for (loc, ted), val in o_map.items():
+            if loc in locations_data:
+                pop = locations[loc].get("population") or 1
+                rate = round((val / pop) * 100000, 2) if per_100k and pop > 1 else None
+                locations_data[loc]["truth"][ted] = val
+                locations_data[loc]["truth_rate"][ted] = rate
 
-        available_horizons = set()
-        dates_by_horizon = {}
-        all_models_meta = self.scan_models()
+        available_horizons: set[int] = set()
+        dates_by_horizon: Dict[int, str] = {}
+        extra_cols = sorted(self.config.get_extra_task_ids(target).keys())
+        core_req = ["target", "reference_date", "location", "horizon", "target_end_date", "output_type", "output_type_id", "value"]
 
+        lazy_mids: List[str] = []
+        lazy_queries: List[pl.LazyFrame] = []
+        fallback_mids: List[str] = []
         for mid in model_ids:
-            raw_mid, is_local = self._resolve_model_id_and_local(mid)
-            lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_local)
+            raw_mid, is_loc = self._resolve_model_id_and_local(mid)
+            lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_loc)
             if lf_m is None:
+                fallback_mids.append(mid)
+                continue
+            names = set(lf_m.collect_schema().names())
+            sel = [c for c in core_req if c in names] + [c for c in extra_cols if c in names]
+            q = (
+                lf_m.filter(
+                    (pl.col("reference_date") == reference_date)
+                    & (pl.col("target") == target)
+                    & (pl.col("horizon") >= 0)
+                    & (pl.col("output_type") == "quantile")
+                    & pl.col("location").is_in(spatial_list)
+                )
+                .select(sel)
+            )
+            lazy_mids.append(mid)
+            lazy_queries.append(q)
+
+        model_frames: Dict[str, pl.DataFrame] = {}
+        if lazy_queries:
+            collected = pl.collect_all(lazy_queries)
+            for mid, df in zip(lazy_mids, collected):
+                if df is not None and not df.is_empty():
+                    model_frames[mid] = df
+
+        if fallback_mids:
+            def _load_fb(mid: str) -> Optional[pl.DataFrame]:
                 df_raw = self.load_forecast_file(mid, reference_date, as_polars=True)
                 if df_raw is None or df_raw.is_empty():
-                    continue
+                    return None
                 sub = df_raw.filter(
                     (pl.col("target") == target)
                     & (pl.col("horizon") >= 0)
                     & (pl.col("output_type") == "quantile")
+                    & pl.col("location").cast(pl.String).is_in(spatial_list)
                 )
-            else:
-                sub = (
-                    lf_m.filter(
-                        (pl.col("reference_date") == reference_date)
-                        & (pl.col("target") == target)
-                        & (pl.col("horizon") >= 0)
-                        & (pl.col("output_type") == "quantile")
-                    )
-                    .collect()
-                )
+                return sub if not sub.is_empty() else None
 
-            if sub.is_empty():
+            for mid, df in zip(fallback_mids, ordered_map(_load_fb, fallback_mids)):
+                if df is not None:
+                    model_frames[mid] = df
+
+        # Compute WIS across all models in one vectorized call per schema group against the cached oracle
+        wis_by_mid: Dict[Tuple[str, str, str, int], float] = {}
+        if model_frames and oracle_full is not None and not oracle_full.is_empty():
+            by_schema: Dict[Tuple[str, ...], List[pl.DataFrame]] = {}
+            for mid, sub in model_frames.items():
+                present_extras = tuple(ec for ec in extra_cols if ec in sub.columns)
+                exprs = [
+                    pl.lit(mid).alias("_mid"),
+                    pl.col("target").cast(pl.String),
+                    pl.col("reference_date").cast(pl.String),
+                    pl.col("location").cast(pl.String),
+                    pl.col("horizon").fill_null(0).cast(pl.Int32),
+                    pl.col("target_end_date").cast(pl.String),
+                    pl.col("output_type_id").cast(pl.Float64),
+                    pl.col("value").cast(pl.Float64),
+                ]
+                if "output_type" in sub.columns:
+                    exprs.append(pl.col("output_type").cast(pl.String))
+                for ec in present_extras:
+                    exprs.append(pl.col(ec).cast(pl.String))
+                by_schema.setdefault(present_extras, []).append(sub.select(exprs))
+
+            for present_extras, frames in by_schema.items():
+                batch_df = pl.concat(frames, how="vertical_relaxed")
+                w_df = score_task_wis(
+                    batch_df,
+                    oracle_full,
+                    target=target,
+                    non_negative=self.config.is_target_non_negative(target),
+                    extra_task_ids=present_extras or None,
+                    preserve_cols=["_mid"],
+                )
+                if not w_df.is_empty():
+                    for mid_k, loc_k, rd_k, h_k, w_val in w_df.select(["_mid", "location", "reference_date", "horizon", "wis"]).iter_rows():
+                        if w_val is not None:
+                            wis_by_mid[(str(mid_k), str(loc_k), str(rd_k), int(h_k))] = float(w_val)
+
+        _SPATIAL_QS = [0.025, 0.25, 0.5, 0.75, 0.975]
+        for mid in model_ids:
+            sub = model_frames.get(mid)
+            if sub is None or sub.is_empty():
                 continue
 
-            wis_lookup = self._task_wis_lookup(sub, target)
-
-            piv = sub.pivot(
+            q_sub = sub.filter(pl.col("output_type_id").cast(pl.Float64, strict=False).round(4).is_in(_SPATIAL_QS))
+            piv_src = q_sub if (not q_sub.is_empty() and q_sub.select(["location", "horizon"]).n_unique() >= sub.select(["location", "horizon"]).n_unique()) else sub
+            piv = piv_src.pivot(
                 on="output_type_id",
                 index=["location", "horizon", "target_end_date"],
                 values="value",
@@ -2029,7 +2221,6 @@ class SandboxDataLoader:
             )
 
             piv_cols = piv.columns
-
             c_05 = find_quantile_column(piv_cols, 0.5)
             c_0025 = find_quantile_column(piv_cols, 0.025)
             c_0975 = find_quantile_column(piv_cols, 0.975)
@@ -2041,16 +2232,15 @@ class SandboxDataLoader:
             if h_vals:
                 base_h = 0 if 0 in h_vals else min(h_vals)
 
-            h0_medians = {}
+            h0_medians: Dict[str, float] = {}
             if c_05 is not None:
-                h0_rows = piv.filter(pl.col("horizon") == base_h).select(["location", c_05]).iter_rows()
-                for loc, med in h0_rows:
+                for loc, med in piv.filter(pl.col("horizon") == base_h).select(["location", c_05]).iter_rows():
                     if med is not None and not np.isnan(med):
                         h0_medians[str(loc)] = float(med)
 
             for row in piv.iter_rows(named=True):
                 loc = str(row["location"])
-                if loc not in locations or loc not in spatial_ids:
+                if loc not in locations_data:
                     continue
                 h = int(row["horizon"])
                 ted = str(row["target_end_date"])
@@ -2062,24 +2252,20 @@ class SandboxDataLoader:
                 q975 = float(row[c_0975]) if c_0975 and row[c_0975] is not None and not np.isnan(row[c_0975]) else None
                 q25 = float(row[c_025]) if c_025 and row[c_025] is not None and not np.isnan(row[c_025]) else None
                 q75 = float(row[c_075]) if c_075 and row[c_075] is not None and not np.isnan(row[c_075]) else None
-                wis = wis_lookup.get((loc, reference_date, h))
+                wis = wis_by_mid.get((mid, loc, reference_date, h))
 
                 pop = locations[loc].get("population") or 1
                 rate = round((med / pop) * 100000, 2) if per_100k and med is not None and pop > 1 else None
 
                 h0_val = h0_medians.get(loc)
-                trend_pct = None
-                if med is not None and h0_val is not None and h0_val > 0:
-                    trend_pct = round(((med - h0_val) / h0_val) * 100, 1)
+                trend_pct = round(((med - h0_val) / h0_val) * 100, 1) if (med is not None and h0_val is not None and h0_val > 0) else None
 
                 loc_rec = locations_data[loc]
                 truth_val = loc_rec["truth"].get(ted)
                 error = rnd(med - truth_val, 1) if med is not None and truth_val is not None else None
 
-                if mid not in loc_rec["models"]:
-                    loc_rec["models"][mid] = {}
-
-                loc_rec["models"][mid][h] = {
+                m_entry = loc_rec["models"].setdefault(mid, {})
+                m_entry[h] = {
                     "median": rnd(med, 1),
                     "rate_per_100k": rate,
                     "q025": rnd(q025, 1),
@@ -2092,7 +2278,7 @@ class SandboxDataLoader:
                     "target_end_date": ted,
                 }
 
-        sorted_horizons = sorted(list(available_horizons))
+        sorted_horizons = sorted(available_horizons)
         return {
             "target": target,
             "reference_date": reference_date,
@@ -2126,6 +2312,7 @@ class SandboxDataLoader:
         horizons: Optional[List[int]] = None,
         dates: Optional[List[str]] = None,
         fair: Union[bool, str] = False,
+        compact: bool = False,
     ) -> Dict[str, Any]:
         """
         horizons / dates (optional, default off so existing callers are unchanged): score only these
@@ -2304,6 +2491,22 @@ class SandboxDataLoader:
             keep = set(dates)
             scope_dates = [d for d in scope_dates if d in keep]
 
+        _DISPLAY_QS = [0.025, 0.5, 0.975]
+
+        def _pivot_display_qs(df_sub: pl.DataFrame, index_cols: List[str]) -> pl.DataFrame:
+            q_sub = df_sub.filter(pl.col("output_type_id").cast(pl.Float64, strict=False).round(4).is_in(_DISPLAY_QS))
+            src = (
+                q_sub
+                if (not q_sub.is_empty() and q_sub.select(index_cols).n_unique() >= df_sub.select(index_cols).n_unique())
+                else df_sub
+            )
+            return src.pivot(
+                on="output_type_id",
+                index=index_cols,
+                values="value",
+                aggregate_function="first",
+            )
+
         # -------------------------------------------------------------
         # Mode 1: Spatio-Temporal Wave Matrix (Location x Date)
         # -------------------------------------------------------------
@@ -2316,53 +2519,34 @@ class SandboxDataLoader:
                     "row_groups": [], "sort_by": sort_by, "normalize": normalize,
                 }
 
-            # Container for cell values: [abbr][date] -> dict
             grid_data: Dict[str, Dict[str, Dict[str, Any]]] = {abbr: {} for abbr, _, _ in state_items}
-
-            # Is this ground truth or model forecast?
             is_truth_mode = (not model_id) or (model_id.lower() in ("truth", "oracle", "none"))
+            target_locs = [loc_id for _, loc_id, _ in state_items]
+            oracle_full = self.get_oracle(as_polars=True)
 
             if is_truth_mode:
-                lf_o = self.cache_mgr.scan_oracle()
-                if lf_o is not None:
-                    target_locs = [loc_id for _, loc_id, _ in state_items]
-                    df_o = (
-                        lf_o.filter((pl.col("target") == target) & pl.col("target_end_date").is_in(scope_dates) & pl.col("location").is_in(target_locs))
-                        .select(["location", "target_end_date", "oracle_value"])
-                        .collect()
-                    )
-                    for row in df_o.iter_rows(named=True):
-                        loc = str(row["location"])
-                        ted = str(row["target_end_date"])
-                        val = float(row["oracle_value"]) if row["oracle_value"] is not None and not np.isnan(row["oracle_value"]) else None
-                        if loc in locations:
-                            abbr = locations[loc].get("abbreviation", loc)
-                            if abbr in grid_data:
-                                pop = abbr_to_pop.get(abbr, 1)
-                                rate = per_100k(val, pop)
-                                grid_data[abbr][ted] = {
-                                    "truth": val,
-                                    "rate": rate,
-                                    "count": val,
-                                    "trend": None,
-                                    "wis": None,
-                                    "pop": pop,
-                                    "name": abbr_to_name.get(abbr, abbr),
-                                }
+                df_o_map = _oracle_value_map(oracle_full, target, locations=target_locs, target_end_dates=scope_dates)
+                for (loc, ted), val in df_o_map.items():
+                    if loc in locations:
+                        abbr = locations[loc].get("abbreviation", loc)
+                        if abbr in grid_data:
+                            pop = abbr_to_pop.get(abbr, 1)
+                            grid_data[abbr][ted] = {
+                                "truth": val,
+                                "rate": per_100k(val, pop),
+                                "count": val,
+                                "trend": None,
+                                "wis": None,
+                                "pop": pop,
+                                "name": abbr_to_name.get(abbr, abbr),
+                            }
             else:
                 raw_mid, is_loc = self._resolve_model_id_and_local(model_id)
                 lf_m = self.cache_mgr.scan_model(raw_mid, is_local=is_loc)
                 if lf_m is None and all_models_meta.get(model_id, {}).get("is_synthetic") and scope_dates:
                     df_syn = self.load_combined_forecasts(model_id, dates=scope_dates, as_polars=True)
                     lf_m = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
-                lf_o = self.cache_mgr.scan_oracle()
-                df_o_map: Dict[Tuple[str, str], float] = {}
-                target_locs = [loc_id for _, loc_id, _ in state_items]
-                if lf_o is not None:
-                    df_o = lf_o.filter((pl.col("target") == target) & pl.col("location").is_in(target_locs)).select(["location", "target_end_date", "oracle_value"]).collect()
-                    for r in df_o.iter_rows(named=True):
-                        if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
-                            df_o_map[(str(r["location"]), str(r["target_end_date"]))] = float(r["oracle_value"])
+                df_o_map = _oracle_value_map(oracle_full, target, locations=target_locs)
 
                 if lf_m is not None:
                     sub = (
@@ -2376,13 +2560,8 @@ class SandboxDataLoader:
                         .collect()
                     )
                     if not sub.is_empty():
-                        wis_lookup = self._task_wis_lookup(sub, target)
-                        piv = sub.pivot(
-                            on="output_type_id",
-                            index=["location", "reference_date", "target_end_date"],
-                            values="value",
-                            aggregate_function="first",
-                        )
+                        wis_lookup = self._task_wis_lookup(sub, target, oracle=oracle_full)
+                        piv = _pivot_display_qs(sub, ["location", "reference_date", "target_end_date"])
                         cols_p = piv.columns
                         c_05 = find_quantile_column(cols_p, 0.5)
                         c_0025 = find_quantile_column(cols_p, 0.025)
@@ -2416,7 +2595,6 @@ class SandboxDataLoader:
                                         "name": abbr_to_name.get(abbr, abbr),
                                     }
 
-            # Compute week-over-week trend for each state across dates
             for abbr, date_map in grid_data.items():
                 prev_val = None
                 for d in scope_dates:
@@ -2442,9 +2620,10 @@ class SandboxDataLoader:
                 row_vals: List[Optional[float]] = []
                 r_id = STATE_TO_HHS_REGION.get(abbr, 99)
                 reg_name = HHS_REGIONS.get(r_id, {}).get("name", "Other")
+                loc_cells = grid_data.get(abbr, {})
 
                 for d in x_keys:
-                    c = grid_data.get(abbr, {}).get(d)
+                    c = loc_cells.get(d)
                     val = None
                     if c is not None:
                         if metric == "rate":
@@ -2459,20 +2638,18 @@ class SandboxDataLoader:
                             val = c.get("error")
                         else:
                             val = c.get("rate")
-
+                        cell_meta[f"{abbr}:{d}"] = {
+                            "row": abbr,
+                            "row_name": abbr_to_name.get(abbr, abbr),
+                            "col": d,
+                            "region_id": r_id,
+                            "region_name": reg_name,
+                            "metric_name": metric,
+                            "metric_value": val,
+                            "population": abbr_to_pop.get(abbr),
+                            **c,
+                        }
                     row_vals.append(val)
-                    cell_key = f"{abbr}:{d}"
-                    cell_meta[cell_key] = {
-                        "row": abbr,
-                        "row_name": abbr_to_name.get(abbr, abbr),
-                        "col": d,
-                        "region_id": r_id,
-                        "region_name": reg_name,
-                        "metric_name": metric,
-                        "metric_value": val,
-                        "population": abbr_to_pop.get(abbr),
-                        **(c or {}),
-                    }
                 raw_matrix.append(row_vals)
 
         # -------------------------------------------------------------
@@ -2488,7 +2665,6 @@ class SandboxDataLoader:
             if lf_m is None and all_models_meta.get(m_target, {}).get("is_synthetic") and ref_date:
                 df_syn = self.load_combined_forecasts(m_target, dates=[ref_date], as_polars=True)
                 lf_m = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
-            lf_o = self.cache_mgr.scan_oracle()
 
             def _resolve_h_cols(df_sub: Optional[pl.DataFrame]) -> List[int]:
                 if horizons:
@@ -2520,77 +2696,63 @@ class SandboxDataLoader:
             y_labels = [abbr_to_name.get(abbr, abbr) if abbr != "US" else "US National" for abbr in y_keys]
 
             h_grid: Dict[str, Dict[int, Dict[str, Any]]] = {abbr: {} for abbr in y_keys}
+            oracle_full = self.get_oracle(as_polars=True)
 
-            df_o_map: Dict[Tuple[str, str], float] = {}
-            if lf_o is not None and ref_date:
+            obs_since = ref_date
+            if ref_date:
                 try:
                     obs_since = (datetime.strptime(ref_date[:10], "%Y-%m-%d").date() + timedelta(days=int(cal.horizon_offset_days) - 7)).isoformat()
                 except ValueError:
                     obs_since = ref_date
-                o_q = lf_o.filter((pl.col("target") == target) & (pl.col("target_end_date") >= obs_since) & pl.col("location").is_in(target_locs))
-                if "output_type" in o_q.collect_schema().names():
-                    o_q = o_q.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
-                df_o = o_q.collect()
-                if not df_o.is_empty():
-                    if "as_of" in df_o.columns:
-                        df_o = df_o.sort("as_of").group_by(["location", "target_end_date"]).last()
-                    for r in df_o.select(["location", "target_end_date", "oracle_value"]).iter_rows(named=True):
-                        if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
-                            df_o_map[(str(r["location"]), str(r["target_end_date"]))] = float(r["oracle_value"])
+            df_o_map = _oracle_value_map(oracle_full, target, locations=target_locs, min_ted=obs_since) if ref_date else {}
 
             if not sub.is_empty():
-                if not sub.is_empty():
-                    wis_lookup = self._task_wis_lookup(sub, target)
-                    piv = sub.pivot(
-                        on="output_type_id",
-                        index=["location", "horizon", "target_end_date"],
-                        values="value",
-                        aggregate_function="first",
-                    )
-                    cols_p = piv.columns
-                    c_05 = find_quantile_column(cols_p, 0.5)
-                    c_0025 = find_quantile_column(cols_p, 0.025)
-                    c_0975 = find_quantile_column(cols_p, 0.975)
+                wis_lookup = self._task_wis_lookup(sub, target, oracle=oracle_full)
+                piv = _pivot_display_qs(sub, ["location", "horizon", "target_end_date"])
+                cols_p = piv.columns
+                c_05 = find_quantile_column(cols_p, 0.5)
+                c_0025 = find_quantile_column(cols_p, 0.025)
+                c_0975 = find_quantile_column(cols_p, 0.975)
 
-                    h0_medians: Dict[str, float] = {}
-                    if c_05 is not None:
-                        for loc, h, med in piv.select(["location", "horizon", c_05]).iter_rows():
-                            if int(h) == 0 and med is not None and not np.isnan(med):
-                                h0_medians[str(loc)] = float(med)
+                h0_medians: Dict[str, float] = {}
+                if c_05 is not None:
+                    for loc, h, med in piv.select(["location", "horizon", c_05]).iter_rows():
+                        if int(h) == 0 and med is not None and not np.isnan(med):
+                            h0_medians[str(loc)] = float(med)
 
-                    for row in piv.iter_rows(named=True):
-                        loc = str(row["location"])
-                        h = int(row["horizon"])
-                        ted = str(row["target_end_date"])
-                        if loc in locations:
-                            abbr = locations[loc].get("abbreviation", loc)
-                            med = float(row[c_05]) if c_05 and row[c_05] is not None and not np.isnan(row[c_05]) else None
-                            q025 = float(row[c_0025]) if c_0025 and row[c_0025] is not None and not np.isnan(row[c_0025]) else None
-                            q975 = float(row[c_0975]) if c_0975 and row[c_0975] is not None and not np.isnan(row[c_0975]) else None
-                            pop = abbr_to_pop.get(abbr, 1)
-                            rate = per_100k(med, pop)
+                for row in piv.iter_rows(named=True):
+                    loc = str(row["location"])
+                    h = int(row["horizon"])
+                    ted = str(row["target_end_date"])
+                    if loc in locations:
+                        abbr = locations[loc].get("abbreviation", loc)
+                        med = float(row[c_05]) if c_05 and row[c_05] is not None and not np.isnan(row[c_05]) else None
+                        q025 = float(row[c_0025]) if c_0025 and row[c_0025] is not None and not np.isnan(row[c_0025]) else None
+                        q975 = float(row[c_0975]) if c_0975 and row[c_0975] is not None and not np.isnan(row[c_0975]) else None
+                        pop = abbr_to_pop.get(abbr, 1)
+                        rate = per_100k(med, pop)
 
-                            h0_val = h0_medians.get(loc)
-                            trend_pct = round(((med - h0_val) / h0_val) * 100, 1) if (med is not None and h0_val is not None and h0_val > 0) else (0.0 if h == 0 else None)
+                        h0_val = h0_medians.get(loc)
+                        trend_pct = round(((med - h0_val) / h0_val) * 100, 1) if (med is not None and h0_val is not None and h0_val > 0) else (0.0 if h == 0 else None)
 
-                            truth_val = df_o_map.get((loc, ted))
-                            wis = wis_lookup.get((loc, ref_date, h))
+                        truth_val = df_o_map.get((loc, ted))
+                        wis = wis_lookup.get((loc, ref_date, h))
 
-                            if abbr in h_grid:
-                                h_grid[abbr][h] = {
-                                    "median": med,
-                                    "rate": rate,
-                                    "count": med,
-                                    "trend": trend_pct,
-                                    "q025": q025,
-                                    "q975": q975,
-                                    "wis": wis,
-                                    "error": round(med - truth_val, 1) if (med is not None and truth_val is not None) else None,
-                                    "truth": truth_val,
-                                    "target_end_date": ted,
-                                    "pop": pop,
-                                    "name": abbr_to_name.get(abbr, abbr),
-                                }
+                        if abbr in h_grid:
+                            h_grid[abbr][h] = {
+                                "median": med,
+                                "rate": rate,
+                                "count": med,
+                                "trend": trend_pct,
+                                "q025": q025,
+                                "q975": q975,
+                                "wis": wis,
+                                "error": round(med - truth_val, 1) if (med is not None and truth_val is not None) else None,
+                                "truth": truth_val,
+                                "target_end_date": ted,
+                                "pop": pop,
+                                "name": abbr_to_name.get(abbr, abbr),
+                            }
 
             raw_matrix = []
             cell_meta = {}
@@ -2598,9 +2760,10 @@ class SandboxDataLoader:
                 row_vals = []
                 r_id = STATE_TO_HHS_REGION.get(abbr, 99)
                 reg_name = HHS_REGIONS.get(r_id, {}).get("name", "Other")
+                abbr_cells = h_grid.get(abbr, {})
 
                 for h in eff_horizons:
-                    c = h_grid.get(abbr, {}).get(h)
+                    c = abbr_cells.get(h)
                     val = None
                     if c is not None:
                         if metric == "rate":
@@ -2615,21 +2778,19 @@ class SandboxDataLoader:
                             val = c.get("error")
                         else:
                             val = c.get("rate")
-
+                        cell_meta[f"{abbr}:{h}"] = {
+                            "row": abbr,
+                            "row_name": abbr_to_name.get(abbr, abbr),
+                            "col": str(h),
+                            "col_label": f"h={h}",
+                            "horizon": h,
+                            "region_id": r_id,
+                            "region_name": reg_name,
+                            "metric_name": metric,
+                            "metric_value": val,
+                            **c,
+                        }
                     row_vals.append(val)
-                    cell_key = f"{abbr}:{h}"
-                    cell_meta[cell_key] = {
-                        "row": abbr,
-                        "row_name": abbr_to_name.get(abbr, abbr),
-                        "col": str(h),
-                        "col_label": f"h={h}",
-                        "horizon": h,
-                        "region_id": r_id,
-                        "region_name": reg_name,
-                        "metric_name": metric,
-                        "metric_value": val,
-                        **(c or {}),
-                    }
                 raw_matrix.append(row_vals)
 
         # -------------------------------------------------------------
@@ -2647,19 +2808,12 @@ class SandboxDataLoader:
             if lf_m is None and all_models_meta.get(m_target, {}).get("is_synthetic") and scope_dates:
                 df_syn = self.load_combined_forecasts(m_target, dates=scope_dates, as_polars=True)
                 lf_m = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
-            lf_o = self.cache_mgr.scan_oracle()
-            df_o_map: Dict[str, float] = {}
-            if lf_o is not None:
-                o_q = lf_o.filter((pl.col("target") == target) & (pl.col("location") == fips))
-                if "output_type" in o_q.collect_schema().names():
-                    o_q = o_q.filter(pl.col("output_type").is_null() | (pl.col("output_type") != "pmf"))
-                df_o = o_q.collect()
-                if not df_o.is_empty():
-                    if "as_of" in df_o.columns:
-                        df_o = df_o.sort("as_of").group_by("target_end_date").last()
-                    for r in df_o.select(["target_end_date", "oracle_value"]).iter_rows(named=True):
-                        if r["oracle_value"] is not None and not np.isnan(r["oracle_value"]):
-                            df_o_map[str(r["target_end_date"])] = float(r["oracle_value"])
+
+            oracle_full = self.get_oracle(as_polars=True)
+            df_o_map_ted = {
+                ted: val
+                for (_, ted), val in _oracle_value_map(oracle_full, target, locations=[fips]).items()
+            }
 
             sub = pl.DataFrame()
             if lf_m is not None:
@@ -2687,46 +2841,41 @@ class SandboxDataLoader:
 
             dh_grid: Dict[str, Dict[int, Dict[str, Any]]] = {d: {} for d in scope_dates}
             if not sub.is_empty():
-                if not sub.is_empty():
-                    wis_lookup = self._task_wis_lookup(sub, target)
-                    piv = sub.pivot(
-                        on="output_type_id",
-                        index=["reference_date", "horizon", "target_end_date"],
-                        values="value",
-                        aggregate_function="first",
-                    )
-                    cols_p = piv.columns
-                    c_05 = find_quantile_column(cols_p, 0.5)
-                    c_0025 = find_quantile_column(cols_p, 0.025)
-                    c_0975 = find_quantile_column(cols_p, 0.975)
+                wis_lookup = self._task_wis_lookup(sub, target, oracle=oracle_full)
+                piv = _pivot_display_qs(sub, ["reference_date", "horizon", "target_end_date"])
+                cols_p = piv.columns
+                c_05 = find_quantile_column(cols_p, 0.5)
+                c_0025 = find_quantile_column(cols_p, 0.025)
+                c_0975 = find_quantile_column(cols_p, 0.975)
 
-                    for row in piv.iter_rows(named=True):
-                        rd = str(row["reference_date"])
-                        h = int(row["horizon"])
-                        ted = str(row["target_end_date"])
-                        med = float(row[c_05]) if c_05 and row[c_05] is not None and not np.isnan(row[c_05]) else None
-                        q025 = float(row[c_0025]) if c_0025 and row[c_0025] is not None and not np.isnan(row[c_0025]) else None
-                        q975 = float(row[c_0975]) if c_0975 and row[c_0975] is not None and not np.isnan(row[c_0975]) else None
-                        rate = per_100k(med, pop)
-                        truth_val = df_o_map.get(ted)
-                        wis = wis_lookup.get((fips, rd, h))
+                for row in piv.iter_rows(named=True):
+                    rd = str(row["reference_date"])
+                    h = int(row["horizon"])
+                    ted = str(row["target_end_date"])
+                    med = float(row[c_05]) if c_05 and row[c_05] is not None and not np.isnan(row[c_05]) else None
+                    q025 = float(row[c_0025]) if c_0025 and row[c_0025] is not None and not np.isnan(row[c_0025]) else None
+                    q975 = float(row[c_0975]) if c_0975 and row[c_0975] is not None and not np.isnan(row[c_0975]) else None
+                    rate = per_100k(med, pop)
+                    truth_val = df_o_map_ted.get(ted)
+                    wis = wis_lookup.get((fips, rd, h))
 
-                        if rd in dh_grid:
-                            dh_grid[rd][h] = {
-                                "median": med,
-                                "rate": rate,
-                                "count": med,
-                                "truth": truth_val,
-                                "wis": wis,
-                                "error": round(med - truth_val, 1) if (med is not None and truth_val is not None) else None,
-                            }
+                    if rd in dh_grid:
+                        dh_grid[rd][h] = {
+                            "median": med,
+                            "rate": rate,
+                            "count": med,
+                            "truth": truth_val,
+                            "wis": wis,
+                            "error": round(med - truth_val, 1) if (med is not None and truth_val is not None) else None,
+                        }
 
             raw_matrix = []
             cell_meta = {}
             for rd in y_keys:
                 row_vals = []
+                rd_cells = dh_grid.get(rd, {})
                 for h in eff_horizons:
-                    c = dh_grid.get(rd, {}).get(h)
+                    c = rd_cells.get(h)
                     val = None
                     if c is not None:
                         if metric == "rate":
@@ -2739,18 +2888,17 @@ class SandboxDataLoader:
                             val = c.get("error")
                         else:
                             val = c.get("rate")
+                        cell_meta[f"{rd}:{h}"] = {
+                            "row": rd,
+                            "col": str(h),
+                            "col_label": f"h={h}",
+                            "horizon": h,
+                            "reference_date": rd,
+                            "metric_name": metric,
+                            "metric_value": val,
+                            **c,
+                        }
                     row_vals.append(val)
-                    cell_key = f"{rd}:{h}"
-                    cell_meta[cell_key] = {
-                        "row": rd,
-                        "col": str(h),
-                        "col_label": f"h={h}",
-                        "horizon": h,
-                        "reference_date": rd,
-                        "metric_name": metric,
-                        "metric_value": val,
-                        **(c or {}),
-                    }
                 raw_matrix.append(row_vals)
 
         # -------------------------------------------------------------
@@ -2765,34 +2913,58 @@ class SandboxDataLoader:
             oracle = self.get_oracle(as_polars=True)
             pop_map = None if is_rate_target else {loc: info["population"] for loc, info in locations.items() if info.get("population")}
             target_non_neg = self.config.is_target_non_negative(target)
+            target_loc_list = [loc_id for _, loc_id, _ in state_items]
+            horizons_int = sorted(set(int(h) for h in horizons)) if horizons else None
+            extra_cols = sorted(self.config.get_extra_task_ids(target).keys())
 
-            target_loc_fips = {loc_id for _, loc_id, _ in state_items}
-
-            # Task dataframes scored for each model
             model_task_dfs: Dict[str, pl.DataFrame] = {}
-            for mid in cand_mids:
-                raw_id, is_loc = self._resolve_model_id_and_local(mid)
-                lf = self.cache_mgr.scan_model(raw_id, is_local=is_loc)
-                if lf is None and all_models_meta.get(mid, {}).get("is_synthetic") and scope_dates:
-                    df_syn = self.load_combined_forecasts(mid, dates=scope_dates, as_polars=True)
-                    lf = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
-                if lf is None or oracle is None or oracle.is_empty():
-                    continue
-                sc = score_forecasts(
-                    lf.collect(),
+            if oracle is not None and not oracle.is_empty():
+                prescored = self.prescore.get_model_task_scores(
+                    target,
+                    cand_mids,
+                    all_models_meta,
                     oracle,
-                    target=target,
-                    reference_dates=scope_dates,
                     non_negative=target_non_neg,
-                    population_map=pop_map,
-                    return_task_df=True,
+                    extra_task_ids=extra_cols,
                 )
-                if sc and "task_df" in sc and sc["task_df"] is not None:
-                    # Restrict to the requested jurisdictions (all states excludes US national, as on the leaderboard)
-                    tdf_m = sc["task_df"].filter(pl.col("location").is_in(list(target_loc_fips)))
-                    if horizons and "horizon" in tdf_m.columns:
-                        tdf_m = tdf_m.filter(pl.col("horizon").is_in(list(horizons)))
+                for mid, (tdf_full, _) in prescored.items():
+                    if tdf_full.is_empty():
+                        continue
+                    pred = pl.col("location").is_in(target_loc_list) & pl.col("reference_date").is_in(scope_dates)
+                    if horizons_int is not None and "horizon" in tdf_full.columns:
+                        pred = pred & pl.col("horizon").is_in(horizons_int)
+                    tdf_m = tdf_full.filter(pred)
+                    if not tdf_m.is_empty():
+                        tdf_m = attach_wis_per_100k(tdf_m, pop_map)
                     model_task_dfs[mid] = tdf_m
+
+                fallback_mids = [mid for mid in cand_mids if mid not in prescored]
+                if fallback_mids:
+                    def _score_hm_fallback(mid: str) -> Optional[pl.DataFrame]:
+                        raw_id, is_loc = self._resolve_model_id_and_local(mid)
+                        lf = self.cache_mgr.scan_model(raw_id, is_local=is_loc)
+                        if lf is None and all_models_meta.get(mid, {}).get("is_synthetic") and scope_dates:
+                            df_syn = self.load_combined_forecasts(mid, dates=scope_dates, as_polars=True)
+                            lf = df_syn.lazy() if df_syn is not None and not df_syn.is_empty() else None
+                        if lf is None:
+                            return None
+                        sc = score_forecasts(
+                            lf,
+                            oracle,
+                            target=target,
+                            locations=target_loc_list,
+                            reference_dates=scope_dates,
+                            horizons=horizons_int,
+                            non_negative=target_non_neg,
+                            population_map=pop_map,
+                            extra_task_ids=extra_cols or None,
+                            return_task_df=True,
+                        )
+                        return sc.get("task_df") if sc else None
+
+                    for mid, tdf_m in zip(fallback_mids, ordered_map(_score_hm_fallback, fallback_mids)):
+                        if tdf_m is not None:
+                            model_task_dfs[mid] = tdf_m
 
             if fair and len(cand_mids) >= 2:
                 present_tdfs = [model_task_dfs.get(m) for m in cand_mids]
@@ -2823,105 +2995,65 @@ class SandboxDataLoader:
                 cell_meta = {}
 
                 for mid in y_keys:
-                    tdf = model_task_dfs.get(mid)
-                    loc_metrics: Dict[str, Dict[str, float]] = {}
-                    if tdf is not None and not tdf.is_empty():
-                        agg = tdf.group_by("location").agg([
-                            pl.col("wis").mean().alias("wis"),
-                            pl.col("wis_per_100k").mean().alias("wis_rate"),
-                            pl.col("mae").mean().alias("mae") if "mae" in tdf.columns else pl.lit(None).alias("mae"),
-                            pl.col("cov95").mean().alias("cov95") if "cov95" in tdf.columns else pl.lit(None).alias("cov95"),
-                            pl.col("sharpness").mean().alias("sharpness") if "sharpness" in tdf.columns else pl.lit(None).alias("sharpness"),
-                            pl.len().alias("task_count"),
-                        ])
-                        for row in agg.iter_rows(named=True):
-                            loc = str(row["location"])
-                            if loc in loc_to_abbr:
-                                abbr = loc_to_abbr[loc]
-                                loc_metrics[abbr] = {
-                                    "wis": round(row["wis"], 4) if row["wis"] is not None and not np.isnan(row["wis"]) else None,
-                                    "wis_rate": round(row["wis_rate"], 2) if row.get("wis_rate") is not None and not np.isnan(row["wis_rate"]) else None,
-                                    "mae": round(row["mae"], 2) if row.get("mae") is not None and not np.isnan(row["mae"]) else None,
-                                    "cov95": round(row["cov95"] * 100, 1) if row.get("cov95") is not None and not np.isnan(row["cov95"]) else None,
-                                    "sharpness": round(row["sharpness"], 1) if row.get("sharpness") is not None and not np.isnan(row["sharpness"]) else None,
-                                    "task_count": row.get("task_count", 0),
-                                }
-
+                    raw_m = _agg_heatmap_group(model_task_dfs.get(mid), "location", wis_digits=4, key_cast=str)
+                    loc_metrics = {loc_to_abbr[loc]: m_d for loc, m_d in raw_m.items() if loc in loc_to_abbr}
                     row_vals = []
                     for abbr in x_keys:
-                        m_dict = loc_metrics.get(abbr, {})
-                        val = m_dict.get(metric if metric in m_dict else "wis")
+                        m_dict = loc_metrics.get(abbr)
+                        val = m_dict.get(metric if metric in m_dict else "wis") if m_dict else None
                         row_vals.append(val)
-                        cell_key = f"{mid}:{abbr}"
-                        cell_meta[cell_key] = {
-                            "row": mid,
-                            "col": abbr,
-                            "location_name": abbr_to_name.get(abbr, abbr),
-                            "metric_name": metric,
-                            "metric_value": val,
-                            **(m_dict or {}),
-                        }
+                        if m_dict:
+                            cell_meta[f"{mid}:{abbr}"] = {
+                                "row": mid,
+                                "col": abbr,
+                                "location_name": abbr_to_name.get(abbr, abbr),
+                                "metric_name": metric,
+                                "metric_value": val,
+                                **m_dict,
+                            }
                     raw_matrix.append(row_vals)
 
             elif mode == "model_h":
                 if horizons:
                     eff_horizons = sorted(set(int(h) for h in horizons))
                 else:
-                    obs_hs = sorted({
+                    all_obs_hs = sorted({
                         int(hv)
                         for tdf in model_task_dfs.values()
                         if tdf is not None and not tdf.is_empty() and "horizon" in tdf.columns
                         for hv in tdf.get_column("horizon").drop_nulls().unique().to_list()
-                        if int(hv) >= 0
                     })
+                    obs_hs = [h for h in all_obs_hs if h >= 0] or all_obs_hs
                     eff_horizons = obs_hs or [0, 1, 2, 3]
+                unit_lbl = "Mo" if self.config.get_target_metadata(target).get("time_unit") == "month" else "Wk"
                 x_keys = [str(h) for h in eff_horizons]
-                x_labels = [f"h={h}" + (" (Nowcast)" if h == 0 else f" (+{h} Wk)") for h in eff_horizons]
+                x_labels = [
+                    f"h={h} " + ("(Nowcast)" if h == 0 else f"({'+' if h > 0 else ''}{h} {unit_lbl})")
+                    for h in eff_horizons
+                ]
 
                 raw_matrix = []
                 cell_meta = {}
 
                 for mid in y_keys:
-                    tdf = model_task_dfs.get(mid)
-                    h_metrics: Dict[int, Dict[str, float]] = {}
-                    if tdf is not None and not tdf.is_empty():
-                        agg = tdf.group_by("horizon").agg([
-                            pl.col("wis").mean().alias("wis"),
-                            pl.col("wis_per_100k").mean().alias("wis_rate"),
-                            pl.col("mae").mean().alias("mae") if "mae" in tdf.columns else pl.lit(None).alias("mae"),
-                            pl.col("cov95").mean().alias("cov95") if "cov95" in tdf.columns else pl.lit(None).alias("cov95"),
-                            pl.col("sharpness").mean().alias("sharpness") if "sharpness" in tdf.columns else pl.lit(None).alias("sharpness"),
-                            pl.len().alias("task_count"),
-                        ])
-                        for row in agg.iter_rows(named=True):
-                            h = int(row["horizon"])
-                            h_metrics[h] = {
-                                "wis": round(row["wis"], 2) if row["wis"] is not None and not np.isnan(row["wis"]) else None,
-                                "wis_rate": round(row["wis_rate"], 2) if row.get("wis_rate") is not None and not np.isnan(row["wis_rate"]) else None,
-                                "mae": round(row["mae"], 2) if row.get("mae") is not None and not np.isnan(row["mae"]) else None,
-                                "cov95": round(row["cov95"] * 100, 1) if row.get("cov95") is not None and not np.isnan(row["cov95"]) else None,
-                                "sharpness": round(row["sharpness"], 1) if row.get("sharpness") is not None and not np.isnan(row["sharpness"]) else None,
-                                "task_count": row.get("task_count", 0),
-                            }
-
+                    h_metrics = _agg_heatmap_group(model_task_dfs.get(mid), "horizon", wis_digits=2, key_cast=int)
                     row_vals = []
                     for h in eff_horizons:
-                        m_dict = h_metrics.get(h, {})
-                        val = m_dict.get(metric if metric in m_dict else "wis")
+                        m_dict = h_metrics.get(h)
+                        val = m_dict.get(metric if metric in m_dict else "wis") if m_dict else None
                         row_vals.append(val)
-                        cell_key = f"{mid}:{h}"
-                        cell_meta[cell_key] = {
-                            "row": mid,
-                            "col": str(h),
-                            "horizon": h,
-                            "metric_name": metric,
-                            "metric_value": val,
-                            **(m_dict or {}),
-                        }
+                        if m_dict:
+                            cell_meta[f"{mid}:{h}"] = {
+                                "row": mid,
+                                "col": str(h),
+                                "horizon": h,
+                                "metric_name": metric,
+                                "metric_value": val,
+                                **m_dict,
+                            }
                     raw_matrix.append(row_vals)
 
             else:  # mode == "model_date"
-                # X-axis: Dates across season
                 x_keys = scope_dates
                 x_labels = [d for d in scope_dates]
 
@@ -2929,41 +3061,20 @@ class SandboxDataLoader:
                 cell_meta = {}
 
                 for mid in y_keys:
-                    tdf = model_task_dfs.get(mid)
-                    d_metrics: Dict[str, Dict[str, float]] = {}
-                    if tdf is not None and not tdf.is_empty():
-                        agg = tdf.group_by("reference_date").agg([
-                            pl.col("wis").mean().alias("wis"),
-                            pl.col("wis_per_100k").mean().alias("wis_rate"),
-                            pl.col("mae").mean().alias("mae") if "mae" in tdf.columns else pl.lit(None).alias("mae"),
-                            pl.col("cov95").mean().alias("cov95") if "cov95" in tdf.columns else pl.lit(None).alias("cov95"),
-                            pl.col("sharpness").mean().alias("sharpness") if "sharpness" in tdf.columns else pl.lit(None).alias("sharpness"),
-                            pl.len().alias("task_count"),
-                        ])
-                        for row in agg.iter_rows(named=True):
-                            rd = str(row["reference_date"])
-                            d_metrics[rd] = {
-                                "wis": round(row["wis"], 2) if row["wis"] is not None and not np.isnan(row["wis"]) else None,
-                                "wis_rate": round(row["wis_rate"], 2) if row.get("wis_rate") is not None and not np.isnan(row["wis_rate"]) else None,
-                                "mae": round(row["mae"], 2) if row.get("mae") is not None and not np.isnan(row["mae"]) else None,
-                                "cov95": round(row["cov95"] * 100, 1) if row.get("cov95") is not None and not np.isnan(row["cov95"]) else None,
-                                "sharpness": round(row["sharpness"], 1) if row.get("sharpness") is not None and not np.isnan(row["sharpness"]) else None,
-                                "task_count": row.get("task_count", 0),
-                            }
-
+                    d_metrics = _agg_heatmap_group(model_task_dfs.get(mid), "reference_date", wis_digits=2, key_cast=str)
                     row_vals = []
                     for d in x_keys:
-                        m_dict = d_metrics.get(d, {})
-                        val = m_dict.get(metric if metric in m_dict else "wis")
+                        m_dict = d_metrics.get(d)
+                        val = m_dict.get(metric if metric in m_dict else "wis") if m_dict else None
                         row_vals.append(val)
-                        cell_key = f"{mid}:{d}"
-                        cell_meta[cell_key] = {
-                            "row": mid,
-                            "col": d,
-                            "metric_name": metric,
-                            "metric_value": val,
-                            **(m_dict or {}),
-                        }
+                        if m_dict:
+                            cell_meta[f"{mid}:{d}"] = {
+                                "row": mid,
+                                "col": d,
+                                "metric_name": metric,
+                                "metric_value": val,
+                                **m_dict,
+                            }
                     raw_matrix.append(row_vals)
 
         # -------------------------------------------------------------
@@ -3230,49 +3341,72 @@ class SandboxDataLoader:
                 y_labels = [y_labels[i] for i in combined_sorted]
                 raw_matrix = [raw_matrix[i] for i in combined_sorted]
 
+        # Prune cell_meta to surviving rows/cols after shoulder pruning & inactive exclusion
+        if cell_meta:
+            valid_y_set = set(y_keys)
+            valid_x_set = set(x_keys)
+            cell_meta = {
+                k: v
+                for k, v in cell_meta.items()
+                if ":" in k and (parts := k.split(":", 1)) and parts[0] in valid_y_set and parts[1] in valid_x_set
+            }
+
         # -------------------------------------------------------------
-        # Normalization
+        # Normalization (Vectorized NumPy)
         # -------------------------------------------------------------
         matrix: List[List[Optional[float]]] = []
+        has_grid = bool(raw_matrix and raw_matrix[0])
+        if has_grid:
+            raw_arr = np.asarray(
+                [
+                    [np.nan if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v) for v in row]
+                    for row in raw_matrix
+                ],
+                dtype=np.float64,
+            )
+            valid_mask = np.isfinite(raw_arr)
+        else:
+            raw_arr = np.empty((0, 0), dtype=np.float64)
+            valid_mask = np.empty((0, 0), dtype=bool)
 
-        if normalize == "row_min_max":
-            for row in raw_matrix:
-                valid = [v for v in row if v is not None and not np.isnan(v)]
-                if not valid or max(valid) == min(valid):
-                    matrix.append([0.0 if (v is not None and not np.isnan(v)) else None for v in row])
+        if normalize == "row_min_max" and has_grid:
+            for r_idx in range(raw_arr.shape[0]):
+                row_m = valid_mask[r_idx]
+                row_v = raw_arr[r_idx]
+                if not np.any(row_m):
+                    matrix.append([None] * raw_arr.shape[1])
+                    continue
+                rmin = float(np.min(row_v[row_m]))
+                rmax = float(np.max(row_v[row_m]))
+                span = rmax - rmin
+                if span == 0.0:
+                    matrix.append([0.0 if m else None for m in row_m])
                 else:
-                    min_v, max_v = min(valid), max(valid)
-                    denom = max_v - min_v
-                    matrix.append([round((v - min_v) / denom, 4) if (v is not None and not np.isnan(v)) else None for v in row])
-        elif normalize == "percentile":
-            all_valid = sorted([v for row in raw_matrix for v in row if v is not None and not np.isnan(v)])
-            if all_valid:
-                n = len(all_valid)
-                for row in raw_matrix:
-                    row_pct = []
-                    for v in row:
-                        if v is None or np.isnan(v):
-                            row_pct.append(None)
-                        else:
-                            rank = np.searchsorted(all_valid, v)
-                            row_pct.append(round(float(rank) / n, 4))
-                    matrix.append(row_pct)
-            else:
-                matrix = raw_matrix
+                    scaled = np.round((row_v - rmin) / span, 4)
+                    matrix.append([float(scaled[c]) if row_m[c] else None for c in range(raw_arr.shape[1])])
+        elif normalize == "percentile" and has_grid and np.any(valid_mask):
+            sorted_all = np.sort(raw_arr[valid_mask])
+            ranks = np.searchsorted(sorted_all, raw_arr[valid_mask], side="left")
+            norm_arr = np.full_like(raw_arr, np.nan)
+            norm_arr[valid_mask] = np.round(ranks.astype(np.float64) / len(sorted_all), 4)
+            matrix = [
+                [float(norm_arr[r, c]) if valid_mask[r, c] else None for c in range(raw_arr.shape[1])]
+                for r in range(raw_arr.shape[0])
+            ]
         else:
             matrix = raw_matrix
 
         # -------------------------------------------------------------
-        # Text Matrix for Hover and Tooltips
+        # Text Matrix (omitted in compact /api/next/heatmap responses)
         # -------------------------------------------------------------
         text_matrix: List[List[str]] = []
-        for r_idx, row in enumerate(raw_matrix):
-            t_row = []
-            for c_idx, v in enumerate(row):
-                if v is None or np.isnan(v):
-                    t_row.append("No Data")
-                else:
-                    if metric == "rate":
+        if not compact:
+            for row in raw_matrix:
+                t_row = []
+                for v in row:
+                    if v is None or (isinstance(v, float) and np.isnan(v)):
+                        t_row.append("No Data")
+                    elif metric == "rate":
                         t_row.append(f"{v:.2f} / 100k")
                     elif metric == "count":
                         t_row.append(f"{v * 100:.2f}%" if is_rate_target else f"{int(round(v)):,} adm")
@@ -3282,7 +3416,7 @@ class SandboxDataLoader:
                         t_row.append(f"{v:.1f}%")
                     else:
                         t_row.append(f"{v:.2f}")
-            text_matrix.append(t_row)
+                text_matrix.append(t_row)
 
         # -------------------------------------------------------------
         # Transpose if requested (e.g. Cols on Y, Rows on X)
@@ -3293,39 +3427,41 @@ class SandboxDataLoader:
             matrix = [list(col) for col in zip(*matrix)] if matrix and matrix[0] else []
             raw_matrix = [list(col) for col in zip(*raw_matrix)] if raw_matrix and raw_matrix[0] else []
             text_matrix = [list(col) for col in zip(*text_matrix)] if text_matrix and text_matrix[0] else []
+            if has_grid:
+                raw_arr = raw_arr.T
+                valid_mask = valid_mask.T
             row_groups = []
 
         # -------------------------------------------------------------
-        # Summary Telemetry
+        # Summary Telemetry (Vectorized NumPy)
         # -------------------------------------------------------------
-        flat_valid = [v for row in raw_matrix for v in row if v is not None and not np.isnan(v)]
+        valid_vals = raw_arr[valid_mask] if (has_grid and np.any(valid_mask)) else np.empty(0, dtype=np.float64)
+        total_cells = len(y_keys) * len(x_keys)
+        n_valid = int(valid_vals.size)
         summary: Dict[str, Any] = {
-            "min": round(float(np.min(flat_valid)), 2) if flat_valid else 0.0,
-            "max": round(float(np.max(flat_valid)), 2) if flat_valid else 0.0,
-            "mean": round(float(np.mean(flat_valid)), 2) if flat_valid else 0.0,
-            "total_cells": len(y_keys) * len(x_keys),
-            "valid_cells": len(flat_valid),
-            "completeness_pct": round((len(flat_valid) / (len(y_keys) * len(x_keys) or 1)) * 100, 1),
+            "min": round(float(np.min(valid_vals)), 2) if n_valid else 0.0,
+            "max": round(float(np.max(valid_vals)), 2) if n_valid else 0.0,
+            "mean": round(float(np.mean(valid_vals)), 2) if n_valid else 0.0,
+            "total_cells": total_cells,
+            "valid_cells": n_valid,
+            "completeness_pct": round((n_valid / (total_cells or 1)) * 100, 1),
             "hotspot_cell": None,
             "fastest_surge": None,
             "earliest_peak": None,
         }
 
-        if flat_valid and len(y_keys) > 0 and len(x_keys) > 0:
-            max_v = float(np.max(flat_valid))
-            for r_idx, row in enumerate(raw_matrix):
-                for c_idx, v in enumerate(row):
-                    if v == max_v:
-                        summary["hotspot_cell"] = {
-                            "row": y_keys[r_idx],
-                            "row_label": y_labels[r_idx],
-                            "col": x_keys[c_idx],
-                            "col_label": x_labels[c_idx],
-                            "val": max_v,
-                        }
-                        break
-                if summary["hotspot_cell"]:
-                    break
+        if n_valid and len(y_keys) > 0 and len(x_keys) > 0:
+            max_v = float(np.max(valid_vals))
+            flat_hits = np.flatnonzero(valid_mask.ravel() & (raw_arr.ravel() == max_v))
+            if flat_hits.size > 0:
+                r_idx, c_idx = divmod(int(flat_hits[0]), raw_arr.shape[1])
+                summary["hotspot_cell"] = {
+                    "row": y_keys[r_idx],
+                    "row_label": y_labels[r_idx],
+                    "col": x_keys[c_idx],
+                    "col_label": x_labels[c_idx],
+                    "val": max_v,
+                }
 
         best_trend = None
         for cell in cell_meta.values():
@@ -3338,6 +3474,12 @@ class SandboxDataLoader:
                     "growth": tr,
                 }
         summary["fastest_surge"] = best_trend
+
+        if compact and cell_meta:
+            cell_meta = {
+                k: {ck: cv for ck, cv in v.items() if ck in _COMPACT_HEATMAP_META_KEYS and cv is not None}
+                for k, v in cell_meta.items()
+            }
 
         return {
             "mode": mode,
@@ -3431,7 +3573,9 @@ class SandboxDataLoader:
             return self._raw_hub_seasons_cache
 
         cal = self.get_calendar()
+        weekly_targets = set(self.config.get_weekly_targets())
         seasons: Dict[str, List[str]] = {}
+        fallback_seasons: Dict[str, List[str]] = {}
         if tasks_path.exists():
             try:
                 data = json.loads(tasks_path.read_text(encoding="utf-8"))
@@ -3440,14 +3584,27 @@ class SandboxDataLoader:
                         task_ids = mt.get("task_ids", {})
                         ref_spec = task_ids.get("reference_date") or task_ids.get("origin_date") or {}
                         dates = (ref_spec.get("optional") or []) + (ref_spec.get("required") or [])
+                        t_spec = task_ids.get("target") or {}
+                        mt_targets = set()
+                        if isinstance(t_spec, dict):
+                            for tk in ("required", "optional"):
+                                tv = t_spec.get(tk)
+                                if isinstance(tv, list):
+                                    mt_targets.update(str(x).strip() for x in tv if x is not None and str(x).strip())
+                                elif isinstance(tv, str) and tv.strip():
+                                    mt_targets.add(tv.strip())
+                        has_weekly = (not weekly_targets) or (not mt_targets) or bool(mt_targets & weekly_targets)
+                        dest = seasons if has_weekly else fallback_seasons
                         for d in dates:
                             s = cal.season_for_date(d)
-                            if s not in seasons:
-                                seasons[s] = []
-                            if d not in seasons[s]:
-                                seasons[s].append(d)
+                            if s not in dest:
+                                dest[s] = []
+                            if d not in dest[s]:
+                                dest[s].append(d)
             except Exception as exc:
                 logger.warning("Error reading hub tasks.json: %s", exc)
+        if not seasons and fallback_seasons:
+            seasons = fallback_seasons
 
         for s in seasons:
             seasons[s].sort(reverse=True)

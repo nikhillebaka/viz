@@ -41,8 +41,15 @@ STANDARD_RAW_COLS = frozenset({
     "round_id",
     "reference_date",
     "origin_date",
+    "forecast_date",
+    "submission_date",
+    "as_of",
     "target",
     "location",
+    "location_name",
+    "location_type",
+    "geo_type",
+    "geo_name",
     "horizon",
     "target_end_date",
     "output_type",
@@ -226,9 +233,12 @@ def normalize_forecast_frame(
     if df is None or df.is_empty():
         raise NormalizationError("file has no rows")
 
-    # Map origin_date -> reference_date seamlessly (RespiCast)
-    if "reference_date" not in df.columns and "origin_date" in df.columns:
-        df = df.rename({"origin_date": "reference_date"})
+    # Map origin_date / forecast_date -> reference_date seamlessly (RespiCast / BDBV)
+    if "reference_date" not in df.columns:
+        if "origin_date" in df.columns:
+            df = df.rename({"origin_date": "reference_date"})
+        elif "forecast_date" in df.columns:
+            df = df.rename({"forecast_date": "reference_date"})
 
     missing = [c for c in REQUIRED_INPUT_COLUMNS if c not in df.columns]
     if missing:
@@ -309,6 +319,12 @@ def normalize_forecast_frame(
                 .otherwise(pl.col("target_end_date"))
                 .alias("target_end_date")
             )
+        # Drop non-step-ahead scalar rows lacking both derivable horizon and target_end_date cleanly
+        weekly_raw = weekly_raw.filter(
+            pl.col("horizon").is_not_null()
+            & pl.col("target_end_date").is_not_null()
+            & (pl.col("target_end_date") != "")
+        )
 
     task_key_cols = ["reference_date", "target", "location", "horizon", "target_end_date"] + extra_cols
     select_base = ["reference_date", "target", "horizon", "location", "target_end_date"] + extra_cols + ["output_type", "output_type_id", "value"]

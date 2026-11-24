@@ -16,9 +16,30 @@ export const fmtMonth = (ms) => (!Number.isFinite(ms) ? DASH : new Date(ms).getU
 
 const F_INT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const F_ONE = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+const F_TWO = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const F_PCT2 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const F_PCT1 = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const PREFIX = [[1e9, "G"], [1e6, "M"], [1e3, "k"]];
+
+/**
+ * Horizon time unit and concise display text for a manifest target (`week` vs `month`).
+ * @param {{ time_unit?: string } | null | undefined} target
+ * @param {boolean} [plural=false]
+ */
+export const horizonUnit = (target, plural = false) =>
+  target?.time_unit === "month" ? (plural ? "months" : "mo") : (plural ? "weeks" : "wk");
+
+/**
+ * Human-readable horizon label (`this week` / `1 wk ahead` / `2 mo ahead`).
+ * @param {number} h
+ * @param {{ time_unit?: string } | null | undefined} target
+ * @param {{ short?: boolean }} [opts]
+ */
+export function horizonText(h, target, opts = {}) {
+  const u = horizonUnit(target);
+  if (h === 0 && !opts.short) return target?.time_unit === "month" ? "this month" : "this week";
+  return opts.short ? `${h} ${u}` : `${h} ${u} ahead`;
+}
 
 // a number with float noise removed and no trailing zeros: 2.5000000001 → "2.5"
 const trim = (v, digits = 12) => String(+v.toPrecision(digits));
@@ -32,7 +53,7 @@ function si(v, digits) {
 
 /**
  * Value formatters for one target.
- * @param {{ scale?: "count" | "proportion" } | null | undefined} target a manifest target
+ * @param {{ scale?: "count" | "proportion" | "percentage" | "rate" } | null | undefined} target a manifest target
  * @returns {{ value(v: number): string, axis(v: number): string, compact(v: number): string }}
  *   count: value "12,345" (one decimal under 10 when not whole), axis "10k" · "2.5k" · "500",
  *   compact "1.2k". proportion (values are fractions): value "1.23%" (2 decimals under 10%, 1 above),
@@ -47,6 +68,11 @@ export function valueFormat(target) {
   if (target?.scale === "percentage") {
     const value = guard((v) => (Math.abs(v) < 10 ? F_PCT2 : F_PCT1).format(v) + "%");
     return { value, axis: guard((v) => trim(v) + "%"), compact: value };
+  }
+  if (target?.scale === "rate") {
+    const value = guard((v) => (Math.abs(v) < 10 ? F_TWO : Math.abs(v) < 100 ? F_ONE : F_INT).format(v));
+    const compact = guard((v) => (Math.abs(v) < 10 ? F_TWO.format(v) : si(v, 2)));
+    return { value, axis: guard((v) => (Math.abs(v) < 10 ? trim(v, 3) : si(v, 12))), compact };
   }
   return {
     value: guard((v) => (Math.abs(v) < 10 && !Number.isInteger(v) ? F_ONE : F_INT).format(v)),

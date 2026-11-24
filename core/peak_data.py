@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 import polars as pl
 
+from viz.core.parallel import ordered_map
 from viz.core.peaks import (
     default_window, observed_peak, peak_targets_for, score_size, score_timing, summarize_size, summarize_timing,
 )
@@ -57,8 +58,20 @@ class PeakService:
         cached = getattr(self, "_declared_cache", None)
         if cached is not None and cached[0] == stamp:
             return cached[1]
-        declared = set(self.loader.config.get_targets())
-        # Discover sample-derived peak targets present in local/cached peak-output parquets
+        declared: Set[str] = set()
+        # Discover peak targets actually present in model peak outputs, peak parquets, or compatible remotes
+        peak_dir = self.loader.base_dir / "peak-output"
+        if peak_dir.is_dir():
+            for p_file in peak_dir.rglob("*.parquet"):
+                try:
+                    lf = pl.scan_parquet(p_file)
+                    if "target" in lf.collect_schema().names():
+                        ts = lf.select("target").drop_nulls().unique().collect().get_column("target").to_list()
+                        for t in ts:
+                            if t:
+                                declared.add(str(t))
+                except Exception:
+                    pass
         for mid, info in (self.loader.scan_models() or {}).items():
             for p_col_target in info.get("peak_targets") or []:
                 declared.add(str(p_col_target))
@@ -69,7 +82,7 @@ class PeakService:
             try:
                 for pq_file in root_dir.glob("*.peak.parquet"):
                     try:
-                        ts = pl.scan_parquet(pq_file).select("target").unique().collect().get_column("target").to_list()
+                        ts = pl.scan_parquet(pq_file).select("target").drop_nulls().unique().collect().get_column("target").to_list()
                         for t in ts:
                             if t:
                                 declared.add(str(t))
@@ -78,7 +91,12 @@ class PeakService:
             except OSError:
                 pass
         if self.loader.include_remote:
-            for h in store.compatible_hub_ids():
+            loc_keys = set((self.loader.get_locations() or {}).keys())
+            tgt_keys = set(self.loader.config.get_targets() or ())
+            for h in store.compatible_hub_ids(
+                targets=tgt_keys or None,
+                locations=loc_keys or None,
+            ):
                 for f in store.load_manifest(h).get("files", {}).values():
                     declared.update(f.get("peak_targets", []))
         self._declared_cache = (stamp, declared)
@@ -86,11 +104,11 @@ class PeakService:
 
     # ---- forecasts --------------------------------------------------------------------------------------
 
-    def _scan(self, model_id: str) -> Optional[pl.LazyFrame]:
+    def _scan(self, model_id: str, *, models: Optional[Dict[str, Any]] = None) -> Optional[pl.LazyFrame]:
         loader = self.loader
         if loader.ensemble_mgr.get_config(model_id):
             return None
-        models = getattr(self._tls, "models", None) or loader.scan_models()
+        models = models or getattr(self._tls, "models", None) or loader.scan_models()
         info = models.get(model_id)
         if info is None and not model_id.startswith("local:"):
             return None
@@ -233,24 +251,47 @@ class PeakService:
         if not pt:
             return out
 
-        # Peak rows of every model for this season (all primary locations needed only for aggregate-free skill)
+        # Single-pass parallel peak scan + summarization across models
         need_states = skill_scope == "states"
+        req_locs_list = sorted(set(state_locs) | set(agg_locs) | {str(location)}) if need_states else [str(location)]
+        pt_vals = list(pt.values())
+        models_snapshot = getattr(self._tls, "models", None) or loader.scan_models()
+
+        def _load_one_peak_model(mid: str) -> Tuple[str, Optional[str], Optional[Dict[Tuple[str, str], Dict[str, Any]]]]:
+            lf = self._scan(mid, models=models_snapshot)
+            if lf is None:
+                return mid, None, None
+            try:
+                names = set(lf.collect_schema().names())
+                sel = [c for c in ("reference_date", "location", "target", "output_type", "output_type_id", "value") if c in names]
+                df_all = lf.filter(pl.col("target").is_in(pt_vals)).select(sel).collect()
+            except Exception as exc:
+                logger.warning("Could not read peak forecasts of %s: %s", mid, exc)
+                return mid, None, None
+            if df_all.is_empty():
+                return mid, None, None
+            unique_dates = [str(d) for d in df_all.get_column("reference_date").drop_nulls().unique().to_list()]
+            if not unique_dates:
+                return mid, None, None
+            latest_d = max(unique_dates)
+            in_season = [d for d in unique_dates if cal.season_for_date(d) == season]
+            if not in_season:
+                return mid, latest_d, {}
+            df_sub = df_all.filter(
+                pl.col("reference_date").is_in(in_season)
+                & pl.col("location").cast(pl.String).is_in(req_locs_list)
+            )
+            return mid, latest_d, self._summaries(df_sub, pt, None)
+
         per_model: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
         candidates: Set[str] = set()
         latest_any: Optional[str] = None
-        for mid in model_ids:
-            dates = self.peak_dates(mid, base_target)
-            if not dates:
+        for mid, latest_d, summ in ordered_map(_load_one_peak_model, model_ids):
+            if summ is None:
                 out["missing"].append(mid)
                 continue
-            latest_any = max(latest_any or "", dates[-1])
-            in_season = [d for d in dates if cal.season_for_date(d) == season]
-            if not in_season:
-                per_model[mid] = {}
-                continue
-            req_locs = sorted(set(state_locs) | set(agg_locs) | {str(location)}) if need_states else [location]
-            df = self._rows(mid, base_target, ref_dates=in_season, locations=req_locs)
-            summ = self._summaries(df, pt, None)
+            if latest_d:
+                latest_any = max(latest_any or "", latest_d)
             per_model[mid] = summ
             for s in summ.values():
                 if "timing" in s:

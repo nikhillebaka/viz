@@ -176,6 +176,11 @@
 .app-welcome-section { align-self: stretch; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
 .app-welcome-label { font-size: var(--text-micro); font-weight: var(--weight-medium); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-tertiary); }
 .app-welcome-hubs { align-self: stretch; display: flex; flex-direction: column; }
+.app-welcome-hub-tools {
+  align-self: stretch; display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-12); padding: 0 0 var(--space-6);
+}
+.app-welcome-hub-tools:empty { display: none; }
 .app-welcome-hub {
   display: flex; align-items: center; gap: var(--space-12); padding: var(--space-8) 0;
   border-top: var(--stroke-hairline) solid var(--line-hairline);

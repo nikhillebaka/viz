@@ -18,6 +18,7 @@ import {
   SAMPLE_BOARD_SORTS,
   sortSampleBoardRows,
 } from "../../sections/trajectories/model.js";
+import { isSectionAvailable, targetLocationCount } from "../../sections/index.js";
 
 describe("next/sections/trajectories/model.js", () => {
   it("crpsEnsemble1D satisfies exact analytical identities and shift invariance", () => {
@@ -120,6 +121,32 @@ describe("next/sections/trajectories/model.js", () => {
     assert.equal(pickDefaultSampleModel(sampleModelsForTarget(man, "t-samp"), { charted: [{ id: "M-no" }], baseline: true }, man), "Base-M");
     // Falls back to ensemble/designated when baseline disabled
     assert.equal(pickDefaultSampleModel(sampleModelsForTarget(man, "t-samp"), { charted: [], baseline: false }, man), "M-ens");
+
+    // Declared output_types:["sample"] with 0 sample-bearing models still hides Trajectories tab
+    const noActualSamples = indexManifest({
+      targets: [{ id: "wk inc flu prop ili", output_types: ["quantile", "sample"], has_peaks: false }],
+      models: [{ id: "GZNL-1", has_samples: false, targets: ["wk inc flu prop ili"] }],
+      seasons: [{ id: "2026-2027", rounds: ["2026-11-16"] }],
+      locations: [{ id: "CN", name: "China" }],
+    });
+    assert.equal(hasSampleModels(noActualSamples, "wk inc flu prop ili"), false);
+    assert.equal(targetLocationCount(noActualSamples, "wk inc flu prop ili"), 1);
+    assert.equal(isSectionAvailable("scores", { manifest: noActualSamples, target: "wk inc flu prop ili", location: "CN" }), true);
+    assert.equal(isSectionAvailable("heatmap", { manifest: noActualSamples, target: "wk inc flu prop ili", location: "CN" }), true);
+    assert.equal(isSectionAvailable("map", { manifest: noActualSamples, target: "wk inc flu prop ili", location: "CN" }), false);
+    assert.equal(isSectionAvailable("peaks", { manifest: noActualSamples, target: "wk inc flu prop ili", location: "CN" }), false);
+    assert.equal(isSectionAvailable("trajectories", { manifest: noActualSamples, target: "wk inc flu prop ili", location: "CN" }), false);
+
+    // Multi-location target with peaks & samples shows all applicable tabs
+    const richMan = indexManifest({
+      targets: [{ id: "wk inc flu hosp", output_types: ["quantile", "sample"], has_peaks: true }],
+      models: [{ id: "M-s", has_samples: true, targets: ["wk inc flu hosp"] }],
+      seasons: [{ id: "2026-2027", rounds: ["2026-11-21"] }],
+      locations: [{ id: "US", name: "US" }, { id: "25", name: "Massachusetts" }],
+    });
+    assert.equal(isSectionAvailable("map", { manifest: richMan, target: "wk inc flu hosp", location: "US" }), true);
+    assert.equal(isSectionAvailable("peaks", { manifest: richMan, target: "wk inc flu hosp", location: "US" }), true);
+    assert.equal(isSectionAvailable("trajectories", { manifest: richMan, target: "wk inc flu hosp", location: "US" }), true);
   });
 
   it("sampleScoresQuery formats current vs all-location sample leaderboard queries cleanly", () => {

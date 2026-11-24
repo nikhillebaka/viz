@@ -29,7 +29,7 @@ import {
   splitDetachedTerritories,
 } from "../geo/topo.js";
 import { EU_META, ISO_NUM_TO_ALPHA2, US_STATE_META } from "../geo/eu_tiles.js";
-import { classifyHubGeo, loadUsGeoCache } from "../geo/picker_geo.js";
+import { classifyHubGeo, loadUsGeoCache, loadRegionGeo } from "../geo/picker_geo.js";
 
 /** Camera and layer-transition zoom thresholds for the unified Globe view. */
 export const GLOBE_ZOOM = Object.freeze({
@@ -69,6 +69,10 @@ const smoothstep = (e0, e1, x) => {
 const LEVEL_LABELS = Object.freeze({
   hsa: "MetroCast HSA",
   state: "State",
+  province: "Province",
+  territory: "Territory",
+  region: "Health Region",
+  health_zone: "Health Zone",
   country: "Country",
   borough: "Borough",
   metro: "Metro",
@@ -153,9 +157,33 @@ export function mountGlobeView(host, ctx) {
   const geoCls = classifyHubGeo(manifest);
 
   // Start facing whichever continent the user came from, while the whole sphere stays live
-  let camLon = geoCls.kind === "eu-countries" ? 10 : -94;
-  let camLat = geoCls.kind === "eu-countries" ? 50 : 38.5;
-  let camZoom = geoCls.kind === "eu-countries" ? GLOBE_ZOOM.EU_DEFAULT : GLOBE_ZOOM.US_DEFAULT;
+  let camLon = geoCls.kind === "eu-countries"
+    ? 10
+    : geoCls.kind === "cd-provinces"
+      ? 23.6
+      : geoCls.kind === "cn-national"
+        ? 104
+        : geoCls.kind === "ca-ontario"
+          ? -84
+          : geoCls.kind === "ca-provinces"
+            ? -96
+            : -94;
+  let camLat = geoCls.kind === "eu-countries"
+    ? 50
+    : geoCls.kind === "cd-provinces"
+      ? -2.9
+      : geoCls.kind === "cn-national"
+        ? 36
+        : geoCls.kind === "ca-ontario"
+          ? 48
+          : geoCls.kind === "ca-provinces"
+            ? 58
+            : 38.5;
+  let camZoom = geoCls.kind === "eu-countries"
+    ? GLOBE_ZOOM.EU_DEFAULT
+    : geoCls.kind === "cd-provinces" || geoCls.kind === "ca-ontario"
+      ? GLOBE_ZOOM.STATE_INITIAL
+      : GLOBE_ZOOM.US_DEFAULT;
   let velLon = 0;
   let velLat = 0;
   let flight = null;
@@ -167,8 +195,10 @@ export function mountGlobeView(host, ctx) {
   let layerId = "observed";
   let metroCastOn = true;
   let hasUsStates = geoCls.kind === "us-states" || geoCls.kind === "us-metrocast" || manifest.locationById.has("US");
-  let hasEu = geoCls.kind === "eu-countries";
   let hasMetroCast = geoCls.kind === "us-metrocast";
+  let hasCaProvinces = geoCls.kind === "ca-provinces";
+  let hasCaOntario = geoCls.kind === "ca-ontario";
+  let hasCdProvinces = geoCls.kind === "cd-provinces";
   let metroIdSet = new Set();
 
   let selectedKey = null;
@@ -178,11 +208,15 @@ export function mountGlobeView(host, ctx) {
   let useFullMetroMesh = false;
   let countries = null;
   let usGeo = null;
+  let caGeo = null;
+  let onGeo = null;
+  let cdGeo = null;
   let destroyed = false;
 
   let hitCountries = [];
   let hitStates = [];
   let hitMetros = [];
+  let hitSubRegions = [];
   let hitDots = [];
   let lastGeoSpec = { cx: 0, cy: 0, radiusPx: 1, R: null };
 
@@ -424,9 +458,22 @@ export function mountGlobeView(host, ctx) {
     if (signals.length) {
       items.push({ header: "Signal" });
       for (const sig of signals) {
+        const tag = sig.geo_kind === "eu-countries"
+          ? "EU"
+          : sig.geo_kind === "us-metrocast"
+            ? "MetroCast"
+            : sig.geo_kind === "ca-provinces"
+              ? "CA"
+              : sig.geo_kind === "ca-ontario"
+                ? "ON"
+                : sig.geo_kind === "cd-provinces"
+                  ? "CD"
+                  : sig.geo_kind === "cn-national"
+                    ? "CN"
+                    : undefined;
         items.push({
           label: sig.id === "all" ? "All connected · Relative activity" : sig.label,
-          shortcut: sig.id === "all" ? undefined : (sig.geo_kind === "eu-countries" ? "EU" : sig.geo_kind === "us-metrocast" ? "MetroCast" : undefined),
+          shortcut: sig.id === "all" ? undefined : tag,
           checked: signalId === sig.id,
           onSelect: () => {
             signalId = sig.id;
@@ -467,17 +514,32 @@ export function mountGlobeView(host, ctx) {
     openMenu(layerBtn, { label: "Globe signal & layer", placement: "top-start", items });
   }
 
+  function findSubFeature(key) {
+    if (!key) return null;
+    if (key.startsWith("CA-ON:") && onGeo) return onGeo.byId.get(key.slice(6)) || null;
+    if (key.startsWith("CA-") && caGeo) return caGeo.byId.get(key.slice(3).toLowerCase()) || null;
+    if (key.startsWith("CD-") && cdGeo) return cdGeo.byId.get(key) || null;
+    return null;
+  }
+
   function coordsForRegion(key) {
     if (!key) return null;
     const reg = regions[key];
     const mh = activeMetros.find((m) => m.id === key);
     if (mh && mh.lon != null && mh.lat != null) return { lon: mh.lon, lat: mh.lat, zoom: 14 };
+    const subF = findSubFeature(key);
+    if (subF?.centroidLonLat) {
+      return { lon: subF.centroidLonLat[0], lat: subF.centroidLonLat[1], zoom: key.startsWith("CA-ON:") ? 6.5 : 5.5 };
+    }
     const fips = reg?.state_fips || (US_STATE_META[key] ? key : null);
     if (fips && US_STATE_META[fips]?.lon != null) {
       return { lon: US_STATE_META[fips].lon, lat: US_STATE_META[fips].lat, zoom: 8.5 };
     }
     const euCode = key === "UK" ? "GB" : key;
     if (EU_META[euCode]?.lon != null) return { lon: EU_META[euCode].lon, lat: EU_META[euCode].lat, zoom: 7.5 };
+    if (reg?.lon != null && reg?.lat != null) {
+      return { lon: reg.lon, lat: reg.lat, zoom: key === "CA" || key === "CN" ? 3.0 : 6.0 };
+    }
     const country = countries?.find((c) => !c.detached && (c.iso2 === key || (key === "GB" && c.iso2 === "UK")));
     if (country?.centroidLonLat) return { lon: country.centroidLonLat[0], lat: country.centroidLonLat[1], zoom: 5.5 };
     if (key === "US") return { lon: -94, lat: 38.5, zoom: GLOBE_ZOOM.US_DEFAULT };
@@ -489,11 +551,13 @@ export function mountGlobeView(host, ctx) {
     const reg = regions[key];
     const mh = activeMetros.find((m) => m.id === key);
     if (mh?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(mh.alpha)), GLOBE_ZOOM.METRO_FIT_MIN, 34);
+    const subF = findSubFeature(key);
+    if (subF?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(subF.alpha)), 3.2, 22);
     const fips = reg?.state_fips || (US_STATE_META[key] ? key : null);
     const st = fips && usGeo?.states?.find((s) => s.fips === fips);
     if (st?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(st.alpha)), 3.2, 22);
     const co = countries?.find((c) => !c.detached && (c.iso2 === key || (key === "GB" && c.iso2 === "UK")));
-    if (co?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(co.alpha)), 2.8, 22);
+    if (co?.alpha > 0.004) return clamp(0.56 / Math.max(0.012, Math.sin(co.alpha)), 2.4, 22);
     return coordsForRegion(key)?.zoom ?? 6;
   }
 
@@ -538,13 +602,28 @@ export function mountGlobeView(host, ctx) {
       ? [...allStreams].sort((a, b) => (a.signal_id === signalId ? -1 : b.signal_id === signalId ? 1 : 0))
       : allStreams;
 
-    const rawChildren = hasMetroCast && metroCastOn && reg.level !== "hsa"
-      ? (reg.children || []).map((ck) => regions[ck]).filter(Boolean)
+    const rawChildren = reg.level !== "hsa" && reg.level !== "health_zone"
+      ? (reg.children || [])
+          .map((ck) => regions[ck])
+          .filter((r) => r && (r.level !== "hsa" || (hasMetroCast && metroCastOn)))
       : [];
     const withData = rawChildren.filter((r) => r.streams?.length);
     const childHsas = (withData.length ? withData : rawChildren)
       .slice()
       .sort((a, b) => (a.name || a.key).localeCompare(b.name || b.key));
+    const childLevels = new Set(childHsas.map((c) => c.level).filter(Boolean));
+    const childGroupTitle = childLevels.size === 1
+      ? (childLevels.has("state") ? `States (${childHsas.length})`
+        : childLevels.has("province") ? `Provinces (${childHsas.length})`
+        : childLevels.has("territory") ? `Territories (${childHsas.length})`
+        : childLevels.has("health_zone") ? `Health Zones (${childHsas.length})`
+        : childLevels.has("region") ? `Health Regions (${childHsas.length})`
+        : (childLevels.has("country") || childLevels.has("nation")) ? `Countries (${childHsas.length})`
+        : (childLevels.has("hsa") || childLevels.has("metro") || childLevels.has("borough")) ? `MetroCast HSAs (${childHsas.length})`
+        : `Sub-regions (${childHsas.length})`)
+      : (childLevels.has("province") && (childLevels.has("territory") || childLevels.has("region"))
+        ? `Provinces & Regions (${childHsas.length})`
+        : `Sub-regions (${childHsas.length})`);
 
     const streamTitle = (st) => {
       const tShort = st.target_short || st.target_id || "";
@@ -614,7 +693,7 @@ export function mountGlobeView(host, ctx) {
       ) : h("p", { class: "pk-empty", style: { padding: "var(--space-8) 0" } }, "No weekly observations for current round"),
       orderedStreams.length && footerText ? h("p", { class: "gb-drawer-foot" }, footerText) : null,
       childHsas.length ? h("div", { class: "gb-metros" },
-        h("h4", { class: "gb-metros-title" }, `MetroCast HSAs (${childHsas.length})`),
+        h("h4", { class: "gb-metros-title" }, childGroupTitle),
         ...childHsas.map((hsa) => {
           const hs = streamForRegion(hsa, signalId);
           const hsVal = hs ? (primaryMode === "forecast" ? (hs.forecast ?? hs.observed) : (hs.observed ?? hs.forecast)) : null;
@@ -670,6 +749,13 @@ export function mountGlobeView(host, ctx) {
         if (pointInRingsEvenOdd(sx, sy, mh.screenRings) && regions[mh.id]) {
           return { kind: "metro", id: mh.id, name: mh.name, key: mh.id };
         }
+      }
+    }
+
+    for (let i = hitSubRegions.length - 1; i >= 0; i--) {
+      const sr = hitSubRegions[i];
+      if (pointInRingsEvenOdd(sx, sy, sr.screenRings)) {
+        return { kind: sr.kind, id: sr.id, name: sr.name, key: sr.key };
       }
     }
 
@@ -868,8 +954,13 @@ export function mountGlobeView(host, ctx) {
     const drawStatesLayer = hasUsStates;
     const stateAlpha = drawStatesLayer ? smoothstep(GLOBE_ZOOM.STATE_FADE_START, GLOBE_ZOOM.STATE_FADE_END, camZoom) : 0;
     const metroAlpha = hasMetroCast && metroCastOn ? smoothstep(GLOBE_ZOOM.METRO_FADE_START, GLOBE_ZOOM.METRO_FADE_END, camZoom) : 0;
+    const caAlpha = hasCaProvinces && caGeo ? smoothstep(GLOBE_ZOOM.STATE_FADE_START, GLOBE_ZOOM.STATE_FADE_END, camZoom) : 0;
+    const onFadeStart = hasCaProvinces ? 2.4 : GLOBE_ZOOM.STATE_FADE_START;
+    const onFadeEnd = hasCaProvinces ? 3.8 : GLOBE_ZOOM.STATE_FADE_END;
+    const onAlpha = hasCaOntario && onGeo ? smoothstep(onFadeStart, onFadeEnd, camZoom) : 0;
+    const cdAlpha = hasCdProvinces && cdGeo ? smoothstep(GLOBE_ZOOM.STATE_FADE_START, GLOBE_ZOOM.STATE_FADE_END, camZoom) : 0;
 
-    // 1. World countries (both US and Europe connected simultaneously!)
+    // 1. World countries (US, Canada, DRC, China, and Europe connected simultaneously!)
     hitCountries = [];
     if (countries) {
       const countryHighlights = [];
@@ -903,8 +994,10 @@ export function mountGlobeView(host, ctx) {
         const cid = co.iso2 || co.id;
         const reg = regionByCountryIso(cid);
         if (reg) hitCountries.push({ ...co, iso2: co.iso2, screenRings });
-        const skipUsShade = cid === "US" && stateAlpha > 0.35;
-        const norm = reg && !skipUsShade ? normForRegionKey(reg.key) : null;
+        const skipCountryShade = (cid === "US" && stateAlpha > 0.35)
+          || (cid === "CA" && (caAlpha > 0.35 || onAlpha > 0.35))
+          || (cid === "CD" && cdAlpha > 0.35);
+        const norm = reg && !skipCountryShade ? normForRegionKey(reg.key) : null;
         const isHov = hoverItem?.kind === "country" && hoverItem.id === cid;
         const isSel = !!(reg && selectedKey === reg.key);
 
@@ -1075,6 +1168,88 @@ export function mountGlobeView(host, ctx) {
       }
     }
 
+    // 3. International subnational layers (Canada provinces, Ontario Health Regions, DRC provinces)
+    hitSubRegions = [];
+    const drawSubnationalOverlay = ({ geo, alpha, kindTag, keyForFeature, fadeFor = null }) => {
+      if (alpha <= 0.04 || !geo) return;
+      g.save();
+      const pendingHighlights = [];
+      for (const feat of geo.features) {
+        if (!coneVisibleInViewport(feat, R, thetaMaxRad)) continue;
+        const screenRings = [];
+        for (const ring3 of feat.rings) {
+          const clipped = clipPolygonToHemisphere(ring3, R);
+          if (!clipped) continue;
+          const sr = new Float64Array(clipped.length);
+          for (let i = 0; i < clipped.length; i += 2) { sr[i] = cx + clipped[i] * radiusPx; sr[i + 1] = cy - clipped[i + 1] * radiusPx; }
+          screenRings.push(sr);
+        }
+        if (!screenRings.length) continue;
+
+        const key = keyForFeature(feat);
+        const reg = regions[key];
+        const isSel = selectedKey === key;
+        const isHov = hoverItem?.kind === kindTag && hoverItem.id === feat.id;
+        if (reg) {
+          hitSubRegions.push({ kind: kindTag, id: feat.id, name: reg.name || feat.name, key, screenRings });
+        }
+        const norm = reg ? normForRegionKey(reg.key) : null;
+        const fFade = fadeFor ? fadeFor(key, feat) : 1;
+
+        g.beginPath();
+        for (const sr of screenRings) {
+          g.moveTo(sr[0], sr[1]);
+          for (let i = 2; i < sr.length; i += 2) g.lineTo(sr[i], sr[i + 1]);
+          g.closePath();
+        }
+        g.globalAlpha = alpha * fFade;
+        g.fillStyle = luminanceFill(norm, isSel, isHov, !!reg);
+        g.fill("evenodd");
+        if (isSel || isHov) pendingHighlights.push({ screenRings, isSel });
+      }
+
+      if (geo.mesh?.length) {
+        g.beginPath();
+        for (const seg3 of geo.mesh) {
+          if (!coneVisibleInViewport(seg3, R, thetaMaxRad)) continue;
+          for (const run of clipPolylineToHemisphere(seg3.xyz, R)) {
+            g.moveTo(cx + run[0] * radiusPx, cy - run[1] * radiusPx);
+            for (let i = 2; i < run.length; i += 2) g.lineTo(cx + run[i] * radiusPx, cy - run[i + 1] * radiusPx);
+          }
+        }
+        g.globalAlpha = alpha;
+        g.strokeStyle = inkSecondary;
+        g.lineWidth = clamp(0.75 + alpha * 0.4, 0.75, 1.35);
+        g.stroke();
+      }
+
+      for (const hl of pendingHighlights) {
+        g.globalAlpha = alpha;
+        drawHighlight(hl.screenRings, hl.isSel);
+      }
+      g.restore();
+    };
+
+    drawSubnationalOverlay({
+      geo: caGeo,
+      alpha: caAlpha,
+      kindTag: "ca-prov",
+      keyForFeature: (f) => `CA-${String(f.id).toUpperCase()}`,
+      fadeFor: (k) => (k === "CA-ON" && onAlpha > 0 ? Math.max(0.18, 1 - onAlpha * 0.82) : 1),
+    });
+    drawSubnationalOverlay({
+      geo: onGeo,
+      alpha: onAlpha,
+      kindTag: "ca-oh",
+      keyForFeature: (f) => `CA-ON:${f.id}`,
+    });
+    drawSubnationalOverlay({
+      geo: cdGeo,
+      alpha: cdAlpha,
+      kindTag: "cd-prov",
+      keyForFeature: (f) => f.id,
+    });
+
     g.restore();
     if (clipToLimb) {
       g.save();
@@ -1091,6 +1266,18 @@ export function mountGlobeView(host, ctx) {
     useFullMetroMesh = activeMetros.length === usGeo.metroFeatures.length;
   }
 
+  function ensureRegionGeos() {
+    if (hasCaProvinces && !caGeo) {
+      loadRegionGeo("ca-provinces").then((g) => { if (!destroyed) { caGeo = g; scheduleDraw(); } }).catch(() => {});
+    }
+    if (hasCaOntario && !onGeo) {
+      loadRegionGeo("ca-ontario").then((g) => { if (!destroyed) { onGeo = g; scheduleDraw(); } }).catch(() => {});
+    }
+    if (hasCdProvinces && !cdGeo) {
+      loadRegionGeo("cd-provinces").then((g) => { if (!destroyed) { cdGeo = g; scheduleDraw(); } }).catch(() => {});
+    }
+  }
+
   const ro = new ResizeObserver(() => scheduleDraw());
   ro.observe(wrap);
   offs.push(
@@ -1101,6 +1288,7 @@ export function mountGlobeView(host, ctx) {
 
   renderRecents();
   updateLegendAndLabel();
+  ensureRegionGeos();
   scheduleDraw();
 
   loadWorldCountries()
@@ -1129,13 +1317,16 @@ export function mountGlobeView(host, ctx) {
       signalId = signals[0]?.id || "all";
       const cov = glData.coverage || {};
       hasUsStates = Boolean(cov.has_us_states || cov.has_metrocast);
-      hasEu = Boolean(cov.has_eu);
       hasMetroCast = Boolean(cov.has_metrocast);
+      hasCaProvinces = Boolean(cov.has_ca_provinces);
+      hasCaOntario = Boolean(cov.has_ca_ontario);
+      hasCdProvinces = Boolean(cov.has_cd_provinces);
       metroIdSet = new Set(cov.metro_ids || []);
       applyMetroGeometry();
+      ensureRegionGeos();
 
       const curKey = currentKeyFromManifest();
-      if (curKey && curKey !== "US") {
+      if (curKey && !["US", "CA", "CD", "CN"].includes(curKey)) {
         const pt = coordsForRegion(curKey);
         if (pt) {
           camLon = pt.lon;

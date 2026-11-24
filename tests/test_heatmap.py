@@ -226,6 +226,39 @@ class TestHeatmapDataLoader(unittest.TestCase):
             self.assertEqual(ca, cb, f"Shared task counts must match in {abbr} (Alpha={ca}, Beta={cb})")
         self.assertEqual(fair["cell_meta"]["Model-Alpha:WA"]["task_count"], 20)
 
+    def test_compact_mode_sparse_meta_and_prescore_parity(self):
+        """Compact mode omits text_matrix and empty/static cell_meta; warm vs cold prescore produces identical matrices."""
+        self.loader.prescore.invalidate()
+        for mode_kw in (
+            dict(rows="model", cols="location", metric="wis"),
+            dict(rows="model", cols="horizon", metric="wis"),
+            dict(rows="model", cols="date", metric="wis_rate"),
+            dict(rows="location", cols="date", metric="rate"),
+        ):
+            full = self.loader.get_heatmap_data(target=SYNTH_TARGET, season="2024-2025", compact=False, **mode_kw)
+            comp = self.loader.get_heatmap_data(target=SYNTH_TARGET, season="2024-2025", compact=True, **mode_kw)
+            self.assertEqual(comp["raw_matrix"], full["raw_matrix"], mode_kw)
+            self.assertEqual(comp["matrix"], full["matrix"], mode_kw)
+            self.assertEqual(comp["summary"], full["summary"], mode_kw)
+            self.assertEqual(comp["text_matrix"], [])
+            # Every cell in compact meta corresponds to a non-empty key and drops static keys
+            for k, v in comp["cell_meta"].items():
+                self.assertNotIn("metric_name", v)
+                self.assertNotIn("row_name", v)
+            # Sparse meta: empty cells never appear in cell_meta even in full mode
+            if mode_kw["rows"] == "model":
+                for r_i, rk in enumerate(full["y_keys"]):
+                    for c_i, ck in enumerate(full["x_keys"]):
+                        if full["raw_matrix"][r_i][c_i] is None:
+                            self.assertNotIn(f"{rk}:{ck}", full["cell_meta"])
+
+        # Warm prescore run must match cold computation identically
+        warm = self.loader.get_heatmap_data(rows="model", cols="location", metric="wis", target=SYNTH_TARGET, season="2024-2025")
+        self.loader.prescore.invalidate()
+        cold = self.loader.get_heatmap_data(rows="model", cols="location", metric="wis", target=SYNTH_TARGET, season="2024-2025")
+        self.assertEqual(warm["raw_matrix"], cold["raw_matrix"])
+        self.assertEqual(warm["cell_meta"], cold["cell_meta"])
+
 
 class TestHeatmapServerAPI(unittest.TestCase):
     @classmethod
@@ -289,6 +322,8 @@ class TestHeatmapServerAPI(unittest.TestCase):
         })
         self.assertEqual(s_status, 200)
         self.assertEqual(scoped["cell_meta"]["Model-Alpha:CA"]["task_count"], 4)
+        self.assertEqual(scoped["text_matrix"], [])
+        self.assertNotIn("metric_name", scoped["cell_meta"]["Model-Alpha:CA"])
 
     def test_api_next_heatmap_location_and_multi_season(self):
         status, single_loc = self._get("/api/next/heatmap", {
@@ -340,6 +375,7 @@ class TestHeatmapServerAPI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["mode"], "wave")
         self.assertGreater(len(data["matrix"]), 0)
+        self.assertGreater(len(data["text_matrix"]), 0)
 
 
 if __name__ == "__main__":

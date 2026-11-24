@@ -15,6 +15,26 @@ const BASE_SECTIONS = [
   { id: "rate_change", label: "Rate change", optional: true },
 ];
 
+/** Count plottable locations for `targetId` (respecting per-target subset when present). */
+export function targetLocationCount(manifest, targetId) {
+  const tMeta = manifest?.targetById?.get?.(targetId)
+    ?? manifest?.targets?.find?.((t) => t.id === targetId);
+  if (Array.isArray(tMeta?.locations)) return tMeta.locations.length;
+  return (manifest?.locations || []).length;
+}
+
+/** True when section tab `id` applies to `(manifest, target, location)`. */
+export function isSectionAvailable(id, { manifest, catalog = null, target, location } = {}) {
+  const tMeta = manifest?.targetById?.get?.(target)
+    ?? manifest?.targets?.find?.((t) => t.id === target);
+  if (isCategoricalTarget(tMeta)) return id === "scores";
+  if (id === "map") return targetLocationCount(manifest, target) >= 2;
+  if (id === "peaks") return tMeta?.has_peaks !== false;
+  if (id === "rate_change") return !!findRateChangeTarget(catalog, manifest, target, location);
+  if (id === "trajectories") return hasSampleModels(manifest, target);
+  return true;
+}
+
 /** @returns {{ el: HTMLElement, destroy(): void }} */
 export function mountSections(root, ctx) {
   const { manifest, store } = ctx;
@@ -32,10 +52,7 @@ export function mountSections(root, ctx) {
 
   const isAvailable = (id) => {
     const s = store.get();
-    if (isCategoricalTarget(manifest.targetById.get(s.target))) return id === "scores";
-    if (id === "rate_change") return !!findRateChangeTarget(ctx.catalog, manifest, s.target, s.location);
-    if (id === "trajectories") return hasSampleModels(manifest, s.target);
-    return true;
+    return isSectionAvailable(id, { manifest, catalog: ctx.catalog, target: s.target, location: s.location });
   };
 
   let activeId = storage.get(TAB_KEY, "scores");
@@ -67,6 +84,7 @@ export function mountSections(root, ctx) {
     if (!isAvailable(activeId)) {
       activeId = "scores";
       ensureMounted(activeId);
+      requestAnimationFrame(() => mounted.get(activeId)?.resize?.());
     }
     for (const s of BASE_SECTIONS) {
       const btn = tabs.get(s.id);

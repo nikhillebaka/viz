@@ -197,7 +197,7 @@ export function horizonFigure(svg, rows, o) {
   const ax = ratioAxis(series.flatMap((se) => se.pts.map((p) => p[1])));
   lineFigure(svg, {
     ...o, series, ref: 1,
-    x: { domain: [hs[0] - 0.2, hs.at(-1) + 0.2], ticks: hs, fmt: (v) => `${v} wk` },
+    x: { domain: [hs[0] - 0.2, hs.at(-1) + 0.2], ticks: hs, fmt: (v) => `${v} ${o.hUnit || "wk"}` },
     y: { ...ax, log: true, fmt: (v) => String(v) },
   });
 }

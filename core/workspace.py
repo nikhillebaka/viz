@@ -441,6 +441,15 @@ class ScopedRemoteManager:
     def cancel(self, hub_id: str) -> bool:
         return self._shared.cancel(hub_id)
 
+    def batch_status(self) -> Optional[Dict[str, Any]]:
+        return self._shared.batch_status()
+
+    def start_sync_all(self, hub_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        return self._shared.start_sync_all(hub_ids)
+
+    def cancel_all(self) -> bool:
+        return self._shared.cancel_all()
+
     def remove(self, hub_id: str):
         return self._shared.remove(hub_id)
 
@@ -690,6 +699,12 @@ class HubManager:
             self.web_store = None
             self.web_scheduler = None
             self.web_rate_limiter = None
+
+        if self.mode == "local":
+            from viz.remote.sync import LocalAutoUpdater
+            self.local_auto_updater = LocalAutoUpdater(self)
+        else:
+            self.local_auto_updater = None
 
     def _invalidate_catalog(self) -> None:
         if hasattr(self, "catalog"):

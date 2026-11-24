@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 import polars as pl
 
 from viz.core.cache_manager import NULL_VALUES
+from viz.core.parallel import ordered_map
 
 logger = logging.getLogger("viz.synthetic_ensemble")
 
@@ -320,29 +321,49 @@ class SyntheticEnsembleManager:
         if len(all_models) < 1:
             return pl.DataFrame(), {"error": "No constituent models configured"}
 
-        # Load forecasts for each model
-        loaded_dfs = []
-        for mid in all_models:
-            m_df = self.data_loader.load_combined_forecasts(mid, dates=dates, as_polars=True)
-            if m_df is not None and not m_df.is_empty():
-                # Filter to quantiles and ensure required schema
-                req_cols = ["reference_date", "target", "horizon", "location", "output_type_id", "value"]
-                if all(c in m_df.columns for c in req_cols):
-                    filtered = m_df.filter(
-                        (pl.col("output_type") == "quantile") if "output_type" in m_df.columns else pl.lit(True)
-                    ).with_columns([
-                        pl.lit(mid).alias("component_model_id"),
-                        pl.col("output_type_id").cast(pl.Float64).round(3),
-                        pl.col("horizon").cast(pl.Int32),
-                        pl.col("location").cast(pl.String),
-                        pl.col("reference_date").cast(pl.String),
-                        pl.col("value").cast(pl.Float64),
-                    ])
-                    if "target_end_date" not in filtered.columns:
-                        filtered = filtered.with_columns(pl.col("reference_date").alias("target_end_date"))
-                    else:
-                        filtered = filtered.with_columns(pl.col("target_end_date").cast(pl.String))
-                    loaded_dfs.append(filtered)
+        # Load forecasts in parallel with lazy Parquet pushdown when available
+        def _load_member(mid: str) -> Optional[pl.DataFrame]:
+            m_df = None
+            if (
+                not self.get_config(mid)
+                and hasattr(self.data_loader, "cache_mgr")
+                and hasattr(self.data_loader, "_resolve_model_id_and_local")
+            ):
+                raw_id, is_local = self.data_loader._resolve_model_id_and_local(mid)
+                lf = self.data_loader.cache_mgr.scan_model(raw_id, is_local=is_local)
+                if lf is not None:
+                    names = set(lf.collect_schema().names())
+                    if "output_type" in names:
+                        lf = lf.filter(pl.col("output_type") == "quantile")
+                    if dates is not None and "reference_date" in names:
+                        if not dates:
+                            return None
+                        lf = lf.filter(pl.col("reference_date").cast(pl.String).is_in([str(d) for d in dates]))
+                    m_df = lf.collect()
+            if m_df is None:
+                m_df = self.data_loader.load_combined_forecasts(mid, dates=dates, as_polars=True)
+            if m_df is None or m_df.is_empty():
+                return None
+            req_cols = ["reference_date", "target", "horizon", "location", "output_type_id", "value"]
+            if not all(c in m_df.columns for c in req_cols):
+                return None
+            filtered = m_df.filter(
+                (pl.col("output_type") == "quantile") if "output_type" in m_df.columns else pl.lit(True)
+            ).with_columns([
+                pl.lit(mid).alias("component_model_id"),
+                pl.col("output_type_id").cast(pl.Float64).round(3),
+                pl.col("horizon").cast(pl.Int32),
+                pl.col("location").cast(pl.String),
+                pl.col("reference_date").cast(pl.String),
+                pl.col("value").cast(pl.Float64),
+            ])
+            if "target_end_date" not in filtered.columns:
+                filtered = filtered.with_columns(pl.col("reference_date").alias("target_end_date"))
+            else:
+                filtered = filtered.with_columns(pl.col("target_end_date").cast(pl.String))
+            return filtered
+
+        loaded_dfs = [df for df in ordered_map(_load_member, all_models) if df is not None and not df.is_empty()]
 
         if not loaded_dfs:
             return pl.DataFrame(), {"total_tasks": 0, "warnings": ["No data available for constituent models."]}

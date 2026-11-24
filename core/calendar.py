@@ -358,8 +358,15 @@ def infer_calendar(
             pass
     has_year_round_rounds = any(len(ms) >= 10 for ms in round_months_by_year.values())
     has_covid_only = bool(target_list) and all("covid" in t for t in target_list)
+    has_non_nh_outbreak = bool(target_list) and any(
+        ("bdbv" in t or "ebola" in t or "dengue" in t or "confirmed cases" in t or "wk r_t" in t or t == "r_t")
+        for t in target_list
+    ) and not any(
+        ("flu" in t or "influenza" in t or "rsv" in t or "ili" in t or "ari" in t)
+        for t in target_list
+    )
 
-    if has_year_round_rounds or has_covid_only:
+    if has_year_round_rounds or has_covid_only or has_non_nh_outbreak:
         season_mode = "continuous"
         active_months = ALL_MONTHS
     else:

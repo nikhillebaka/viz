@@ -188,7 +188,11 @@ class TestPhase3Backend(unittest.TestCase):
         by_id = {h.id: h for h in BUILTIN_HUBS}
         self.assertEqual(
             set(by_id.keys()),
-            {"flusight", "flu_metrocast", "covid19", "rsv", "respicast_syndromic", "respicast_covid19"},
+            {
+                "flusight", "flu_metrocast", "covid19", "rsv",
+                "respicast_syndromic", "respicast_covid19",
+                "china_id", "canada_rvdss", "ontario_hosp", "bdbv_drc",
+            },
         )
         self.assertEqual(by_id["flu_metrocast"].transport, "github")
         self.assertEqual(by_id["flu_metrocast"].github_repo, "reichlab/flu-metrocast")
@@ -337,7 +341,7 @@ class TestPhase3Backend(unittest.TestCase):
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/remote/hubs") as resp:
                     self.assertEqual(resp.status, 200)
                     payload = json.loads(resp.read().decode("utf-8"))
-                    self.assertEqual(len(payload["hubs"]), 6)
+                    self.assertEqual(len(payload["hubs"]), 10)
             finally:
                 srv.shutdown()
                 srv.server_close()

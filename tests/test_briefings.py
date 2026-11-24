@@ -170,6 +170,75 @@ def _fixture_router(fail_urls=()):
                 "SARI syndromic,Germany,2026-W46,SARIrate,total,8.6\n"
             ).encode("utf-8")
 
+        if "drc_ebola_cases_consolidated.csv" in url:
+            return (
+                "location_country,location_level,location_name,location_name_source,location_code,location_code_type,reference_date,measure,case_classification,time_period,value,unit,source\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-08-04,cases,suspected,cumulative,1077,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-07-11,deaths,suspected,cumulative,246,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-10-30,cases,confirmed,cumulative,10900,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-10-30,deaths,confirmed,cumulative,5350,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-06,cases,confirmed,cumulative,11150,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-06,deaths,confirmed,cumulative,5480,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-13,cases,confirmed,cumulative,11420,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-13,deaths,confirmed,cumulative,5620,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-20,cases,confirmed,cumulative,11762,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-20,cases,confirmed,daily,99,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-02-30,cases,confirmed,cumulative,88888,count,INRB-UMIE\n"
+                "COD,0,République démocratique du Congo,DRC,COD,iso3,2026-11-20,deaths,confirmed,cumulative,5775,count,INRB-UMIE\n"
+                "COD,3,Bunia,Bunia,CD540202,pcode,2026-11-06,cases,confirmed,cumulative,2000,count,INRB-UMIE\n"
+                "COD,3,Bunia,Bunia,CD540202,pcode,2026-11-20,cases,confirmed,cumulative,2141,count,INRB-UMIE\n"
+                "COD,3,Bunia,Bunia,CD540202,pcode,2026-11-20,deaths,confirmed,cumulative,1050,count,INRB-UMIE\n"
+                "COD,3,Beni,Beni,CD610901,pcode,2026-11-06,cases,confirmed,cumulative,920,count,INRB-UMIE\n"
+                "COD,3,Beni,Beni,CD610901,pcode,2026-11-20,cases,confirmed,cumulative,966,count,INRB-UMIE\n"
+                "COD,3,Beni,Beni,CD610901,pcode,2026-11-20,deaths,confirmed,cumulative,455,count,INRB-UMIE\n"
+            ).encode("utf-8")
+
+        if "diseaseoutbreaknews" in url:
+            return json.dumps({
+                "value": [
+                    {
+                        "DonId": "2026-DON630",
+                        "UrlName": "2026-DON630",
+                        "Title": "Ebola disease caused by Bundibugyo virus - Democratic Republic of the Congo, Kenya and Nigeria",
+                        "PublicationDate": "2026-11-20T22:38:46Z",
+                        "Overview": "<p>Cases reported across five&nbsp;countries since 15 May 2026.</p>",
+                        "Summary": "<p>Additional confirmed cases and deaths occurred in Ituri and North Kivu.</p>",
+                        "Epidemiology": "<p>Bundibugyo virus disease (BVD) is caused by Orthoebolavirus bundibugyoense.</p>",
+                        "Assessment": "<p>On 17 November 2026, WHO reassessed national and regional risk.</p>",
+                        "Response": "<p>Ministry of Health and WHO partners continue field surveillance.</p>",
+                        "Advice": "<p>WHO recommends strengthening cross-border screening and IPC.</p>",
+                    },
+                    {
+                        "DonId": "2026-DON625",
+                        "UrlName": "2026-DON625",
+                        "Title": "Ebola disease caused by Bundibugyo virus, DRC",
+                        "PublicationDate": "2026-11-06T17:00:00Z",
+                        "Overview": "<p>Prior situation report.</p>",
+                        "Summary": "<p>Geographic expansion documented across eastern DRC.</p>",
+                        "Epidemiology": "",
+                        "Assessment": "<p>Risk remains elevated nationally.</p>",
+                        "Response": "",
+                        "Advice": "",
+                    },
+                ]
+            }).encode("utf-8")
+
+        if "weekly-reporting-delays-by-province.csv" in url:
+            rows = ["week_ending,location_name,days_sym_to_report,as_of"]
+            # Stale as_of should be superseded by 2026-11-22 per location
+            rows.append("2026-11-14,Ituri,25,2026-11-15")
+            for _ in range(30):
+                rows.extend([
+                    "2026-11-14,Ituri,4,2026-11-22",
+                    "2026-11-14,Ituri,6,2026-11-22",
+                    "2026-11-14,Nord Kivu,8,2026-11-22",
+                ])
+            rows.extend([
+                "2026-11-21,Ituri,2,2026-11-22",
+                "2026-11-21,Nord Kivu,3,2026-11-22",
+            ])
+            return ("\n".join(rows) + "\n").encode("utf-8")
+
         raise RuntimeError(f"Unexpected fixture URL: {url}")
 
     return _fetch
@@ -314,6 +383,165 @@ def _build_us_and_eu_workspace(root: Path, data_dir: Path) -> HubManager:
     )
 
 
+def _build_intl_briefing_workspace(root: Path, data_dir: Path) -> HubManager:
+    """Create minimal DRC (bdbv), Canada RVDSS, and China hubs in isolated temp dirs."""
+    # 1. DRC Bundibugyo hub
+    drc_hub = root / "bdbv_drc"
+    for sub in ("hub-config", "auxiliary-data", "target-data"):
+        (drc_hub / sub).mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "location": ["CD", "CD-IT"],
+        "location_name": ["DRC", "Ituri"],
+        "location_type": ["country", "province"],
+        "parent": ["", "DRC"],
+    }).write_csv(drc_hub / "auxiliary-data" / "locations.csv")
+    (drc_hub / "hub-config" / "tasks.json").write_text(json.dumps({
+        "rounds": [{
+            "model_tasks": [{
+                "task_ids": {
+                    "reference_date": {"optional": ["2026-11-21", "2026-11-28"]},
+                    "target": {"required": ["wk inc confirmed cases"]},
+                    "location": {"required": ["CD", "CD-IT"]},
+                    "horizon": {"required": [0, 1, 2]},
+                },
+                "output_type": {"quantile": {"output_type_id": {"required": ["0.025", "0.5", "0.975"]}}},
+            }]
+        }]
+    }), encoding="utf-8")
+    pl.DataFrame({
+        "target": ["wk inc confirmed cases"] * 4,
+        "location": ["CD", "CD", "CD-IT", "CD-IT"],
+        "target_end_date": ["2026-11-14", "2026-11-21", "2026-11-14", "2026-11-21"],
+        "oracle_value": [310.0, 290.0, 180.0, 160.0],
+    }).write_parquet(drc_hub / "target-data" / "oracle.parquet")
+    drc_rows = []
+    for loc, base in [("CD", 290.0), ("CD-IT", 160.0)]:
+        for h_idx, ted in [(0, "2026-11-28"), (1, "2026-12-05"), (2, "2026-12-12")]:
+            for qid, qm in [("0.025", 0.6), ("0.5", 1.0), ("0.975", 1.5)]:
+                drc_rows.append({
+                    "reference_date": "2026-11-28",
+                    "target": "wk inc confirmed cases",
+                    "horizon": h_idx,
+                    "target_end_date": ted,
+                    "location": loc,
+                    "output_type": "quantile",
+                    "output_type_id": qid,
+                    "value": base * (1.0 + 0.05 * h_idx) * qm,
+                })
+    p_drc = drc_hub / "model-output" / "OHTJHU-BM" / "2026-11-28-OHTJHU-BM.parquet"
+    p_drc.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(drc_rows).write_parquet(p_drc)
+
+    # 2. Canada RVDSS lab positivity hub (3 pathogens sharing positivity concept class)
+    ca_hub = root / "canada_rvdss"
+    for sub in ("hub-config", "auxiliary-data", "target-data"):
+        (ca_hub / sub).mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "geo_type": ["nation", "province"],
+        "geo_abbr": ["ca", "on"],
+        "geo_name": ["Canada", "Ontario"],
+    }).write_csv(ca_hub / "auxiliary-data" / "locations.csv")
+    ca_targets = ["pct wk flu lab det", "pct wk covid lab det", "pct wk rsv lab det"]
+    (ca_hub / "hub-config" / "tasks.json").write_text(json.dumps({
+        "rounds": [{
+            "model_tasks": [{
+                "task_ids": {
+                    "reference_date": {"optional": ["2026-11-14", "2026-11-21"]},
+                    "target": {"required": ca_targets},
+                    "location": {"required": ["ca", "on"]},
+                    "horizon": {"required": [0, 1]},
+                },
+                "output_type": {"quantile": {"output_type_id": {"required": ["0.025", "0.5", "0.975"]}}},
+                "target_metadata": [
+                    {"target_id": t, "target_name": t, "target_units": "percent"}
+                    for t in ca_targets
+                ],
+            }]
+        }]
+    }), encoding="utf-8")
+    pl.DataFrame({
+        "target": [t for t in ca_targets for _ in range(2)],
+        "location": ["ca", "ca"] * 3,
+        "target_end_date": ["2026-11-07", "2026-11-14"] * 3,
+        "oracle_value": [12.0, 14.5, 5.8, 6.4, 0.5, 0.7],
+    }).write_parquet(ca_hub / "target-data" / "oracle.parquet")
+    ca_rows = []
+    for t, med in zip(ca_targets, [15.5, 6.1, 1.2]):
+        for h_idx, ted in [(0, "2026-11-21"), (1, "2026-11-28")]:
+            for qid, qm in [("0.025", 0.7), ("0.5", 1.0), ("0.975", 1.3)]:
+                ca_rows.append({
+                    "reference_date": "2026-11-21",
+                    "target": t,
+                    "horizon": h_idx,
+                    "target_end_date": ted,
+                    "location": "ca",
+                    "output_type": "quantile",
+                    "output_type_id": qid,
+                    "value": med * qm,
+                })
+    p_ca = ca_hub / "model-output" / "AI4Casting_Hub-Simple_Ens" / "2026-11-21-AI4Casting_Hub-Simple_Ens.parquet"
+    p_ca.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(ca_rows).write_parquet(p_ca)
+    (ca_hub / "model-metadata").mkdir(parents=True, exist_ok=True)
+    (ca_hub / "model-metadata" / "AI4Casting_Hub-Simple_Ens.yml").write_text(
+        "team_abbr: AI4Casting_Hub\nmodel_abbr: Simple_Ens\ndesignated_model: true\nensemble_of_hub_models: true\n",
+        encoding="utf-8",
+    )
+
+    # 3. China ILI hub (0-100 proportion scale promotion)
+    cn_hub = root / "china_id"
+    for sub in ("hub-config", "target-data"):
+        (cn_hub / sub).mkdir(parents=True, exist_ok=True)
+    (cn_hub / "hub-config" / "tasks.json").write_text(json.dumps({
+        "rounds": [{
+            "model_tasks": [{
+                "task_ids": {
+                    "reference_date": {"optional": ["2026-11-16", "2026-11-23"]},
+                    "target": {"required": ["wk inc flu prop ili"]},
+                    "location": {"required": ["CN"]},
+                    "horizon": {"required": [0, 1]},
+                },
+                "output_type": {"quantile": {"output_type_id": {"required": ["0.025", "0.5", "0.975"]}}},
+                "target_metadata": [{
+                    "target_id": "wk inc flu prop ili",
+                    "target_name": "Weekly flu ILI percentage",
+                    "target_units": "proportion",
+                    "scale": "proportion",
+                }],
+            }]
+        }]
+    }), encoding="utf-8")
+    pl.DataFrame({
+        "target": ["wk inc flu prop ili", "wk inc flu prop ili"],
+        "location": ["CN", "CN"],
+        "target_end_date": ["2026-10-19", "2026-10-26"],
+        "oracle_value": [11.8, 12.4],
+    }).write_parquet(cn_hub / "target-data" / "oracle.parquet")
+    cn_rows = [
+        {
+            "reference_date": "2026-11-23",
+            "target": "wk inc flu prop ili",
+            "horizon": h_idx,
+            "target_end_date": ted,
+            "location": "CN",
+            "output_type": "quantile",
+            "output_type_id": qid,
+            "value": 15.0 * qm,
+        }
+        for h_idx, ted in [(0, "2026-11-23"), (1, "2026-11-30")]
+        for qid, qm in [("0.025", 0.7), ("0.5", 1.0), ("0.975", 1.3)]
+    ]
+    p_cn = cn_hub / "model-output" / "GZNL-FluLGBMCQR" / "2026-11-23-GZNL-FluLGBMCQR.parquet"
+    p_cn.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(cn_rows).write_parquet(p_cn)
+
+    return HubManager(
+        data_dir=data_dir,
+        cli_hubs=[drc_hub, ca_hub, cn_hub],
+        include_enclosing=False,
+    )
+
+
 class TestBriefingFeedsAndBuilder(unittest.TestCase):
     def setUp(self):
         self.tmp_root = Path(tempfile.mkdtemp(prefix="viz_briefing_test_"))
@@ -397,6 +625,21 @@ class TestBriefingFeedsAndBuilder(unittest.TestCase):
         self.assertIsNotNone(st2["feeds"]["cdc_nwss"]["error"])
         self.assertTrue(st2["feeds"]["cdc_nwss"]["cached"])
         self.assertGreater(failing_store.read_feed("cdc_nwss").height, 0)
+
+        # Verify DRC OCHA national + zone rows, sanitized WHO DON HTML, and Polars delay percentiles
+        df_ocha = store.read_feed("drc_ebola_ocha")
+        self.assertGreater(df_ocha.filter(pl.col("location_level") == "0").height, 0)
+        self.assertGreater(df_ocha.filter(pl.col("location_level") == "3").height, 0)
+        df_don = store.read_feed("who_don_drc")
+        self.assertEqual(df_don["don_id"][0], "2026-DON630")
+        self.assertNotIn("<p>", df_don["summary"][0])
+        self.assertNotIn("&nbsp;", df_don["overview"][0])
+        df_del = store.read_feed("bdbv_delays")
+        drc_nat_14 = df_del.filter((pl.col("location_name") == "DRC") & (pl.col("date") == "2026-11-14"))
+        self.assertEqual(drc_nat_14.height, 1)
+        self.assertEqual(drc_nat_14["n_cases"].item(), 90)
+        self.assertEqual(drc_nat_14["as_of"].item(), "2026-11-22")
+        self.assertAlmostEqual(drc_nat_14["median_days"].item(), 6.0, places=1)
 
     def test_briefing_builder_us_ma_substate_and_poland(self):
         mgr = _build_us_and_eu_workspace(self.tmp_root, self.data_dir)
@@ -528,6 +771,134 @@ class TestBriefingFeedsAndBuilder(unittest.TestCase):
         from viz.core.briefings import _fmt_date_short
         self.assertEqual(_fmt_date_short("2022-10-16", ref_iso="2026-11-21"), "Oct 16, 2022")
         self.assertEqual(_fmt_date_short("2026-11-14", ref_iso="2026-11-21"), "Nov 14")
+
+    def test_international_hubs_ensemble_ranking_and_active_round_selection(self):
+        from viz.core.briefings import _pick_latest_round_for_target
+
+        models = {
+            "ont:AI4Casting_Hub-Quantile_Baseline": {"designated": True, "is_baseline": True, "targets": ["t"], "dates": ["2026-11-21"] * 10},
+            "ont:AI4Casting_Hub-Ensemble_v1": {"designated": True, "targets": ["t"], "dates": ["2026-11-14"] * 50},
+            "ont:AI4Casting_Hub-Simple_Ens": {"designated": True, "targets": ["t"], "dates": ["2026-11-21"] * 2},
+            "ont:AI4Casting_Hub-Team_Ens": {"designated": True, "targets": ["t"], "dates": ["2026-11-21"] * 2},
+            "ont:UGuelph-CompositeCurve": {"designated": True, "targets": ["t"], "dates": ["2026-11-21"] * 40},
+        }
+        meta = {
+            "ont:AI4Casting_Hub-Ensemble_v1": {"ensemble_of_hub_models": True},
+            "ont:AI4Casting_Hub-Simple_Ens": {"ensemble_of_hub_models": True},
+            "ont:AI4Casting_Hub-Team_Ens": {"ensemble_of_hub_models": True},
+            "ont:UGuelph-CompositeCurve": {"ensemble_of_hub_models": True},
+        }
+        ranked = rank_ensemble_candidates(models, "t", "2026-11-21", get_meta=lambda m: meta.get(m, {}), hub_id="ontario_hosp")
+        self.assertEqual(ranked[0], "ont:AI4Casting_Hub-Simple_Ens")
+        self.assertNotIn("ont:AI4Casting_Hub-Quantile_Baseline", ranked)
+
+        # No-ensemble fallback prioritizes designated=True, then longest round history
+        no_ens_models = {
+            "cn:GZNL-FluLGBMCQR": {"designated": False, "targets": ["f"], "dates": ["2026-11-23"] * 10},
+            "cn:GZNL-NextWave": {"designated": True, "targets": ["f"], "dates": ["2026-11-23"] * 4},
+            "cn:MUST-SEIRS": {"designated": True, "targets": ["f"], "dates": ["2026-11-23"] * 8},
+        }
+        no_ens_ranked = rank_ensemble_candidates(no_ens_models, "f", "2026-11-23", get_meta=lambda _m: {})
+        self.assertEqual(no_ens_ranked[:3], ["cn:MUST-SEIRS", "cn:GZNL-NextWave", "cn:GZNL-FluLGBMCQR"])
+
+        # _pick_latest_round_for_target skips retired (>14d stale) ensemble in favor of active models
+        class _DummyLoader:
+            def __init__(self, ms, mdict):
+                self._ms = ms
+                self._md = mdict
+            def scan_models(self):
+                return self._ms
+            def get_model_metadata(self, mid):
+                return self._md.get(mid, {})
+            def get_forecast_seasons(self):
+                return []
+            def get_latest_reference_date(self):
+                return None
+
+        class _DummyCtx:
+            def __init__(self, ms, mdict):
+                self.loader = _DummyLoader(ms, mdict)
+
+        cn_models = {
+            "CNCovidHub-ensemble": {"designated": True, "targets": ["t"], "dates": ["2026-08-31"]},
+            "GZNL-Mantis": {"designated": True, "targets": ["t"], "dates": ["2026-11-23"]},
+        }
+        cn_meta = {"CNCovidHub-ensemble": {"ensemble_of_hub_models": True}}
+        self.assertEqual(_pick_latest_round_for_target(_DummyCtx(cn_models, cn_meta), "t"), "2026-11-23")
+        # But keeps active ensemble within 14d of latest_any
+        ca_models = {
+            "AI4Casting_Hub-Simple_Ens": {"designated": True, "targets": ["t"], "dates": ["2026-11-21"]},
+            "JHU-DMD": {"designated": True, "targets": ["t"], "dates": ["2026-11-28"]},
+        }
+        ca_meta = {"AI4Casting_Hub-Simple_Ens": {"ensemble_of_hub_models": True}}
+        self.assertEqual(_pick_latest_round_for_target(_DummyCtx(ca_models, ca_meta), "t"), "2026-11-21")
+
+        # Non-official team model named "*ensemble" ahead by 1 week must not hijack official hub ensemble
+        hijack_models = {
+            "FluSight-ensemble": {"designated": False, "targets": ["t"], "dates": ["2026-11-21"]},
+            "TeamX-ensemble": {"designated": True, "targets": ["t"], "dates": ["2026-11-28"]},
+        }
+        hijack_meta = {
+            "FluSight-ensemble": {"ensemble_of_hub_models": True},
+            "TeamX-ensemble": {"ensemble_of_hub_models": False},
+        }
+        self.assertEqual(_pick_latest_round_for_target(_DummyCtx(hijack_models, hijack_meta), "t"), "2026-11-21")
+
+        # US hub with "Central" / "East" regions must not be hijacked by Ontario health region refs
+        from viz.core.geo import build_geo_graph
+        from viz.core.catalog import classify_geo_kind, canonical_place_key
+        us_locs = build_geo_graph(None, tasks_config=None, observed_locations=["25", "Central", "East"]).to_legacy_locations_map()
+        self.assertNotEqual(us_locs["Central"].get("canonical_id"), "CA:ON:Central")
+        self.assertNotEqual(classify_geo_kind(us_locs), "ca-ontario")
+        self.assertEqual(canonical_place_key("us_mc", "Central", us_locs["Central"], "us-metrocast")[0], "Central")
+
+    def test_drc_canada_and_china_briefings(self):
+        mgr = _build_intl_briefing_workspace(self.tmp_root, self.data_dir)
+        mgr.briefing_feeds = BriefingFeedStore(self.data_dir, fetcher=_fixture_router())
+        mgr.briefings.feed_store = mgr.briefing_feeds
+        mgr.briefing_feeds.refresh_sync(force=True)
+
+        # DR Congo briefing
+        cd = mgr.briefings.build_briefing("CD")
+        self.assertEqual(cd["place"]["key"], "CD")
+        self.assertEqual(cd["place"]["jurisdiction_scope"], "cd")
+        self.assertEqual(cd["virology"]["vaccine_reference"], [])
+        self.assertIsNone(cd["virology"]["vaccine_season"])
+        drc = cd["drc_ebola"]
+        self.assertTrue(drc["feeds_cached"])
+        self.assertEqual(drc["national"]["cum_cases"], 11762)
+        self.assertEqual(drc["national"]["cum_deaths"], 5775)
+        self.assertAlmostEqual(drc["national"]["cfr_pct"], 49.1, places=1)
+        self.assertEqual(drc["national"]["new_cases_14d"], 612)
+        self.assertEqual(drc["health_zones"]["rows"][0]["name"], "Bunia")
+        self.assertEqual(drc["latest_don"]["don_id"], "2026-DON630")
+        self.assertEqual(drc["reporting_delays"]["mature_week"]["median_days"], 6.0)
+        self.assertGreaterEqual(len(drc["provinces"]), 1)
+        self.assertEqual(drc["provinces"][0]["place_key"], "CD-IT")
+        cd_prose = " ".join(cd["summary"]["paragraphs"]).lower()
+        for banned in ("alarming", "surge", "crisis", "panic", "you should"):
+            self.assertNotIn(banned, cd_prose)
+
+        # Canada briefing preserves all 3 RVDSS pathogen positivity targets
+        ca = mgr.briefings.build_briefing("CA")
+        self.assertEqual(ca["place"]["jurisdiction_scope"], "ca")
+        self.assertEqual(ca["place"]["clade_region"], "North America")
+        ca_cids = {s["concept_id"] for s in ca["signals"]}
+        self.assertEqual(ca_cids, {"flu_lab_positivity", "covid19_lab_positivity", "rsv_lab_positivity"})
+        self.assertEqual({s["pathogen"] for s in ca["signals"]}, {"influenza", "covid19", "rsv"})
+        self.assertEqual(ca["signals"][0]["model_display"], "AI4Casting_Hub-Simple_Ens")
+
+        # China briefing promotes 0-100 proportion values to percentage without 100x scaling
+        from viz.core.briefings import _clean_signal_label
+        self.assertEqual(_clean_signal_label("Dengue cases", "COVID-19", "covid19"), "Dengue cases")
+        cn = mgr.briefings.build_briefing("CN")
+        self.assertEqual(cn["place"]["jurisdiction_scope"], "cn")
+        cn_flu = cn["signals"][0]
+        self.assertEqual(cn_flu["pathogen"], "influenza")
+        self.assertEqual(cn_flu["scale"], "percentage")
+        self.assertEqual(cn_flu["unit"], "%")
+        self.assertAlmostEqual(cn_flu["latest_obs"], 12.4, places=1)
+        self.assertAlmostEqual(cn_flu["forecast_end_median"], 15.0, places=1)
 
 
 if __name__ == "__main__":

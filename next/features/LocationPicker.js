@@ -8,7 +8,7 @@ import { openPopover } from "../ui/floating.js";
 import { icon } from "../ui/controls.js";
 import { prefetchFan } from "../lib/api.js";
 import { EU_TILES_PROPORTIONED, EU_TILES_PROPORTIONED_UK_SPLIT, US_STATE_META, resolveEuLocation } from "../geo/eu_tiles.js";
-import { TILES, COLUMNS, classifyHubGeo, loadUsGeoCache, renderHsaStateSvg } from "../geo/picker_geo.js";
+import { TILES, COLUMNS, classifyHubGeo, loadUsGeoCache, loadRegionGeo, renderHsaStateSvg, renderRegionSvg } from "../geo/picker_geo.js";
 
 export { TILES, COLUMNS };
 
@@ -386,6 +386,10 @@ export function openLocationPicker(anchor, ctx) {
       let mcStateFips = geoCls.kind === "us-metrocast"
         ? (geoCls.stateFipsOf(current) || (geoCls.coveredStateFips.size === 1 ? [...geoCls.coveredStateFips][0] : null))
         : null;
+      const candProv = (geoCls.kind === "cd-provinces" && geoCls.hasHealthZones)
+        ? geoCls.drcProvinceOf(current)
+        : null;
+      let drcProvId = candProv && (geoCls.drcZonesByProvince.get(candProv) || []).length ? candProv : null;
       let topHit = null;
 
       function renderContextual() {
@@ -491,6 +495,98 @@ export function openLocationPicker(anchor, ctx) {
               activeId: current,
               onHover: (_id, label) => { caption.textContent = label; },
               onPick: (id) => pick(id),
+            });
+            svgWrap.replaceChildren(svg || h("p", { class: "pk-empty" }, "Select region below"));
+          }).catch(() => {
+            if (svgWrap.isConnected) svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Select region below"));
+          });
+          return;
+        }
+
+        if (geoCls.kind === "cd-provinces" && drcProvId) {
+          const provLoc = manifest.locationById.get(drcProvId);
+          const provName = provLoc?.name || drcProvId;
+          const zones = geoCls.drcZonesByProvince.get(drcProvId) || [];
+          const zoneBtns = zones.map((z) => place(z, ["c-chip", z.id === current && "on"], z.name || z.abbr || z.id));
+          map.replaceChildren(
+            h("div", { class: "lp-ctx-bar" },
+              h("button", {
+                type: "button", class: "c-link",
+                onclick: () => { drcProvId = null; renderContextual(); },
+              }, `← ${geoCls.drcProvinces.length || 26} provinces`),
+              h("span", { class: "lp-ctx-title" }, provName),
+              provLoc ? h("div", { class: "lp-ctx-actions" }, h("button", {
+                type: "button", class: ["c-link lp-ctx-act", current === provLoc.id && "is-on"],
+                onclick: () => pick(provLoc.id),
+              }, "Whole province")) : null),
+            h("p", { class: "lp-hsa-cap" }, `${zones.length} health zones in ${provName}`),
+            h("div", { class: "lp-chips", style: { maxHeight: "220px", overflowY: "auto" } }, ...zoneBtns),
+          );
+          return;
+        }
+
+        if (geoCls.kind === "ca-provinces" || geoCls.kind === "ca-ontario" || geoCls.kind === "cd-provinces" || geoCls.kind === "cn-national") {
+          const ctxTitle = geoCls.kind === "ca-provinces"
+            ? "Canada"
+            : geoCls.kind === "ca-ontario"
+              ? "Ontario"
+              : geoCls.kind === "cd-provinces"
+                ? "DR Congo"
+                : "China";
+          const aggLoc = geoCls.aggregateId ? manifest.locationById.get(geoCls.aggregateId) : null;
+          const aggLabel = geoCls.kind === "ca-ontario" ? "Whole province" : "Whole country";
+          const chipLocs = [];
+          if (geoCls.kind === "ca-provinces") {
+            for (const id of ["atlantic", "prairies", "territories", "pe"]) {
+              const l = manifest.locationById.get(id);
+              if (l) chipLocs.push(l);
+            }
+          } else if (geoCls.kind === "ca-ontario") {
+            for (const l of locs) {
+              if (l.id !== "Ontario") chipLocs.push(l);
+            }
+          } else if (geoCls.kind === "cd-provinces") {
+            const kn = manifest.locationById.get("CD-KN");
+            if (kn) chipLocs.push(kn);
+          }
+
+          const curLoc = manifest.locationById.get(current);
+          const defaultCap = geoCls.kind === "ca-provinces"
+            ? "13 provinces & territories"
+            : geoCls.kind === "ca-ontario"
+              ? "6 Ontario Health regions"
+              : geoCls.kind === "cd-provinces"
+                ? (geoCls.hasHealthZones ? "Click a province to browse health zones" : "26 DRC provinces")
+                : "China national forecasts";
+          const caption = h("p", { class: "lp-hsa-cap" }, curLoc && curLoc.id !== geoCls.aggregateId ? curLoc.name : defaultCap);
+          const svgWrap = h("div", { class: "lp-hsa-wrap" });
+
+          map.replaceChildren(...[
+            h("div", { class: "lp-ctx-bar" },
+              h("span", { class: "lp-ctx-title" }, ctxTitle),
+              aggLoc ? h("div", { class: "lp-ctx-actions" }, h("button", {
+                type: "button", class: ["c-link lp-ctx-act", current === aggLoc.id && "is-on"],
+                onclick: () => pick(aggLoc.id),
+              }, aggLabel)) : null),
+            svgWrap,
+            caption,
+            chipLocs.length ? h("div", { class: "lp-chips" }, chipLocs.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.abbr || l.id))) : null,
+          ].filter(Boolean));
+
+          svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Loading boundaries…"));
+          loadRegionGeo(geoCls.kind).then((rGeo) => {
+            if (!svgWrap.isConnected) return;
+            const svg = renderRegionSvg(rGeo, manifest.locationById, {
+              activeId: current,
+              onHover: (_id, label) => { caption.textContent = label; },
+              onPick: (id) => {
+                if (geoCls.kind === "cd-provinces" && geoCls.hasHealthZones && (geoCls.drcZonesByProvince.get(id) || []).length) {
+                  drcProvId = id;
+                  renderContextual();
+                  return;
+                }
+                if (manifest.locationById.has(id)) pick(id);
+              },
             });
             svgWrap.replaceChildren(svg || h("p", { class: "pk-empty" }, "Select region below"));
           }).catch(() => {

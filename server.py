@@ -503,6 +503,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 "hubs": remote_mgr.list_hubs(),
                 "busy": remote_mgr.is_busy(),
                 "current_season": current_season(),
+                "settings": remote_mgr.store.get_settings(),
+                "auto_updating": bool(getattr(mgr, "local_auto_updater", None) and mgr.local_auto_updater.is_running),
+                "batch": remote_mgr.batch_status(),
             })
         elif path == "/api/remote/job":
             mgr = self._mgr()
@@ -1396,6 +1399,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         include_inactive_param = query.get("include_inactive", ["0"])[0].strip().lower()
         include_inactive = include_inactive_param in ("1", "true", "yes")
         fair = query.get("fair", ["0"])[0].strip().lower() in ("1", "true", "yes")
+        compact_param = query.get("compact", [""])[0].strip().lower()
+        compact = compact_param in ("1", "true", "yes") if compact_param else bool(next_api)
 
         model_ids = [m.strip() for m in models_param.split(",") if m.strip()] if models_param else None
 
@@ -1416,6 +1421,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 normalize=normalize,
                 include_inactive=include_inactive,
                 fair=fair,
+                compact=compact,
                 **(self._heatmap_scope(query) if next_api else {}),
             )
             self._send_json(heatmap_data)
@@ -1562,6 +1568,24 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             elif path == "/api/remote/toggle":
                 remote_mgr.set_enabled(hub_id, bool(body.get("enabled", True)))
                 self._send_json({"status": "ok", "hub": hub_id, "enabled": bool(body.get("enabled", True))})
+            elif path == "/api/remote/auto-update":
+                enabled = bool(body.get("enabled", False))
+                settings = remote_mgr.store.set_auto_update_daily(enabled)
+                updater = getattr(self._mgr(), "local_auto_updater", None)
+                if enabled and updater is not None:
+                    updater.wake()
+                self._send_json({
+                    "ok": True,
+                    "settings": settings,
+                    "auto_updating": bool(updater and updater.is_running),
+                })
+            elif path == "/api/remote/sync-all":
+                req_hubs = body.get("hubs")
+                req_hubs = [str(x).strip() for x in req_hubs if str(x).strip()] if isinstance(req_hubs, list) else None
+                self._send_json({"batch": remote_mgr.start_sync_all(req_hubs)})
+            elif path == "/api/remote/cancel-all":
+                cancelled = remote_mgr.cancel_all()
+                self._send_json({"cancelled": cancelled, "batch": remote_mgr.batch_status()})
             else:
                 self._send_json({"error": f"POST endpoint '{path}' not found"}, status=404)
         except KeyError as exc:
@@ -1783,12 +1807,14 @@ def run_server(
             sys.stderr.write(f"Start on a free port instead:  {launcher} {suggestion}\n\n")
         sys.exit(1)
 
-    # Start web-mode daemons (ephemeral TTL reaper / cold archiver + built-in hub auto-sync)
+    # Start background daemons (web ephemeral reaper + hub auto-sync, or local daily auto-updater)
     if mgr.mode == "web":
         if mgr.web_store is not None:
             mgr.web_store.start()
         if mgr.web_scheduler is not None:
             mgr.web_scheduler.start()
+    elif mgr.mode == "local" and getattr(mgr, "local_auto_updater", None) is not None:
+        mgr.local_auto_updater.start()
 
     # Warm up Parquet cache in background thread when an active hub is present
     if active_ctx is not None:
@@ -1836,6 +1862,8 @@ def run_server(
                     mgr.web_scheduler.stop()
                 if mgr.web_store is not None:
                     mgr.web_store.stop()
+            elif mgr.mode == "local" and getattr(mgr, "local_auto_updater", None) is not None:
+                mgr.local_auto_updater.stop()
             httpd.server_close()
 
 

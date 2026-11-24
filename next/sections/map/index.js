@@ -6,7 +6,7 @@
  *
  * Data: /api/next/spatial (/api/spatial unrounded with `locations` keyed by unique loc_id). */
 import { onThemeChange } from "../../lib/dom.js";
-import { valueFormat, fmtDay, fmtLong } from "../../lib/format.js";
+import { valueFormat, fmtDay, fmtLong, horizonText } from "../../lib/format.js";
 import { parseIso } from "../../lib/scale.js";
 import { slotOf, COLORS } from "../../features/selection.js";
 import {
@@ -18,7 +18,15 @@ import {
   EU_TILES_UNIFORM_UK_SPLIT,
   US_STATE_META,
 } from "../../geo/eu_tiles.js";
-import { TILES, COLUMNS, classifyHubGeo, loadUsGeoCache, renderHsaStateSvg } from "../../geo/picker_geo.js";
+import {
+  TILES,
+  COLUMNS,
+  classifyHubGeo,
+  loadUsGeoCache,
+  loadRegionGeo,
+  renderHsaStateSvg,
+  renderRegionSvg,
+} from "../../geo/picker_geo.js";
 import { targetHorizons } from "../scope.js";
 import {
   h, linkStyle, frame, fragment, action, setLine, getJson, query, isAbort, sequential, diverging, inkOn,
@@ -49,35 +57,42 @@ export function mount(el, ctx) {
   const vs = viewState(store, "map", KEY);
   const saved = vs.initial;
   let layer = saved.layer || "f_rate";
-  let horizon = Number.isInteger(saved.horizon) && saved.horizon >= 0 ? saved.horizon : 1;
+  let horizon = Number.isInteger(saved.horizon) ? saved.horizon : 1;
   let euShape = "proportioned";
   let mcFips = geoCls.kind === "us-metrocast"
     ? (geoCls.stateFipsOf(store.get().location) || (geoCls.coveredStateFips.size === 1 ? [...geoCls.coveredStateFips][0] : [...geoCls.coveredStateFips][0] || null))
     : null;
   let mcView = geoCls.kind === "us-metrocast" && mcFips ? "state" : "states";
   let model = null;
-  let data = null, usGeo = null, reqKey = "", hoverId = null, timer = 0;
+  let data = null, usGeo = null, regionGeo = null, reqKey = "", hoverId = null, timer = 0;
   const slot = {};
+  const REGION_GEO_KINDS = new Set(["ca-provinces", "ca-ontario", "cd-provinces", "cn-national"]);
 
   const target = () => manifest.targetById.get(store.get().target);
   const isCategorical = () => {
     const t = target();
-    return Boolean(t?.is_categorical || (t?.output_types?.length && !t.output_types.includes("quantile")));
+    return Boolean(t?.is_categorical || (t?.output_types?.length && !t.output_types.includes("quantile") && !t.output_types.includes("sample")));
   };
   const counts = () => {
     const t = target();
-    return !t?.is_rate && t?.scale !== "proportion" && t?.per_100k_capable !== false;
+    return !t?.is_rate && t?.scale !== "proportion" && t?.scale !== "percentage" && t?.per_100k_capable !== false;
   };
   const vf = () => valueFormat(target());
   const baseId = () => { const s = store.get(); return manifest.baselineFor?.(s.target, s.date) ?? manifest.baseline; };
-  const layers = () => LAYERS.filter((l) => counts() || !l.counts);
-  const layerOf = () => layers().find((l) => l.id === layer) || layers()[0];
-  const minH = () => layerOf().minHorizon || 0;
   const availHorizons = () => (
     data?.available_horizons?.length
       ? data.available_horizons
       : targetHorizons(manifest, store.get().target)
   );
+  const layers = () => LAYERS.filter((l) => counts() || !l.counts);
+  const layerOf = () => {
+    const ls = layers();
+    const hs = availHorizons();
+    const picked = ls.find((l) => l.id === layer);
+    if (picked && (!picked.minHorizon || hs.some((x) => x >= picked.minHorizon))) return picked;
+    return ls.find((l) => !l.minHorizon || hs.some((x) => x >= l.minHorizon)) || ls[0];
+  };
+  const minH = () => layerOf().minHorizon || 0;
   const save = () => vs.write({ layer, horizon }, layer === LAYERS[0].id && horizon === 1);
 
   const candidates = () => {
@@ -128,13 +143,23 @@ export function mount(el, ctx) {
     }),
     layer: fragment({
       label: "Layer", title: "Layer",
-      items: () => layers().map((l) => ({ value: l.id, label: l.label, disabled: horizon < (l.minHorizon || 0) })),
+      items: () => layers().map((l) => ({ value: l.id, label: l.label, disabled: Boolean(l.minHorizon) && horizon < l.minHorizon })),
       value: () => layerOf().id, isDefault: () => layerOf().id === layers()[0].id,
       onSelect: (v) => { layer = v; save(); render(); },
     }),
     horizon: fragment({
       label: "Horizon", title: "Horizon",
-      items: () => availHorizons().map((x) => ({ value: x, label: `${x} wk ahead`, short: `${x} wk ahead`, disabled: x < minH() })),
+      items: () => {
+        const tm = target();
+        const hs = availHorizons();
+        const hasNonNeg = hs.some((x) => x >= 0);
+        return hs.map((x) => ({
+          value: x,
+          label: horizonText(x, tm),
+          short: horizonText(x, tm),
+          disabled: hasNonNeg && x < minH(),
+        }));
+      },
       value: () => horizon, isDefault: () => horizon === 1,
       onSelect: (v) => { stop(); horizon = v; save(); render(); },
     }),
@@ -143,7 +168,8 @@ export function mount(el, ctx) {
   const play = action("▶", "Play horizons", () => (timer ? stop() : start()));
   function start() {
     play.textContent = "❚❚"; play.classList.add("is-on"); play.setAttribute("aria-label", "Pause");
-    const hs = availHorizons().filter((x) => x >= minH());
+    const rawHs = availHorizons();
+    const hs = rawHs.some((x) => x >= 0) ? rawHs.filter((x) => x >= minH()) : rawHs;
     timer = setInterval(() => {
       if (!hs.length) return;
       const idx = hs.indexOf(horizon);
@@ -269,6 +295,88 @@ export function mount(el, ctx) {
       return;
     }
 
+    if (REGION_GEO_KINDS.has(geoCls.kind)) {
+      const box = h("div", { class: "mp-hsa-box" });
+      const subItems = [];
+      if (geoCls.kind === "ca-provinces") {
+        const provLeaves = (manifest.locations || []).filter((l) => !l.is_aggregate);
+        activeLocIds = provLeaves.map((l) => l.id);
+        for (const id of ["ca", "atlantic", "prairies", "territories", "pe"]) {
+          const loc = manifest.locationById.get(id);
+          if (loc) subItems.push(loc);
+        }
+      } else if (geoCls.kind === "ca-ontario") {
+        const leaves = (manifest.locations || []).filter((l) => !l.is_aggregate);
+        activeLocIds = leaves.map((l) => l.id);
+        for (const id of ["Ontario", "Toronto"]) {
+          const loc = manifest.locationById.get(id);
+          if (loc) subItems.push(loc);
+        }
+      } else if (geoCls.kind === "cd-provinces") {
+        activeLocIds = geoCls.drcProvinces.map((l) => l.id);
+        for (const id of ["CD", "CD-KN"]) {
+          const loc = manifest.locationById.get(id);
+          if (loc) subItems.push(loc);
+        }
+      } else if (geoCls.kind === "cn-national") {
+        activeLocIds = manifest.locationById.has("CN") ? ["CN"] : [];
+      }
+
+      let subbar = null;
+      if (subItems.length) {
+        subbar = h("div", { class: "mp-subbar", role: "group", "aria-label": "Summary and key areas" });
+        for (const loc of subItems) {
+          const b = h("button", {
+            type: "button",
+            class: "mp-tile mp-subchip",
+            "aria-label": loc.name || loc.id,
+          }, h("span", { class: "mp-abbr" }, loc.name || loc.abbr || loc.id), h("span", { class: "mp-val" }));
+          b.addEventListener("pointerenter", () => { hoverId = loc.id; inspect(); });
+          b.addEventListener("focus", () => { hoverId = loc.id; inspect(); });
+          b.addEventListener("click", () => { store.set({ location: loc.id }); });
+          tileButtons.set(loc.id, b);
+          subbar.append(b);
+        }
+        subbar.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+        subbar.addEventListener("focusout", (e) => { if (!subbar.contains(e.relatedTarget)) { hoverId = null; inspect(); } });
+      }
+
+      mapHost.replaceChildren(...[box, subbar].filter(Boolean));
+      if (!regionGeo || regionGeo.kind !== geoCls.kind) {
+        box.replaceChildren(h("p", { class: "v-empty" }, "Loading boundaries…"));
+        loadRegionGeo(geoCls.kind).then((g) => {
+          regionGeo = g;
+          if (box.isConnected) render();
+        }).catch(() => {
+          if (box.isConnected) box.replaceChildren(h("p", { class: "v-empty" }, "Map boundaries unavailable"));
+        });
+      }
+      return;
+    }
+
+    if (geoCls.kind === "generic") {
+      const leaves = (manifest.locations || []).filter((l) => !l.is_aggregate);
+      const list = leaves.length ? leaves : (manifest.locations || []);
+      const grid = h("div", { class: "mp-grid-generic", role: "group", "aria-label": "Locations" });
+      for (const loc of list.slice(0, 80)) {
+        const b = h("button", {
+          type: "button",
+          class: "mp-tile",
+          "aria-label": loc.name || loc.id,
+        }, h("span", { class: "mp-abbr" }, loc.abbr || loc.id), h("span", { class: "mp-val" }));
+        b.addEventListener("pointerenter", () => { hoverId = loc.id; inspect(); });
+        b.addEventListener("focus", () => { hoverId = loc.id; inspect(); });
+        b.addEventListener("click", () => { store.set({ location: loc.id }); });
+        tileButtons.set(loc.id, b);
+        activeLocIds.push(loc.id);
+        grid.append(b);
+      }
+      grid.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+      grid.addEventListener("focusout", (e) => { if (!grid.contains(e.relatedTarget)) { hoverId = null; inspect(); } });
+      mapHost.replaceChildren(grid);
+      return;
+    }
+
     // Standard US states 11x8 tile grid
     const grid = h("div", { class: "mp-grid", role: "group", "aria-label": "States", style: { "--cols": COLUMNS, "--rows": US_ROWS } });
     for (const [abbr, [c, r]] of Object.entries(TILES)) {
@@ -368,8 +476,9 @@ export function mount(el, ctx) {
   function render() {
     if (isCategorical()) return;
     const hs = availHorizons();
-    if (!hs.includes(horizon)) horizon = hs.find((x) => x >= minH()) ?? hs[0] ?? 0;
-    if (horizon < minH()) horizon = hs.find((x) => x >= minH()) ?? minH();
+    const hasNonNeg = hs.some((x) => x >= 0);
+    if (!hs.includes(horizon)) horizon = hs.includes(1) ? 1 : (hs.find((x) => x >= minH()) ?? (hasNonNeg ? hs.find((x) => x >= 0) : null) ?? hs[0] ?? 0);
+    if (hasNonNeg && horizon < minH()) horizon = hs.find((x) => x >= minH()) ?? minH();
     syncLine();
     const s = store.get();
     if (!data) return;
@@ -402,18 +511,38 @@ export function mount(el, ctx) {
           box.replaceChildren(svg);
         }
       }
-    } else {
-      for (const [id, b] of tileButtons) {
-        const v = valueAt(id, L.id);
-        const has = fin(v);
-        b.classList.toggle("has-value", has);
-        b.classList.toggle("is-here", id === hereId);
-        const fill = has ? colorFor(L, v, max) : "";
-        b.style.background = fill;
-        b.style.color = has ? inkOn(fill) : "";
-        b.lastChild.textContent = has ? fmt(L.id, v) : "";
-        b.setAttribute("aria-pressed", String(id === hereId));
+    } else if (REGION_GEO_KINDS.has(geoCls.kind)) {
+      const box = mapHost.querySelector(".mp-hsa-box");
+      if (box && regionGeo && regionGeo.kind === geoCls.kind) {
+        const svg = renderRegionSvg(regionGeo, manifest.locationById, {
+          width: 580,
+          height: 340,
+          className: "mp-hsa-svg",
+          polyClass: "mp-hsa-poly",
+          activeId: hereId,
+          fillFor: (id) => {
+            const v = valueAt(id, L.id);
+            return fin(v) ? colorFor(L, v, max) : "";
+          },
+          onHover: (id) => { hoverId = id; inspect(); },
+          onPick: (id) => { if (manifest.locationById.has(id)) store.set({ location: id }); },
+        });
+        if (svg) {
+          svg.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
+          box.replaceChildren(svg);
+        }
       }
+    }
+    for (const [id, b] of tileButtons) {
+      const v = valueAt(id, L.id);
+      const has = fin(v);
+      b.classList.toggle("has-value", has);
+      b.classList.toggle("is-here", id === hereId);
+      const fill = has ? colorFor(L, v, max) : "";
+      b.style.background = fill;
+      b.style.color = has ? inkOn(fill) : "";
+      b.lastChild.textContent = has ? fmt(L.id, v) : "";
+      b.setAttribute("aria-pressed", String(id === hereId));
     }
 
     drawLegend(L, max);
@@ -429,7 +558,7 @@ export function mount(el, ctx) {
       h("span", { class: "mp-legend-num" }, lo),
       h("span", { class: "mp-ramp", style: { background: `linear-gradient(90deg, ${stops.join(", ")})` } }),
       h("span", { class: "mp-legend-num" }, hi),
-      h("span", { class: "mp-legend-label" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, `${horizon} wk ahead`].filter(Boolean).join(" · ")),
+      h("span", { class: "mp-legend-label" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, horizonText(horizon, target())].filter(Boolean).join(" · ")),
     );
   }
 
@@ -441,10 +570,20 @@ export function mount(el, ctx) {
       ? "All countries"
       : geoCls.kind === "us-metrocast"
         ? (mcView === "state" && mcFips ? `${US_STATE_META[mcFips]?.name || mcFips} HSAs` : `Covered states (${geoCls.coveredStateFips.size})`)
-        : "All states";
+        : geoCls.kind === "ca-provinces"
+          ? "All provinces & territories"
+          : geoCls.kind === "ca-ontario"
+            ? "Ontario Health Regions"
+            : geoCls.kind === "cd-provinces"
+              ? "DRC Provinces"
+              : geoCls.kind === "cn-national"
+                ? "China"
+                : geoCls.kind === "generic"
+                  ? "All locations"
+                  : "All states";
     aside.replaceChildren(
       h("p", { class: "mp-place" }, scopeTitle),
-      h("p", { class: "mp-meta" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, `${horizon} wk ahead`].filter(Boolean).join(" · ")),
+      h("p", { class: "mp-meta" }, [tedOf() ? fmtDay(parseIso(tedOf())) : null, horizonText(horizon, target())].filter(Boolean).join(" · ")),
       h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null, "data-model-sheet": model, title: "Details" }, h("i"), manifest.label(model, candidates()))),
       h("dl", { class: "mp-rows" }, glance.map(([k, v, sub]) => h("div", { class: "mp-row" }, h("dt", null, k), h("dd", null, v, sub ? h("small", null, sub) : null)))),
     );
@@ -453,7 +592,19 @@ export function mount(el, ctx) {
   function drawSummary() {
     let top = null, rising = 0, falling = 0, steady = 0, total = 0, n = 0;
     const rateId = counts() ? "f_rate" : "f_count";
-    const unitPlural = geoCls.kind === "eu-countries" ? "countries" : geoCls.kind === "us-metrocast" && mcView === "state" ? "HSAs" : "states";
+    const unitPlural = geoCls.kind === "eu-countries"
+      ? "countries"
+      : geoCls.kind === "us-metrocast" && mcView === "state"
+        ? "HSAs"
+        : geoCls.kind === "ca-provinces" || geoCls.kind === "cd-provinces"
+          ? "provinces"
+          : geoCls.kind === "ca-ontario"
+            ? "regions"
+            : geoCls.kind === "cn-national"
+              ? "country"
+              : geoCls.kind === "generic"
+                ? "locations"
+                : "states";
     for (const id of activeLocIds) {
       const e = entry(id);
       if (!e) continue;
@@ -462,7 +613,7 @@ export function mount(el, ctx) {
       if (fin(e.median)) { total += e.median; n++; }
     }
     glance = [];
-    if (counts() && n) glance.push(["Total forecast", vf().value(total), `sum of ${n} ${unitPlural}`]);
+    if (counts() && n > 1) glance.push(["Total forecast", vf().value(total), `sum of ${n} ${unitPlural}`]);
     if (top) glance.push(["Highest", `${manifest.locationById.get(top.id)?.name ?? top.id}`, `${fmt(rateId, top.v)}${counts() ? " per 100k" : ""}`]);
     if (horizon > 0 && rising + falling + steady) {
       glance.push(["Rising", String(rising), "more than 5% above now"], ["Falling", String(falling), "more than 5% below now"], ["Steady", String(steady)]);
@@ -473,7 +624,7 @@ export function mount(el, ctx) {
   function inspect() {
     if (!data || !model) { aside.replaceChildren(); return; }
     const s = store.get();
-    const inspectId = hoverId || (activeLocIds.includes(s.location) ? s.location : null);
+    const inspectId = hoverId || (activeLocIds.includes(s.location) || tileButtons.has(s.location) ? s.location : null);
     if (!inspectId) { overview(); return; }
     const st = stateOf(inspectId), loc = manifest.locationById.get(inspectId), e = entry(inspectId), V = vf();
     const truth = st?.truth?.[tedOf()];
@@ -498,7 +649,7 @@ export function mount(el, ctx) {
       h("p", { class: "mp-meta" }, [
         loc?.population ? `${valueFormat(null).value(loc.population)} residents` : null,
         tedOf() ? fmtDay(parseIso(tedOf())) : null,
-        `${horizon} wk ahead`,
+        horizonText(horizon, target()),
       ].filter(Boolean).join(" · ")),
       h("p", { class: "mp-model" }, h("span", { class: "v-name", style: dot ? { "--c": dot } : null, "data-model-sheet": model, title: "Details" }, h("i"), manifest.label(model, candidates()))),
       h("dl", { class: "mp-rows" }, rows),

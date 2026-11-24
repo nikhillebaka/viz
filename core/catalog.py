@@ -15,7 +15,16 @@ import re
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-from viz.core.geo import EUROPE_REF, US_ABBR_TO_FIPS, US_STATES_REF
+from viz.core.geo import (
+    CANADA_REF,
+    DRC_REF,
+    EUROPE_REF,
+    ONTARIO_OH_REF,
+    US_ABBR_TO_FIPS,
+    US_STATES_REF,
+    WORLD_COUNTRIES_REF,
+)
+from viz.core.parallel import ordered_map
 
 PATHOGEN_LABELS: Dict[str, Tuple[str, str]] = {
     "flu": ("influenza", "Influenza"),
@@ -25,6 +34,9 @@ PATHOGEN_LABELS: Dict[str, Tuple[str, str]] = {
     "rsv": ("rsv", "RSV"),
     "respiratory_syndromic": ("syndromic", "ILI / ARI"),
     "syndromic": ("syndromic", "ILI / ARI"),
+    "bdbv": ("bdbv", "BDBV (Ebola)"),
+    "ebola": ("bdbv", "BDBV (Ebola)"),
+    "dengue": ("dengue", "Dengue"),
 }
 
 CONCEPT_LABELS: Dict[str, str] = {
@@ -39,6 +51,17 @@ CONCEPT_LABELS: Dict[str, str] = {
     "covid_ed_share": "COVID-19 ED visits share",
     "rsv_hosp": "RSV hospital admissions",
     "rsv_ed_share": "RSV ED visits share",
+    "flu_lab_positivity": "Influenza lab positivity",
+    "covid19_lab_positivity": "COVID-19 lab positivity",
+    "rsv_lab_positivity": "RSV lab positivity",
+    "lab_positivity": "Lab positivity",
+    "flu_ili_positivity": "Influenza ILI share",
+    "covid19_ili_positivity": "COVID-19 ILI share",
+    "ili_positivity": "ILI positivity",
+    "bdbv_cases": "BDBV confirmed cases",
+    "dengue_cases": "Dengue confirmed cases",
+    "cases": "Confirmed cases",
+    "rt": "Effective R\u209c",
 }
 
 _RE_ED = re.compile(r"\bed\b|ed_|_ed|emergency")
@@ -46,6 +69,8 @@ _RE_HOSP = re.compile(r"hosp|admit|admission|nhsn")
 _RE_SHARE = re.compile(r"\bproportion\b|\bpercentage\b|\bpct\b|\bprop\b|\bshare\b|%")
 _RE_ILI = re.compile(r"\bili\b|influenza-like|influenza like")
 _RE_ARI = re.compile(r"\bari\b|acute respiratory")
+_RE_LAB = re.compile(r"\blab\b|specimen|detection")
+_RE_EFF_R = re.compile(r"\beffective r\b|\br_t\b|\breproduction")
 
 
 def canonical_target_concept(
@@ -73,6 +98,9 @@ def canonical_target_concept(
     scale = str(tm.get("scale") or "").lower()
     text = f"{target_id} {disp} {short}".lower()
 
+    if _RE_EFF_R.search(text):
+        return ("rt", CONCEPT_LABELS["rt"], False)
+
     if pathogen == "influenza" and (tm.get("is_categorical") or ("rate" in text and "change" in text)):
         cid = "flu_hosp_rate_change"
         return (cid, CONCEPT_LABELS[cid], False)
@@ -82,13 +110,27 @@ def canonical_target_concept(
     is_hosp = bool(_RE_HOSP.search(text))
     is_ili = bool(_RE_ILI.search(text))
     is_ari = bool(_RE_ARI.search(text))
+    is_lab = bool(_RE_LAB.search(text))
     is_inc = "incidence" in text
+
+    def _scoped(suffix: str, default_key: str) -> Tuple[str, str, bool]:
+        p_norm = {"influenza": "flu", "covid-19": "covid19", "covid": "covid19"}.get(pathogen, pathogen)
+        if p_norm and p_norm not in ("unknown", "syndromic"):
+            cid = f"{p_norm}_{suffix}"
+            label = CONCEPT_LABELS.get(cid) or f"{p_norm.upper()} {CONCEPT_LABELS[default_key].lower()}"
+            return (cid, label, False)
+        return (default_key, CONCEPT_LABELS[default_key], False)
+
+    if is_lab and is_share and not is_ed:
+        return _scoped("lab_positivity", "lab_positivity")
 
     if is_ili:
         if is_ed and is_share:
             return ("ili_ed_share", CONCEPT_LABELS["ili_ed_share"], False)
         if is_ed:
             return ("ili_ed_visits", CONCEPT_LABELS["ili_ed_visits"], False)
+        if is_share:
+            return _scoped("ili_positivity", "ili_positivity")
         if is_inc or pathogen == "syndromic":
             return ("ili_incidence", CONCEPT_LABELS["ili_incidence"], False)
 
@@ -106,6 +148,9 @@ def canonical_target_concept(
         cid = by_p.get(pathogen)
         if cid:
             return (cid, CONCEPT_LABELS[cid], False)
+
+    if "confirmed cases" in text or "dengue cases" in text or (pathogen in ("bdbv", "dengue") and "case" in text and not is_hosp):
+        return _scoped("cases", "cases")
 
     tid_low = re.sub(r"[^a-z0-9]+", "_", str(target_id).strip().lower()).strip("_") or "target"
     return (f"custom::{pathogen}::{tid_low}", disp, True)
@@ -125,10 +170,16 @@ def infer_pathogen(
             return ("covid19", "COVID-19")
         if re.search(r"(?<![a-z])rsv(?![a-z])", text):
             return ("rsv", "RSV")
-        if _RE_ILI.search(text) or _RE_ARI.search(text) or "syndromic" in text:
+        if "dengue" in text:
+            return ("dengue", "Dengue")
+        if "bdbv" in text or "ebola" in text or "bundibugyo" in text or "bvbd" in text:
+            return ("bdbv", "BDBV (Ebola)")
+        if _RE_ARI.search(text) or "syndromic" in text:
             return ("syndromic", "ILI / ARI")
         if re.search(r"(?<![a-z])(flu|influenza)(?![a-z])|flusight", text):
             return ("influenza", "Influenza")
+        if _RE_ILI.search(text):
+            return ("syndromic", "ILI / ARI")
         return None
 
     # Explicit pathogen names in target IDs beat hub spec/folder slugs
@@ -151,21 +202,31 @@ def infer_pathogen(
     return (clean.lower() or "other", clean or "Forecasts")
 
 
-def classify_geo_kind(locations: Dict[str, Dict[str, Any]], geo: Any) -> str:
-    """Classify hub geography into `us-metrocast` | `us-states` | `eu-countries` | `other`."""
-    levels = {str(v.get("level") or "").lower() for v in locations.values()}
-    if levels & {"hsa", "region", "borough", "metro", "subnational"}:
-        return "us-metrocast"
+def classify_geo_kind(locations: Dict[str, Dict[str, Any]], geo: Any = None) -> str:
+    """Classify hub geography into `us-metrocast` | `us-states` | `eu-countries` | `ca-provinces` | `ca-ontario` | `cd-provinces` | `cn-national` | `other`."""
     ids = set(locations.keys())
-    if "US" in ids or any(lid in US_STATES_REF for lid in ids):
+    levels = {str(v.get("level") or "").lower() for v in locations.values()}
+    cids = [str(v.get("canonical_id") or "") for v in locations.values()]
+
+    if "CD" in ids or "health_zone" in levels or any(lid.startswith("CD-") or c.startswith("CD:") for lid, c in zip(locations.keys(), cids)):
+        return "cd-provinces"
+    if "Ontario" in ids and (ids & {"Central", "East", "North East", "North West", "Toronto", "West"}):
+        return "ca-ontario"
+    if "ca" in ids and ((ids & set(CANADA_REF.keys())) or any(c.startswith("CA:") for c in cids)):
+        return "ca-provinces"
+    if (ids & {"ab", "bc", "mb", "nb", "nl", "ns", "nt", "nu", "on", "pe", "qc", "sk", "yt"}) and any(c.startswith("CA:") for c in cids):
+        return "ca-provinces"
+    if "US" in ids or any(lid in US_STATES_REF for lid in ids) or any(c.startswith("US:") for c in cids):
+        if levels & {"hsa", "region", "borough", "metro", "subnational"}:
+            return "us-metrocast"
         return "us-states"
+    if levels & {"hsa", "borough", "metro", "subnational"}:
+        return "us-metrocast"
     eu_keys = set(EUROPE_REF.keys()) | {"UK"}
-    if ids & eu_keys:
+    if (ids & eu_keys) or any(c.startswith("EU:") for c in cids):
         return "eu-countries"
-    if any(str(v.get("canonical_id") or "").startswith("EU:") for v in locations.values()):
-        return "eu-countries"
-    if any(str(v.get("canonical_id") or "").startswith("US:") for v in locations.values()):
-        return "us-states"
+    if "CN" in ids or "CN" in cids:
+        return "cn-national"
     return "other"
 
 
@@ -173,7 +234,8 @@ def canonical_place_key(hub_id: str, loc_id: str, loc: Dict[str, Any], geo_kind:
     """
     Map a hub-specific location entry into `(canonical_place_key, state_fips, parent_key)`.
     Merges shared entities (e.g. `"25"` in FluSight/COVID/RSV & statewide `"MA"` in MetroCast;
-    `"UK"` & `"GB"` across European hubs) while keeping MetroCast HSAs as distinct sub-state places.
+    `"UK"` & `"GB"` across European hubs; `"on"` in Canada RVDSS & `"Ontario"` in Ontario Hosp)
+    while keeping sub-national locations distinct.
     """
     cid = str(loc.get("canonical_id") or "")
     lvl = str(loc.get("level") or "").lower()
@@ -193,6 +255,40 @@ def canonical_place_key(hub_id: str, loc_id: str, loc: Dict[str, Any], geo_kind:
 
     if loc_id in US_STATES_REF and loc_id != "US":
         return (loc_id, loc_id, "US")
+
+    # Canada RVDSS & Ontario Health normalization (`on` and `Ontario` share canonical key `CA-ON`)
+    if geo_kind == "ca-ontario" or (loc_id == "Ontario" and geo_kind == "ca-provinces") or cid == "CA:ON" or cid.startswith("CA:ON:"):
+        if loc_id == "Ontario" or cid == "CA:ON":
+            return ("CA-ON", None, "CA")
+        return (f"CA-ON:{loc_id}", None, "CA-ON")
+
+    if geo_kind == "ca-provinces" or loc_id in CANADA_REF or cid == "CA" or cid.startswith("CA:"):
+        if loc_id == "ca" or cid == "CA":
+            return ("CA", None, None)
+        if loc_id == "on" or cid == "CA:ON":
+            return ("CA-ON", None, "CA")
+        if loc_id in ("atlantic", "prairies", "territories") or lvl == "region":
+            return (f"CA:{loc_id}", None, "CA")
+        if len(loc_id) == 2 and loc_id.isalpha():
+            return (f"CA-{loc_id.upper()}", None, "CA")
+        if cid.startswith("CA:") and len(cid) == 5:
+            return (f"CA-{cid[3:].upper()}", None, "CA")
+        return (f"CA:{loc_id}", None, "CA")
+
+    # DRC normalization (`CD`, `CD-xx` provinces, `CD-xx-nn` health zones)
+    if geo_kind == "cd-provinces" or loc_id == "CD" or loc_id in DRC_REF or cid == "CD" or cid.startswith("CD:"):
+        if loc_id == "CD" or cid == "CD":
+            return ("CD", None, None)
+        if loc_id in DRC_REF or (lvl == "province" and loc_id.startswith("CD-")):
+            return (loc_id, None, "CD")
+        parent = str(loc.get("parent_id") or "")
+        if not parent and len(loc_id) >= 5 and loc_id.startswith("CD-"):
+            parent = loc_id[:5]
+        return (loc_id, None, parent or "CD")
+
+    # China national
+    if geo_kind == "cn-national" or loc_id == "CN" or cid == "CN":
+        return ("CN", None, None)
 
     # European country / sub-nation normalization (`UK` and `GB` share canonical key `GB`)
     if loc_id in ("UK", "GB") or cid in ("EU:GB", "CUSTOM:UK"):
@@ -237,6 +333,14 @@ def _region_label_for(geo_kind: str) -> str:
         return "US · MetroCast"
     if geo_kind == "us-states":
         return "US"
+    if geo_kind == "ca-provinces":
+        return "Canada"
+    if geo_kind == "ca-ontario":
+        return "Ontario"
+    if geo_kind == "cd-provinces":
+        return "DR Congo"
+    if geo_kind == "cn-national":
+        return "China"
     return "Other"
 
 
@@ -721,8 +825,9 @@ class WorkspaceCatalog:
             leaf_activities_by_parent: Dict[str, List[float]] = {}
 
             spatial_locs = spatial.get("locations") or {}
+            raw_max_nonrate = 0.0
             for lid, ldict in locs.items():
-                pkey, sfips, _ = canonical_place_key(hub_id, lid, ldict, geo_kind)
+                pkey, sfips, parent_k = canonical_place_key(hub_id, lid, ldict, geo_kind)
                 rec = spatial_locs.get(lid) or {}
                 pop = rec.get("population") or ldict.get("population") or 0
                 use_rate = bool(per_100k and _finite(pop) and float(pop) > 1)
@@ -759,6 +864,12 @@ class WorkspaceCatalog:
                         entry_m = mid
                         break
 
+                if not use_rate:
+                    if obs_val is not None and abs(obs_val) > raw_max_nonrate:
+                        raw_max_nonrate = abs(obs_val)
+                    if fc_val is not None and abs(fc_val) > raw_max_nonrate:
+                        raw_max_nonrate = abs(fc_val)
+
                 is_agg = lid in agg_ids
                 if not is_agg:
                     if obs_val is not None:
@@ -771,9 +882,10 @@ class WorkspaceCatalog:
                     lid,
                     {
                         "is_agg": is_agg,
+                        "parent_k": parent_k,
                         "sfips": sfips,
-                        "observed": round(obs_val, 5 if (tm.get("scale") == "proportion" and not use_rate) else 3) if obs_val is not None else None,
-                        "forecast": round(fc_val, 5 if (tm.get("scale") == "proportion" and not use_rate) else 3) if fc_val is not None else None,
+                        "observed": obs_val,
+                        "forecast": fc_val,
                         "trend_pct": round(trend_pct, 2) if trend_pct is not None else None,
                         "use_rate": use_rate,
                         "ref_date": ref_date,
@@ -781,6 +893,27 @@ class WorkspaceCatalog:
                         "model": entry_m,
                     },
                 ))
+
+            eff_scale = str(tm.get("scale") or "count")
+            eff_unit = str(tm.get("unit") or "")
+            if eff_scale == "proportion":
+                obs_peak = max(
+                    (
+                        float(v)
+                        for _, vals in ctx.next_data._observed(tid).values()
+                        for v in vals
+                        if _finite(v)
+                    ),
+                    default=0.0,
+                )
+                if max(raw_max_nonrate, obs_peak) > 1.5:
+                    eff_scale = "percentage"
+                    if not eff_unit.startswith("%"):
+                        eff_unit = "%"
+            for _, _, st in raw_entries:
+                nd = 5 if (eff_scale == "proportion" and not st["use_rate"]) else 3
+                st["observed"] = round(st["observed"], nd) if st["observed"] is not None else None
+                st["forecast"] = round(st["forecast"], nd) if st["forecast"] is not None else None
 
             if not leaf_obs_vals and not leaf_fc_vals and not any(e[2]["observed"] is not None or e[2]["forecast"] is not None for e in raw_entries):
                 continue
@@ -803,8 +936,15 @@ class WorkspaceCatalog:
                 fc_lo, fc_hi = lo, hi
 
             # Compute normalized activity for each non-aggregate leaf first so count-based
-            # national totals without populations can fall back cleanly to leaf-mean activity.
+            # national/provincial totals without populations can fall back cleanly to leaf-mean activity.
             pending_agg: List[Tuple[str, Dict[str, Any]]] = []
+            root_parent = (
+                "US" if geo_kind in ("us-states", "us-metrocast") else
+                "CA" if geo_kind == "ca-provinces" else
+                "CA-ON" if geo_kind == "ca-ontario" else
+                "CD" if geo_kind == "cd-provinces" else
+                None
+            )
             for pkey, lid, st in raw_entries:
                 if st["observed"] is None and st["forecast"] is None:
                     continue
@@ -829,8 +969,8 @@ class WorkspaceCatalog:
                     "activity": round(act, 4) if act is not None else None,
                     "forecast_activity": round(fc_act, 4) if fc_act is not None else None,
                     "use_rate": st["use_rate"],
-                    "scale": tm.get("scale") or "count",
-                    "unit": tm.get("unit") or "",
+                    "scale": eff_scale,
+                    "unit": eff_unit,
                     "ref_date": st["ref_date"],
                     "obs_date": st["obs_date"],
                 }
@@ -838,7 +978,11 @@ class WorkspaceCatalog:
                     pending_agg.append((pkey, stream))
                 else:
                     if not st["is_agg"] and act is not None:
-                        leaf_activities_by_parent.setdefault("US", []).append(act)
+                        pk = st.get("parent_k")
+                        if pk:
+                            leaf_activities_by_parent.setdefault(pk, []).append(act)
+                        if root_parent and root_parent != pk:
+                            leaf_activities_by_parent.setdefault(root_parent, []).append(act)
                     place_streams.setdefault(pkey, []).append(stream)
 
             for pkey, stream in pending_agg:
@@ -857,8 +1001,8 @@ class WorkspaceCatalog:
                 "pathogen": t_path,
                 "pathogen_label": t_path_label,
                 "geo_kind": geo_kind,
-                "scale": tm.get("scale") or "count",
-                "unit": tm.get("unit") or "",
+                "scale": eff_scale,
+                "unit": eff_unit,
                 "per_100k": any(e[2]["use_rate"] for e in raw_entries),
                 "lo": round(lo, 3),
                 "hi": round(hi, 3),
@@ -908,6 +1052,10 @@ class WorkspaceCatalog:
         has_us_states = False
         has_eu = False
         has_metrocast = False
+        has_ca_provinces = False
+        has_ca_ontario = False
+        has_cd_provinces = False
+        has_cn = False
         metro_ids: Set[str] = set()
         metro_state_fips: Set[str] = set()
         stamp_parts: List[str] = [cat["stamp"]]
@@ -922,6 +1070,8 @@ class WorkspaceCatalog:
                 "geo_kind": pinfo["geo_kind"],
                 "state_fips": pinfo.get("state_fips"),
                 "parent_key": pinfo.get("parent_key"),
+                "lat": pinfo.get("lat"),
+                "lon": pinfo.get("lon"),
                 "population": pinfo.get("population"),
                 "children": pinfo.get("children") or [],
                 "streams": [],
@@ -932,13 +1082,21 @@ class WorkspaceCatalog:
             }
 
         cat_by_hub: Dict[str, List[Dict[str, Any]]] = {}
-        for prov in providers:
-            sl = self._compute_hub_globe_slice(prov, cat["places"])
+        slices = ordered_map(lambda prov: self._compute_hub_globe_slice(prov, cat["places"]), providers) if providers else []
+        for prov, sl in zip(providers, slices):
             gk = sl["geo_kind"]
             if gk == "us-states":
                 has_us_states = True
             elif gk == "eu-countries":
                 has_eu = True
+            elif gk == "ca-provinces":
+                has_ca_provinces = True
+            elif gk == "ca-ontario":
+                has_ca_ontario = True
+            elif gk == "cd-provinces":
+                has_cd_provinces = True
+            elif gk == "cn-national":
+                has_cn = True
             elif gk == "us-metrocast":
                 has_metrocast = True
                 has_us_states = True
@@ -1005,6 +1163,10 @@ class WorkspaceCatalog:
                 "has_us_states": has_us_states,
                 "has_eu": has_eu,
                 "has_metrocast": has_metrocast,
+                "has_ca_provinces": has_ca_provinces,
+                "has_ca_ontario": has_ca_ontario,
+                "has_cd_provinces": has_cd_provinces,
+                "has_cn": has_cn,
                 "metro_ids": sorted(metro_ids),
                 "metro_state_fips": sorted(metro_state_fips),
             },
@@ -1027,6 +1189,9 @@ _ENSEMBLE_CANONICAL_SUFFIXES = frozenset({
     "ensemble_mean",
     "ensemble_median",
     "ensemble_short",
+    "ensemble_v1",
+    "team_ens",
+    "simple_ens",
 })
 _ENSEMBLE_SECONDARY_MARKERS = (
     "hjudge",
@@ -1049,7 +1214,13 @@ def _is_baseline_name(mid: str, info: Dict[str, Any]) -> bool:
     if info.get("is_baseline"):
         return True
     low = _strip_namespace(mid).lower()
-    return low == "baseline" or low.endswith("-baseline") or low.endswith("-quantilebaseline") or "_baseline" in low
+    return (
+        low == "baseline"
+        or low.endswith("-baseline")
+        or low.endswith("-quantilebaseline")
+        or low.endswith("-quantile_baseline")
+        or "_baseline" in low
+    )
 
 
 def rank_ensemble_candidates(
@@ -1100,7 +1271,16 @@ def rank_ensemble_candidates(
         team_low, sep, model_part = low.partition("-")
         suffix = model_part if sep else low
         is_secondary = any(tok in low for tok in _ENSEMBLE_SECONDARY_MARKERS)
-        is_canon = (suffix in _ENSEMBLE_CANONICAL_SUFFIXES) or ("hubensemble" in low)
+        is_canon = (
+            (suffix in _ENSEMBLE_CANONICAL_SUFFIXES)
+            or suffix.startswith("ensemble")
+            or ("hubensemble" in low)
+        )
+        is_hub_team = (
+            (team_low in hub_prefixes)
+            or team_low.endswith("hub")
+            or ("hubensemble" in low)
+        )
 
         yaml_ens = False
         if get_meta is not None and not is_secondary and (
@@ -1113,9 +1293,9 @@ def rank_ensemble_candidates(
                 yaml_ens = False
 
         designated = bool(info.get("designated"))
-        has_ens_word = "ensemble" in low
+        has_ens_word = ("ensemble" in low) or suffix.endswith("_ens")
 
-        if not is_secondary and (team_low in hub_prefixes or "hubensemble" in low) and (is_canon or yaml_ens):
+        if not is_secondary and is_hub_team and (is_canon or yaml_ens):
             tier = 0
         elif not is_secondary and yaml_ens and not designated:
             tier = 1
@@ -1127,17 +1307,21 @@ def rank_ensemble_candidates(
             tier = 4
         elif has_ens_word:
             tier = 5
-        else:
+        elif designated:
             tier = 6
+        else:
+            tier = 7
 
-        if suffix in {"ensemble", "hubensemble"}:
+        if suffix in {"ensemble", "hubensemble", "ensemble_v1"}:
             sub_p = 0
         elif any(k in suffix for k in ("short", "mean", "median")):
             sub_p = 1
         elif "long" in suffix:
             sub_p = 2
+        elif suffix in {"simple_ens", "team_ens"} or suffix.startswith("ensemble"):
+            sub_p = 3 if suffix == "simple_ens" or suffix.startswith("ensemble") else 4
         else:
-            sub_p = 3
+            sub_p = 5
 
         scored.append((tier, sub_p, -len(dates), low, mid))
 

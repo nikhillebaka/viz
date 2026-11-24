@@ -103,7 +103,7 @@ export function sortsFor(rows) {
 export function normalizeView(v, counts) {
   const rows = AXES[v.rows] ? v.rows : "location";
   const cols = AXES[rows].includes(v.cols) ? v.cols : AXES[rows][0];
-  const out = { rows, cols, model: v.model || "truth", horizon: [0, 1, 2, 3].includes(v.horizon) ? v.horizon : 1, scale: v.scale === "row" ? "row" : "none" };
+  const out = { rows, cols, model: v.model || "truth", horizon: Number.isInteger(v.horizon) ? v.horizon : 1, scale: v.scale === "row" ? "row" : "none" };
   const ms = metricsFor(out, counts);
   out.metric = ms.includes(v.metric) ? v.metric : ms[0];
   const ss = sortsFor(rows);

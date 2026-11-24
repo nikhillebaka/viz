@@ -18,6 +18,9 @@ const ARM_MS = 3500;
 
 let hubs = [];                 // /api/remote/hubs rows
 let currentSeason = "";
+let remoteSettings = { auto_update_daily: false, last_auto_update: null };
+let autoUpdating = false;
+let batchState = null;
 const checks = new Map();      // hub id → /api/remote/check answer
 const picked = new Map();      // hub id → Set of seasons for the next sync
 const notes = new Map();       // hub id → a one-line outcome ("Up to date · latest Nov 14")
@@ -39,7 +42,7 @@ const needsUpdateOf = (x) => upstreamOf(x) > 0 || hasTruthUpdate(x);
 
 /** "running" while a sync runs, "failed" after one failed (until the panel is opened), "new" when a shown
  * hub has new forecasts or truth upstream, else "". */
-export const syncStatus = () => (hubs.some(running) ? "running" : failed ? "failed" : hubs.some((x) => x.synced && x.enabled !== false && needsUpdateOf(x)) ? "new" : "");
+export const syncStatus = () => ((hubs.some(running) || batchState?.running || autoUpdating) ? "running" : failed ? "failed" : hubs.some((x) => x.synced && x.enabled !== false && needsUpdateOf(x)) ? "new" : "");
 
 /**
  * Follow the sync status (called now, then on each change).
@@ -63,6 +66,9 @@ async function loadHubs() {
   const r = await getJSON("/api/remote/hubs");
   hubs = r.hubs || [];
   currentSeason = r.current_season || "";
+  remoteSettings = r.settings || { auto_update_daily: false, last_auto_update: null };
+  autoUpdating = !!r.auto_updating;
+  batchState = r.batch || null;
   for (const x of hubs) if (!picked.has(x.id)) picked.set(x.id, defaultSeasons(x));
   emit();
 }
@@ -79,14 +85,47 @@ function defaultSeasons(x) {
  */
 export async function resumeSync(_ctx) {
   await loadHubs();
-  if (hubs.some(running)) startPoll();
+  if (hubs.some(running) || batchState?.running || autoUpdating) startPoll();
 }
 
 function startPoll() {
   if (pollTimer) return;
   const tick = async () => {
+    const wasBatch = !!batchState?.running;
+    if (wasBatch) {
+      try {
+        await loadHubs();
+      } catch { /* retry next tick */ }
+      render?.();
+      emit();
+      if (!batchState?.running) {
+        pollTimer = 0;
+        const doneN = batchState?.completed?.length || 0;
+        const errN = Object.keys(batchState?.errors || {}).length;
+        if (batchState?.cancelled) toast(`Download paused · ${plural(doneN, "hub")} synced`);
+        else if (errN) toast(`Downloaded ${plural(doneN, "hub")} · ${errN} failed`, { tone: "error" });
+        else if (doneN) toast(`Downloaded ${plural(doneN, "hub")}`);
+        if (doneN) applyWorkspaceUpdate();
+        if (autoUpdating || hubs.some(running)) startPoll();
+        return;
+      }
+      pollTimer = setTimeout(tick, POLL_MS);
+      return;
+    }
+
     const live = hubs.filter(running);
-    if (!live.length) { pollTimer = 0; emit(); return; }
+    if (!live.length) {
+      if (autoUpdating) {
+        try { await loadHubs(); } catch { /* retry next tick */ }
+        render?.();
+        emit();
+        if (autoUpdating || batchState?.running || hubs.some(running)) {
+          pollTimer = setTimeout(tick, POLL_MS);
+          return;
+        }
+      }
+      pollTimer = 0; emit(); return;
+    }
     await Promise.all(live.map(async (x) => {
       try {
         const r = await getJSON(`/api/remote/job?hub=${encodeURIComponent(x.id)}`);
@@ -570,6 +609,77 @@ export async function openHubs(anchor, ctx = {}) {
       h("span", { class: "c-section-title" },
         h("span", null, webMode ? "Public hubs" : "Live hubs"),
         h("span", { class: "c-section-count" }, [plural(visible.length, "hub"), schedLabel].filter(Boolean).join(" · "))));
+
+    const unsyncedBuiltins = !webMode ? hubs.filter((x) => x.builtin && !x.synced) : [];
+    const anyBusyNow = !webMode && (hubs.some(running) || !!batchState?.running);
+    const localTools = !webMode
+      ? h("div", { class: "mo-hub-tools" },
+        h("button", {
+          type: "button",
+          class: "mo-toggle mo-auto-toggle",
+          role: "checkbox",
+          "aria-checked": String(!!remoteSettings.auto_update_daily),
+          onclick: async () => {
+            const next = !remoteSettings.auto_update_daily;
+            try {
+              const r = await postJSON("/api/remote/auto-update", { enabled: next });
+              remoteSettings = r.settings || { ...remoteSettings, auto_update_daily: next };
+              autoUpdating = !!r.auto_updating;
+              emit();
+              if (autoUpdating) startPoll();
+              toast(next ? "Auto-update daily enabled" : "Auto-update daily disabled");
+              render?.();
+            } catch (err) {
+              toast(`Couldn't save setting · ${err.message}`, { tone: "error" });
+            }
+          },
+        }, h("span", { class: "c-check" }), "Auto-update daily"),
+        remoteSettings.auto_update_daily
+          ? h("span", { class: "mo-src-meta" }, autoUpdating ? "Checking updates…" : (remoteSettings.last_auto_update ? `last ${fmtAgo(remoteSettings.last_auto_update)}` : "every 24 h"))
+          : null,
+        batchState?.running
+          ? h("span", { class: "mo-hub-tools-right" },
+            h("span", { class: "mo-src-meta" }, `${batchState.done || 0} / ${batchState.total} · ${batchState.current_label || batchState.current_hub || "…"}`),
+            h("button", {
+              type: "button",
+              class: "mo-text-act",
+              onclick: async () => {
+                const preBatch = batchState;
+                if (pollTimer) { clearTimeout(pollTimer); pollTimer = 0; }
+                await postJSON("/api/remote/cancel-all", {}).catch(() => {});
+                await loadHubs().catch(() => {});
+                render?.();
+                if (preBatch?.running) {
+                  if (!batchState?.running) {
+                    const doneN = batchState?.completed?.length ?? preBatch?.completed?.length ?? 0;
+                    toast(`Download paused · ${plural(doneN, "hub")} synced`);
+                    if (doneN) applyWorkspaceUpdate();
+                  } else {
+                    startPoll();
+                  }
+                }
+              },
+            }, "Cancel all"))
+          : (unsyncedBuiltins.length
+            ? h("button", {
+              type: "button",
+              class: "c-link mo-web-act mo-hub-tools-right",
+              disabled: anyBusyNow,
+              onclick: async () => {
+                try {
+                  const r = await postJSON("/api/remote/sync-all", { hubs: unsyncedBuiltins.map((x) => x.id) });
+                  batchState = r.batch || null;
+                  emit();
+                  startPoll();
+                  render?.();
+                } catch (err) {
+                  toast(`Couldn't start · ${err.message}`, { tone: "error" });
+                }
+              },
+            }, `Download all (${unsyncedBuiltins.length})`)
+            : null))
+      : null;
+
     if (!pubHubs.length && remoteBusy) {
       list.replaceChildren(h("div", { class: "mo-note" }, "Loading…"));
     } else if (!visible.length) {
@@ -579,6 +689,7 @@ export async function openHubs(anchor, ctx = {}) {
     }
     remoteBox.replaceChildren(...[
       remoteHead,
+      localTools,
       list,
       webMode ? null : h("div", { class: "mo-add" }, h("label", { class: "c-search mo-field" }, input), addBtn),
       webMode ? null : addNote,
@@ -635,7 +746,7 @@ export async function openHubs(anchor, ctx = {}) {
   }
 
   render?.();
-  if (hubs.some(running)) startPoll();
+  if (hubs.some(running) || batchState?.running || autoUpdating) startPoll();
   return layer;
 }
 
@@ -705,7 +816,7 @@ function renderBrowser(snap, { onNavigate, onConnect, currentHubId }) {
 }
 
 function hubBlock(x, { isWeb = false } = {}) {
-  const busy = isWeb ? false : running(x), anyBusy = isWeb ? false : hubs.some(running);
+  const busy = isWeb ? false : running(x), anyBusy = isWeb ? false : (hubs.some(running) || !!batchState?.running);
   const compatible = x.compatible !== false;
   const isActiveRemote = activeRemoteHubId === x.id;
   if (isWeb) {
@@ -906,13 +1017,39 @@ async function remove(x) {
  * @returns {Promise<{ destroy(): void }>}
  */
 export async function mountPublicHubs(host) {
+  const bar = h("div", { class: "app-welcome-hub-tools" });
   const rows = h("div", { class: "app-welcome-hubs" });
-  host.replaceChildren(rows);
-  let list = [], timer = 0, gone = false;
+  host.replaceChildren(bar, rows);
+  let list = [], batch = null, timer = 0, gone = false;
   const failedNotes = new Map();
 
   const draw = () => {
-    const live = list.some(running);
+    const batchRunning = !!batch?.running;
+    const live = list.some(running) || batchRunning;
+    const missingCount = list.filter((x) => x.builtin && !x.synced).length;
+    if (batchRunning) {
+      bar.replaceChildren(
+        h("span", { class: "app-welcome-hub-meta" }, `Downloading ${batch.done || 0} / ${batch.total} · ${batch.current_label || batch.current_hub || "Starting…"}`),
+        h("button", {
+          type: "button",
+          class: "mo-text-act",
+          onclick: () => postJSON("/api/remote/cancel-all", {}).catch(() => {}),
+        }, "Cancel all"),
+      );
+    } else if (missingCount > 0) {
+      bar.replaceChildren(
+        h("span", { class: "app-welcome-hub-meta" }, `${plural(missingCount, "hub")} ready to download`),
+        h("button", {
+          type: "button",
+          class: "c-link mo-web-act",
+          disabled: live,
+          onclick: () => startAll(),
+        }, "Download all"),
+      );
+    } else {
+      bar.replaceChildren();
+    }
+
     rows.replaceChildren(...list.map((x) => {
       const busy = running(x), j = x.job || {};
       const meta = busy
@@ -935,6 +1072,28 @@ export async function mountPublicHubs(host) {
     if (timer || gone) return;
     const tick = async () => {
       timer = 0;
+      const wasBatch = !!batch?.running;
+      if (wasBatch) {
+        try {
+          const r = await getJSON("/api/remote/hubs");
+          list = r.hubs || list;
+          batch = r.batch || null;
+          for (const [hid, msg] of Object.entries(batch?.errors || {})) {
+            failedNotes.set(hid, `Sync failed · ${msg}`);
+          }
+          if (!batch?.running) {
+            if (!batch?.cancelled && !Object.keys(batch?.errors || {}).length) {
+              const firstSynced = list.find((y) => y.synced);
+              if (firstSynced) { await openRemoteHub(firstSynced.id); return; }
+            }
+          }
+        } catch { /* retried on next tick */ }
+        if (gone) return;
+        draw();
+        if (batch?.running || list.some(running)) timer = setTimeout(tick, POLL_MS);
+        return;
+      }
+
       const busy = list.filter(running);
       await Promise.all(busy.map(async (x) => {
         try {
@@ -954,6 +1113,19 @@ export async function mountPublicHubs(host) {
     timer = setTimeout(tick, POLL_MS);
   };
 
+  async function startAll() {
+    failedNotes.clear();
+    const missing = list.filter((x) => x.builtin && !x.synced).map((x) => x.id);
+    try {
+      const r = await postJSON("/api/remote/sync-all", { hubs: missing });
+      batch = r.batch || null;
+      poll();
+      draw();
+    } catch (err) {
+      bar.replaceChildren(h("span", { class: "app-welcome-hub-meta is-error" }, `Couldn't start · ${err.message}`));
+    }
+  }
+
   async function start(x) {
     failedNotes.delete(x.id);
     try {
@@ -965,13 +1137,15 @@ export async function mountPublicHubs(host) {
   }
 
   try {
-    list = (await getJSON("/api/remote/hubs")).hubs || [];
+    const res = await getJSON("/api/remote/hubs");
+    list = res.hubs || [];
+    batch = res.batch || null;
   } catch (err) {
     rows.replaceChildren(h("div", { class: "mo-note" }, `Couldn't load hubs · ${err.message}`));
     return { destroy() { gone = true; } };
   }
   draw();
-  if (list.some(running)) poll();
+  if (batch?.running || list.some(running)) poll();
   return { destroy() { gone = true; clearTimeout(timer); } };
 }
 

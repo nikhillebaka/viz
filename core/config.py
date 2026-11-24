@@ -354,15 +354,32 @@ class VizConfig:
         return ["wk inc flu hosp"]
 
     def get_weekly_targets(self, discovered_targets: Optional[List[str]] = None) -> List[str]:
-        """Targets shown in the target selector: everything except season peak targets (see viz.core.peaks)."""
-        return [t for t in self.get_targets(discovered_targets) if not t.strip().lower().startswith("peak ")]
+        """Targets shown in the target selector: step-ahead forecast targets (excluding season peaks and scalars)."""
+        specs = self._parse_target_specs()
+        out = []
+        for t in self.get_targets(discovered_targets):
+            if t.strip().lower().startswith("peak "):
+                continue
+            if (specs.get(t) or {}).get("is_step_ahead") is False:
+                continue
+            out.append(t)
+        return out
 
     def get_default_target(self, discovered_targets: Optional[List[str]] = None) -> str:
         """Get the default active target variable."""
         if "default_target" in self._user_config:
             return str(self._user_config["default_target"]).strip()
         targets = self.get_weekly_targets(discovered_targets=discovered_targets)
-        for preferred in ["wk inc flu hosp", "wk inc covid hosp", "wk inc rsv hosp", "Flu ED visits pct", "ILI incidence"]:
+        for preferred in [
+            "wk inc flu hosp",
+            "wk inc covid hosp",
+            "wk inc rsv hosp",
+            "Flu ED visits pct",
+            "ILI incidence",
+            "wk inc confirmed cases",
+            "pct wk flu lab det",
+            "wk inc flu prop ili",
+        ]:
             if preferred in targets:
                 return preferred
         specs = self._parse_target_specs()
@@ -375,7 +392,7 @@ class VizConfig:
 
     def is_target_non_negative(self, target: str) -> bool:
         """
-        Determine if the target represents a non-negative quantity (counts, incidence, proportions).
+        Determine if the target represents a non-negative quantity (counts, incidence, proportions, R_t).
         Config-driven via tasks.json bounds with standard epidemiological naming fallbacks.
         """
         for section in ("target_metadata", "target_constraints"):
@@ -394,13 +411,34 @@ class VizConfig:
             if spec.get("value_min") is not None:
                 return float(spec["value_min"]) >= 0.0
 
-        return any(k in t_lower for k in ["hosp", "inc", "count", "prop", "visit", "death", "case", "admiss", "pct", "rate"])
+        return any(k in t_lower for k in ["hosp", "inc", "count", "prop", "visit", "death", "case", "admiss", "pct", "rate", "r_t", "reproduction"])
 
     @staticmethod
     def _clean_short_target(target: str, scale: str, tmeta_name: Optional[str]) -> str:
         t_low = target.lower()
+        name_low = (tmeta_name or "").lower()
         if "flu hosp rate change" in t_low:
             return "Rate change"
+        if "r_t" in t_low or "reproduction" in t_low or "reproduction" in name_low:
+            return "Effective R\u209c"
+        if "lab det" in t_low:
+            if "flu" in t_low:
+                return "Flu lab %"
+            if "covid" in t_low:
+                return "COVID lab %"
+            if "rsv" in t_low:
+                return "RSV lab %"
+            return "Lab pos %"
+        if "prop ili" in t_low:
+            if "flu" in t_low:
+                return "Flu ILI %"
+            if "covid" in t_low:
+                return "COVID ILI %"
+            return "ILI pos %"
+        if "dengue" in t_low:
+            return "Dengue cases"
+        if "confirmed cases" in t_low:
+            return "Confirmed cases"
         if "ed visits" in t_low or "ed visit" in t_low:
             if "ili" in t_low:
                 return "ILI ED %" if scale in ("proportion", "percentage") else "ILI ED"
@@ -416,20 +454,21 @@ class VizConfig:
         if "ari incidence" in t_low:
             return "ARI / 100k"
         if "hosp" in t_low or "admit" in t_low:
+            is_bed_occ = "bed occupancy" in name_low
             if "covid" in t_low:
-                return "COVID admissions"
+                return "COVID hosp beds" if is_bed_occ else "COVID admissions"
             if "rsv" in t_low:
-                return "RSV admissions"
+                return "RSV hosp beds" if is_bed_occ else "RSV admissions"
             if "flu" in t_low:
-                return "Flu admissions"
-            return "Hospital admissions"
+                return "Flu hosp beds" if is_bed_occ else "Flu admissions"
+            return "Hospital beds" if is_bed_occ else "Hospital admissions"
         return target if len(target) <= 22 else (tmeta_name or target)[:22]
 
     def get_target_metadata(self, target: str) -> Dict[str, Any]:
         """
         Get rich, dynamic metadata for a given target variable: display_name, short_name, unit,
         scale ('count'|'proportion'|'percentage'|'rate'|'ordinal_pmf'|'nominal_pmf'|'peak_week_pmf'),
-        per_100k_capable, output_types, categories, dimensions, horizons.
+        per_100k_capable, output_types, categories, dimensions, horizons, time_unit.
         """
         target_overrides = self._user_config.get("target_metadata", {}).get(target, {})
         spec = self._parse_target_specs().get(target) or {}
@@ -437,6 +476,7 @@ class VizConfig:
         t_lower = target.lower()
         t_units_raw = str(spec.get("target_units") or "").strip()
         t_units_low = t_units_raw.lower()
+        t_name_low = str(spec.get("target_name") or "").lower()
         t_type = str(spec.get("target_type") or "").strip().lower()
         output_types = list(spec.get("output_types") or [])
         categories = list(spec.get("categories") or [])
@@ -461,6 +501,12 @@ class VizConfig:
             is_categorical = True
             default_display = str(spec.get("target_name") or "").strip() or ("Flu Hosp Rate Change" if "rate change" in t_lower else target)
             default_unit = "Category (PMF)"
+        elif "r_t" in t_lower or "reproduction" in t_lower or "reproduction" in t_name_low:
+            scale = "rate"
+            is_rate = True
+            is_categorical = False
+            default_display = str(spec.get("target_name") or "").strip() or "Effective Reproduction Number"
+            default_unit = "R\u209c"
         elif t_units_low == "percentage" or "pct" in t_lower or (val_max == 100 and (val_min is None or val_min >= 0)):
             scale = "percentage"
             is_rate = True
@@ -471,8 +517,8 @@ class VizConfig:
             scale = "proportion"
             is_rate = True
             is_categorical = False
-            default_display = str(spec.get("target_name") or "").strip() or "ED Visits Proportion"
-            default_unit = "% ED Visits"
+            default_display = str(spec.get("target_name") or "").strip() or ("ILI Positivity" if "ili" in t_lower else "ED Visits Proportion")
+            default_unit = "% ILI" if "ili" in t_lower else ("% ED Visits" if "ed" in t_lower else "%")
         elif "100,000" in t_units_low or "100k" in t_units_low or "incidence" in t_lower or ("rate" in t_lower and "rate change" not in t_lower):
             scale = "rate"
             is_rate = True
@@ -505,6 +551,7 @@ class VizConfig:
         final_is_rate = bool(target_overrides.get("is_rate", is_rate or final_scale in ("proportion", "percentage", "rate")))
         final_short = str(target_overrides.get("short_name") or self._clean_short_target(target, final_scale, spec.get("target_name")))
         dims = self.get_extra_task_ids(target)
+        raw_time_unit = str(target_overrides.get("time_unit") or spec.get("time_unit") or ("month" if t_lower.startswith("mo ") else "week")).strip().lower()
 
         return {
             "target": target,
@@ -519,6 +566,7 @@ class VizConfig:
             "output_types": output_types,
             "categories": categories,
             "dimensions": dims,
+            "time_unit": raw_time_unit or "week",
             "horizons": {
                 "required": list(spec.get("required_horizons") or []),
                 "optional": list(spec.get("optional_horizons") or []),

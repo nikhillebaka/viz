@@ -654,6 +654,7 @@ export class FanChart {
       this.readout.show(hoverInfo(fan, scene, hoverT), scene, {
         value: o.format.value, levels: s.levels, rulers: s.rulers, showAll: s.sel.showAll, more: this.more,
         focus: scene.focus, minX: this.inset.v + tokenNum("--inset", 16),
+        target: this.ctx.manifest.targetById.get(fan.target),
         layers: this.layers?.rows(hoverT, scene, o.format.value),
       });
     } else this.readout.hide();

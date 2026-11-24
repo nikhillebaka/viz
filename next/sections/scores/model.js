@@ -314,12 +314,12 @@ export function datesLabel(scope, seasonLabel, seasonCount) {
   return parts.join(" · ");
 }
 
-/** The Horizons fragment: "0–3 wk", "1–4 wk", "0, 2 wk". */
-export function horizonsLabel(horizons, availableHorizons = HORIZONS) {
+/** The Horizons fragment: "0–3 wk", "1–4 wk", "0, 2 wk", or "0–3 mo". */
+export function horizonsLabel(horizons, availableHorizons = HORIZONS, unit = "wk") {
   const hs = horizons || availableHorizons;
   const run = hs.every((h, i) => i === 0 || h === hs[i - 1] + 1);
-  if (hs.length === 1) return `${hs[0]} wk`;
-  return run ? `${hs[0]}–${hs.at(-1)} wk` : `${hs.join(", ")} wk`;
+  if (hs.length === 1) return `${hs[0]} ${unit}`;
+  return run ? `${hs[0]}–${hs.at(-1)} ${unit}` : `${hs.join(", ")} ${unit}`;
 }
 
 /* ------------------------------------------------------------------ exports */
