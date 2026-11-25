@@ -51,7 +51,14 @@ ADMISSIONS_TARGET = "wk inc flu hosp"
 MAX_WORKERS = 16
 # Version of per-file normalization:
 # v1 = quantiles only; v2 = added season peak rows; v3 = added sample trajectories, PMF bins, & CalendarSpec/GeoGraph
-FILE_SCHEMA = 3
+FILE_SCHEMA = 4  # bump whenever ingest/normalization output changes so synced files re-normalize
+
+
+def _add_hub_warning(man: Dict[str, Any], msg: str) -> None:
+    """Append a de-duplicated hub-level warning, keeping the most recent 50."""
+    warnings = man.get("hub_warnings") or []
+    if msg not in warnings:
+        man["hub_warnings"] = (warnings + [msg])[-50:]
 
 
 def _outdated(entry: Dict[str, Any]) -> bool:
@@ -179,7 +186,7 @@ def _set_mtime(path: Path, ts_iso: str):
 
 def _atomic_write_parquet(df: pl.DataFrame, dest: Path):
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.parquet")
+    tmp = dest.with_name(f".{dest.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     try:
         df.write_parquet(tmp, compression="zstd")
         os.replace(tmp, dest)
@@ -190,13 +197,17 @@ def _atomic_write_parquet(df: pl.DataFrame, dest: Path):
 
 def _atomic_write_bytes(data: bytes, dest: Path):
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+    tmp = dest.with_name(f".{dest.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     try:
         tmp.write_bytes(data)
         os.replace(tmp, dest)
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+
+
+def _atomic_write_json(data: Any, dest: Path):
+    _atomic_write_bytes(json.dumps(data).encode("utf-8"), dest)
 
 
 def _designated(yml_text: str) -> bool:
@@ -285,6 +296,8 @@ class RemoteManager:
         self._batch: Optional[Dict[str, Any]] = None
         self._batch_cancel = threading.Event()
         self._lock = threading.Lock()
+        self._manifest_locks: Dict[str, threading.Lock] = {}
+        self._status_cache: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
         self._listing_cache: Dict[str, Tuple[float, List[Tuple[RemoteObject, str]]]] = {}
 
     # ---- status (no network) ----------------------------------------------------------------------------
@@ -302,6 +315,13 @@ class RemoteManager:
             out["job"] = job.to_dict()
         if man is None:
             return out
+        # The manifest snapshot object only changes when it is re-read or saved, so the O(files)
+        # summary is memoized on its identity; anonymous status polling stays cheap.
+        cached = self._status_cache.get(spec.id)
+        if cached is not None and cached[0] is man:
+            out.update(cached[1])
+            return out
+        summary: Dict[str, Any] = {}
         files = man["files"]
         shown = [
             f for f in files.values()
@@ -310,7 +330,7 @@ class RemoteManager:
         models = {f["model"] for f in shown}
         dates = sorted({f["reference_date"] for f in shown})
         latest = dates[-1] if dates else None
-        out.update({
+        summary.update({
             "hub_name": man.get("hub_name"),
             "last_sync": man.get("last_sync"),
             "last_check": man.get("last_check"),
@@ -329,6 +349,8 @@ class RemoteManager:
             "peak_outdated": sum(1 for f in files.values() if _outdated(f)),
             "pending": man.get("pending"),
         })
+        self._status_cache[spec.id] = (man, summary)
+        out.update(summary)
         return out
 
     def list_hubs(self) -> List[Dict[str, Any]]:
@@ -483,12 +505,20 @@ class RemoteManager:
         spec: HubSpec,
         primary_client: HubTransport,
         cancel_event: Optional[threading.Event] = None,
-    ) -> Tuple[List[Tuple[RemoteObject, str, Optional[HubTransport]]], List[str]]:
+    ) -> Tuple[List[Tuple[RemoteObject, str, Optional[HubTransport]]], List[str], bool]:
         """
-        Return list of `(RemoteObject, source_label, client_or_none_for_primary)` across primary +
+        Return `(entries, archive_warnings, listing_complete)` where each entry is
+        `(RemoteObject, source_label, client_or_none_for_primary)` across primary +
         any configured `archive_sources`, letting primary overwrite overlapping `(model, ref)` rounds.
+        `listing_complete` is False if any source truncated or failed to list.
         """
         primary_objs = self._list_forecasts(primary_client)
+        listing_complete = not bool(getattr(primary_client, "last_listing_truncated", False))
+        archive_warnings: List[str] = []
+        if not listing_complete:
+            archive_warnings.append(
+                f"Primary listing for '{spec.id}' was truncated upstream; keeping existing local rounds."
+            )
         seen_round_models: Set[Tuple[str, str]] = set()
         combined: List[Tuple[RemoteObject, str, Optional[HubTransport]]] = []
         primary_tag = spec.github_repo or spec.bucket or spec.id
@@ -505,12 +535,16 @@ class RemoteManager:
             seen_round_models.add(rk)
             combined.append((o, primary_tag, None))
 
-        archive_warnings: List[str] = []
         for src in spec.archive_sources or []:
             try:
                 arch_client = self._client_for_source(src, cancel_event=cancel_event)
                 arch_tag = _source_label(src)
                 arch_objs = sorted(self._list_forecasts(arch_client), key=lambda o: (o.key.endswith(".csv"), o.key))
+                if getattr(arch_client, "last_listing_truncated", False):
+                    listing_complete = False
+                    archive_warnings.append(
+                        f"Archive source '{arch_tag}' listing was truncated; keeping existing local rounds."
+                    )
                 for o in arch_objs:
                     m = FORECAST_KEY_RE.match(o.key)
                     if not m:
@@ -523,15 +557,16 @@ class RemoteManager:
             except SyncCancelled:
                 raise
             except (TransportError, OSError, ValueError) as exc:
+                listing_complete = False
                 archive_warnings.append(f"Archive source '{_source_label(src)}' unavailable: {exc}")
 
-        return combined, archive_warnings
+        return combined, archive_warnings, listing_complete
 
     def check(self, hub_id: str) -> Dict[str, Any]:
         """List the hub and summarize what is available and what changed since the last sync."""
         spec = self._require(hub_id)
         client = self._client_for_spec(spec)
-        combined, _ = self._list_primary_and_archives(spec, client)
+        combined, _, listing_complete = self._list_primary_and_archives(spec, client)
         objs = [o for o, _, _ in combined]
         self._listing_cache[hub_id] = (time.time(), [(o, src) for o, src, _ in combined])
         cal = self._hub_calendar(hub_id, client=client)
@@ -540,19 +575,28 @@ class RemoteManager:
         skipped_files = man.get("skipped_files") or {}
 
         seasons: Dict[str, Dict[str, Any]] = {}
-        new = changed = outdated = 0
-        listed_keys: Set[str] = set()
+        parsed_objs: List[Tuple[RemoteObject, str, str, str]] = []
         for o in objs:
             m = FORECAST_KEY_RE.match(o.key)
             model, ref = m.group(1), m.group(2)
             s = season_for_date(ref, calendar=cal)
+            parsed_objs.append((o, model, ref, s))
             entry = seasons.setdefault(s, {"season": s, "files": 0, "bytes": 0, "models": set(), "rounds": {}})
             entry["files"] += 1
             entry["bytes"] += o.size
             entry["models"].add(model)
             entry["rounds"][ref] = entry["rounds"].get(ref, 0) + 1
+
+        max_synced = max(synced_seasons) if synced_seasons else None
+        newer_seasons = sorted(s for s in seasons if max_synced is not None and s > max_synced)
+        check_seasons = synced_seasons | set(newer_seasons)
+
+        new = changed = outdated = 0
+        listed_synced_keys: Set[str] = set()
+        for o, _, _, s in parsed_objs:
             if s in synced_seasons:
-                listed_keys.add(o.key)
+                listed_synced_keys.add(o.key)
+            if s in check_seasons:
                 if _is_known_skip(skipped_files, o):
                     continue
                 have = man["files"].get(o.key)
@@ -563,9 +607,13 @@ class RemoteManager:
                 elif _outdated(have):
                     changed += 1
                     outdated += 1
-        removed = sum(
-            1 for k, f in man["files"].items()
-            if season_for_date(f["reference_date"], calendar=cal) in synced_seasons and k not in listed_keys
+        removed = (
+            sum(
+                1 for k, f in man["files"].items()
+                if season_for_date(f["reference_date"], calendar=cal) in synced_seasons and k not in listed_synced_keys
+            )
+            if listing_complete and (bool(listed_synced_keys) or not man["files"])
+            else 0
         )
 
         truth_changed = False
@@ -612,15 +660,21 @@ class RemoteManager:
             "changed": changed,
             "removed": removed,
             "outdated": outdated,
+            "new_seasons": newer_seasons,
+            "listing_incomplete": not listing_complete,
             "truth_changed": truth_changed,
             "truth_last_modified": truth_last_modified,
             "checked_at": _utcnow(),
             "latest_round": latest,
         }
         if self.store.has_data(hub_id):
-            man["last_check"] = pending["checked_at"]
-            man["pending"] = pending
-            self.store.save_manifest(hub_id, man)
+            # Re-load under the per-hub manifest lock and merge only the check fields, so a sync that
+            # finished while we were listing is never overwritten by this (older) snapshot.
+            with self._manifest_lock(hub_id):
+                fresh = self.store.load_manifest(hub_id, mutable=True)
+                fresh["last_check"] = pending["checked_at"]
+                fresh["pending"] = pending
+                self.store.save_manifest(hub_id, fresh)
         return {
             "hub": hub_id,
             "current_season": current_season(calendar=cal),
@@ -648,7 +702,11 @@ class RemoteManager:
             if not seasons:
                 man = self.store.load_manifest(hub_id)
                 cal = self._hub_calendar(hub_id)
-                seasons = man.get("seasons") or [current_season(calendar=cal)]
+                base_seasons = list(man.get("seasons") or [current_season(calendar=cal)])
+                rollover = list((man.get("pending") or {}).get("new_seasons") or [])
+                if rollover:
+                    base_seasons.append(max(rollover))
+                seasons = base_seasons
             seasons = sorted({s for s in seasons if re.match(r"^\d{4}(-\d{4})?$", str(s))})
             if not seasons:
                 raise ValueError("No valid seasons requested (expected e.g. '2026-2027' or '2025')")
@@ -734,7 +792,11 @@ class RemoteManager:
                 seasons: List[str] = []
                 try:
                     if self.store.has_data(spec.id):
-                        seasons = list(self.store.load_manifest(spec.id).get("seasons") or [])
+                        man = self.store.load_manifest(spec.id)
+                        seasons = list(man.get("seasons") or [])
+                        rollover = list((man.get("pending") or {}).get("new_seasons") or [])
+                        if rollover:
+                            seasons.append(max(rollover))
                     if not seasons:
                         chk = self.check(spec.id)
                         avail = sorted(str(s["season"]) for s in (chk.get("seasons") or []) if s.get("season"))
@@ -764,7 +826,11 @@ class RemoteManager:
                         if job.status == "done":
                             self._batch["completed"].append(spec.id)
                         elif job.status == "cancelled":
-                            self._batch["cancelled"] = True
+                            if self._batch_cancel.is_set():
+                                self._batch["cancelled"] = True
+                            else:
+                                # Only this hub was cancelled; the batch carries on with the rest.
+                                self._batch["errors"][spec.id] = "Cancelled"
                         else:
                             self._batch["errors"][spec.id] = job.error or "Sync failed"
                 if self._batch_cancel.is_set():
@@ -790,8 +856,15 @@ class RemoteManager:
         self.store.set_enabled(hub_id, enabled)
         self._on_inventory_change(hub_id, [])
 
+    def _manifest_lock(self, hub_id: str) -> threading.Lock:
+        with self._lock:
+            lk = self._manifest_locks.get(hub_id)
+            if lk is None:
+                lk = self._manifest_locks[hub_id] = threading.Lock()
+            return lk
+
     def _run_sync(self, spec: HubSpec, job: SyncJob):
-        man = self.store.load_manifest(spec.id)
+        man = self.store.load_manifest(spec.id, mutable=True)
         changed_models: Set[str] = set()
         outcome, phase, error = "done", "Done", None
         try:
@@ -805,17 +878,20 @@ class RemoteManager:
             outcome, phase, error = "error", "Failed", f"Unexpected error: {exc}"
             logger.exception("Unexpected error syncing hub %s", spec.id)
 
-        if man.get("files") or man.get("truth"):
+        if outcome == "done" and (man.get("files") or man.get("truth")):
             try:
-                self.store.save_manifest(spec.id, man)
+                with self._manifest_lock(spec.id):
+                    self.store.save_manifest(spec.id, man)
             except OSError as exc:
                 logger.error("Could not save manifest for %s: %s", spec.id, exc)
-        if self.store.has_data(spec.id):
-            job.phase = "Indexing"
-            try:
-                self._on_inventory_change(spec.id, sorted(changed_models))
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Post-sync indexing failed for %s: %s", spec.id, exc)
+                outcome, phase, error = "error", "Failed", f"Could not save manifest: {exc}"
+            else:
+                if self.store.has_data(spec.id):
+                    job.phase = "Indexing"
+                    try:
+                        self._on_inventory_change(spec.id, sorted(changed_models))
+                    except Exception as exc:  # pragma: no cover
+                        logger.warning("Post-sync indexing failed for %s: %s", spec.id, exc)
         job.error = error
         job.phase = phase
         job.finished_at = _utcnow()
@@ -829,10 +905,10 @@ class RemoteManager:
         if not info.get("supported"):
             raise ValueError(info.get("reason") or "This hub is not supported")
         hub_dir = self.store.hub_dir(spec.id)
-        (hub_dir / "hub-config").mkdir(parents=True, exist_ok=True)
+        cfg_dir = hub_dir / "hub-config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
         for name in ("admin", "tasks"):
-            with open(hub_dir / "hub-config" / f"{name}.json", "w", encoding="utf-8") as f:
-                json.dump(info[name], f)
+            _atomic_write_json(info[name], cfg_dir / f"{name}.json")
         cal = infer_calendar(info.get("tasks"), targets=info.get("targets"))
         tz_name = info.get("timezone") or "UTC"
         man.update({
@@ -843,7 +919,6 @@ class RemoteManager:
             "hub_name": info.get("name"),
             "timezone": tz_name,
             "calendar": cal.to_dict(),
-            "seasons": sorted(set(man.get("seasons", [])) | set(job.seasons)),
         })
 
         # 1b. Sync optional auxiliary-data/locations.csv so location validation fits this hub
@@ -869,7 +944,9 @@ class RemoteManager:
 
         # 2. List forecasts (primary + archives) and diff against the manifest
         job.phase = "Listing forecasts"
-        combined, archive_warnings = self._list_primary_and_archives(spec, client, cancel_event=job.cancel_event)
+        combined, archive_warnings, listing_complete = self._list_primary_and_archives(
+            spec, client, cancel_event=job.cancel_event
+        )
         self._listing_cache.pop(spec.id, None)
         if archive_warnings:
             man.setdefault("hub_warnings", [])
@@ -893,7 +970,6 @@ class RemoteManager:
             if avail_seasons:
                 latest_season = avail_seasons[-1]
                 job.seasons = [latest_season]
-                man["seasons"] = sorted(set(man.get("seasons", [])) | {latest_season})
                 for o, src_tag, src_client in combined:
                     m = FORECAST_KEY_RE.match(o.key)
                     if m and season_for_date(m.group(2), calendar=cal) == latest_season:
@@ -919,10 +995,25 @@ class RemoteManager:
                 or not _all_paths_exist(man["files"][k])
             )
         ]
-        removed = [
-            k for k, f in man["files"].items()
-            if season_for_date(f["reference_date"], calendar=cal) in job.seasons and k not in wanted
-        ]
+        had_season_files = any(
+            season_for_date(f["reference_date"], calendar=cal) in job.seasons
+            for f in man["files"].values()
+        )
+        safe_to_prune = listing_complete and (bool(wanted) or not had_season_files)
+        removed = (
+            [
+                k for k, f in man["files"].items()
+                if season_for_date(f["reference_date"], calendar=cal) in job.seasons and k not in wanted
+            ]
+            if safe_to_prune
+            else []
+        )
+        if not safe_to_prune and had_season_files:
+            msg = f"Skipped removing local rounds for {spec.id} because remote listing was incomplete."
+            man.setdefault("hub_warnings", [])
+            if msg not in man["hub_warnings"]:
+                man["hub_warnings"] = (man["hub_warnings"] + [msg])[-50:]
+
         job.files_total = len(to_fetch)
         job.bytes_total = sum(o.size for o, _, _ in to_fetch)
 
@@ -932,12 +1023,22 @@ class RemoteManager:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = {
                 pool.submit(
-                    self._fetch_forecast, src_client, spec, o, src_tag, known_locations, cal, hub_geo
+                    self._fetch_forecast,
+                    src_client,
+                    spec,
+                    o,
+                    src_tag,
+                    known_locations,
+                    cal,
+                    hub_geo,
+                    cancel_event=job.cancel_event,
                 ): o
                 for o, src_tag, src_client in to_fetch
             }
             try:
                 for fut in as_completed(futures):
+                    if job.cancel_event.is_set():
+                        raise SyncCancelled("Sync cancelled by user")
                     o = futures[fut]
                     try:
                         entry = fut.result()
@@ -995,11 +1096,56 @@ class RemoteManager:
                     man["files"][o.key] = entry
                     changed_models.add(entry["model"])
                     job.advance(o.size)
-            except SyncCancelled:
+            except BaseException:
+                # Cancel or unexpected failure: stop queued downloads and signal in-flight ones, so the
+                # executor does not keep writing files for a sync whose manifest will not be saved.
+                job.cancel_event.set()
                 for f in futures:
                     f.cancel()
                 raise
 
+        if job.cancel_event.is_set():
+            raise SyncCancelled("Sync cancelled by user")
+
+        # 4. Model metadata for every model we hold (best effort: never fails the forecast sync)
+        job.phase = "Model metadata"
+        try:
+            self._sync_metadata(client, spec, man, cancel_event=job.cancel_event)
+        except SyncCancelled:
+            raise
+        except Exception as exc:
+            logger.warning("Model metadata sync failed for %s: %s", spec.id, exc)
+            _add_hub_warning(man, f"Model metadata could not be refreshed: {exc}")
+
+        # 5. Truth data across all supported target-data layouts. A truth failure keeps the previous
+        # truth and still saves the forecast changes; `pending.truth_changed` stays set so the next
+        # cycle retries truth only.
+        job.phase = "Truth data"
+        truth_error: Optional[str] = None
+        try:
+            truth_updated = self._sync_truth(
+                client,
+                spec,
+                man,
+                job,
+                cal=cal,
+                pad_single_digit_fips=hub_geo.uses_us_fips,
+                aux_objs=aux_objs,
+                target_ids=info.get("targets"),
+            )
+        except SyncCancelled:
+            raise
+        except (TransportError, NormalizationError, OSError, ValueError, pl.exceptions.PolarsError) as exc:
+            truth_updated = False
+            truth_error = str(exc)
+            logger.warning("Truth sync failed for %s (keeping previous truth): %s", spec.id, exc)
+            _add_hub_warning(man, f"Truth data could not be refreshed: {exc}")
+
+        if job.cancel_event.is_set():
+            raise SyncCancelled("Sync cancelled by user")
+
+        # 6. Remove rounds that disappeared upstream, only after every fallible step succeeded, so a
+        # failed sync never leaves the saved manifest pointing at deleted files.
         for k in removed:
             f = man["files"].pop(k)
             changed_models.add(f["model"])
@@ -1007,36 +1153,24 @@ class RemoteManager:
                 rel = f.get(p_field)
                 if rel and (hub_dir / rel).exists():
                     (hub_dir / rel).unlink(missing_ok=True)
-        for k in [
-            k for k, sf in skipped_files.items()
-            if sf.get("reference_date") and season_for_date(sf["reference_date"], calendar=cal) in job.seasons and k not in wanted
-        ]:
-            skipped_files.pop(k, None)
+        if safe_to_prune:
+            for k in [
+                k for k, sf in skipped_files.items()
+                if sf.get("reference_date") and season_for_date(sf["reference_date"], calendar=cal) in job.seasons and k not in wanted
+            ]:
+                skipped_files.pop(k, None)
 
-        # 4. Model metadata for every model we hold
-        job.phase = "Model metadata"
-        self._sync_metadata(client, spec, man)
-
-        # 5. Truth data across all supported target-data layouts
-        job.phase = "Truth data"
-        truth_updated = self._sync_truth(
-            client,
-            spec,
-            man,
-            job,
-            cal=cal,
-            pad_single_digit_fips=hub_geo.uses_us_fips,
-            aux_objs=aux_objs,
-            target_ids=info.get("targets"),
-        )
-
+        man["seasons"] = sorted(set(man.get("seasons", [])) | set(job.seasons))
         man["last_sync"] = _utcnow()
         man["pending"] = {
             "new": 0,
             "changed": 0,
             "removed": 0,
             "outdated": 0,
-            "truth_changed": False,
+            "new_seasons": [],
+            "listing_incomplete": False,
+            "truth_changed": truth_error is not None,
+            "truth_error": truth_error,
             "checked_at": man["last_sync"],
             "latest_round": max((f["reference_date"] for f in man["files"].values()), default=None),
         }
@@ -1047,6 +1181,7 @@ class RemoteManager:
             "failed": failed,
             "models_changed": len(changed_models),
             "truth_updated": bool(truth_updated),
+            "truth_error": truth_error,
         }
 
     def _fetch_forecast(
@@ -1058,12 +1193,18 @@ class RemoteManager:
         known_locations: Set[str],
         calendar: CalendarSpec,
         geo: GeoGraph,
+        *,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise SyncCancelled("Sync cancelled by user")
         m = FORECAST_KEY_RE.match(o.key)
         model, ref, model2, ext = m.group(1), m.group(2), m.group(3), m.group(4)
         data = client.get(o.key)
+        if cancel_event is not None and cancel_event.is_set():
+            raise SyncCancelled("Sync cancelled by user")
         if o.size and len(data) != o.size:
-            raise NormalizationError(f"truncated download ({len(data)} of {o.size} bytes)")
+            raise TransportError(f"truncated download ({len(data)} of {o.size} bytes)")
         df = read_table(data, f".{ext}")
         if df.is_empty():
             raise NormalizationError("file has no rows")
@@ -1077,6 +1218,8 @@ class RemoteManager:
             calendar=calendar,
             geo=geo,
         )
+        if cancel_event is not None and cancel_event.is_set():
+            raise SyncCancelled("Sync cancelled by user")
         warnings = list(info["warnings"])
         if model2 != model:
             warnings.append(f"{ref}-{model}: file name model '{model2}' does not match folder")
@@ -1086,6 +1229,8 @@ class RemoteManager:
 
         def _store_part(part: Optional[pl.DataFrame], subdir: str) -> str:
             nonlocal stored
+            if cancel_event is not None and cancel_event.is_set():
+                raise SyncCancelled("Sync cancelled by user")
             rel = Path(subdir) / model / f"{ref}-{model}.parquet"
             dest = hub_dir / rel
             if part is not None and not part.is_empty():
@@ -1139,7 +1284,14 @@ class RemoteManager:
             "warnings": warnings,
         }
 
-    def _sync_metadata(self, client: HubTransport, spec: HubSpec, man: Dict[str, Any]):
+    def _sync_metadata(
+        self,
+        client: HubTransport,
+        spec: HubSpec,
+        man: Dict[str, Any],
+        *,
+        cancel_event: Optional[threading.Event] = None,
+    ):
         models = {f["model"] for f in man["files"].values()}
         try:
             objs = client.list("model-metadata/")
@@ -1159,22 +1311,34 @@ class RemoteManager:
         ]
 
         def fetch(o: RemoteObject):
+            if cancel_event is not None and cancel_event.is_set():
+                raise SyncCancelled("Sync cancelled by user")
             stem = o.key.rsplit("/", 1)[-1].rpartition(".")[0]
-            text = client.get(o.key).decode("utf-8", errors="replace")
+            raw = client.get(o.key)
+            if cancel_event is not None and cancel_event.is_set():
+                raise SyncCancelled("Sync cancelled by user")
+            text = raw.decode("utf-8", errors="replace")
             path = self.store.metadata_path(spec.id, stem)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            _atomic_write_bytes(text.encode("utf-8"), path)
             return stem, {"etag": o.etag, "designated": _designated(text)}
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            for fut in as_completed([pool.submit(fetch, o) for o in todo]):
-                try:
-                    stem, meta = fut.result()
-                    man["metadata"][stem] = meta
-                except SyncCancelled:
-                    raise
-                except (TransportError, OSError) as exc:
-                    logger.info("Model metadata download failed: %s", exc)
+            futs = [pool.submit(fetch, o) for o in todo]
+            try:
+                for fut in as_completed(futs):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SyncCancelled("Sync cancelled by user")
+                    try:
+                        stem, meta = fut.result()
+                        man["metadata"][stem] = meta
+                    except SyncCancelled:
+                        raise
+                    except (TransportError, OSError) as exc:
+                        logger.info("Model metadata download failed: %s", exc)
+            except SyncCancelled:
+                for f in futs:
+                    f.cancel()
+                raise
 
     def _sync_truth(
         self,

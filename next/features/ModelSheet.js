@@ -6,8 +6,8 @@
  * leaderboard shows, the detail blocks (anatomy by horizon, coverage, places, submissions; built by
  * sections/scores/detail.js), then what the model is (methods, team, licence, data details, ensemble
  * members). Scores come from the Scores section when it has them (ctx.scores), else one request of its own. */
-import { h, on } from "../lib/dom.js";
-import { apiUrl, registerCacheClear } from "../lib/api.js";
+import { h, on, safeHref } from "../lib/dom.js";
+import { apiUrl, hubFetch, registerCacheClear } from "../lib/api.js";
 import { openPopover, activeLayer, tooltip } from "../ui/floating.js";
 import { icon, slideText, toast } from "../ui/controls.js";
 import { seriesColor } from "../chart/layout.js";
@@ -21,7 +21,7 @@ registerCacheClear(() => sheetMetricsCache.clear());
 const fetchSheetMetrics = (q) => {
   const url = apiUrl(`/api/next/metrics?${q}`);
   if (!sheetMetricsCache.has(url)) {
-    const p = fetch(url).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+    const p = hubFetch(url).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
     p.catch(() => { if (sheetMetricsCache.get(url) === p) sheetMetricsCache.delete(url); });
     sheetMetricsCache.set(url, p);
   }
@@ -237,11 +237,17 @@ function build(body, ctx) {
     const md = d.metadata || {}, m = manifest.modelById.get(id) || {};
     const block = (title, ...kids) => h("div", { class: "ms-block" }, h("div", { class: "sc-block-title" }, title), ...kids.filter(Boolean));
     const dl = (pairs) => h("dl", { class: "ms-dl" }, pairs.filter(([, v]) => v != null && v !== "" && v !== false).flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)]));
-    const people = (md.model_contributors || md.contributors || []).map((c) => (typeof c === "string" ? c : [c.name, c.affiliation].filter(Boolean).join(" · ")));
+    const rawContributors = md.model_contributors ?? md.contributors;
+    const people = (Array.isArray(rawContributors) ? rawContributors : [])
+      .filter((c) => c != null && c !== "")
+      .map((c) => (typeof c === "string"
+        ? c.trim()
+        : (typeof c === "object" ? [c.name, c.affiliation].filter(Boolean).join(" · ") : String(c))))
+      .filter(Boolean);
     const methods = md.methods_long || md.methods;
     const specs = d.specs || {};
     const hubInfo = m.source === "hub" ? manifest.hubs?.find((x) => x.id === m.hub) : null;
-    const links = [md.website_url, md.repo_url].filter((u) => /^https?:\/\//.test(u || ""));
+    const links = [md.website_url, md.repo_url].map((u) => safeHref(u)).filter(Boolean);
     const ens = md.ensemble_of_models || md.ensemble_of_hub_models;
     const out = [
       methods ? block("Methods", h("p", { class: "ms-prose" }, methods)) : null,
@@ -257,7 +263,7 @@ function build(body, ctx) {
         ["Seasons", (d.active_seasons || m.seasons || []).map((x) => manifest.seasonById.get(x)?.label || x).join(", ")],
         ["Forecasting", d.first_date && d.last_date ? `${fmtDay(parseIso(d.first_date))} – ${fmtDay(parseIso(d.last_date))}` : null],
         ["Targets", (specs.targets || m.targets || []).map((t) => manifest.targetById.get(t)?.short || t).join(", ")],
-      ]), links.length ? h("p", { class: "ms-links" }, links.map((u) => h("a", { class: "c-link", href: u, target: "_blank", rel: "noopener" }, u.replace(/^https?:\/\//, "").replace(/\/$/, "")))) : null),
+      ]), links.length ? h("p", { class: "ms-links" }, links.map((u) => h("a", { class: "c-link", href: u, target: "_blank", rel: "noopener noreferrer" }, u.replace(/^https?:\/\//, "").replace(/\/$/, "")))) : null),
       people.length ? block(`People · ${people.length}`, h("ul", { class: "ms-people" }, people.map((p) => h("li", null, p)))) : null,
       block("Data", dl([
         ["Forecasts", d.forecasts_count != null ? `${d.forecasts_count.toLocaleString()} rounds` : null],

@@ -4,7 +4,8 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
+    read_only: true
     environment:
       VIZ_MODE: web
       VIZ_DATA_DIR: /data
@@ -12,15 +13,23 @@ services:
       VIZ_AUTO_SYNC: "${VIZ_AUTO_SYNC:-1}"
       VIZ_SYNC_INTERVAL_HOURS: "${VIZ_SYNC_INTERVAL_HOURS:-6}"
       VIZ_TRUST_PROXY_AUTH: "${VIZ_TRUST_PROXY_AUTH:-0}"
+      VIZ_PROXY_SECRET: "${VIZ_PROXY_SECRET:-}"
+      VIZ_TRUSTED_PROXY_HOPS: "${VIZ_TRUSTED_PROXY_HOPS:-0}"
+      VIZ_ALLOW_DEV_USER: "${VIZ_ALLOW_DEV_USER:-0}"
       VIZ_DEV_USER: "${VIZ_DEV_USER:-}"
       VIZ_SSO_LOGIN_URL: "${VIZ_SSO_LOGIN_URL:-}"
       VIZ_SSO_LOGOUT_URL: "${VIZ_SSO_LOGOUT_URL:-}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     volumes:
       - viz_data:/data
       - type: tmpfs
         target: /tmp/viz-ephem
         tmpfs:
-          size: 2147483648
+          size: 4294967296
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 268435456
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

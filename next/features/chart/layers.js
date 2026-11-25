@@ -15,7 +15,7 @@
  * list what exists here); responses are cached. Everything that doesn't depend on the view is prepared
  * once per response; a frame only maps prepared points through the scene's scales into reused buffers. */
 import { h, on, tokenNum } from "../../lib/dom.js";
-import { apiUrl, registerCacheClear } from "../../lib/api.js";
+import { apiUrl, hubFetch, registerCacheClear } from "../../lib/api.js";
 import { WEEK, DAY, parseIso, niceStep } from "../../lib/scale.js";
 import { glass } from "../../ui/glass.js";
 import { openMenu, activeLayer } from "../../ui/floating.js";
@@ -81,7 +81,7 @@ function getJson(path, params) {
   const url = apiUrl(`${path}?${new URLSearchParams(params)}`);
   let p = cache.get(url);
   if (!p) {
-    p = fetch(url).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); });
+    p = hubFetch(url).then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); });
     p.catch(() => cache.delete(url));
     cache.set(url, p);
     if (cache.size > 96) cache.delete(cache.keys().next().value);

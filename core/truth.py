@@ -121,42 +121,86 @@ def _truth_pathogen(text: str) -> Optional[str]:
     return None
 
 
+def _wide_measure_family(tokens: Set[str], text_low: str) -> Optional[str]:
+    if tokens & {"ed", "emergency"}:
+        return "ed"
+    if tokens & {"ili"} or "influenza like" in text_low:
+        return "ili"
+    if tokens & {"ari"} or "acute respiratory" in text_low:
+        return "ari"
+    if tokens & {"pct", "positive", "positivity", "prop", "percent", "share"} or "%" in text_low:
+        return "pct_pos"
+    if tokens & {"hosp", "hospitalization", "hospitalizations", "admit", "admissions", "admits", "nhsn", "bed", "beds", "occupancy"}:
+        return "hosp"
+    if tokens & {"death", "deaths"}:
+        return "death"
+    if tokens & {"case", "cases"} or "case" in text_low:
+        return "case"
+    return None
+
+
+_PROPORTION_TOKENS = frozenset({"pct", "prop", "percent", "share", "frac", "proportion", "percentage", "fraction"})
+
+
+def _indicates_proportion(tokens: Set[str], text_low: str) -> bool:
+    return bool(tokens & _PROPORTION_TOKENS) or "%" in text_low
+
+
+def _score_wide_column_to_target(col_name: str, t: str) -> int:
+    col_low = col_name.lower()
+    col_toks = set(re.sub(r"[^a-z0-9]+", " ", col_low).split())
+    col_path = _truth_pathogen(col_low)
+    col_fam = _wide_measure_family(col_toks, col_low)
+
+    t_low = t.lower()
+    t_toks = set(re.sub(r"[^a-z0-9]+", " ", t_low).split())
+    t_path = _truth_pathogen(t_low)
+    t_fam = _wide_measure_family(t_toks, t_low)
+
+    if col_path and t_path and col_path != t_path:
+        return -1000
+    # Reject explicit measure-family mismatches (e.g. flu_pct_positive must never match wk inc flu hosp)
+    if col_fam and t_fam and col_fam != t_fam:
+        return -1000
+    # A proportion/percentage target only takes a column that says so (influenza_ed_visits is a count)
+    if _indicates_proportion(t_toks, t_low) and not _indicates_proportion(col_toks, col_low):
+        return -1000
+
+    score = 0
+    if col_path and col_path == t_path:
+        score += 10
+    if col_fam and col_fam == t_fam:
+        score += 4
+    if (col_toks & {"bed", "beds", "occupancy"}) and (t_toks & {"bed", "beds", "occupancy"}):
+        score += 3
+    if (col_toks & {"hosp", "hospitalization", "admit", "admissions"}) and (t_toks & {"hosp", "admit", "admissions"}):
+        score += 3
+    if "ed" in col_toks and "ed" in t_toks:
+        score += 3
+    if "case" in col_low and "case" in t_low:
+        score += 3
+    if t_low == col_low:
+        score += 20
+    if t_low.startswith("peak "):
+        score -= 5
+    return score
+
+
 def _match_wide_column_to_target(col_name: str, target_ids: Sequence[str]) -> Optional[str]:
     weekly = [str(t).strip() for t in target_ids if str(t).strip() and not str(t).strip().lower().startswith("peak ")]
     candidates = weekly or [str(t).strip() for t in target_ids if str(t).strip()]
     if not candidates:
         return None
-    col_low = col_name.lower()
-    col_toks = set(re.sub(r"[^a-z0-9]+", " ", col_low).split())
-    col_path = _truth_pathogen(col_low)
     best_tgt: Optional[str] = None
     best_score = -1000
     for t in candidates:
-        t_low = t.lower()
-        t_toks = set(re.sub(r"[^a-z0-9]+", " ", t_low).split())
-        t_path = _truth_pathogen(t_low)
-        if col_path and t_path and col_path != t_path:
-            continue
-        score = 0
-        if col_path and col_path == t_path:
-            score += 10
-        if (col_toks & {"pct", "positive", "prop", "percent"}) and (t_toks & {"pct", "prop", "positive", "percent"}):
-            score += 3
-        if (col_toks & {"hosp", "hospitalization", "bed"}) and (t_toks & {"hosp", "admit", "admissions"}):
-            score += 3
-        if "ed" in col_toks and "ed" in t_toks:
-            score += 3
-        if "case" in col_low and "case" in t_low:
-            score += 3
-        if t_low == col_low:
-            score += 20
-        if t_low.startswith("peak "):
-            score -= 5
+        score = _score_wide_column_to_target(col_name, t)
         if score > best_score:
             best_score = score
             best_tgt = t
     if best_score >= 10:
         return best_tgt
+    col_low = col_name.lower()
     if len(candidates) == 1 and col_low in ("value", "observation", "admissions", "cases", "count"):
         return candidates[0]
     return None
@@ -184,15 +228,27 @@ def unpivot_wide_truth(df: pl.DataFrame, target_ids: Sequence[str] = ()) -> Opti
     skip = set(DATE_COL_ALIASES) | set(LOC_COL_ALIASES) | TRUTH_EXTRA_IGNORE | {
         "as_of", "horizon", "output_type", "output_type_id", "target", "oracle_value", "observation", "value",
     }
-    col_map: Dict[str, str] = {}
-    used_targets: Set[str] = set()
+    weekly = [str(t).strip() for t in target_ids if str(t).strip() and not str(t).strip().lower().startswith("peak ")]
+    candidates = weekly or [str(t).strip() for t in target_ids if str(t).strip()]
+    scored_pairs: List[Tuple[int, str, str]] = []
     for col in df.columns:
         if col in skip:
             continue
-        tgt = _match_wide_column_to_target(col, target_ids)
-        if tgt and tgt not in used_targets:
-            col_map[col] = tgt
-            used_targets.add(tgt)
+        for tgt in candidates:
+            sc = _score_wide_column_to_target(col, tgt)
+            if sc >= 10:
+                scored_pairs.append((sc, col, tgt))
+            elif len(candidates) == 1 and col.lower() in ("value", "observation", "admissions", "cases", "count"):
+                scored_pairs.append((10, col, tgt))
+
+    scored_pairs.sort(key=lambda item: item[0], reverse=True)
+    col_map: Dict[str, str] = {}
+    used_targets: Set[str] = set()
+    for _, col, tgt in scored_pairs:
+        if col in col_map or tgt in used_targets:
+            continue
+        col_map[col] = tgt
+        used_targets.add(tgt)
     if not col_map:
         return None
 

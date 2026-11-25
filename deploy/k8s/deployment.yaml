@@ -17,6 +17,10 @@ spec:
         app.kubernetes.io/name: hub-viz
     spec:
       automountServiceAccountToken: false
+      # GHCR packages are private by default: either make the package public or create a pull secret
+      # (kubectl create secret docker-registry ghcr-pull --docker-server=ghcr.io ...) and uncomment:
+      # imagePullSecrets:
+      #   - name: ghcr-pull
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -26,8 +30,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: viz
+          # For production releases, prefer pinning an immutable image digest (@sha256:...).
           image: ghcr.io/nikhillebaka/viz:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8501
@@ -53,13 +58,34 @@ spec:
               value: "400"
             - name: VIZ_USER_QUOTA_MB
               value: "250"
+            - name: VIZ_USERS_MAX_TOTAL_MB
+              value: "10240"
+            # Each loaded private hub can hold hundreds of MB in memory; keep this small for a 6Gi pod.
+            - name: VIZ_MAX_PRIVATE_HUBS_LOADED
+              value: "6"
+            # Max concurrent API requests per client IP (0 disables); protects the shared worker pool.
+            - name: VIZ_MAX_CONCURRENT_PER_CLIENT
+              value: "12"
             - name: VIZ_USER_COLD_AFTER_HOURS
               value: "24"
-            # Enable behind oauth2-proxy / OIDC ingress sidecar:
+            - name: VIZ_TRUSTED_PROXY_HOPS
+              value: "1"
+            # Optional sign-in (see ingress.yaml + oauth2-proxy.example.yaml): set to "1" and uncomment
+            # VIZ_PROXY_SECRET, VIZ_SSO_LOGIN_URL and VIZ_SSO_LOGOUT_URL below.
             - name: VIZ_TRUST_PROXY_AUTH
               value: "0"
+            # - name: VIZ_PROXY_SECRET
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: hub-viz-proxy-auth
+            #       key: proxy-secret
+            # - name: GITHUB_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: hub-viz-github
+            #       key: token
             # - name: VIZ_SSO_LOGIN_URL
-            #   value: "/oauth2/start?rd=/"
+            #   value: "/auth/login"
             # - name: VIZ_SSO_LOGOUT_URL
             #   value: "/oauth2/sign_out"
           resources:
@@ -101,7 +127,8 @@ spec:
             claimName: viz-data
         - name: ephem-scratch
           emptyDir:
-            sizeLimit: 2Gi
+            # Kept above VIZ_EPHEM_MAX_TOTAL_MB (2048 MiB) to accommodate in-flight uploads and hub caches.
+            sizeLimit: 4Gi
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi

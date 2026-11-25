@@ -151,8 +151,8 @@ class PreScoreStore:
         pq_path = self.scores_dir / f"{slug}.parquet"
         meta_path = self.scores_dir / f"{slug}.meta.json"
         tid = f"{os.getpid()}.{threading.get_ident()}"
-        tmp_pq = pq_path.with_suffix(f".tmp.{tid}.parquet")
-        tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
+        tmp_pq = pq_path.with_name(f".{pq_path.name}.tmp.{tid}")
+        tmp_meta = meta_path.with_name(f".{meta_path.name}.tmp.{tid}")
         try:
             df.write_parquet(tmp_pq, compression="zstd")
             os.replace(tmp_pq, pq_path)

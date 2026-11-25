@@ -14,6 +14,7 @@ import {
   extractMesh,
   extractPolygons,
 } from "./topo.js";
+import { WORLD_TOPO_URL, loadWorldTopo } from "./world_topo.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -264,6 +265,7 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
     polyClass = "lp-hsa-poly",
     fillFor = null,
     textColorFor = null,
+    isInteractive = null,
     onPick = null,
     onHover = null,
     width = 360,
@@ -327,7 +329,8 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("class", compactSubarea ? `${className} is-clipped` : className);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("role", "img");
+  // a group, not an image: it holds focusable, named regions
+  svg.setAttribute("role", "group");
   svg.setAttribute("aria-label", `${US_STATE_META[stateFips]?.name || stateFips} MetroCast HSAs`);
 
   if (bgRings.length) {
@@ -343,7 +346,8 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
     const loc = manifestById.get(m.id);
     // When rendering from a hub manifest, keep every HSA clickable even if a fixture ID is used, or match by manifest id
     const targetId = loc?.id || m.id;
-    const label = loc?.name || m.name;
+    const label = loc?.name || m.name || targetId;
+    const interactive = isInteractive ? Boolean(isInteractive(targetId, loc || m)) : true;
     const path = document.createElementNS(SVG_NS, "path");
     const isOn = targetId === activeId || m.id === activeId;
     path.setAttribute("class", isOn ? `${polyClass} is-on` : polyClass);
@@ -351,7 +355,11 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
     path.setAttribute("fill-rule", "evenodd");
     path.setAttribute("d", ringsToPath(m.lonLatRings));
     path.setAttribute("aria-label", label);
-    path.setAttribute("tabindex", "0");
+    if (interactive) {
+      path.setAttribute("tabindex", "0");
+      // a focusable region needs a role for its aria-label to be its accessible name
+      path.setAttribute("role", onPick ? "button" : "img");
+    }
 
     if (fillFor) {
       const f = fillFor(targetId, loc || m);
@@ -365,9 +373,9 @@ export function renderHsaStateSvg(usGeo, stateFips, manifestHsas, opts = {}) {
     path.append(tip);
     if (onHover) {
       path.addEventListener("pointerenter", () => onHover(targetId, label));
-      path.addEventListener("focus", () => onHover(targetId, label));
+      if (interactive) path.addEventListener("focus", () => onHover(targetId, label));
     }
-    if (onPick) {
+    if (interactive && onPick) {
       path.addEventListener("click", () => onPick(targetId, loc || m));
       path.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(targetId, loc || m); }
@@ -397,11 +405,17 @@ export function loadRegionGeo(kind) {
   let p = regionGeoCache.get(kind);
   if (!p) {
     const url = new URL(spec.file, import.meta.url).href;
-    p = fetch(url)
-      .then((r) => { if (!r.ok) throw new Error(`${kind}: ${r.status}`); return r.json(); })
-      .then((topo) => {
-        const decodedArcs = decodeArcs(topo);
-        const unitArcs = arcsToUnitSphere(decodedArcs);
+    // the world file is shared with GlobeView (one fetch and decode per page)
+    const source = url === WORLD_TOPO_URL
+      ? loadWorldTopo()
+      : fetch(url)
+        .then((r) => { if (!r.ok) throw new Error(`${kind}: ${r.status}`); return r.json(); })
+        .then((topo) => {
+          const decodedArcs = decodeArcs(topo);
+          return { topo, decodedArcs, unitArcs: arcsToUnitSphere(decodedArcs) };
+        });
+    p = source
+      .then(({ topo, decodedArcs, unitArcs }) => {
         const raw2d = extractLonLatFeatures(topo, spec.object, decodedArcs);
         let features3d = extractPolygons(topo, spec.object, unitArcs);
         if (spec.onlyIsoNum) {
@@ -451,6 +465,7 @@ export function renderRegionSvg(regionGeo, manifestLocations, opts = {}) {
     ariaLabel = regionGeo?.label || "Region map",
     fillFor = null,
     textColorFor = null,
+    isInteractive = null,
     onPick = null,
     onHover = null,
     width = 360,
@@ -497,13 +512,15 @@ export function renderRegionSvg(regionGeo, manifestLocations, opts = {}) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("class", className);
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("role", "img");
+  // a group, not an image: it holds focusable, named regions
+  svg.setAttribute("role", "group");
   svg.setAttribute("aria-label", ariaLabel);
 
   for (const f of features) {
     const loc = manifestById.get(f.id);
     const targetId = loc?.id || f.id;
     const label = loc?.name || f.name || targetId;
+    const interactive = isInteractive ? Boolean(isInteractive(targetId, loc || f)) : true;
     const isSelected = targetId === activeId
       || (activeId && loc && String(activeId).startsWith(`${targetId}-`));
     const path = document.createElementNS(SVG_NS, "path");
@@ -512,7 +529,11 @@ export function renderRegionSvg(regionGeo, manifestLocations, opts = {}) {
     path.setAttribute("fill-rule", "evenodd");
     path.setAttribute("d", ringsToPath(f.lonLatRings));
     path.setAttribute("aria-label", label);
-    path.setAttribute("tabindex", "0");
+    if (interactive) {
+      path.setAttribute("tabindex", "0");
+      // a focusable region needs a role for its aria-label to be its accessible name
+      path.setAttribute("role", onPick ? "button" : "img");
+    }
 
     if (fillFor) {
       const fill = fillFor(targetId, loc || f);
@@ -526,9 +547,9 @@ export function renderRegionSvg(regionGeo, manifestLocations, opts = {}) {
     path.append(tip);
     if (onHover) {
       path.addEventListener("pointerenter", () => onHover(targetId, label));
-      path.addEventListener("focus", () => onHover(targetId, label));
+      if (interactive) path.addEventListener("focus", () => onHover(targetId, label));
     }
-    if (onPick) {
+    if (interactive && onPick) {
       path.addEventListener("click", () => onPick(targetId, loc || f));
       path.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(targetId, loc || f); }

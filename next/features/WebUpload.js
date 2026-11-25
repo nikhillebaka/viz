@@ -3,9 +3,10 @@
  *
  * Pure helpers (`isAllowedHubversePath`, `normalizeSelectedFiles`, `validateFolderSelection`,
  * `buildVzb1Bytes`) have zero DOM/network dependencies so Node unit tests verify them directly. */
-import { h } from "../lib/dom.js";
+import { h, safeHref } from "../lib/dom.js";
 
 export const VZB1_MAGIC = "VZB1";
+export const MAX_METADATA_FILE_BYTES = 64 * 1024;
 const SAFE_SEG_RE = /^[A-Za-z0-9._-]+$/;
 const RESERVED_MODEL_NAMES = new Set(["synthetic", "remote"]);
 const MAX_PATH_LEN = 240;
@@ -14,6 +15,7 @@ const DEFAULT_LIMITS = {
   max_compressed_bytes: 100 * 1024 * 1024,
   max_uncompressed_bytes: 400 * 1024 * 1024,
   max_files: 2500,
+  max_metadata_file_bytes: MAX_METADATA_FILE_BYTES,
   ephem_ttl_seconds: 1800,
   user_quota_bytes: 250 * 1024 * 1024,
 };
@@ -69,7 +71,6 @@ export function isAllowedHubversePath(rawPath) {
     if (!seg || seg === "." || seg === ".." || seg.startsWith(".") || !SAFE_SEG_RE.test(seg)) return null;
   }
   const norm = parts.join("/");
-  if (norm === "viz.config.json") return norm;
 
   const top = parts[0];
   const ext = extOf(parts.at(-1));
@@ -166,7 +167,10 @@ export function normalizeSelectedFiles(rawEntries) {
       : "This folder does not match Hubverse structure (expected hub-config/tasks.json, model-output/, or target-data/).";
   } else if (dataFilesCount === 0) {
     valid = false;
-    error = "No forecast or target-data tables (.parquet or .csv) found inside model-output/ or target-data/.";
+    error = "No forecast tables (.parquet or .csv) found inside model-output/.";
+  } else if (!hasModelOutput) {
+    valid = false;
+    error = "Upload requires at least one forecast table in model-output/ (target-data alone is not supported).";
   }
 
   return {
@@ -185,13 +189,33 @@ export function normalizeSelectedFiles(rawEntries) {
 }
 
 /**
- * Validate folder scan summary against server-enforced upload limits.
- * @param {ReturnType<typeof normalizeSelectedFiles>} summary
- * @param {Partial<typeof DEFAULT_LIMITS>} [limits]
- * @returns {{ ok: boolean, error?: string }}
+ * Bytes the VZB1 framing adds around the files' own bytes: magic + terminator, and per file a path
+ * length, the UTF-8 path and a body length. The server's uncompressed cap counts the whole stream.
+ * @param {{ relPath?: string }[]} included
+ * @returns {number}
  */
-export function validateFolderSelection(summary, limits = DEFAULT_LIMITS) {
+export function vzb1FramingBytes(included) {
+  const enc = new TextEncoder();
+  let n = VZB1_MAGIC.length + 4;
+  for (const item of included || []) n += 4 + enc.encode(String(item?.relPath || "")).length + 8;
+  return n;
+}
+
+/**
+ * Validate folder scan summary against server-enforced upload limits.
+ * `usage` (from /api/web/status `workspaces`) adds the account checks the server would refuse with:
+ * saved-hub count (`user_max_hubs`) and remaining quota (`user_quota_bytes - user_used_bytes`) for the
+ * persistent tier. For the temporary tier the server replaces the oldest hub past
+ * `ephem_max_hubs_per_session`, so that is a warning, not an error. Missing fields skip their check.
+ * @param {ReturnType<typeof normalizeSelectedFiles>} summary
+ * @param {Partial<typeof DEFAULT_LIMITS> & { user_max_hubs?: number, ephem_max_hubs_per_session?: number }} [limits]
+ * @param {{ tier?: "ephem" | "persistent", ownedCount?: number, usedBytes?: number, quotaBytes?: number }} [usage]
+ * @returns {{ ok: boolean, error?: string, warning?: string }}
+ */
+export function validateFolderSelection(summary, limits = DEFAULT_LIMITS, usage = {}) {
   const lim = { ...DEFAULT_LIMITS, ...(limits || {}) };
+  const use = usage || {};
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   if (!summary?.valid) {
     return { ok: false, error: summary?.error || "Not a compatible Hubverse hub folder." };
   }
@@ -201,11 +225,46 @@ export function validateFolderSelection(summary, limits = DEFAULT_LIMITS) {
       error: `Too many files (${summary.included.length.toLocaleString()} Hubverse files; limit is ${lim.max_files.toLocaleString()}).`,
     };
   }
-  if (summary.totalBytes > lim.max_uncompressed_bytes) {
+  const streamBytes = (Number(summary.totalBytes) || 0) + vzb1FramingBytes(summary.included);
+  if (streamBytes > lim.max_uncompressed_bytes) {
     return {
       ok: false,
-      error: `Folder data size (${fmtBytesShort(summary.totalBytes)}) exceeds the ${fmtBytesShort(lim.max_uncompressed_bytes)} limit.`,
+      error: `Folder data size (${fmtBytesShort(streamBytes)}) exceeds the ${fmtBytesShort(lim.max_uncompressed_bytes)} limit.`,
     };
+  }
+  const maxMetaBytes = lim.max_metadata_file_bytes ?? MAX_METADATA_FILE_BYTES;
+  for (const item of summary.included) {
+    if (typeof item?.relPath === "string" && item.relPath.startsWith("model-metadata/") && Number(item.size || 0) > maxMetaBytes) {
+      return {
+        ok: false,
+        error: `Metadata file ${item.relPath} (${fmtBytesShort(item.size)}) exceeds the ${fmtBytesShort(maxMetaBytes)} limit.`,
+      };
+    }
+  }
+  const owned = num(use.ownedCount);
+  if (use.tier === "persistent") {
+    const maxHubs = num(lim.user_max_hubs);
+    if (maxHubs != null && owned != null && owned >= maxHubs) {
+      return { ok: false, error: `Account limit reached (${maxHubs} saved hub${maxHubs === 1 ? "" : "s"}). Delete a saved hub first.` };
+    }
+    const quota = num(use.quotaBytes), used = num(use.usedBytes);
+    if (quota != null && quota > 0 && used != null) {
+      const left = Math.max(0, quota - used);
+      if ((Number(summary.totalBytes) || 0) > left) {
+        return {
+          ok: false,
+          error: `Folder data size (${fmtBytesShort(summary.totalBytes)}) exceeds your remaining account storage (${fmtBytesShort(left)} of ${fmtBytesShort(quota)}). Delete a saved hub to free space.`,
+        };
+      }
+    }
+  } else if (use.tier === "ephem") {
+    const maxEphem = num(lim.ephem_max_hubs_per_session);
+    if (maxEphem != null && owned != null && owned >= maxEphem) {
+      return {
+        ok: true,
+        warning: `You already have ${owned} temporary hub${owned === 1 ? "" : "s"} (limit ${maxEphem}); the oldest will be replaced.`,
+      };
+    }
   }
   return { ok: true };
 }
@@ -245,50 +304,177 @@ export function buildVzb1Bytes(records) {
   return out;
 }
 
-async function packSummaryForUpload(summary, { onProgress } = {}) {
-  const records = [];
-  const n = summary.included.length;
+const STREAM_SLICE_BYTES = 256 * 1024;
+const ALLOWED_DROP_TOP_DIRS = new Set([
+  "hub-config",
+  "model-metadata",
+  "model-output",
+  "local-output",
+  "target-data",
+  "auxiliary-data",
+]);
+const SKIP_DROP_DIRS = new Set([".git", ".venv", "__pycache__", "node_modules", ".cache", ".pytest_cache"]);
+
+function makeAbortError(msg = "Upload cancelled.") {
+  const err = new Error(msg);
+  err.name = "AbortError";
+  return err;
+}
+
+async function writeVzb1Records(included, writeChunk, onProgress, checkAborted) {
+  const enc = new TextEncoder();
+  await writeChunk(enc.encode(VZB1_MAGIC));
+  const n = included.length;
   for (let i = 0; i < n; i++) {
-    const item = summary.included[i];
-    const buf = await item.file.arrayBuffer();
-    records.push({ relPath: item.relPath, bytes: new Uint8Array(buf) });
+    checkAborted();
+    const item = included[i];
+    const pathBytes = enc.encode(item.relPath);
+    const body = new Uint8Array(await item.file.arrayBuffer());
+    const hdr = new Uint8Array(4 + pathBytes.length + 8);
+    const dv = new DataView(hdr.buffer);
+    dv.setUint32(0, pathBytes.length, true);
+    hdr.set(pathBytes, 4);
+    dv.setBigUint64(4 + pathBytes.length, BigInt(body.byteLength), true);
+    await writeChunk(hdr);
+    for (let off = 0; off < body.byteLength; off += STREAM_SLICE_BYTES) {
+      await writeChunk(body.subarray(off, off + STREAM_SLICE_BYTES));
+    }
     if (onProgress && (i === n - 1 || i % 10 === 0)) onProgress((i + 1) / Math.max(1, n));
   }
-  const raw = buildVzb1Bytes(records);
+  await writeChunk(new Uint8Array(4));
+}
+
+const tooLargeError = (size, max) => new Error(
+  `Compressed upload (over ${fmtBytesShort(size)}) exceeds the ${fmtBytesShort(max)} upload limit. Remove some model-output files or upload a smaller hub.`,
+);
+
+/**
+ * VZB1-frame and gzip the selected files. With `maxBytes`, stops as soon as the output passes it.
+ * @param {ReturnType<typeof normalizeSelectedFiles>} summary
+ * @param {{ onProgress?: (p: number) => void, signal?: AbortSignal, maxBytes?: number }} [opts]
+ * @returns {Promise<{ payload: Blob, size: number, gzip: boolean }>}
+ */
+export async function packSummaryForUpload(summary, { onProgress, signal, maxBytes = Infinity } = {}) {
+  let overLimit = null;
+  const checkAborted = () => {
+    if (overLimit) throw overLimit;
+    if (signal?.aborted) throw makeAbortError();
+  };
+  checkAborted();
   if (typeof CompressionStream === "function") {
     const cs = new CompressionStream("gzip");
-    const readerP = new Response(cs.readable).arrayBuffer();
+    const compressedChunks = [];
+    let compressedBytes = 0;
+    const reader = cs.readable.getReader();
+    const drainPromise = (async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value?.byteLength) {
+          compressedChunks.push(value);
+          compressedBytes += value.byteLength;
+          if (compressedBytes > maxBytes) {
+            overLimit = tooLargeError(compressedBytes, maxBytes);
+            compressedChunks.length = 0;
+            await reader.cancel(overLimit).catch(() => {}); // errors the writable side, so a pending write rejects
+            return;
+          }
+        }
+      }
+    })();
+    drainPromise.catch(() => {});
     const writer = cs.writable.getWriter();
-    await writer.write(raw);
-    await writer.close();
-    const compressedBuf = await readerP;
-    return { payload: new Uint8Array(compressedBuf), gzip: true };
+    const writeChunk = async (chunk) => {
+      checkAborted();
+      await writer.write(chunk);
+    };
+    try {
+      await writeVzb1Records(summary.included, writeChunk, onProgress, checkAborted);
+      await writer.close();
+      await drainPromise;
+      checkAborted();
+    } catch (err) {
+      await writer.abort(err).catch(() => {});
+      await drainPromise.catch(() => {});
+      throw overLimit || err;
+    }
+    return {
+      payload: new Blob(compressedChunks, { type: "application/octet-stream" }),
+      size: compressedBytes,
+      gzip: true,
+    };
   }
-  return { payload: raw, gzip: false };
+  const rawChunks = [];
+  let rawBytes = 0;
+  await writeVzb1Records(summary.included, async (chunk) => {
+    checkAborted();
+    rawChunks.push(chunk);
+    rawBytes += chunk.byteLength;
+    if (rawBytes > maxBytes) throw (overLimit = tooLargeError(rawBytes, maxBytes));
+  }, onProgress, checkAborted);
+  return {
+    payload: new Blob(rawChunks, { type: "application/octet-stream" }),
+    size: rawBytes,
+    gzip: false,
+  };
+}
+
+function sendXhrUpload(url, headers, body, { onUploadProgress, onBodySent, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    const onAbort = () => xhr.abort();
+    if (signal) {
+      if (signal.aborted) { reject(makeAbortError()); return; }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && e.total > 0) onUploadProgress?.(e.loaded / e.total);
+    };
+    // the whole body is on the server: from here it may save the hub even if the request is dropped
+    xhr.upload.onload = () => onBodySent?.();
+    xhr.onload = () => {
+      cleanup();
+      let data = {};
+      try { data = JSON.parse(xhr.responseText || "{}"); } catch { data = {}; }
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
+    };
+    xhr.onerror = () => { cleanup(); reject(new Error("Network error during upload.")); };
+    xhr.onabort = () => { cleanup(); reject(makeAbortError()); };
+    xhr.send(body);
+  });
 }
 
 /**
  * Pack, gzip-compress in-browser, and POST a scanned Hubverse folder to `/api/web/upload`.
  * @param {ReturnType<typeof normalizeSelectedFiles>} summary
- * @param {{ tier?: "ephem" | "persistent", limits?: object, onPhase?: (phase: string, pct?: number) => void, signal?: AbortSignal }} [opts]
+ * @param {{
+ *   tier?: "ephem" | "persistent", limits?: object, usage?: Parameters<typeof validateFolderSelection>[2],
+ *   onPhase?: (phase: string, pct?: number) => void, onBodySent?: () => void, signal?: AbortSignal,
+ * }} [opts] `usage` adds the account checks (see validateFolderSelection); `onBodySent` fires once the
+ *   request body is fully sent (cancelling after that may not stop the server from saving the hub)
  */
-export async function uploadHubBundle(summary, { tier = "ephem", limits = DEFAULT_LIMITS, onPhase, signal } = {}) {
+export async function uploadHubBundle(summary, { tier = "ephem", limits = DEFAULT_LIMITS, usage = null, onPhase, onBodySent, signal } = {}) {
   const lim = { ...DEFAULT_LIMITS, ...(limits || {}) };
-  const check = validateFolderSelection(summary, lim);
+  const check = validateFolderSelection(summary, lim, usage ? { ...usage, tier } : {});
   if (!check.ok) throw new Error(check.error);
 
   onPhase?.("Compressing Hubverse files…", 0.1);
-  const { payload, gzip } = await packSummaryForUpload(summary, {
+  const { payload, size, gzip } = await packSummaryForUpload(summary, {
+    signal,
+    maxBytes: lim.max_compressed_bytes,
     onProgress: (p) => onPhase?.("Compressing Hubverse files…", 0.1 + p * 0.45),
   });
 
-  if (payload.byteLength > lim.max_compressed_bytes) {
+  if (size > lim.max_compressed_bytes) {
     throw new Error(
-      `Compressed upload (${fmtBytesShort(payload.byteLength)}) exceeds the ${fmtBytesShort(lim.max_compressed_bytes)} upload limit.`,
+      `Compressed upload (${fmtBytesShort(size)}) exceeds the ${fmtBytesShort(lim.max_compressed_bytes)} upload limit.`,
     );
   }
 
-  onPhase?.(`Uploading ${fmtBytesShort(payload.byteLength)}…`, 0.7);
+  onPhase?.(`Uploading ${fmtBytesShort(size)}…`, 0.55);
   const headers = {
     "Content-Type": "application/octet-stream",
     "X-Viz-Upload": "1",
@@ -297,16 +483,31 @@ export async function uploadHubBundle(summary, { tier = "ephem", limits = DEFAUL
   };
   if (gzip) headers["Content-Encoding"] = "gzip";
 
-  const res = await fetch("/api/web/upload", {
-    method: "POST",
-    headers,
-    body: payload,
-    signal,
-  });
-  onPhase?.("Validating Hubverse schema…", 0.92);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.error || `Upload failed (HTTP ${res.status})`);
+  let resStatus = 0;
+  let ok = false;
+  let data = {};
+  if (typeof XMLHttpRequest !== "undefined") {
+    const r = await sendXhrUpload("/api/web/upload", headers, payload, {
+      signal,
+      onBodySent: () => {
+        onBodySent?.();
+        onPhase?.("Validating Hubverse schema…", 0.94);
+      },
+      onUploadProgress: (p) => onPhase?.(`Uploading ${fmtBytesShort(size)}…`, 0.55 + p * 0.35),
+    });
+    ok = r.ok;
+    resStatus = r.status;
+    data = r.data;
+  } else {
+    const res = await fetch("/api/web/upload", { method: "POST", headers, body: payload, signal });
+    onBodySent?.();
+    onPhase?.("Validating Hubverse schema…", 0.94);
+    ok = res.ok;
+    resStatus = res.status;
+    data = await res.json().catch(() => ({}));
+  }
+  if (!ok) {
+    throw new Error(data.error || `Upload failed (HTTP ${resStatus})`);
   }
   return data;
 }
@@ -315,7 +516,20 @@ export async function uploadHubBundle(summary, { tier = "ephem", limits = DEFAUL
 
 async function collectDroppedFiles(dataTransfer) {
   const out = [];
-  const walkEntry = async (entry, prefix) => {
+  // Synchronously snapshot all webkitGetAsEntry() handles before any await
+  // (browsers invalidate DataTransfer.items after the first microtask).
+  const items = [...(dataTransfer?.items || [])];
+  const rootEntries = [];
+  const hasEntryApi = items.some((it) => typeof it.webkitGetAsEntry === "function");
+  if (hasEntryApi) {
+    for (const it of items) {
+      const ent = it.webkitGetAsEntry?.();
+      if (ent) rootEntries.push(ent);
+    }
+  }
+  const hasSingleRootDir = rootEntries.length === 1 && rootEntries[0]?.isDirectory;
+
+  const walkEntry = async (entry, prefix, depth) => {
     if (!entry) return;
     if (entry.isFile) {
       const file = await new Promise((res, rej) => entry.file(res, rej));
@@ -323,31 +537,79 @@ async function collectDroppedFiles(dataTransfer) {
       return;
     }
     if (entry.isDirectory) {
+      if (depth > 0) {
+        if (!entry.name || entry.name.startsWith(".") || SKIP_DROP_DIRS.has(entry.name)) return;
+        if (hasSingleRootDir && depth === 1 && !ALLOWED_DROP_TOP_DIRS.has(entry.name)) return;
+      }
       const reader = entry.createReader();
-      const readAll = async () => {
+      const entries = [];
+      while (true) {
         const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
-        if (!batch.length) return [];
-        const rest = await readAll();
-        return [...batch, ...rest];
-      };
-      const entries = await readAll();
+        if (!batch.length) break;
+        entries.push(...batch);
+      }
       const nextPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
-      for (const child of entries) await walkEntry(child, nextPrefix);
+      for (const child of entries) await walkEntry(child, nextPrefix, depth + 1);
     }
   };
 
-  const items = [...(dataTransfer?.items || [])];
-  if (items.some((it) => typeof it.webkitGetAsEntry === "function")) {
-    for (const it of items) {
-      const ent = it.webkitGetAsEntry?.();
-      if (ent) await walkEntry(ent, "");
-    }
+  if (rootEntries.length) {
+    for (const ent of rootEntries) await walkEntry(ent, "", 0);
     return out;
   }
   return [...(dataTransfer?.files || [])];
 }
 
 /* ---------- On-theme UI Section ---------- */
+
+/* One upload at a time, shared by every uploader on the page (the welcome card, the Data sources panel).
+ * It lives here, not in a section, so a re-render or a reopened panel shows the same progress and Cancel
+ * (the same AbortController) instead of detaching them, and a second upload can't start. */
+const upload = { phase: "", pct: 0, ctrl: null, sent: false, note: "", noteIsError: false };
+const views = new Set(); // { root, draw, ctx } for each rendered section, newest last
+
+/** @returns {boolean} an upload is being scanned, packed or sent */
+export const isUploadBusy = () => Boolean(upload.phase);
+
+/* the sections still on the page (the newest is kept even before it is attached) */
+function liveViews() {
+  const all = [...views], newest = all.at(-1);
+  for (const v of all) if (v !== newest && !v.root.isConnected) views.delete(v);
+  return [...views];
+}
+
+function setNote(text, isError = false) {
+  upload.note = text;
+  upload.noteIsError = isError;
+}
+
+function redrawAll() {
+  for (const v of liveViews()) v.draw();
+}
+
+/* progress ticks update the bar in place (a full redraw would steal focus from Cancel) */
+function showProgress() {
+  for (const v of liveViews()) {
+    const textEl = v.root.querySelector(".mo-progress-text");
+    const barEl = v.root.querySelector(".mo-bar > i");
+    if (!textEl || !barEl) { v.draw(); continue; }
+    textEl.textContent = upload.phase;
+    barEl.style.width = `${Math.round(Math.min(100, Math.max(0, upload.pct * 100)))}%`;
+  }
+}
+
+/* the section that should hear about the outcome: the newest one on the page, else the one that started */
+function outcomeView(starter) {
+  const live = liveViews().filter((v) => v.root.isConnected);
+  return live.at(-1) || starter;
+}
+
+function resetUpload() {
+  upload.phase = "";
+  upload.pct = 0;
+  upload.ctrl = null;
+  upload.sent = false;
+}
 
 /**
  * Render the web-mode SSO account bar (when enabled), private uploaded hubs list, and
@@ -359,7 +621,9 @@ async function collectDroppedFiles(dataTransfer) {
  *   onOpenHub: (hubId: string) => void,
  *   onUploaded: (result: any) => Promise<void> | void,
  *   onDeleteHub: (hubId: string) => Promise<void> | void,
- * }} ctx
+ *   onCancelled?: () => Promise<void> | void,
+ * }} ctx  onUploaded/onCancelled go to the newest section on the page (the upload outlives re-renders);
+ *   onCancelled should refresh web status, since a cancel after the body was sent may still create the hub
  */
 export function renderWebUploadSection(ctx) {
   const {
@@ -367,7 +631,6 @@ export function renderWebUploadSection(ctx) {
     currentHubId = null,
     compact = false,
     onOpenHub,
-    onUploaded,
     onDeleteHub,
   } = ctx;
 
@@ -379,16 +642,24 @@ export function renderWebUploadSection(ctx) {
   const coldHours = Math.max(1, Math.round((limits.user_cold_after_seconds || 86400) / 3600));
   const maxCompText = fmtBytesShort(limits.max_compressed_bytes);
 
-  let busyPhase = "";
-  let busyPct = 0;
-  let noteText = "";
-  let noteIsError = false;
   let tier = auth.authenticated ? "persistent" : "ephem";
   const armed = new Set();
 
   const root = h("div", { class: "mo-upload-wrap" });
+  const view = { root, draw: () => {}, ctx };
+
+  const usageFor = (t) => {
+    const all = workspaces.all || [];
+    const ofTier = (key, name) => (Array.isArray(workspaces[key]) ? workspaces[key] : all.filter((w) => w.tier === name));
+    return {
+      ownedCount: (t === "persistent" ? ofTier("persistent", "persistent") : ofTier("ephemeral", "ephem")).length,
+      usedBytes: workspaces.user_used_bytes,
+      quotaBytes: workspaces.user_quota_bytes ?? webStatus?.limits?.user_quota_bytes,
+    };
+  };
 
   const draw = () => {
+    const busyPhase = upload.phase;
     const pieces = [];
 
     // 1. Optional SSO account row (flat hairline separator; hidden when SSO is unconfigured)
@@ -396,12 +667,14 @@ export function renderWebUploadSection(ctx) {
       const accountText = auth.authenticated
         ? `Signed in as ${auth.email || auth.display_name}`
         : "Sign in to keep uploads across sessions";
+      const logoutHref = safeHref(auth.logout_url, { allowRelative: true });
+      const loginHref = safeHref(auth.login_url, { allowRelative: true });
       const accountAct = auth.authenticated
-        ? (auth.logout_url
-          ? h("a", { class: "c-link mo-web-act", href: auth.logout_url }, "Sign out")
+        ? (logoutHref
+          ? h("a", { class: "c-link mo-web-act", href: logoutHref }, "Sign out")
           : null)
-        : (auth.login_url
-          ? h("a", { class: "c-link mo-web-act", href: auth.login_url }, auth.login_label || "Sign in")
+        : (loginHref
+          ? h("a", { class: "c-link mo-web-act", href: loginHref }, auth.login_label || "Sign in")
           : null);
       pieces.push(h("div", { class: "mo-auth" },
         h("div", { class: "mo-auth-text" },
@@ -462,9 +735,8 @@ export function renderWebUploadSection(ctx) {
               try {
                 await onDeleteHub?.(w.id);
               } catch (err) {
-                noteText = err?.message || "Could not delete workspace.";
-                noteIsError = true;
-                draw();
+                setNote(err?.message || "Could not delete workspace.", true);
+                redrawAll();
               }
             },
           }, isArmed ? "Delete?" : "Remove"))));
@@ -478,38 +750,61 @@ export function renderWebUploadSection(ctx) {
       hidden: true,
     });
 
-    const handleEntries = async (entries) => {
-      if (busyPhase) return;
-      noteText = "";
-      noteIsError = false;
-      busyPhase = "Scanning folder…";
-      busyPct = 0.05;
-      draw();
+    /* claims the one upload slot; false when another upload is already running */
+    const beginUpload = (pct) => {
+      if (upload.phase) return false;
+      setNote("");
+      upload.ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      upload.sent = false;
+      upload.phase = "Scanning folder…";
+      upload.pct = pct;
+      redrawAll();
+      return true;
+    };
+
+    const endCancelled = (text = "Upload cancelled.", isError = false) => {
+      resetUpload();
+      setNote(text, isError);
+      redrawAll();
+    };
+
+    const finishUploadEntries = async (entries) => {
+      const uploadTier = auth.authenticated ? tier : "ephem";
       try {
         const summary = normalizeSelectedFiles(entries);
+        const usage = usageFor(uploadTier);
+        const pre = validateFolderSelection(summary, limits, { ...usage, tier: uploadTier });
+        if (pre.ok && pre.warning) {
+          setNote(pre.warning);
+          redrawAll();
+        }
         const res = await uploadHubBundle(summary, {
-          tier: auth.authenticated ? tier : "ephem",
+          tier: uploadTier,
           limits,
+          usage,
+          signal: upload.ctrl?.signal,
+          onBodySent: () => { upload.sent = true; redrawAll(); },
           onPhase: (phase, pct) => {
-            busyPhase = phase;
-            busyPct = pct ?? 0.5;
-            const textEl = root.querySelector(".mo-progress-text");
-            const barEl = root.querySelector(".mo-bar > i");
-            if (textEl) textEl.textContent = phase;
-            else draw();
-            if (barEl) barEl.style.width = `${Math.round(Math.min(100, Math.max(0, busyPct * 100)))}%`;
+            upload.phase = phase;
+            upload.pct = pct ?? 0.5;
+            showProgress();
           },
         });
-        busyPhase = "";
-        busyPct = 0;
-        await onUploaded?.(res);
+        resetUpload();
+        setNote("");
+        const target = outcomeView(view);
+        await target.ctx.onUploaded?.(res, { detached: !target.root.isConnected });
       } catch (err) {
-        busyPhase = "";
-        busyPct = 0;
-        noteText = err?.message || "Could not upload Hubverse folder.";
-        noteIsError = true;
-        draw();
+        const aborted = err?.name === "AbortError";
+        endCancelled(aborted ? "Upload cancelled." : (err?.message || "Could not upload Hubverse folder."), !aborted);
+        // a cancel can land after the server already has the whole body: refresh so a saved hub shows up
+        if (aborted) await outcomeView(view).ctx.onCancelled?.();
       }
+    };
+
+    const handleEntries = async (entries) => {
+      if (!beginUpload(0.05)) return;
+      await finishUploadEntries(entries);
     };
 
     fileInput.addEventListener("change", () => {
@@ -552,10 +847,20 @@ export function renderWebUploadSection(ctx) {
       tierToggle,
       busyPhase
         ? h("div", { class: "mo-progress", role: "status" },
-          h("div", { class: "mo-progress-text" }, busyPhase),
-          h("div", { class: "mo-bar" }, h("i", { style: { width: `${Math.round(busyPct * 100)}%` } })))
+          h("div", { class: "mo-progress-head", style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" } },
+            h("div", { class: "mo-progress-text" }, busyPhase),
+            upload.ctrl
+              ? h("button", {
+                type: "button",
+                class: "mo-text-act",
+                // once the body is sent the server may still save the hub, so there is nothing left to cancel
+                disabled: upload.sent,
+                onclick: () => upload.ctrl?.abort(),
+              }, upload.sent ? "Finishing…" : "Cancel")
+              : null),
+          h("div", { class: "mo-bar" }, h("i", { style: { width: `${Math.round(upload.pct * 100)}%` } })))
         : null,
-      noteText ? h("div", { class: ["mo-note", noteIsError && "is-error"], "aria-live": "polite" }, noteText) : null,
+      upload.note ? h("div", { class: ["mo-note", upload.noteIsError && "is-error"], "aria-live": "polite" }, upload.note) : null,
       h("details", { class: "mo-upload-help" },
         h("summary", null, "What folder structure is expected?"),
         h("div", { class: "mo-upload-help-body" },
@@ -570,15 +875,24 @@ export function renderWebUploadSection(ctx) {
     drop.addEventListener("drop", async (e) => {
       e.preventDefault();
       drop.classList.remove("is-drag");
-      if (busyPhase) return;
-      const entries = await collectDroppedFiles(e.dataTransfer).catch(() => []);
-      if (entries.length) handleEntries(entries);
+      if (upload.phase) return;
+      // snapshot the entries synchronously (DataTransfer empties after this event), then claim the slot
+      const entriesP = collectDroppedFiles(e.dataTransfer).catch(() => []);
+      if (!beginUpload(0.03)) return;
+      const ctrl = upload.ctrl;
+      const entries = await entriesP;
+      if (ctrl?.signal?.aborted) { endCancelled(); return; }
+      if (!entries.length) { endCancelled("No files found in dropped selection.", true); return; }
+      await finishUploadEntries(entries);
     });
 
     pieces.push(drop);
     root.replaceChildren(...pieces);
   };
 
+  view.draw = draw;
+  views.add(view);
+  liveViews();
   draw();
   return root;
 }

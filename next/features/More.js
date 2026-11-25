@@ -2,7 +2,7 @@
  * copy link and the Guide (which ends with the shortcuts). Each panel is its own module, loaded on first use.
  * Also the small helpers those panels share (JSON requests, sizes, relative times). */
 import { h, on } from "../lib/dom.js";
-import { apiUrl } from "../lib/api.js";
+import { apiUrl, hubFetch } from "../lib/api.js";
 import { glass } from "../ui/glass.js";
 import { activeLayer, openMenu, tooltip } from "../ui/floating.js";
 import { pill, icon, toast } from "../ui/controls.js";
@@ -17,7 +17,7 @@ const TEXT_FIELD = "input, textarea, select, [contenteditable]:not([contentedita
  * @returns {Promise<any>} the body; rejects with the server's `error` text, else "HTTP n"
  */
 export async function getJSON(url) {
-  const r = await fetch(apiUrl(url));
+  const r = await hubFetch(apiUrl(url));
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
@@ -31,7 +31,7 @@ export async function getJSON(url) {
  * @returns {Promise<any>}
  */
 export async function postJSON(url, body = {}, { okStatuses = [] } = {}) {
-  const r = await fetch(apiUrl(url), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const r = await hubFetch(apiUrl(url), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok && !okStatuses.includes(r.status)) throw new Error(j.error || `HTTP ${r.status}`);
   return j;

@@ -158,6 +158,18 @@ export function matchCatalogPlaces(catalog, manifest, query, activeHubId) {
   }));
 }
 
+/* A map's caption follows hover and focus; when both leave the map it goes back to its resting text
+ * (or to the region that still has focus). */
+function resetCaptionOnLeave(wrap, caption) {
+  const rest = caption.textContent;
+  const reset = () => {
+    const focused = wrap.contains(document.activeElement) ? document.activeElement?.closest?.("[data-loc]") : null;
+    caption.textContent = focused?.getAttribute("aria-label") || rest;
+  };
+  wrap.addEventListener("pointerleave", reset);
+  wrap.addEventListener("focusout", (e) => { if (!wrap.contains(e.relatedTarget)) caption.textContent = rest; });
+}
+
 /**
  * Open the location picker from the Location bubble (or close it, if it is open from there).
  * Renders only the geography belonging to the loaded hub while search indexes all connected places.
@@ -488,11 +500,13 @@ export function openLocationPicker(anchor, ctx) {
               ...chipHsas.map((m) => place(m, ["c-chip", m.id === current && "on"], m.abbr || m.name))),
           );
 
+          resetCaptionOnLeave(svgWrap, caption);
           svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Loading boundaries…"));
           loadUsGeoCache().then((usGeo) => {
             if (!svgWrap.isConnected) return;
             const svg = renderHsaStateSvg(usGeo, mcStateFips, hsas, {
               activeId: current,
+              isInteractive: (id) => manifest.locationById.has(id),
               onHover: (_id, label) => { caption.textContent = label; },
               onPick: (id) => pick(id),
             });
@@ -573,11 +587,14 @@ export function openLocationPicker(anchor, ctx) {
             chipLocs.length ? h("div", { class: "lp-chips" }, chipLocs.map((l) => place(l, ["c-chip", l.id === current && "on"], l.name || l.abbr || l.id))) : null,
           ].filter(Boolean));
 
+          resetCaptionOnLeave(svgWrap, caption);
           svgWrap.replaceChildren(h("p", { class: "pk-empty" }, "Loading boundaries…"));
           loadRegionGeo(geoCls.kind).then((rGeo) => {
             if (!svgWrap.isConnected) return;
             const svg = renderRegionSvg(rGeo, manifest.locationById, {
               activeId: current,
+              isInteractive: (id) => manifest.locationById.has(id)
+                || (geoCls.kind === "cd-provinces" && geoCls.hasHealthZones && (geoCls.drcZonesByProvince.get(id) || []).length > 0),
               onHover: (_id, label) => { caption.textContent = label; },
               onPick: (id) => {
                 if (geoCls.kind === "cd-provinces" && geoCls.hasHealthZones && (geoCls.drcZonesByProvince.get(id) || []).length) {

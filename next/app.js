@@ -7,6 +7,9 @@ import {
   clearAllCaches,
   getActiveHub,
   setActiveHub,
+  isPrivateHubId,
+  onHubGone,
+  HUB_GONE_MESSAGE,
 } from "./lib/api.js";
 import { createStore } from "./lib/store.js";
 import { h, storage } from "./lib/dom.js";
@@ -14,7 +17,7 @@ import { DAY, parseIso } from "./lib/scale.js";
 import { activeLayer } from "./ui/floating.js";
 import { setHubsContext } from "./features/Hubs.js";
 import { fromLists, chartedBySlot, setShowAll, setBaseline, isCharted, chart } from "./features/selection.js";
-import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels, isCategoricalTarget } from "./features/url.js";
+import { KEYS, defaults, defaultDate, defaultDims, targetDimSpecs, readUrl, syncUrl, parseLevels, isValidScoreCol, sanitizeScoresForTarget } from "./features/url.js";
 import { mountShell, storedTheme } from "./features/Shell.js";
 import { parseLayers } from "./features/chart/layers.js";
 import { classifyHubGeo } from "./geo/picker_geo.js";
@@ -22,24 +25,39 @@ import { classifyHubGeo } from "./geo/picker_geo.js";
 const root = document.getElementById("app");
 const hubKey = (id, name) => (id ? `viz.h.${id}.${name}` : `viz.${name}`);
 const geoKey = (manifest) => `viz.geo.${classifyHubGeo(manifest).kind}.location`;
-const VALID_SCORE_COLS = new Set(["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"]);
-const QUANT_SORTS = new Set(["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name", "h0", "h1", "h2", "h3", "h4"]);
-const CAT_SORTS = new Set(["rel", "rps", "logScore", "brier", "hitMode", "n", "name", "h0", "h1", "h2", "h3", "h4"]);
 
-function sanitizeScoresForTarget(scores, manifest, targetId) {
-  if (!scores) return undefined;
-  const cols = Array.isArray(scores.cols) ? scores.cols.filter((c) => VALID_SCORE_COLS.has(c)) : [];
-  const tMeta = manifest.targetById.get(targetId);
-  const allowedSorts = isCategoricalTarget(tMeta) ? CAT_SORTS : QUANT_SORTS;
-  const keepSort = typeof scores.sort === "string" && allowedSorts.has(scores.sort);
-  return {
-    ...scores,
-    sort: keepSort ? scores.sort : "rel",
-    rev: keepSort ? !!scores.rev : false,
-    cols,
-    open: Array.isArray(scores.open) ? scores.open : [],
-  };
+let liveCtx = null; // the mounted hub's context (null on the welcome screen)
+
+/* Where to go when an uploaded hub is gone: the Data sources panel (it has the uploader), else the
+ * welcome screen's uploader, else a fresh start. */
+function openUploadUi() {
+  if (liveCtx) {
+    import("./features/Hubs.js").then((m) => m.openHubs(document.querySelector(".app-more") || document.body, liveCtx));
+    return;
+  }
+  const zone = document.querySelector(".app-welcome .mo-upload-zone");
+  if (zone) {
+    zone.scrollIntoView({ block: "center", behavior: "smooth" });
+    zone.querySelector("button")?.focus();
+    return;
+  }
+  setActiveHub(null);
+  location.assign("/next/");
 }
+
+/* One message per uploaded hub that expired or was lost (api.js reports each hub once, however many
+ * sections were loading from it). */
+let goneToast = null;
+onHubGone(() => {
+  goneToast?.dismiss();
+  import("./ui/controls.js").then(({ toast }) => {
+    goneToast = toast(HUB_GONE_MESSAGE, {
+      tone: "error",
+      duration: 15000,
+      action: { label: "Upload again", onClick: openUploadUi },
+    });
+  });
+});
 
 /* What this browser remembers, validated against the manifest (anything unknown is ignored). */
 function fromStorage(manifest) {
@@ -68,7 +86,7 @@ function fromStorage(manifest) {
   if (Array.isArray(layers)) out.layers = parseLayers(layers);
   const scoreCols = storage.get("viz.scores.cols");
   if (Array.isArray(scoreCols)) {
-    const cols = [...new Set(scoreCols.filter((c) => typeof c === "string" && VALID_SCORE_COLS.has(c)))];
+    const cols = [...new Set(scoreCols.filter((c) => typeof c === "string" && isValidScoreCol(c)))];
     if (cols.length) out.scores = { sort: "rel", rev: false, cols, open: [] };
   }
   return out;
@@ -156,23 +174,31 @@ async function renderWelcome(manifest) {
       h("div", { class: "app-welcome-actions" }, actionBtn),
       hubless ? h("code", { class: "app-welcome-cmd" }, "./run.sh --hub /path/to/hub") : null));
   }
-  if (hubless && localMode) {
+  if (localMode) {
     const listHost = h("div", { class: "app-welcome-hubs" });
     welcomeBits.push(h("div", { class: "app-welcome-section" }, h("span", { class: "app-welcome-label" }, "Public hubs"), listHost));
     mountPublicHubs(listHost);
-  } else if (hubless && !localMode) {
+  } else {
     const uploadHost = h("div", { class: "app-welcome-section" });
     const pubHost = h("div", { class: "app-welcome-section" });
     welcomeBits.push(uploadHost, pubHost);
 
-    const drawWebWelcome = async () => {
-      if (!document.body.contains(uploadHost)) return;
-      const ws = await loadWebStatus().catch(() => null);
-      if (!document.body.contains(uploadHost)) return;
+    let pollTimer = 0;
+    let pollGen = 0; // the newest drawWebWelcome call; older ones stop after their await (one polling chain)
+    let lastUploadSig = "";
+    const statusSig = (ws) => JSON.stringify({
+      auth: ws?.auth || null,
+      limits: ws?.limits || null,
+      owned: (ws?.workspaces?.all || []).map((w) => [w.id, w.state, w.bytes, w.tier]),
+      used: ws?.workspaces?.user_used_bytes || 0,
+    });
+
+    const mountUpload = (ws) => {
       uploadHost.replaceChildren(
         h("span", { class: "app-welcome-label" }, "Your local hub"),
         renderWebUploadSection({
           webStatus: ws,
+          currentHubId: manifest.hub_id || null,
           compact: true,
           onOpenHub: (id) => location.assign(`/next/?hub=${encodeURIComponent(id)}`),
           onUploaded: (res) => {
@@ -180,15 +206,37 @@ async function renderWelcome(manifest) {
             location.assign(id ? `/next/?hub=${encodeURIComponent(id)}` : "/next/");
           },
           onDeleteHub: async (id) => {
-            await fetch("/api/web/workspaces/delete", {
+            const res = await fetch("/api/web/workspaces/delete", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ id }),
             });
-            drawWebWelcome();
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || `Could not delete workspace (HTTP ${res.status})`);
+            lastUploadSig = "";
+            if (id === manifest.hub_id) {
+              setActiveHub(null);
+              location.assign("/next/");
+              return;
+            }
+            await drawWebWelcome();
           },
+          onCancelled: () => { lastUploadSig = ""; drawWebWelcome(); },
         }),
       );
+    };
+
+    const drawWebWelcome = async () => {
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = 0; }
+      const gen = ++pollGen;
+      if (!document.body.contains(uploadHost)) return;
+      const ws = await loadWebStatus().catch(() => null);
+      if (gen !== pollGen || !document.body.contains(uploadHost)) return;
+      const sig = statusSig(ws);
+      if (!uploadHost.children.length || (sig !== lastUploadSig && !uploadHost.querySelector(".mo-progress"))) {
+        lastUploadSig = sig;
+        mountUpload(ws);
+      }
       const pubHubs = ws?.scheduler?.hubs || [];
       if (pubHubs.length) {
         pubHost.replaceChildren(
@@ -205,7 +253,8 @@ async function renderWelcome(manifest) {
         );
       }
       if (!pubHubs.some((x) => x.synced) && document.body.contains(uploadHost)) {
-        setTimeout(drawWebWelcome, 3500);
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(drawWebWelcome, 3500);
       }
     };
     drawWebWelcome();
@@ -454,6 +503,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
   };
 
   setHubsContext(ctx);
+  liveCtx = ctx;
   const shell = mountShell(root, ctx, { pickLocation: state.location == null });
   const stopUrl = syncUrl(store, manifest);
   const stopPersist = persist(store, manifest);
@@ -462,6 +512,7 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
     stopPersist();
     shell.destroy();
     activeUnmount = null;
+    if (liveCtx === ctx) liveCtx = null;
   };
   window.__viz = { store, manifest, chart: ctx.chart, get nav() { return ctx.chart.nav; }, idle: () => ctx.chart.idle() };
 }
@@ -469,10 +520,12 @@ function mountContext(manifest, { catalog = null, stateOverride = null, initialU
 async function boot() {
   const catalogP = loadCatalog().catch(() => null);
   let manifest;
+  let deadHub = null; // a ?hub= that couldn't be opened, so another hub (or the welcome screen) is shown
   try {
     manifest = await loadManifest();
   } catch (err) {
-    if (err?.status === 404 && getActiveHub()) {
+    if ((err?.status === 404 || err?.status === 403) && getActiveHub()) {
+      deadHub = getActiveHub();
       setActiveHub(null);
       const q = new URLSearchParams(location.search);
       q.delete("hub");
@@ -491,11 +544,17 @@ async function boot() {
   }
 
   const catalog = await catalogP;
-  if ((manifest.empty || !manifest.allRounds.length) && catalog?.hubs?.length) {
+  if (manifest.empty && !getActiveHub() && catalog?.hubs?.length) {
     setActiveHub(catalog.hubs[0].id);
     try {
       manifest = await loadManifest(catalog.hubs[0].id);
     } catch { /* fallback to welcome below */ }
+  }
+
+  // a private hub's expiry has its own message (onHubGone above); any other dead link says where it landed
+  if (deadHub && !isPrivateHubId(deadHub)) {
+    const where = manifest.empty || !manifest.allRounds.length ? "the start page" : (manifest.hub || "another hub");
+    import("./ui/controls.js").then(({ toast }) => toast(`Hub “${deadHub}” isn’t available here · showing ${where}`, { tone: "info", duration: 8000 }));
   }
 
   if (manifest.empty || !manifest.allRounds.length) {

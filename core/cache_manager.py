@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any
@@ -37,6 +38,7 @@ from viz.remote.store import RemoteStore, TRUTH_FILES
 
 logger = logging.getLogger("viz.cache")
 
+CACHE_SCHEMA_VERSION = 2
 SNAPSHOT_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.csv$")
 
 
@@ -116,6 +118,7 @@ class ParquetCacheManager:
         calendar_provider: Optional[Callable[[], Any]] = None,
         geo_provider: Optional[Callable[[], Any]] = None,
         is_non_negative_provider: Optional[Callable[[str], bool]] = None,
+        time_unit_provider: Optional[Callable[[str], Optional[str]]] = None,
     ):
         self.base_dir = Path(base_dir).resolve()
         # Hub data synced from S3 is only used by the dashboard; the CLI scores repository models only
@@ -167,15 +170,20 @@ class ParquetCacheManager:
         self._calendar_provider = calendar_provider
         self._geo_provider = geo_provider
         self._is_non_negative_provider = is_non_negative_provider
+        self._time_unit_provider = time_unit_provider
 
         self._model_locks = LockRegistry()
         self._target_locks = LockRegistry()
         self.warning_registry = WarningRegistry()
         self._missing_logged: set = set()
         self._fresh_lock = threading.Lock()
-        self._fresh_pq_cache: Dict[str, Tuple[Optional[Path], int]] = {}
+        self._fresh_pq_cache: Dict[str, Tuple[Optional[Path], Any]] = {}
 
         self._ensure_dirs()
+
+    def invalidate_fresh_cache(self) -> None:
+        with self._fresh_lock:
+            self._fresh_pq_cache.clear()
 
     def _calendar(self):
         if self._calendar_provider is not None:
@@ -198,7 +206,61 @@ class ParquetCacheManager:
         """Return captured validation warnings for specified models or all models."""
         return self.warning_registry.get_warnings(sources)
 
+    def _enforce_schema_stamp(
+        self,
+        root: Path,
+        *,
+        dirs_to_wipe: Tuple[Path, ...] = (),
+        files_to_wipe: Tuple[Path, ...] = (),
+        wipe_root_children: bool = False,
+    ) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        stamp_file = root / ".cache_schema_version"
+        expected = str(CACHE_SCHEMA_VERSION)
+        try:
+            if stamp_file.is_file() and stamp_file.read_text(encoding="utf-8").strip() == expected:
+                return
+        except OSError:
+            pass
+        for d in dirs_to_wipe:
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+        for f in files_to_wipe:
+            f.unlink(missing_ok=True)
+        if wipe_root_children and root.is_dir():
+            for child in list(root.iterdir()):
+                if child.name == ".cache_schema_version":
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+        tmp = stamp_file.with_name(f".{stamp_file.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            tmp.write_text(expected + "\n", encoding="utf-8")
+            os.replace(tmp, stamp_file)
+        except OSError:
+            pass
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def _ensure_dirs(self):
+        wipe_dirs = [
+            self.models_cache_dir,
+            self.local_models_cache_dir,
+            self.targets_cache_dir,
+            self.cache_dir / "scores",
+        ]
+        default_hub_models = self.hub_models_cache_dir == (self.cache_dir / "hub_models")
+        if default_hub_models:
+            wipe_dirs.append(self.hub_models_cache_dir)
+        self._enforce_schema_stamp(
+            self.cache_dir,
+            dirs_to_wipe=tuple(wipe_dirs),
+            files_to_wipe=(self.cache_dir / "model_dedup.json",),
+        )
+        if not default_hub_models:
+            self._enforce_schema_stamp(self.hub_models_cache_dir, wipe_root_children=True)
         self.models_cache_dir.mkdir(parents=True, exist_ok=True)
         self.local_models_cache_dir.mkdir(parents=True, exist_ok=True)
         self.hub_models_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -207,8 +269,20 @@ class ParquetCacheManager:
     @staticmethod
     def _scan_source_files(source_dir: Path) -> Tuple[List[Path], Dict[str, Any]]:
         """Single-pass os.scandir collection of .csv/.parquet files plus fingerprint metadata."""
+        files, fp, _ = ParquetCacheManager._scan_source_dir(source_dir)
+        return files, fp
+
+    @staticmethod
+    def _scan_source_dir(
+        source_dir: Path,
+    ) -> Tuple[List[Path], Dict[str, Any], Optional[Tuple[int, int, int, int]]]:
+        """
+        One os.scandir pass returning `(files, fingerprint, dir_sig)`, where
+        `dir_sig = (dir_mtime_ns, count, max_mtime_ns, total_size)` (None when the folder is unreadable).
+        """
         entries: List[Tuple[str, Path, os.stat_result]] = []
         try:
+            dir_mtime_ns = source_dir.stat().st_mtime_ns
             with os.scandir(source_dir) as it:
                 for ent in it:
                     if ent.name.startswith("."):
@@ -220,19 +294,25 @@ class ParquetCacheManager:
                         st = ent.stat()
                         entries.append((ent.name, Path(ent.path), st))
         except OSError:
-            return [], {"count": 0, "max_mtime": 0.0, "total_size": 0}
+            return [], {"count": 0, "max_mtime": 0.0, "total_size": 0}, None
 
+        dir_sig = (
+            dir_mtime_ns,
+            len(entries),
+            max((item[2].st_mtime_ns for item in entries), default=0),
+            sum(item[2].st_size for item in entries),
+        )
         if not entries:
-            return [], {"count": 0, "max_mtime": 0.0, "total_size": 0}
+            return [], {"count": 0, "max_mtime": 0.0, "total_size": 0}, dir_sig
         # CSVs sorted then Parquets sorted to match prior ordering cleanly
         entries.sort(key=lambda item: (0 if item[1].suffix.lower() == ".csv" else 1, item[0]))
         files = [item[1] for item in entries]
         fp = {
             "count": len(entries),
             "max_mtime": max(item[2].st_mtime for item in entries),
-            "total_size": sum(item[2].st_size for item in entries),
+            "total_size": dir_sig[3],
         }
-        return files, fp
+        return files, fp, dir_sig
 
     @staticmethod
     def _compute_dir_fingerprint(csv_files: List[Path]) -> Dict[str, Any]:
@@ -252,7 +332,8 @@ class ParquetCacheManager:
             with open(meta_path, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             if (
-                saved.get("count") != fingerprint["count"]
+                saved.get("schema_version") != CACHE_SCHEMA_VERSION
+                or saved.get("count") != fingerprint["count"]
                 or abs(saved.get("max_mtime", 0.0) - fingerprint["max_mtime"]) >= 1e-3
                 or saved.get("total_size") != fingerprint["total_size"]
             ):
@@ -263,23 +344,38 @@ class ParquetCacheManager:
         except Exception:
             return False
 
-    def active_remote_hub_ids(self) -> List[str]:
+    def _tasks_and_locations_stamp(self) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        stamps: List[Tuple[int, int]] = []
+        for p in (self.base_dir / "hub-config" / "tasks.json", self.auxiliary_data_dir / "locations.csv"):
+            try:
+                st = p.stat()
+                stamps.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                stamps.append((0, 0))
+        return stamps[0], stamps[1]
+
+    def active_remote_hub_ids(self, *, check_locations: bool = True) -> List[str]:
         """Remote S3 hubs enabled AND compatible with the active hub's targets/locations."""
         if not self.include_remote:
             return []
-        stamp = self.remote_store.state_mtime()
+        stamp = (self.remote_store.state_mtime(), self._tasks_and_locations_stamp())
+        cache_key = f"__active_remote_hub_ids_{int(check_locations)}__"
         with self._fresh_lock:
-            hit = self._fresh_pq_cache.get("__active_remote_hub_ids__")
+            hit = self._fresh_pq_cache.get(cache_key)
         if hit is not None and hit[1] == stamp:  # type: ignore[comparison-overlap]
             return list(hit[0])  # type: ignore[arg-type]
         targets = self._allowed_targets_provider() if self._allowed_targets_provider else None
-        locations = self._allowed_locations_provider() if self._allowed_locations_provider else None
+        locations = (
+            self._allowed_locations_provider()
+            if (check_locations and self._allowed_locations_provider)
+            else None
+        )
         if targets or locations:
             res = self.remote_store.compatible_hub_ids(targets=targets, locations=locations)
         else:
             res = self.remote_store.active_hub_ids()
         with self._fresh_lock:
-            self._fresh_pq_cache["__active_remote_hub_ids__"] = (tuple(res), stamp)  # type: ignore[assignment]
+            self._fresh_pq_cache[cache_key] = (tuple(res), stamp)  # type: ignore[assignment]
         return res
 
     def hub_key(self, model_id: str) -> Optional[Tuple[str, str]]:
@@ -325,6 +421,7 @@ class ParquetCacheManager:
 
         r_st, h_st = repo_pq.stat(), hub_pq.stat()
         fp = {
+            "schema_version": CACHE_SCHEMA_VERSION,
             "repo_mtime": r_st.st_mtime,
             "repo_size": r_st.st_size,
             "hub_mtime": h_st.st_mtime,
@@ -337,7 +434,8 @@ class ParquetCacheManager:
             try:
                 saved = json.loads(meta_path.read_text(encoding="utf-8"))
                 return (
-                    saved.get("repo_size") == fp["repo_size"]
+                    saved.get("schema_version") == CACHE_SCHEMA_VERSION
+                    and saved.get("repo_size") == fp["repo_size"]
                     and saved.get("hub_size") == fp["hub_size"]
                     and abs(saved.get("repo_mtime", 0.0) - fp["repo_mtime"]) < 1e-3
                     and abs(saved.get("hub_mtime", 0.0) - fp["hub_mtime"]) < 1e-3
@@ -371,7 +469,7 @@ class ParquetCacheManager:
             tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
             try:
                 with open(tmp_meta, "w", encoding="utf-8") as fm:
-                    json.dump(fp, fm)
+                    json.dump({**fp, "schema_version": CACHE_SCHEMA_VERSION}, fm)
                 os.replace(tmp_meta, meta_path)
             finally:
                 tmp_meta.unlink(missing_ok=True)
@@ -405,7 +503,7 @@ class ParquetCacheManager:
     @staticmethod
     def _atomic_write_parquet(df: pl.DataFrame, dest: Path):
         tid = f"{os.getpid()}_{threading.get_ident()}"
-        tmp = dest.with_suffix(f".tmp.{tid}.parquet")
+        tmp = dest.with_name(f".{dest.name}.tmp.{tid}")
         try:
             df.write_parquet(tmp, compression="zstd")
             os.replace(tmp, dest)
@@ -463,7 +561,7 @@ class ParquetCacheManager:
             tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
             try:
                 with open(tmp_meta, "w", encoding="utf-8") as fm:
-                    json.dump(fp, fm)
+                    json.dump({**fp, "schema_version": CACHE_SCHEMA_VERSION}, fm)
                 os.replace(tmp_meta, meta_path)
             finally:
                 tmp_meta.unlink(missing_ok=True)
@@ -497,8 +595,6 @@ class ParquetCacheManager:
         """
         from viz.core.ingest import NormalizationError, normalize_forecast_frame
 
-        fast_key = f"q::{int(bool(is_local))}::{model_id}"
-
         merged = self.merged_key(model_id)
         if merged is not None:
             return self._get_merged_artifact(
@@ -509,22 +605,21 @@ class ParquetCacheManager:
         if resolved is None:
             return None
         source_dir, dest_dir, file_stem, hub, is_local = resolved
-        try:
-            dir_mtime_ns = source_dir.stat().st_mtime_ns
-        except OSError:
-            dir_mtime_ns = -1
+        fast_key = f"q::{int(bool(is_local))}::{model_id}::{source_dir}"
 
+        # One scan per call: the same listing feeds the memo check and (on a miss) the rebuild
+        source_files, fp, dir_sig = self._scan_source_dir(source_dir)
         with self._fresh_lock:
             hit = self._fresh_pq_cache.get(fast_key)
-        if hit is not None and dir_mtime_ns >= 0 and hit[1] == dir_mtime_ns:
+        if hit is not None and dir_sig is not None and hit[1] == dir_sig:
             p = hit[0]
             if p is None or p.exists():
                 return p
 
         def _memo(p: Optional[Path]) -> Optional[Path]:
-            if dir_mtime_ns >= 0:
+            if dir_sig is not None:
                 with self._fresh_lock:
-                    self._fresh_pq_cache[fast_key] = (p, dir_mtime_ns)
+                    self._fresh_pq_cache[fast_key] = (p, dir_sig)
             return p
 
         is_remote_dir = (hub is not None) or (not is_local and (self.base_dir / "manifest.json").is_file())
@@ -536,7 +631,6 @@ class ParquetCacheManager:
         meta_path = dest_dir / f"{file_stem}.meta.json"
         peak_meta_path = dest_dir / f"{file_stem}.peak.meta.json"
 
-        source_files, fp = self._scan_source_files(source_dir)
         if not source_files:
             return None
 
@@ -547,7 +641,8 @@ class ParquetCacheManager:
             try:
                 saved = json.loads(meta_path.read_text(encoding="utf-8"))
                 if (
-                    saved.get("empty_quantiles")
+                    saved.get("schema_version") == CACHE_SCHEMA_VERSION
+                    and saved.get("empty_quantiles")
                     and saved.get("count") == fp["count"]
                     and saved.get("total_size") == fp["total_size"]
                     and abs(saved.get("max_mtime", 0.0) - fp["max_mtime"]) < 1e-3
@@ -614,6 +709,7 @@ class ParquetCacheManager:
                         geo=geo,
                         known_locations=known_locs,
                         is_non_negative=self._is_non_negative_provider,
+                        time_unit_for=self._time_unit_provider,
                     )
                     for w in res.info.get("warnings") or []:
                         if "unknown location codes" not in w or known_locs:
@@ -674,11 +770,12 @@ class ParquetCacheManager:
                     self._atomic_write_parquet(combined_pk, peak_pq)
                     tmp_pk_meta = peak_meta_path.with_suffix(f".tmp.{tid}.json")
                     with open(tmp_pk_meta, "w", encoding="utf-8") as fpk:
-                        json.dump({**fp, "empty": False}, fpk)
+                        json.dump({**fp, "schema_version": CACHE_SCHEMA_VERSION, "empty": False}, fpk)
                     os.replace(tmp_pk_meta, peak_meta_path)
 
                 meta_payload = {
                     **fp,
+                    "schema_version": CACHE_SCHEMA_VERSION,
                     "targets": sorted(all_targets or q_targets | pmf_targets),
                     "quantile_targets": sorted(q_targets),
                     "pmf_targets": sorted(pmf_targets),
@@ -836,8 +933,12 @@ class ParquetCacheManager:
                     saved = json.load(f)
             except (OSError, ValueError):
                 return None
-            if (saved.get("count") != fp["count"] or saved.get("total_size") != fp["total_size"]
-                    or abs(saved.get("max_mtime", 0.0) - fp["max_mtime"]) >= 1e-3):
+            if (
+                saved.get("schema_version") != CACHE_SCHEMA_VERSION
+                or saved.get("count") != fp["count"]
+                or saved.get("total_size") != fp["total_size"]
+                or abs(saved.get("max_mtime", 0.0) - fp["max_mtime"]) >= 1e-3
+            ):
                 return None
             if saved.get("empty"):
                 return True, None
@@ -891,8 +992,8 @@ class ParquetCacheManager:
 
             dest_dir.mkdir(parents=True, exist_ok=True)
             tid = f"{os.getpid()}_{threading.get_ident()}"
-            tmp_pq = pq_path.with_suffix(f".tmp.{tid}.parquet")
-            tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
+            tmp_pq = pq_path.with_name(f".{pq_path.name}.tmp.{tid}")
+            tmp_meta = meta_path.with_name(f".{meta_path.name}.tmp.{tid}")
             try:
                 if frames:
                     pl.concat(frames, how="vertical_relaxed").unique(
@@ -902,7 +1003,7 @@ class ParquetCacheManager:
                 else:
                     pq_path.unlink(missing_ok=True)
                 with open(tmp_meta, "w", encoding="utf-8") as f_meta:
-                    json.dump({**fp, "empty": not frames}, f_meta)
+                    json.dump({**fp, "schema_version": CACHE_SCHEMA_VERSION, "empty": not frames}, f_meta)
                 os.replace(tmp_meta, meta_path)
             except Exception as exc:
                 logger.error("Failed to write peak cache for model %s: %s", model_id, exc)
@@ -950,6 +1051,7 @@ class ParquetCacheManager:
 
         fp = {
             **self._compute_dir_fingerprint(existing_sources),
+            "schema_version": CACHE_SCHEMA_VERSION,
             "paths": [str(f) for f in existing_sources],
             **(extra_meta or {}),
         }
@@ -961,8 +1063,8 @@ class ParquetCacheManager:
                 return pq_path
 
             tid = f"{os.getpid()}_{threading.get_ident()}"
-            tmp_pq = pq_path.with_suffix(f".tmp.{tid}.parquet")
-            tmp_meta = meta_path.with_suffix(f".tmp.{tid}.json")
+            tmp_pq = pq_path.with_name(f".{pq_path.name}.tmp.{tid}")
+            tmp_meta = meta_path.with_name(f".{meta_path.name}.tmp.{tid}")
 
             try:
                 df = builder_fn()
@@ -1596,6 +1698,7 @@ class ParquetCacheManager:
         Fast incremental refresh for truth/surveillance tables and modified local models.
         Avoids blocking on untouched models or remote S3 mirrors (which sync manages).
         """
+        self.invalidate_fresh_cache()
         self.get_oracle_parquet()
         self.get_admissions_parquet()
         self.get_initial_admissions_parquet()
@@ -1654,6 +1757,7 @@ class ParquetCacheManager:
                     (d / f"{model_id}{suffix}").unlink(missing_ok=True)
         else:
             # Consolidated tables only; synced hub copies under .cache/remote are kept (removed via the UI)
+            (self.cache_dir / "model_dedup.json").unlink(missing_ok=True)
             hub_dirs = [p for p in self.hub_models_cache_dir.iterdir() if p.is_dir()] if self.hub_models_cache_dir.exists() else []
             for d in [self.models_cache_dir, self.local_models_cache_dir, self.targets_cache_dir, self.cache_dir / "scores"] + hub_dirs:
                 if d.exists():

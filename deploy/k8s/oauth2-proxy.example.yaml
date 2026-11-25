@@ -1,0 +1,147 @@
+# Reference oauth2-proxy for optional sign-in in web mode (see ingress.yaml and docs/deployment.md).
+#
+# oauth2-proxy runs in auth-request mode only: nginx calls /oauth2/auth for the single /auth/login path, and
+# oauth2-proxy never proxies app traffic. Its auth response carries the user's identity and the shared
+# X-Viz-Proxy-Secret, so the secret only ever reaches the app on authenticated requests.
+#
+# Secrets to create first:
+#   hub-viz-oauth2-proxy: client-id, client-secret, cookie-secret (32 random bytes, base64)
+#   hub-viz-proxy-auth:   proxy-secret (long random string; the same Secret feeds VIZ_PROXY_SECRET on hub-viz)
+#
+# The alpha config below targets oauth2-proxy v7.6. Check field names against the alpha-config docs for
+# the version you deploy: https://oauth2-proxy.github.io/oauth2-proxy/configuration/alpha-config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oauth2-proxy-alpha
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+data:
+  alpha.yaml: |
+    server:
+      bindAddress: "0.0.0.0:4180"
+    upstreamConfig:
+      upstreams:
+        # auth-request mode: no real upstream, just answer 202 for authenticated /oauth2/auth calls
+        - id: static-202
+          path: /
+          static: true
+          staticCode: 202
+    injectResponseHeaders:
+      - name: X-Auth-Request-User
+        values:
+          - claim: user
+      - name: X-Auth-Request-Email
+        values:
+          - claim: email
+      - name: X-Auth-Request-Preferred-Username
+        values:
+          - claim: preferred_username
+      - name: X-Viz-Proxy-Secret
+        values:
+          - fromFile: /etc/hub-viz-proxy-auth/proxy-secret
+    providers:
+      # UMass / CILogon / any OIDC IdP. For GitHub use `provider: github` and drop oidcConfig.
+      - id: oidc
+        provider: oidc
+        clientID: REPLACE_WITH_CLIENT_ID
+        clientSecretFile: /etc/hub-viz-oauth2-proxy/client-secret
+        oidcConfig:
+          issuerURL: https://idp.example.edu/realms/main
+          emailClaim: email
+          audienceClaims: ["aud"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oauth2-proxy
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+          args:
+            - --alpha-config=/etc/oauth2-proxy/alpha.yaml
+            - --reverse-proxy=true
+            - --redirect-url=https://hub.viz.example.edu/oauth2/callback
+            # Restrict who can sign in. With GitHub, "*" would admit every GitHub account.
+            - --email-domain=umass.edu
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            - --cookie-expire=12h
+          ports:
+            - name: http
+              containerPort: 4180
+              protocol: TCP
+          env:
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: hub-viz-oauth2-proxy
+                  key: cookie-secret
+          volumeMounts:
+            - name: alpha-config
+              mountPath: /etc/oauth2-proxy
+              readOnly: true
+            - name: client-secret
+              mountPath: /etc/hub-viz-oauth2-proxy
+              readOnly: true
+            - name: proxy-secret
+              mountPath: /etc/hub-viz-proxy-auth
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: alpha-config
+          configMap:
+            name: oauth2-proxy-alpha
+        - name: client-secret
+          secret:
+            secretName: hub-viz-oauth2-proxy
+            items:
+              - key: client-secret
+                path: client-secret
+        - name: proxy-secret
+          secret:
+            secretName: hub-viz-proxy-auth
+            items:
+              - key: proxy-secret
+                path: proxy-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: oauth2-proxy
+  ports:
+    - name: http
+      port: 4180
+      targetPort: http
+      protocol: TCP

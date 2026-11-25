@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import polars as pl
 
-from viz.core.calendar import CalendarSpec, DEFAULT_FLUSIGHT_CALENDAR
+from viz.core.calendar import CalendarSpec, DEFAULT_FLUSIGHT_CALENDAR, target_name_implies_monthly
 from viz.core.metrics import STANDARD_23_QUANTILES
 from viz.core.peaks import PEAK_SCHEMA, empty_peak_frame, extract_peak_rows, peak_targets_for, peak_quality_warnings
 
@@ -214,6 +214,24 @@ def _derive_peaks_from_samples(
     return pl.concat([timing_df.select(cols), size_df.select(cols)], how="vertical_relaxed").cast(schema)
 
 
+def _monthly_targets(targets: Sequence[str], time_unit_for: Optional[Callable[[str], Optional[str]]]) -> List[str]:
+    """Targets whose horizons step in calendar months: configured `time_unit` first, name heuristic otherwise."""
+    out: List[str] = []
+    for t in targets:
+        unit: Optional[str] = None
+        if time_unit_for is not None:
+            try:
+                unit = time_unit_for(t)
+            except Exception:
+                unit = None
+        if unit:
+            if str(unit).strip().lower().startswith("month"):
+                out.append(t)
+        elif target_name_implies_monthly(t):
+            out.append(t)
+    return out
+
+
 def normalize_forecast_frame(
     df: pl.DataFrame,
     *,
@@ -225,10 +243,14 @@ def normalize_forecast_frame(
     is_non_negative: Optional[Callable[[str], bool]] = None,
     derive_quantiles_from_samples: bool = True,
     derive_peaks_from_samples: bool = True,
+    time_unit_for: Optional[Callable[[str], Optional[str]]] = None,
 ) -> NormalizedForecast:
     """
     Normalize a raw Hubverse forecast table (CSV or Parquet) into canonical quantiles, samples,
     PMFs, and season peaks, deriving missing horizons and optional sample summaries automatically.
+
+    `time_unit_for(target)` returns the target's configured horizon unit ('week' / 'month'); when
+    absent or empty, monthly targets are recognised by name (`mo ...`, `monthly ...`).
     """
     if df is None or df.is_empty():
         raise NormalizationError("file has no rows")
@@ -295,36 +317,85 @@ def normalize_forecast_frame(
     )
     weekly_raw = df.filter(~pl.col("target").str.to_lowercase().str.starts_with("peak "))
 
-    # Vectorized derivation of missing horizon or target_end_date on weekly rows
+    # Vectorized derivation of missing horizon or target_end_date on step-ahead rows (weekly & monthly)
     if not weekly_raw.is_empty():
+        weekly_raw = weekly_raw.with_columns([
+            pl.col("horizon").is_not_null().alias("_had_h"),
+            (pl.col("target_end_date").is_not_null() & (pl.col("target_end_date") != "")).alias("_had_ted"),
+        ])
+        step_targets = [str(t) for t in weekly_raw.get_column("target").unique().to_list() if t is not None]
+        monthly = _monthly_targets(step_targets, time_unit_for)
+        is_monthly_target = pl.col("target").is_in(monthly) if monthly else pl.lit(False)
         has_null_h = weekly_raw.get_column("horizon").null_count() > 0
-        has_null_ted = weekly_raw.get_column("target_end_date").null_count() > 0
+        has_null_ted = weekly_raw.filter(
+            pl.col("target_end_date").is_null() | (pl.col("target_end_date") == "")
+        ).height > 0
+
         if has_null_h and "target_end_date" in weekly_raw.columns:
             ref_dt = pl.col("reference_date").str.to_date("%Y-%m-%d", strict=False)
             ted_dt = pl.col("target_end_date").str.to_date("%Y-%m-%d", strict=False)
+            # Weekly horizon via exact 7-day cadence
             adj = (ted_dt - ref_dt).dt.total_days() - int(cal.horizon_offset_days)
             h_est = (adj.cast(pl.Float64) / 7.0).round(0)
-            derived_h = pl.when((adj - h_est * 7.0).abs() <= 2.0).then(h_est.cast(pl.Int32)).otherwise(None)
+            weekly_h = pl.when((adj - h_est * 7.0).abs() <= 2.0).then(h_est.cast(pl.Int32)).otherwise(None)
+            # Monthly horizon via calendar-month difference (accepting +/-4 day drift or matching month-ends)
+            ref_base = ref_dt + pl.duration(days=int(cal.horizon_offset_days))
+            m_delta = (
+                (ted_dt.dt.year().cast(pl.Int32) - ref_base.dt.year().cast(pl.Int32)) * 12
+                + (ted_dt.dt.month().cast(pl.Int32) - ref_base.dt.month().cast(pl.Int32))
+            )
+            both_eom = (
+                ((ref_base + pl.duration(days=1)).dt.day() == 1)
+                & ((ted_dt + pl.duration(days=1)).dt.day() == 1)
+            )
+            day_diff_ok = (ted_dt.dt.day().cast(pl.Int32) - ref_base.dt.day().cast(pl.Int32)).abs() <= 4
+            monthly_h = pl.when(both_eom | day_diff_ok).then(m_delta).otherwise(None)
+            derived_h = pl.when(is_monthly_target).then(monthly_h).otherwise(weekly_h)
             weekly_raw = weekly_raw.with_columns(
                 pl.when(pl.col("horizon").is_null()).then(derived_h).otherwise(pl.col("horizon")).alias("horizon")
             )
+
         if has_null_ted:
             ref_dt = pl.col("reference_date").str.to_date("%Y-%m-%d", strict=False)
-            derived_ted = (
+            weekly_ted = (
                 ref_dt + pl.duration(days=pl.col("horizon").cast(pl.Int64) * 7 + int(cal.horizon_offset_days))
             ).dt.strftime("%Y-%m-%d")
+            ref_base = ref_dt + pl.duration(days=int(cal.horizon_offset_days))
+            ym0 = (
+                ref_base.dt.year().cast(pl.Int32) * 12
+                + (ref_base.dt.month().cast(pl.Int32) - 1)
+                + pl.col("horizon").cast(pl.Int32)
+            )
+            tgt_y = (ym0 // 12)
+            tgt_m = (ym0 % 12) + 1
+            last_d = pl.date(tgt_y, tgt_m, 1).dt.month_end().dt.day().cast(pl.Int32)
+            tgt_d = pl.min_horizontal(ref_base.dt.day().cast(pl.Int32), last_d)
+            monthly_ted = pl.date(tgt_y, tgt_m, tgt_d).dt.strftime("%Y-%m-%d")
+            derived_ted = pl.when(is_monthly_target).then(monthly_ted).otherwise(weekly_ted)
             weekly_raw = weekly_raw.with_columns(
                 pl.when(pl.col("target_end_date").is_null() | (pl.col("target_end_date") == ""))
                 .then(derived_ted)
                 .otherwise(pl.col("target_end_date"))
                 .alias("target_end_date")
             )
-        # Drop non-step-ahead scalar rows lacking both derivable horizon and target_end_date cleanly
-        weekly_raw = weekly_raw.filter(
+
+        resolved = (
             pl.col("horizon").is_not_null()
             & pl.col("target_end_date").is_not_null()
             & (pl.col("target_end_date") != "")
         )
+        n_unresolved = weekly_raw.filter((pl.col("_had_h") | pl.col("_had_ted")) & ~resolved).height
+
+        # Drop unalignable step-ahead rows (off-cadence dates) plus pure scalar rows lacking both fields
+        weekly_raw = weekly_raw.filter(resolved).drop(["_had_h", "_had_ted"])
+        if n_unresolved:
+            if weekly_raw.is_empty() and explicit_peaks.is_empty():
+                raise NormalizationError(
+                    f"could not derive horizon/target_end_date alignment for {n_unresolved} step-ahead row(s)"
+                )
+            warnings.append(
+                f"{fname}: dropped {n_unresolved} step-ahead row(s) whose horizon/target_end_date could not be aligned"
+            )
 
     task_key_cols = ["reference_date", "target", "location", "horizon", "target_end_date"] + extra_cols
     select_base = ["reference_date", "target", "horizon", "location", "target_end_date"] + extra_cols + ["output_type", "output_type_id", "value"]

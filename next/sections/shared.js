@@ -3,7 +3,7 @@
  * cancellation, the score color ramps, HHS regions, canvas sizing, and on-screen / DPR watching. */
 export { fitLabels } from "../lib/labels.js";
 import { h, on, cssColor, storage } from "../lib/dom.js";
-import { apiUrl, registerCacheClear } from "../lib/api.js";
+import { apiUrl, hubFetch, registerCacheClear } from "../lib/api.js";
 import { openMenu } from "../ui/floating.js";
 
 /* ---------------------------------------------------------------- styles */
@@ -124,7 +124,7 @@ export function getJson(url, { slot } = {}) {
   if (cache.has(reqUrl)) { const v = cache.get(reqUrl); cache.delete(reqUrl); cache.set(reqUrl, v); return Promise.resolve(v); }
   const ctl = new AbortController();
   if (slot) slot._ctl = ctl;
-  return fetch(reqUrl, { signal: ctl.signal }).then(async (r) => {
+  return hubFetch(reqUrl, { signal: ctl.signal }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (!r.ok || j?.error) throw new Error(j?.error || `HTTP ${r.status}`);
     cache.set(reqUrl, j);

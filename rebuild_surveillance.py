@@ -30,6 +30,7 @@ import os
 import shutil
 import sys
 import urllib.error
+import time
 import urllib.request
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -46,6 +47,7 @@ APP_DIR = ensure_viz_package()
 
 from viz.core.cache_manager import ParquetCacheManager
 from viz.core.data_loader import date_to_season_and_week
+from viz.core.geo import US_STATES_REF
 from viz.core.paths import detect_enclosing_hub, get_data_dir, is_hub_dir
 from viz.core.workspace import WorkspaceRegistry, resolve_hub_storage
 
@@ -89,20 +91,61 @@ def _resolve_hub_dir(base_dir: Optional[Path] = None) -> Path:
     return APP_DIR
 
 
-def get_viz_paths(base_dir: Optional[Path] = None) -> Dict[str, Path]:
+def _github_headers() -> Dict[str, str]:
+    hdrs = {"User-Agent": "FluSight-Sandbox-Viz/2.0"}
+    tok = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if tok:
+        hdrs["Authorization"] = f"Bearer {tok}"
+    return hdrs
+
+
+def _atomic_write_csv(df: pl.DataFrame, dest_path: Path) -> None:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest_path.with_name(f".{dest_path.name}.tmp.{os.getpid()}")
+    try:
+        df.write_csv(tmp)
+        os.replace(tmp, dest_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+def _atomic_write_parquet(df: pl.DataFrame, dest_path: Path) -> None:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest_path.with_name(f".{dest_path.name}.tmp.{os.getpid()}")
+    try:
+        df.write_parquet(tmp, compression="zstd")
+        os.replace(tmp, dest_path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+def get_viz_paths(
+    base_dir: Optional[Path] = None,
+    *,
+    surveillance_dir: Optional[Path] = None,
+    cache_dir: Optional[Path] = None,
+) -> Dict[str, Path]:
     """Resolve repository and self-contained viz paths."""
     viz_dir = APP_DIR
     repo_root = _resolve_hub_dir(base_dir)
-    surveillance_dir = viz_dir / "data" / "surveillance"
+    resolved_surv = (
+        Path(surveillance_dir).expanduser().resolve()
+        if surveillance_dir is not None
+        else (viz_dir / "data" / "surveillance")
+    )
     seed_dir = viz_dir / "data" / "seed"
     target_data_dir = repo_root / "target-data"
 
-    if repo_root == viz_dir:
-        cache_dir = viz_dir / ".cache"
+    if cache_dir is not None:
+        resolved_cache = Path(cache_dir).expanduser().resolve()
+    elif repo_root == viz_dir:
+        resolved_cache = viz_dir / ".cache"
     else:
         data_dir = get_data_dir()
         rec = WorkspaceRegistry(data_dir).find_by_path(repo_root)
-        cache_dir = resolve_hub_storage(
+        resolved_cache = resolve_hub_storage(
             repo_root,
             data_dir,
             hub_id=rec.id if rec is not None else None,
@@ -112,22 +155,20 @@ def get_viz_paths(base_dir: Optional[Path] = None) -> Dict[str, Path]:
     return {
         "repo_root": repo_root,
         "viz_dir": viz_dir,
-        "surveillance_dir": surveillance_dir,
+        "surveillance_dir": resolved_surv,
         "seed_dir": seed_dir,
         "target_data_dir": target_data_dir,
-        "cache_dir": cache_dir,
+        "cache_dir": resolved_cache,
     }
 
 
 def download_file(url: str, dest_path: Path, timeout_sec: int = 30) -> bool:
     """Download a remote file atomically to destination path with timeout."""
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = dest_path.with_suffix(".tmp.download")
+    tmp_path = dest_path.with_name(f".{dest_path.name}.tmp.download")
 
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "FluSight-Sandbox-Viz/2.0"},
-    )
+    hdrs = _github_headers() if "github" in url.lower() else {"User-Agent": "FluSight-Sandbox-Viz/2.0"}
+    req = urllib.request.Request(url, headers=hdrs)
     try:
         logger.info("Downloading official surveillance data from %s...", url)
         with urllib.request.urlopen(req, timeout=timeout_sec) as response:
@@ -278,7 +319,7 @@ def fetch_and_update_flusurvnet(dest_path: Path, timeout_sec: int = 25) -> Dict[
             merged = pl.concat([old_df, df_new]).unique(subset=["location", "wk_end_date"], keep="last").sort(["location", "wk_end_date"])
         else:
             merged = df_new.sort(["location", "wk_end_date"])
-        merged.write_csv(dest_path)
+        _atomic_write_csv(merged, dest_path)
         logger.info("FluSurv-NET updated: %d total records (latest: %s)", len(merged), merged["wk_end_date"].max())
         return {"updated": True, "total_rows": len(merged), "max_date": merged["wk_end_date"].max()}
 
@@ -307,7 +348,11 @@ def fetch_and_update_ilinet(dest_path: Path, locations_csv: Path, timeout_sec: i
         except Exception as exc:
             logger.warning("Could not read existing ilinet.csv: %s", exc)
 
-    fips_map = {"nat": ("national", "US")}
+    fips_map: Dict[str, Tuple[str, str]] = {"nat": ("national", "US")}
+    for fips_code, meta in US_STATES_REF.items():
+        abbr = str(meta.get("abbr") or "").strip().lower()
+        if fips_code != "US" and abbr:
+            fips_map[abbr] = ("state", str(fips_code))
     if locations_csv.exists():
         loc_df = pl.read_csv(locations_csv, schema_overrides={"location": pl.String})
         for row in loc_df.iter_rows(named=True):
@@ -364,7 +409,7 @@ def fetch_and_update_ilinet(dest_path: Path, locations_csv: Path, timeout_sec: i
             merged = pl.concat([old_df, df_new]).unique(subset=["location", "wk_end_date"], keep="last").sort(["location", "wk_end_date"])
         else:
             merged = df_new.sort(["location", "wk_end_date"])
-        merged.write_csv(dest_path)
+        _atomic_write_csv(merged, dest_path)
         logger.info("ILINet updated: %d total records (latest: %s)", len(merged), merged["wk_end_date"].max())
         return {"updated": True, "total_rows": len(merged), "max_date": merged["wk_end_date"].max()}
 
@@ -461,7 +506,8 @@ def fetch_and_update_initial_admissions(
     else:
         # 2. Fetch list from upstream GitHub repository
         api_url = "https://api.github.com/repos/cdcepi/FluSight-forecast-hub/contents/auxiliary-data/target-data-archive"
-        req = urllib.request.Request(api_url, headers={"User-Agent": "FluSight-Sandbox-Viz/2.0"})
+        gh_hdrs = _github_headers()
+        req = urllib.request.Request(api_url, headers=gh_hdrs)
         adm_files = []
         try:
             with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
@@ -472,7 +518,7 @@ def fetch_and_update_initial_admissions(
 
         def _fetch_one(fname: str) -> Optional[pl.DataFrame]:
             u = f"https://raw.githubusercontent.com/cdcepi/FluSight-forecast-hub/main/auxiliary-data/target-data-archive/{fname}"
-            r_req = urllib.request.Request(u, headers={"User-Agent": "FluSight-Sandbox-Viz/2.0"})
+            r_req = urllib.request.Request(u, headers=gh_hdrs)
             m = re.search(r"\d{4}-\d{2}-\d{2}", fname)
             snap_d = m.group() if m else ""
             try:
@@ -503,7 +549,7 @@ def fetch_and_update_initial_admissions(
                 .rename({"snap_date": "initial_report_date"})
                 .sort(["location", "date"])
             )
-            first_seen.write_csv(dest_path)
+            _atomic_write_csv(first_seen, dest_path)
             val = validate_admissions_csv(dest_path)
             logger.info("Successfully compiled initial admissions: %d records to %s", len(first_seen), dest_path)
             return {"updated": True, **val}
@@ -544,7 +590,7 @@ def fetch_and_update_as_of_admissions(
     try:
         req = urllib.request.Request(
             REICHLAB_DASHBOARD_TAR_URL,
-            headers={"User-Agent": "FluSight-Sandbox-Viz/2.0"},
+            headers=_github_headers(),
         )
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             tar_bytes = resp.read()
@@ -597,7 +643,7 @@ def fetch_and_update_as_of_admissions(
                     )
                     .sort(["target", "location", "as_of", "target_end_date"])
                 )
-                formatted.write_parquet(dest_path, compression="zstd")
+                _atomic_write_parquet(formatted, dest_path)
                 logger.info("Successfully compiled %d authoritative as-of records to %s", len(formatted), dest_path)
                 return {"updated": True, "valid": True, "total_rows": len(formatted)}
         except Exception as exc:
@@ -628,12 +674,22 @@ def rebuild_surveillance_data(
     base_dir: Optional[Path] = None,
     admissions_url: str = DEFAULT_CDC_ADMISSIONS_URL,
     force: bool = False,
+    *,
+    surveillance_dir: Optional[Path] = None,
+    cache_dir: Optional[Path] = None,
+    skip_cache_warmup: bool = False,
+    refresh_admissions_after_hours: Optional[float] = None,
+    refresh_as_of_after_hours: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Main programmatic entrypoint:
     Rebuilds self-contained surveillance datasets and refreshes Parquet caches.
+
+    `refresh_admissions_after_hours` / `refresh_as_of_after_hours` let long-running callers (the
+    web scheduler) re-download those files once they are older than the given age without a full
+    `force` rebuild. A refreshed admissions file only replaces the current one if it validates.
     """
-    paths = get_viz_paths(base_dir)
+    paths = get_viz_paths(base_dir, surveillance_dir=surveillance_dir, cache_dir=cache_dir)
     surv_dir = paths["surveillance_dir"]
     surv_dir.mkdir(parents=True, exist_ok=True)
     seed_surveillance_history(paths)
@@ -646,7 +702,7 @@ def rebuild_surveillance_data(
     downloaded = False
 
     # Clear target cache if force refresh requested
-    if force:
+    if force and not skip_cache_warmup:
         try:
             ParquetCacheManager(
                 paths["repo_root"],
@@ -657,9 +713,27 @@ def rebuild_surveillance_data(
         except Exception:
             pass
 
+    def _older_than(path: Path, hours: Optional[float]) -> bool:
+        if hours is None or not path.exists():
+            return False
+        try:
+            return (time.time() - path.stat().st_mtime) >= float(hours) * 3600.0
+        except OSError:
+            return False
+
     # 1. Download or verify official admissions ground truth
     if force or not dest_adm.exists():
         downloaded = download_file(admissions_url, dest_adm)
+    elif _older_than(dest_adm, refresh_admissions_after_hours):
+        candidate = dest_adm.with_name(f".{dest_adm.name}.candidate")
+        try:
+            if download_file(admissions_url, candidate) and validate_admissions_csv(candidate).get("valid"):
+                os.replace(candidate, dest_adm)
+                downloaded = True
+            else:
+                logger.warning("Refreshed admissions CSV failed validation; keeping the previous file")
+        finally:
+            candidate.unlink(missing_ok=True)
 
     if not dest_adm.exists() or dest_adm.stat().st_size == 0:
         logger.info("Admissions CSV not present after download attempt. Falling back to local oracle synthesis...")
@@ -671,24 +745,30 @@ def rebuild_surveillance_data(
 
     # 2. Update initial unrevised admissions archive and as-of vintages
     init_res = fetch_and_update_initial_admissions(dest_init, paths["repo_root"])
-    as_of_res = fetch_and_update_as_of_admissions(dest_as_of, paths["repo_root"], force=force)
+    as_of_res = fetch_and_update_as_of_admissions(
+        dest_as_of,
+        paths["repo_root"],
+        force=force or _older_than(dest_as_of, refresh_as_of_after_hours),
+    )
 
     # 3. Update ILINet and FluSurv-NET from Delphi Epidata API
     ili_res = fetch_and_update_ilinet(dest_ili, paths["repo_root"] / "auxiliary-data" / "locations.csv")
     fsn_res = fetch_and_update_flusurvnet(dest_fsn)
 
     # 4. Refresh Parquet cache atomically via ParquetCacheManager
-    cache_mgr = ParquetCacheManager(
-        paths["repo_root"],
-        cache_dir=paths["cache_dir"],
-        surveillance_dir=paths["surveillance_dir"],
-        seed_dir=paths["seed_dir"],
-    )
-    cached_adm = cache_mgr.get_admissions_parquet()
-    cached_init = cache_mgr.get_initial_admissions_parquet()
-    cached_as_of = cache_mgr.get_as_of_admissions_parquet()
-    cached_ili = cache_mgr.get_ilinet_parquet()
-    cached_fsn = cache_mgr.get_flusurvnet_parquet()
+    cached_adm = cached_init = cached_ili = cached_fsn = None
+    if not skip_cache_warmup:
+        cache_mgr = ParquetCacheManager(
+            paths["repo_root"],
+            cache_dir=paths["cache_dir"],
+            surveillance_dir=paths["surveillance_dir"],
+            seed_dir=paths["seed_dir"],
+        )
+        cached_adm = cache_mgr.get_admissions_parquet()
+        cached_init = cache_mgr.get_initial_admissions_parquet()
+        _ = cache_mgr.get_as_of_admissions_parquet()
+        cached_ili = cache_mgr.get_ilinet_parquet()
+        cached_fsn = cache_mgr.get_flusurvnet_parquet()
 
     report = {
         "status": "success",

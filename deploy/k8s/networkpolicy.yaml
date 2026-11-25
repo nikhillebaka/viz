@@ -1,0 +1,45 @@
+# Only the cluster's ingress controller may open connections to hub-viz on port 8501.
+#
+# Defense in depth: identity headers are already ignored unless they carry VIZ_PROXY_SECRET, which only
+# oauth2-proxy's authenticated responses contain. This policy additionally keeps other pods in the cluster
+# from reaching the app directly. Egress is not restricted (hub sync, briefing feeds, and DNS need it), and
+# kubelet liveness/readiness probes are not affected by NetworkPolicy on Calico or Cilium.
+#
+# BEFORE APPLYING, confirm how your ingress controller runs:
+#   kubectl get pods -A -l app.kubernetes.io/name=ingress-nginx -o wide
+#   kubectl get pods -A | grep -i ingress
+# - Upstream ingress-nginx chart: namespace `ingress-nginx` (the default below).
+# - RKE2 / Rancher: `rke2-ingress-nginx-controller` in `kube-system`; use the kube-system selector instead.
+# - Controller with `hostNetwork: true` (common on RKE2): its traffic comes from node IPs, which no
+#   namespaceSelector matches. Use the ipBlock rule with your node CIDR, or the policy will block all traffic.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hub-viz-ingress-only
+  labels:
+    app.kubernetes.io/name: hub-viz
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hub-viz
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Upstream ingress-nginx:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        # RKE2 / Rancher (controller pods in kube-system):
+        # - namespaceSelector:
+        #     matchLabels:
+        #       kubernetes.io/metadata.name: kube-system
+        #   podSelector:
+        #     matchLabels:
+        #       app.kubernetes.io/name: rke2-ingress-nginx
+        # hostNetwork controllers (replace with your node CIDR):
+        # - ipBlock:
+        #     cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8501

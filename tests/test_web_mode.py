@@ -397,14 +397,25 @@ class TestWebModeSecurityAndWorkspaces(unittest.TestCase):
             resolve_request_user({"X-Auth-Request-Email": "attacker@umass.edu", "X-Auth-Request-User": "attacker"}, untrusted_cfg)
         )
 
-        # 2. Launch with VIZ_TRUST_PROXY_AUTH=1
+        # 2. Launch with VIZ_TRUST_PROXY_AUTH=1 and VIZ_PROXY_SECRET (fails closed without secret)
+        proxy_secret = "test-proxy-secret"
         mgr, httpd, port = self._start_web_server({
             "VIZ_TRUST_PROXY_AUTH": "1",
+            "VIZ_PROXY_SECRET": proxy_secret,
             "VIZ_SSO_LOGIN_URL": "/oauth2/start",
             "VIZ_USER_MAX_HUBS": "2",
         })
         try:
             payload = _pack_vzb1(_sample_hub_entries(), compress=True)
+            # Missing or wrong proxy secret fails closed even when X-Auth-Request-Email is set
+            for bad_hdr in (
+                {"X-Auth-Request-Email": "alice@umass.edu"},
+                {"X-Auth-Request-Email": "alice@umass.edu", "X-Viz-Proxy-Secret": "wrong-secret"},
+            ):
+                st_bad, _, raw_bad = self._http("GET", port, "/api/web/status", headers=bad_hdr)
+                self.assertEqual(st_bad, 200)
+                self.assertFalse(json.loads(raw_bad)["auth"]["authenticated"])
+
             # Anonymous caller trying tier=persistent gets 401
             st_401, _, _ = self._http(
                 "POST",
@@ -412,6 +423,7 @@ class TestWebModeSecurityAndWorkspaces(unittest.TestCase):
                 "/api/web/upload",
                 body=payload,
                 headers={
+                    "X-Auth-Request-Email": "alice@umass.edu",
                     "Content-Type": "application/octet-stream",
                     "Content-Encoding": "gzip",
                     "X-Viz-Upload": "1",
@@ -420,8 +432,12 @@ class TestWebModeSecurityAndWorkspaces(unittest.TestCase):
             )
             self.assertEqual(st_401, 401)
 
-            # Authenticated User A uploads to persistent tier
-            hdr_a = {"X-Auth-Request-Email": "alice@umass.edu", "X-Auth-Request-Preferred-Username": "Alice"}
+            # Authenticated User A (with valid proxy secret) uploads to persistent tier
+            hdr_a = {
+                "X-Auth-Request-Email": "alice@umass.edu",
+                "X-Auth-Request-Preferred-Username": "Alice",
+                "X-Viz-Proxy-Secret": proxy_secret,
+            }
             st_a, _, raw_a = self._http(
                 "POST",
                 port,
@@ -443,7 +459,7 @@ class TestWebModeSecurityAndWorkspaces(unittest.TestCase):
             self.assertEqual(hub_a["state"], "hot")
 
             # Authenticated User B cannot access User A's persistent hub
-            hdr_b = {"X-Auth-Request-Email": "bob@github.com"}
+            hdr_b = {"X-Auth-Request-Email": "bob@github.com", "X-Viz-Proxy-Secret": proxy_secret}
             st_b, _, _ = self._http("GET", port, f"/api/next/manifest?workspace={hid_a}", headers=hdr_b)
             self.assertEqual(st_b, 404)
 

@@ -19,14 +19,19 @@ Nothing here touches the network; it is safe to use from request handlers and fr
 
 from __future__ import annotations
 
+import copy
+from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
 import threading
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from viz.remote.hubs import BUILTIN_HUBS, HubSpec
+
+logger = logging.getLogger("viz.remote.store")
 
 _BUILTIN_DEFAULT_TARGETS: Dict[str, Set[str]] = {
     "flusight": {"wk inc flu hosp", "wk flu hosp rate change", "wk inc flu prop ed visits"},
@@ -49,23 +54,80 @@ TRUTH_FILES = {
     "time_series": "time_series.parquet",
 }
 
-_write_lock = threading.Lock()
+# Re-entrant: registry writers hold this lock while `_registry()` may quarantine a corrupt file,
+# which takes it again. A plain Lock deadlocks every later write (and every manifest save).
+_write_lock = threading.RLock()
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort fsync of a directory so a completed rename survives power loss (POSIX only)."""
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(str(directory), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _atomic_write_json(path: Path, data: Any):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=1, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(path.parent)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
-def _read_json(path: Path, default: Any) -> Any:
+def _quarantine_corrupt_json(path: Path, reason: str) -> None:
+    if not path.is_file():
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = path.with_name(f"{path.stem}.corrupt.{stamp}{path.suffix}")
+    n = 1
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"{path.stem}.corrupt.{stamp}.{n}{path.suffix}")
+    try:
+        os.replace(path, backup)
+        logger.error("Corrupt JSON in %s (%s); quarantined backup at %s", path, reason, backup)
+    except OSError as exc:
+        logger.error("Corrupt JSON in %s (%s); backup quarantine failed: %s", path, reason, exc)
+
+
+def _read_json(path: Path, default: Any, *, quarantine_corrupt: bool = False) -> Any:
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
+            data = json.load(f)
+    except FileNotFoundError:
+        return copy.deepcopy(default)
+    except (ValueError, UnicodeDecodeError) as exc:
+        if quarantine_corrupt:
+            with _write_lock:
+                _quarantine_corrupt_json(path, str(exc))
+        else:
+            logger.warning("Failed to parse JSON at %s: %s", path, exc)
+        return copy.deepcopy(default)
+    except OSError as exc:
+        logger.warning("Could not read JSON at %s: %s", path, exc)
+        return copy.deepcopy(default)
+    if default is not None and type(data) is not type(default):
+        if quarantine_corrupt:
+            with _write_lock:
+                _quarantine_corrupt_json(path, f"expected {type(default).__name__}, got {type(data).__name__}")
+        return copy.deepcopy(default)
+    return data
 
 
 class RemoteStore:
@@ -74,18 +136,21 @@ class RemoteStore:
     def __init__(self, cache_dir: Path, root: Optional[Path] = None):
         self.root = Path(root).resolve() if root is not None else (Path(cache_dir) / "remote")
         self.registry_path = self.root / "hubs.json"
+        self._cache_lock = threading.RLock()
         self._active_cache: Optional[tuple] = None
         self._tasks_meta_cache: Dict[str, tuple] = {}
-        self._manifest_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._manifest_cache: Dict[str, Tuple[Tuple[int, int], Dict[str, Any]]] = {}
 
     # ---- registry -------------------------------------------------------------------------------------
 
     def _registry(self) -> Dict[str, Any]:
-        reg = _read_json(self.registry_path, {})
+        reg = _read_json(self.registry_path, {}, quarantine_corrupt=True)
         if not isinstance(reg, dict):
             reg = {}
-        reg.setdefault("custom_hubs", [])
-        reg.setdefault("enabled", {})
+        if not isinstance(reg.get("custom_hubs"), list):
+            reg["custom_hubs"] = []
+        if not isinstance(reg.get("enabled"), dict):
+            reg["enabled"] = {}
         if not isinstance(reg.get("settings"), dict):
             reg["settings"] = {}
         return reg
@@ -149,6 +214,8 @@ class RemoteStore:
             reg = self._registry()
             reg["custom_hubs"] = [h for h in reg["custom_hubs"] if h.get("id") != spec.id] + [spec.to_dict()]
             _atomic_write_json(self.registry_path, reg)
+            with self._cache_lock:
+                self._active_cache = None
 
     def is_enabled(self, hub_id: str) -> bool:
         """A hub is shown when it has synced data, unless the user switched it off in the brand menu."""
@@ -159,11 +226,13 @@ class RemoteStore:
             reg = self._registry()
             reg["enabled"][hub_id] = bool(enabled)
             _atomic_write_json(self.registry_path, reg)
+            with self._cache_lock:
+                self._active_cache = None
+                self._tasks_meta_cache.pop(hub_id, None)
 
     def remove_hub(self, hub_id: str):
         """Delete a hub's copied data (and its registration if it was user-added)."""
         with _write_lock:
-            self._manifest_cache.pop(hub_id, None)
             d = self.hub_dir(hub_id)
             if d.exists():
                 shutil.rmtree(d, ignore_errors=True)
@@ -171,6 +240,10 @@ class RemoteStore:
             reg["custom_hubs"] = [h for h in reg["custom_hubs"] if h.get("id") != hub_id]
             reg["enabled"].pop(hub_id, None)
             _atomic_write_json(self.registry_path, reg)
+            with self._cache_lock:
+                self._manifest_cache.pop(hub_id, None)
+                self._active_cache = None
+                self._tasks_meta_cache.pop(hub_id, None)
 
     # ---- per-hub paths ----------------------------------------------------------------------------------
 
@@ -202,7 +275,11 @@ class RemoteStore:
         return self.hub_dir(hub_id) / "target-data" / TRUTH_FILES[kind]
 
     def has_data(self, hub_id: str) -> bool:
-        return self.manifest_path(hub_id).exists()
+        p = self.manifest_path(hub_id)
+        try:
+            return p.is_file() and p.stat().st_size >= 2
+        except OSError:
+            return False
 
     def synced_hub_ids(self) -> List[str]:
         return [s.id for s in self.hub_specs() if self.has_data(s.id)]
@@ -212,12 +289,14 @@ class RemoteStore:
         if not self.root.exists():
             return []
         stamp = self.state_mtime()
-        cached = self._active_cache
-        if cached is not None and cached[0] == stamp:
-            return cached[1]
+        with self._cache_lock:
+            cached = self._active_cache
+            if cached is not None and cached[0] == stamp:
+                return list(cached[1])
         active = [h for h in self.synced_hub_ids() if self.is_enabled(h)]
-        self._active_cache = (stamp, active)
-        return active
+        with self._cache_lock:
+            self._active_cache = (stamp, active)
+        return list(active)
 
     def active_truth_files(self, kind: str, hub_ids: Optional[List[str]] = None) -> List[Path]:
         ids = self.active_hub_ids() if hub_ids is None else hub_ids
@@ -225,9 +304,10 @@ class RemoteStore:
 
     def _tasks_summary(self, hub_id: str) -> tuple[Set[str], Set[str]]:
         stamp = self.state_mtime()
-        hit = self._tasks_meta_cache.get(hub_id)
-        if hit is not None and hit[0] == stamp:
-            return hit[1], hit[2]
+        with self._cache_lock:
+            hit = self._tasks_meta_cache.get(hub_id)
+            if hit is not None and hit[0] == stamp:
+                return set(hit[1]), set(hit[2])
         targets: Set[str] = set()
         locations: Set[str] = set()
         tasks_path = self.hub_dir(hub_id) / "hub-config" / "tasks.json"
@@ -256,7 +336,8 @@ class RemoteStore:
                     targets.update(str(t).strip() for t in (f.get("targets") or []) if str(t).strip())
         if not targets and hub_id in _BUILTIN_DEFAULT_TARGETS:
             targets = set(_BUILTIN_DEFAULT_TARGETS[hub_id])
-        self._tasks_meta_cache[hub_id] = (stamp, targets, locations)
+        with self._cache_lock:
+            self._tasks_meta_cache[hub_id] = (stamp, set(targets), set(locations))
         return targets, locations
 
     def hub_targets(self, hub_id: str) -> Set[str]:
@@ -293,36 +374,67 @@ class RemoteStore:
 
     # ---- manifest ---------------------------------------------------------------------------------------
 
-    def load_manifest(self, hub_id: str) -> Dict[str, Any]:
+    def load_manifest(self, hub_id: str, *, mutable: bool = False) -> Dict[str, Any]:
+        """
+        Return the hub's manifest.
+
+        By default this is a shared, cached snapshot that callers must treat as READ-ONLY (it is
+        replaced wholesale on save, never mutated in place). Pass `mutable=True` to get a private
+        deep copy for code that edits the manifest before `save_manifest` (sync, check).
+        """
         p = self.manifest_path(hub_id)
-        mtime = -1.0
+        sig: Optional[Tuple[int, int]] = None
         try:
-            if p.exists():
-                mtime = p.stat().st_mtime
-                cached = self._manifest_cache.get(hub_id)
-                if cached is not None and cached[0] == mtime:
-                    return cached[1]
+            st = p.stat()
+            sig = (st.st_mtime_ns, st.st_size)
         except OSError:
-            pass
-        m = _read_json(p, {})
+            sig = None
+
+        if sig is not None:
+            with self._cache_lock:
+                cached = self._manifest_cache.get(hub_id)
+            if cached is not None and cached[0] == sig:
+                return copy.deepcopy(cached[1]) if mutable else cached[1]
+
+        m = _read_json(p, {}, quarantine_corrupt=True)
         if not isinstance(m, dict):
             m = {}
         m.setdefault("files", {})
         m.setdefault("metadata", {})
         m.setdefault("truth", {})
         m.setdefault("seasons", [])
-        if mtime >= 0:
-            self._manifest_cache[hub_id] = (mtime, m)
-        return m
+        if sig is not None and p.is_file():
+            with self._cache_lock:
+                self._manifest_cache[hub_id] = (sig, m)
+        return copy.deepcopy(m) if mutable else m
 
     def save_manifest(self, hub_id: str, manifest: Dict[str, Any]):
-        self._manifest_cache.pop(hub_id, None)
-        _atomic_write_json(self.manifest_path(hub_id), manifest)
+        p = self.manifest_path(hub_id)
+        snapshot = copy.deepcopy(manifest)
+        with _write_lock:
+            _atomic_write_json(p, snapshot)
+            try:
+                st = p.stat()
+                sig = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                sig = None
+            with self._cache_lock:
+                if sig is not None:
+                    self._manifest_cache[hub_id] = (sig, snapshot)
+                else:
+                    self._manifest_cache.pop(hub_id, None)
+                self._active_cache = None
+                self._tasks_meta_cache.pop(hub_id, None)
 
     def state_mtime(self) -> float:
-        """Combined modification stamp of the registry and all manifests, for inventory cache invalidation."""
+        """Combined modification stamp of the registry, manifests, tasks, and locations."""
         stamp = 0.0
-        for p in [self.registry_path] + [self.manifest_path(s.id) for s in self.hub_specs()]:
+        paths: List[Path] = [self.registry_path]
+        for s in self.hub_specs():
+            paths.append(self.manifest_path(s.id))
+            paths.append(self.hub_dir(s.id) / "hub-config" / "tasks.json")
+            paths.append(self.locations_path(s.id))
+        for p in paths:
             try:
                 stamp = max(stamp, p.stat().st_mtime)
             except OSError:

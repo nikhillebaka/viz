@@ -221,13 +221,22 @@ def hub_id_from_bucket(bucket: str, taken: Iterable[str]) -> str:
 
 def _task_values(tasks: Dict[str, Any], task_id: str) -> Set[str]:
     values: Set[str] = set()
-    for rnd in tasks.get("rounds", []) or []:
+    rounds = tasks.get("rounds") if isinstance(tasks, dict) else None
+    if not isinstance(rounds, list):
+        return values
+    for rnd in rounds:
         if not isinstance(rnd, dict):
             continue
-        for mt in rnd.get("model_tasks", []) or []:
+        mts = rnd.get("model_tasks")
+        if not isinstance(mts, list):
+            continue
+        for mt in mts:
             if not isinstance(mt, dict):
                 continue
-            spec = (mt.get("task_ids") or {}).get(task_id) or {}
+            tids = mt.get("task_ids")
+            if not isinstance(tids, dict):
+                continue
+            spec = tids.get(task_id)
             if not isinstance(spec, dict):
                 continue
             for k in ("required", "optional"):
@@ -241,13 +250,19 @@ def _task_values(tasks: Dict[str, Any], task_id: str) -> Set[str]:
 
 def _output_types(tasks: Dict[str, Any]) -> Set[str]:
     ots: Set[str] = set()
-    for rnd in tasks.get("rounds", []) or []:
+    rounds = tasks.get("rounds") if isinstance(tasks, dict) else None
+    if not isinstance(rounds, list):
+        return ots
+    for rnd in rounds:
         if not isinstance(rnd, dict):
             continue
-        for mt in rnd.get("model_tasks", []) or []:
+        mts = rnd.get("model_tasks")
+        if not isinstance(mts, list):
+            continue
+        for mt in mts:
             if not isinstance(mt, dict):
                 continue
-            ot_map = mt.get("output_type") or {}
+            ot_map = mt.get("output_type")
             if isinstance(ot_map, dict):
                 ots.update(str(k).strip().lower() for k in ot_map.keys() if k)
     return ots

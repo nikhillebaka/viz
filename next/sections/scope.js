@@ -20,6 +20,16 @@ export const PHASES = Object.freeze(["pre", "peak", "post"]);
 export const HORIZONS = Object.freeze([0, 1, 2, 3]);
 const DAY = 864e5, WEEK = 7 * DAY;
 
+/** Whether the manifest includes the US national aggregate location (returns true for minimal test mocks lacking location metadata). */
+export function hasUsLocation(manifest) {
+  if (!manifest) return true;
+  const hasMap = manifest.locationById && typeof manifest.locationById.has === "function";
+  const hasArr = Array.isArray(manifest.locations);
+  if (!hasMap && !hasArr) return true;
+  if (hasMap && manifest.locationById.has("US")) return true;
+  return hasArr ? manifest.locations.some((loc) => (loc?.id ?? loc) === "US") : false;
+}
+
 /**
  * Available non-negative weekly horizons for `targetId` from manifest metadata (fallback `[0, 1, 2, 3]`).
  * @param {object} manifest
@@ -104,8 +114,8 @@ export function scopeOf(state, manifest, availableHorizons = null) {
     : [];
   const hs = hasExplicitH ? hsRaw.filter((h) => availSet.has(h)) : hsRaw;
   const sameAsAvail = hs.length === availH.length && hs.every((h, i) => h === availH[i]);
-  const place = ["US", "current"].includes(sc.place) ? sc.place : "all";
-  const defaultLoc = manifest.geo?.default_location ?? manifest.default_location ?? "US";
+  const place = sc.place === "current" ? "current" : (sc.place === "US" && hasUsLocation(manifest)) ? "US" : "all";
+  const defaultLoc = manifest.geo?.default_location ?? manifest.default_location ?? (hasUsLocation(manifest) ? "US" : manifest.locations?.[0]?.id ?? "");
   const location = place === "US" ? "US" : place === "current" ? state.location || defaultLoc : "states";
   const defaultBaseline = typeof manifest.baselineFor === "function"
     ? manifest.baselineFor(target, seasons.length === 1 ? seasons[0] : null)

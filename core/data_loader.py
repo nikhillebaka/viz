@@ -223,6 +223,7 @@ class SandboxDataLoader:
             calendar_provider=self.get_calendar,
             geo_provider=self.get_geo_graph,
             is_non_negative_provider=self.config.is_target_non_negative,
+            time_unit_provider=self.config.get_target_time_unit,
             remote_store=remote_store,
         )
         self.remote_store = self.cache_mgr.remote_store
@@ -245,11 +246,17 @@ class SandboxDataLoader:
         self._tasks_mtime: float = -1.0
         self._hub_seasons_sig: Optional[Tuple[Any, ...]] = None
         self._model_details_cache: Dict[str, Dict[str, Any]] = {}
-        self._model_metadata_cache: Dict[str, Tuple[Optional[Path], float, Dict[str, Any]]] = {}
+        # raw_id -> (metadata path, (mtime_ns, size), parsed dict or None when the file is oversized)
+        self._model_metadata_cache: Dict[str, Tuple[Path, Tuple[int, int], Optional[Dict[str, Any]]]] = {}
         self._models_cache: Optional[Dict[str, Dict[str, Any]]] = None
         self._models_cache_mtime: float = -1.0
         self._models_dir_sig: Optional[Tuple[Any, ...]] = None
+        # Guards only reads/swaps of the inventory refs; rebuilds run outside it under `_models_build_lock`
         self._models_cache_lock = threading.Lock()
+        self._models_build_lock = threading.Lock()
+        self._models_gen = 0
+        # (monotonic stamp, dir probe, dir signature, max forecast mtime) of the last full walk
+        self._models_dir_state_cache: Optional[Tuple[float, Tuple[Any, ...], Tuple[Any, ...], float]] = None
         self._dedup_lock = threading.Lock()
         self._phase_cache: Dict[str, Tuple[Tuple[Any, ...], pl.DataFrame]] = {}
         self._phase_cache_lock = threading.Lock()
@@ -293,7 +300,7 @@ class SandboxDataLoader:
         loc_file = self.auxiliary_data_dir / "locations.csv"
         if not loc_file.exists() and self.include_remote and self.remote_store is not None:
             try:
-                for hid in self.cache_mgr.active_remote_hub_ids():
+                for hid in self.cache_mgr.active_remote_hub_ids(check_locations=False):
                     cand = self.remote_store.locations_path(hid)
                     if cand is not None and cand.exists():
                         loc_file = cand
@@ -390,35 +397,72 @@ class SandboxDataLoader:
                         )
         return sorted(list(set(warnings)))
 
-    def _compute_models_dir_sig(self) -> Tuple[Any, ...]:
-        """Fast top-level directory signature (1-level scandir, no file walk) to detect newly added/removed/touched model dirs."""
-        manifest_file = self.base_dir / "manifest.json"
-        synth_dir = self.ensemble_mgr.synthetic_dir
-        try:
-            synth_m = synth_dir.stat().st_mtime_ns if synth_dir.exists() else 0
-        except OSError:
-            synth_m = 0
-        if not self.include_remote and manifest_file.is_file():
-            try:
-                man_m = manifest_file.stat().st_mtime_ns
-            except OSError:
-                man_m = 0
-            return ("manifest", man_m, synth_m)
-        parts: List[Any] = [synth_m]
-        if self.include_remote:
-            parts.append(self.remote_store.state_mtime())
-        for root in (
+    # Hot request paths (listings, heatmaps, model resolution) skip the per-file walk for this long
+    _MODELS_DIR_SIG_TTL_S = 1.5
+
+    def _model_roots(self) -> Tuple[Path, ...]:
+        return (
             self.model_output_dir,
             self.local_output_dir,
             self.base_dir / "sample-output",
             self.base_dir / "pmf-output",
             self.base_dir / "peak-output",
-        ):
+        )
+
+    def _models_dir_state(self, *, fresh: bool = False) -> Tuple[Tuple[Any, ...], float]:
+        """
+        Return `(dir_signature, max_forecast_mtime)` from ONE 2-level walk of the model folders.
+
+        The per-file walk is reused for `_MODELS_DIR_SIG_TTL_S` seconds (monotonic clock) as long as a
+        cheap directory-level probe (root + model-folder mtimes, no per-file stats) is unchanged, so
+        added/removed/renamed models and files show up immediately while in-place edits of existing
+        files are picked up once the TTL lapses. `invalidate_inventory()` drops the memo immediately.
+        """
+        cached = self._models_dir_state_cache
+        now = time.monotonic()
+        if not fresh and cached is not None and now - cached[0] < self._MODELS_DIR_SIG_TTL_S:
+            if self._probe_models_dirs() == cached[1]:
+                return cached[2], cached[3]
+        gen = self._models_gen
+        probe, sig, mtime = self._walk_models_dirs()
+        if gen == self._models_gen:
+            # Stamped with the pre-walk time so a change during the walk is re-checked within the TTL
+            self._models_dir_state_cache = (now, probe, sig, mtime)
+        return sig, mtime
+
+    def _models_dir_header(self) -> Tuple[Any, ...]:
+        """Cheap stats shared by the probe and the full walk (synthetic dir, remote state, manifest)."""
+        manifest_file = self.base_dir / "manifest.json"
+        synth_dir = self.ensemble_mgr.synthetic_dir
+        synth_m, synth_t = 0, 0.0
+        try:
+            if synth_dir.exists():
+                synth_st = synth_dir.stat()
+                synth_m, synth_t = synth_st.st_mtime_ns, synth_st.st_mtime
+        except OSError:
+            pass
+        man_sig: Optional[Tuple[int, int]] = None
+        man_t = 0.0
+        try:
+            if manifest_file.is_file():
+                st_m = manifest_file.stat()
+                man_sig, man_t = (st_m.st_mtime_ns, st_m.st_size), st_m.st_mtime
+        except OSError:
+            man_sig = (0, 0)
+        state_m = self.remote_store.state_mtime() if self.include_remote else None
+        return synth_m, synth_t, man_sig, man_t, state_m
+
+    def _probe_models_dirs(self) -> Tuple[Any, ...]:
+        """Directory-level probe: root and model-folder mtimes only (one stat per model, none per file)."""
+        header = self._models_dir_header()
+        if not self.include_remote and header[2] is not None:
+            return (header,)
+        parts: List[Any] = [header]
+        for root in self._model_roots():
             try:
                 if not root.exists():
                     parts.append(None)
                     continue
-                parts.append(root.stat().st_mtime_ns)
                 subdirs = []
                 with os.scandir(root) as it:
                     for ent in it:
@@ -427,61 +471,89 @@ class SandboxDataLoader:
                         if ent.is_dir():
                             subdirs.append((ent.name, ent.stat().st_mtime_ns))
                 subdirs.sort()
-                parts.append(tuple(subdirs))
+                parts.append((root.stat().st_mtime_ns, tuple(subdirs)))
             except OSError:
                 parts.append(None)
         return tuple(parts)
 
-    def _compute_models_mtime(self) -> float:
-        """Compute maximum modification time across model directories and forecast files for cache invalidation."""
-        mtime = 0.0
-        try:
-            manifest_file = self.base_dir / "manifest.json"
-            # Standalone synced remote hubs record their complete file inventory in manifest.json
-            if not self.include_remote and manifest_file.is_file():
-                mtime = max(mtime, manifest_file.stat().st_mtime)
-                synth_dir = self.ensemble_mgr.synthetic_dir
-                if synth_dir.exists():
-                    mtime = max(mtime, synth_dir.stat().st_mtime)
-                return mtime
-
-            for root in (
-                self.model_output_dir,
-                self.local_output_dir,
-                self.base_dir / "sample-output",
-                self.base_dir / "pmf-output",
-                self.base_dir / "peak-output",
-            ):
+    def _walk_models_dirs(self) -> Tuple[Tuple[Any, ...], Tuple[Any, ...], float]:
+        """
+        Full 2-level scandir returning `(probe, signature, max_mtime)`: detects added/removed/renamed AND
+        in-place edited model files with a single stat per file.
+        """
+        header = self._models_dir_header()
+        synth_m, synth_t, man_sig, man_t, state_m = header
+        mtime = synth_t
+        # Standalone synced remote hubs record their complete file inventory in manifest.json
+        if not self.include_remote and man_sig is not None:
+            return (header,), ("manifest", man_sig, synth_m), max(mtime, man_t)
+        probe: List[Any] = [header]
+        parts: List[Any] = [synth_m]
+        if self.include_remote:
+            parts.append(state_m)
+            try:
+                mtime = max(mtime, float(state_m), man_t)
+            except (TypeError, ValueError):
+                mtime = max(mtime, man_t)
+        for root in self._model_roots():
+            try:
                 if not root.exists():
+                    parts.append(None)
+                    probe.append(None)
                     continue
-                mtime = max(mtime, root.stat().st_mtime)
+                root_st = root.stat()
+                mtime = max(mtime, root_st.st_mtime)
+                subdirs = []
                 with os.scandir(root) as it:
                     for ent in it:
                         if ent.name.startswith(".") or (root == self.local_output_dir and ent.name == "synthetic"):
                             continue
-                        if not ent.is_dir():
-                            continue
-                        mtime = max(mtime, ent.stat().st_mtime)
-                        try:
-                            with os.scandir(ent.path) as sub:
-                                for fent in sub:
-                                    if fent.name.startswith("."):
-                                        continue
-                                    ext = os.path.splitext(fent.name)[1].lower()
-                                    if ext in (".csv", ".parquet") and fent.is_file():
-                                        mtime = max(mtime, fent.stat().st_mtime)
-                        except OSError:
-                            pass
-            synth_dir = self.ensemble_mgr.synthetic_dir
-            if synth_dir.exists():
-                mtime = max(mtime, synth_dir.stat().st_mtime)
-            if self.include_remote:
-                mtime = max(mtime, self.remote_store.state_mtime())
-            if manifest_file.is_file():
-                mtime = max(mtime, manifest_file.stat().st_mtime)
-        except Exception:
-            pass
-        return mtime
+                        if ent.is_dir():
+                            d_st = ent.stat()
+                            mtime = max(mtime, d_st.st_mtime)
+                            f_cnt = 0
+                            f_max_m = 0
+                            f_total_sz = 0
+                            try:
+                                with os.scandir(ent.path) as fit:
+                                    for fent in fit:
+                                        if fent.name.startswith("."):
+                                            continue
+                                        if fent.is_file():
+                                            fst = fent.stat()
+                                            f_cnt += 1
+                                            if fst.st_mtime_ns > f_max_m:
+                                                f_max_m = fst.st_mtime_ns
+                                            f_total_sz += fst.st_size
+                                            if os.path.splitext(fent.name)[1].lower() in (".csv", ".parquet"):
+                                                mtime = max(mtime, fst.st_mtime)
+                            except OSError:
+                                pass
+                            subdirs.append((ent.name, d_st.st_mtime_ns, f_cnt, f_max_m, f_total_sz))
+                subdirs.sort()
+                parts.append((root_st.st_mtime_ns, tuple(subdirs)))
+                probe.append((root_st.st_mtime_ns, tuple((d[0], d[1]) for d in subdirs)))
+            except OSError:
+                parts.append(None)
+                probe.append(None)
+        return tuple(probe), tuple(parts), mtime
+
+    def _compute_models_dir_sig(self) -> Tuple[Any, ...]:
+        """Directory signature of all model folders (TTL-memoized; see `_models_dir_state`)."""
+        return self._models_dir_state()[0]
+
+    def _compute_models_mtime(self) -> float:
+        """Maximum modification time across model directories and forecast files (TTL-memoized)."""
+        return self._models_dir_state()[1]
+
+    def _drop_models_cache(self) -> None:
+        """Invalidate the model inventory and its directory-signature memo (any in-flight rebuild is discarded)."""
+        with self._models_cache_lock:
+            self._models_gen += 1
+            self._models_cache = None
+            self._models_cache_mtime = -1.0
+            self._models_dir_sig = None
+            self._models_dir_state_cache = None
 
     # ------------------------------------------------------------------------------------------------
     # Season phases (pre-peak / peak / post-peak) per location, from observed truth
@@ -723,13 +795,14 @@ class SandboxDataLoader:
 
     def invalidate_inventory(self):
         """Drop in-memory inventory caches after hub data is synced, toggled, or removed."""
+        if hasattr(self.config, "reload_tasks"):
+            self.config.reload_tasks()
         with self._models_cache_lock:
-            for key, info in (self._models_cache or {}).items():
-                if info.get("source") == "hub":
-                    self.cache_mgr.warning_registry.clear(key)
-            self._models_cache = None
-            self._models_cache_mtime = -1.0
-            self._models_dir_sig = None
+            prev_models = self._models_cache
+        for key, info in (prev_models or {}).items():
+            if info.get("source") == "hub":
+                self.cache_mgr.warning_registry.clear(key)
+        self._drop_models_cache()
         self._model_details_cache.clear()
         self._model_metadata_cache.clear()
         self._hub_seasons_cache = None
@@ -739,6 +812,7 @@ class SandboxDataLoader:
         self._locations_cache = None
         self._geo_cache = None
         self._calendar_cache = None
+        self.cache_mgr.invalidate_fresh_cache()
         with self._phase_cache_lock:
             self._phase_cache.clear()
         with self._oracle_cache_lock:
@@ -1243,170 +1317,181 @@ class SandboxDataLoader:
         Returns dict of model_id -> metadata. Cached by directory mtime for high performance.
         Disambiguates name collisions between local and production models.
         """
-        dir_sig = self._compute_models_dir_sig()
-        if (
-            not force_refresh
-            and self._models_cache is not None
-            and self._models_dir_sig == dir_sig
-        ):
-            return self._models_cache
-
-        current_mtime = self._compute_models_mtime()
+        dir_sig, current_mtime = self._models_dir_state(fresh=force_refresh)
+        # Read the published (models, sig) pair once; never re-read the attributes after the check
         with self._models_cache_lock:
-            if (
-                not force_refresh
-                and self._models_cache is not None
-                and self._models_cache_mtime == current_mtime
-                and self._models_dir_sig == dir_sig
-            ):
-                return self._models_cache
+            cached, cached_sig = self._models_cache, self._models_dir_sig
+        if not force_refresh and cached is not None and cached_sig == dir_sig:
+            return cached
 
-            cal = self.get_calendar()
-            models = {}
-
-            # 1. Production / Main model-output (or synced remote manifest.json when opened standalone)
-            base_manifest_file = self.base_dir / "manifest.json"
-            used_standalone_manifest = False
-            if not self.include_remote and base_manifest_file.is_file():
-                try:
-                    standalone_man = json.loads(base_manifest_file.read_text(encoding="utf-8"))
-                    if isinstance(standalone_man, dict) and isinstance(standalone_man.get("files"), dict):
-                        models.update(
-                            self._models_from_remote_manifest(
-                                standalone_man,
-                                prefix=None,
-                                source="repo",
-                                hub_id=None,
-                                hub_label=None,
-                                base_dir=self.base_dir,
-                                taken=set(),
-                            )
-                        )
-                        used_standalone_manifest = True
-                except (OSError, ValueError):
-                    pass
-
-            if not used_standalone_manifest and self.model_output_dir.exists():
-                for p in sorted(self.model_output_dir.iterdir()):
-                    if p.is_dir() and not p.name.startswith("."):
-                        forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)
-                        if forecast_files:
-                            dates = [f.name[:10] for f in forecast_files if len(f.name) >= 10]
-                            seasons = sorted(list(set(cal.season_for_date(d) for d in dates)))
-                            mmeta = self._read_model_meta(p.name, is_local=False, files=forecast_files)
-                            targets = [t for t in mmeta["targets"] if not is_peak_target(t)]
-                            models[p.name] = {
-                                "id": p.name,
-                                "raw_name": p.name,
-                                "display_name": p.name,
-                                "is_local": False,
-                                "is_synthetic": False,
-                                "source": "repo",
-                                "path": str(p),
-                                "count": len(forecast_files),
-                                "dates": dates,
-                                "seasons": seasons,
-                                "targets": targets,
-                                "output_types": mmeta["output_types"],
-                                "extra_task_ids": mmeta["extra_task_ids"],
-                                "has_samples": mmeta["has_samples"],
-                                "has_pmf": mmeta["has_pmf"],
-                                "from_samples": mmeta["from_samples"],
-                                "family": self.infer_model_family(p.name),
-                                "min_date": dates[0] if dates else None,
-                                "max_date": dates[-1] if dates else None,
-                            }
-
-            # 2. Local test runs in local-output (ignoring synthetic directory namespace)
-            if self.local_output_dir.exists():
-                for p in sorted(self.local_output_dir.iterdir()):
-                    if p.is_dir() and not p.name.startswith(".") and p.name != "synthetic":
-                        forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)
-                        if forecast_files:
-                            dates = [f.name[:10] for f in forecast_files if len(f.name) >= 10]
-                            seasons = sorted(list(set(cal.season_for_date(d) for d in dates)))
-                            model_key = p.name
-                            display_name = f"{p.name} (Local)"
-                            if p.name in models:
-                                model_key = f"local:{p.name}"
-                                msg = f"Model collision: '{p.name}' exists in both model-output/ and local-output/. Local run registered as '{model_key}'."
-                                logger.info(msg)
-                                self.cache_mgr.warning_registry.add_warning(model_key, msg)
-
-                            mmeta = self._read_model_meta(p.name, is_local=True, files=forecast_files)
-                            targets = [t for t in mmeta["targets"] if not is_peak_target(t)]
-                            models[model_key] = {
-                                "id": model_key,
-                                "raw_name": p.name,
-                                "display_name": display_name,
-                                "is_local": True,
-                                "is_synthetic": False,
-                                "source": "local",
-                                "path": str(p),
-                                "count": len(forecast_files),
-                                "dates": dates,
-                                "seasons": seasons,
-                                "targets": targets,
-                                "output_types": mmeta["output_types"],
-                                "extra_task_ids": mmeta["extra_task_ids"],
-                                "has_samples": mmeta["has_samples"],
-                                "has_pmf": mmeta["has_pmf"],
-                                "from_samples": mmeta["from_samples"],
-                                "family": self.infer_model_family(p.name),
-                                "min_date": dates[0] if dates else None,
-                                "max_date": dates[-1] if dates else None,
-                            }
-
-            # 3. Models copied from live hubs (namespaced '<hub>:<model>', so they never collide with repo models)
-            if self.include_remote:
-                models.update(self._scan_hub_models(set(models)))
-                self._deduplicate_repo_and_hub_models(models)
-
-            # 4. Dynamic and saved synthetic ensembles
-            if hasattr(self, "ensemble_mgr"):
-                for ens in self.ensemble_mgr.list_ensembles():
-                    eid = ens["id"]
-                    comp_models = (ens.get("state_models", []) + ens.get("national_models", [])) if ens.get("spatial_split") else ens.get("models", [])
-                    ens_dates_set = set()
-                    ens_targets_set = set()
-                    for c_mid in comp_models:
-                        if c_mid in models:
-                            ens_dates_set.update(models[c_mid].get("dates", []))
-                            ens_targets_set.update(models[c_mid].get("targets", []))
-                    ens_dates = sorted(list(ens_dates_set), reverse=True)
-                    seasons = sorted(list(set(cal.season_for_date(d) for d in ens_dates)), reverse=True)
-                    models[eid] = {
-                        "id": eid,
-                        "raw_name": eid,
-                        "name": ens.get("name", eid),
-                        "display_name": f"{ens.get('name', eid)} [SYNTHETIC]",
-                        "is_local": True,
-                        "is_synthetic": True,
-                        "source": "synthetic",
-                        "synthetic_config": ens,
-                        "path": str(self.ensemble_mgr.synthetic_dir / eid) if ens.get("is_saved") else "",
-                        "count": len(ens_dates),
-                        "dates": ens_dates,
-                        "seasons": seasons,
-                        "targets": sorted(list(ens_targets_set)) if ens_targets_set else [],
-                        "output_types": ["quantile"],
-                        "extra_task_ids": [],
-                        "has_samples": False,
-                        "has_pmf": False,
-                        "from_samples": False,
-                        "family": "Synthetic Ensemble",
-                        "min_date": ens_dates[-1] if ens_dates else None,
-                        "max_date": ens_dates[0] if ens_dates else None,
-                    }
-
-            self._models_cache = models
-            self._models_cache_mtime = current_mtime
-            self._models_dir_sig = dir_sig
+        # Rebuild OUTSIDE `_models_cache_lock` so readers never stall. One builder at a time; while it
+        # runs, other readers are served the previous inventory instead of queueing behind it.
+        if not self._models_build_lock.acquire(blocking=force_refresh or cached is None):
+            return cached  # type: ignore[return-value]
+        try:
+            if not force_refresh:
+                with self._models_cache_lock:
+                    cached, cached_sig = self._models_cache, self._models_dir_sig
+                if cached is not None and cached_sig == dir_sig:
+                    return cached
+            with self._models_cache_lock:
+                gen = self._models_gen
+            models = self._build_models_inventory()
+            with self._models_cache_lock:
+                if gen == self._models_gen:  # not invalidated mid-build: publish atomically
+                    self._models_cache = models
+                    self._models_cache_mtime = current_mtime
+                    self._models_dir_sig = dir_sig
             return models
+        finally:
+            self._models_build_lock.release()
+
+    def _build_models_inventory(self) -> Dict[str, Dict[str, Any]]:
+        """Assemble the full model inventory from disk (called by `scan_models` outside the cache lock)."""
+        cal = self.get_calendar()
+        models: Dict[str, Dict[str, Any]] = {}
+
+        # 1. Production / Main model-output (or synced remote manifest.json when opened standalone)
+        base_manifest_file = self.base_dir / "manifest.json"
+        used_standalone_manifest = False
+        if not self.include_remote and base_manifest_file.is_file():
+            try:
+                standalone_man = json.loads(base_manifest_file.read_text(encoding="utf-8"))
+                if isinstance(standalone_man, dict) and isinstance(standalone_man.get("files"), dict):
+                    models.update(
+                        self._models_from_remote_manifest(
+                            standalone_man,
+                            prefix=None,
+                            source="repo",
+                            hub_id=None,
+                            hub_label=None,
+                            base_dir=self.base_dir,
+                            taken=set(),
+                        )
+                    )
+                    used_standalone_manifest = True
+            except (OSError, ValueError):
+                pass
+
+        if not used_standalone_manifest and self.model_output_dir.exists():
+            for p in sorted(self.model_output_dir.iterdir()):
+                if p.is_dir() and not p.name.startswith("."):
+                    forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)
+                    if forecast_files:
+                        dates = [f.name[:10] for f in forecast_files if len(f.name) >= 10]
+                        seasons = sorted(list(set(cal.season_for_date(d) for d in dates)))
+                        mmeta = self._read_model_meta(p.name, is_local=False, files=forecast_files)
+                        targets = [t for t in mmeta["targets"] if not is_peak_target(t)]
+                        models[p.name] = {
+                            "id": p.name,
+                            "raw_name": p.name,
+                            "display_name": p.name,
+                            "is_local": False,
+                            "is_synthetic": False,
+                            "source": "repo",
+                            "path": str(p),
+                            "count": len(forecast_files),
+                            "dates": dates,
+                            "seasons": seasons,
+                            "targets": targets,
+                            "output_types": mmeta["output_types"],
+                            "extra_task_ids": mmeta["extra_task_ids"],
+                            "has_samples": mmeta["has_samples"],
+                            "has_pmf": mmeta["has_pmf"],
+                            "from_samples": mmeta["from_samples"],
+                            "family": self.infer_model_family(p.name),
+                            "min_date": dates[0] if dates else None,
+                            "max_date": dates[-1] if dates else None,
+                        }
+
+        # 2. Local test runs in local-output (ignoring synthetic directory namespace)
+        if self.local_output_dir.exists():
+            for p in sorted(self.local_output_dir.iterdir()):
+                if p.is_dir() and not p.name.startswith(".") and p.name != "synthetic":
+                    forecast_files = sorted(list(p.glob("*.csv")) + list(p.glob("*.parquet")), key=lambda f: f.name)
+                    if forecast_files:
+                        dates = [f.name[:10] for f in forecast_files if len(f.name) >= 10]
+                        seasons = sorted(list(set(cal.season_for_date(d) for d in dates)))
+                        model_key = p.name
+                        display_name = f"{p.name} (Local)"
+                        if p.name in models:
+                            model_key = f"local:{p.name}"
+                            msg = f"Model collision: '{p.name}' exists in both model-output/ and local-output/. Local run registered as '{model_key}'."
+                            logger.info(msg)
+                            self.cache_mgr.warning_registry.add_warning(model_key, msg)
+
+                        mmeta = self._read_model_meta(p.name, is_local=True, files=forecast_files)
+                        targets = [t for t in mmeta["targets"] if not is_peak_target(t)]
+                        models[model_key] = {
+                            "id": model_key,
+                            "raw_name": p.name,
+                            "display_name": display_name,
+                            "is_local": True,
+                            "is_synthetic": False,
+                            "source": "local",
+                            "path": str(p),
+                            "count": len(forecast_files),
+                            "dates": dates,
+                            "seasons": seasons,
+                            "targets": targets,
+                            "output_types": mmeta["output_types"],
+                            "extra_task_ids": mmeta["extra_task_ids"],
+                            "has_samples": mmeta["has_samples"],
+                            "has_pmf": mmeta["has_pmf"],
+                            "from_samples": mmeta["from_samples"],
+                            "family": self.infer_model_family(p.name),
+                            "min_date": dates[0] if dates else None,
+                            "max_date": dates[-1] if dates else None,
+                        }
+
+        # 3. Models copied from live hubs (namespaced '<hub>:<model>', so they never collide with repo models)
+        if self.include_remote:
+            models.update(self._scan_hub_models(set(models)))
+            self._deduplicate_repo_and_hub_models(models)
+
+        # 4. Dynamic and saved synthetic ensembles
+        if hasattr(self, "ensemble_mgr"):
+            for ens in self.ensemble_mgr.list_ensembles():
+                eid = ens["id"]
+                comp_models = (ens.get("state_models", []) + ens.get("national_models", [])) if ens.get("spatial_split") else ens.get("models", [])
+                ens_dates_set = set()
+                ens_targets_set = set()
+                for c_mid in comp_models:
+                    if c_mid in models:
+                        ens_dates_set.update(models[c_mid].get("dates", []))
+                        ens_targets_set.update(models[c_mid].get("targets", []))
+                ens_dates = sorted(list(ens_dates_set), reverse=True)
+                seasons = sorted(list(set(cal.season_for_date(d) for d in ens_dates)), reverse=True)
+                models[eid] = {
+                    "id": eid,
+                    "raw_name": eid,
+                    "name": ens.get("name", eid),
+                    "display_name": f"{ens.get('name', eid)} [SYNTHETIC]",
+                    "is_local": True,
+                    "is_synthetic": True,
+                    "source": "synthetic",
+                    "synthetic_config": ens,
+                    "path": str(self.ensemble_mgr.synthetic_dir / eid) if ens.get("is_saved") else "",
+                    "count": len(ens_dates),
+                    "dates": ens_dates,
+                    "seasons": seasons,
+                    "targets": sorted(list(ens_targets_set)) if ens_targets_set else [],
+                    "output_types": ["quantile"],
+                    "extra_task_ids": [],
+                    "has_samples": False,
+                    "has_pmf": False,
+                    "from_samples": False,
+                    "family": "Synthetic Ensemble",
+                    "min_date": ens_dates[-1] if ens_dates else None,
+                    "max_date": ens_dates[0] if ens_dates else None,
+                }
+
+        return models
 
     def _resolve_model_id_and_local(self, model_id: str) -> Tuple[str, bool]:
         """Resolve model ID and whether it is a local run, handling 'local:' namespace."""
-        models = self._models_cache if self._models_cache is not None else self.scan_models()
+        # scan_models() is a TTL-memoized signature check on the hot path, so a stale inventory refreshes
+        models = self.scan_models()
         if model_id in models:
             info = models[model_id]
             return info.get("raw_name", model_id), info.get("is_local", False)
@@ -1587,28 +1672,19 @@ class SandboxDataLoader:
     def register_synthetic_ensemble(self, config: SyntheticEnsembleConfig) -> SyntheticEnsembleConfig:
         """Register a new synthetic ensemble and invalidate model cache."""
         res = self.ensemble_mgr.register_ensemble(config)
-        with self._models_cache_lock:
-            self._models_cache = None
-            self._models_cache_mtime = -1.0
-            self._models_dir_sig = None
+        self._drop_models_cache()
         return res
 
     def remove_synthetic_ensemble(self, ensemble_id: str) -> bool:
         """Remove a session or persisted ensemble and invalidate model cache."""
         res = self.ensemble_mgr.remove_ensemble(ensemble_id)
-        with self._models_cache_lock:
-            self._models_cache = None
-            self._models_cache_mtime = -1.0
-            self._models_dir_sig = None
+        self._drop_models_cache()
         return res
 
     def save_synthetic_ensemble(self, ensemble_id: str) -> Dict[str, Any]:
         """Save a synthetic ensemble to disk and invalidate model cache."""
         res = self.ensemble_mgr.save_to_disk(ensemble_id)
-        with self._models_cache_lock:
-            self._models_cache = None
-            self._models_cache_mtime = -1.0
-            self._models_dir_sig = None
+        self._drop_models_cache()
         return res
 
     def get_ground_truth_series(
@@ -1914,10 +1990,16 @@ class SandboxDataLoader:
         lf_as_of = self.cache_mgr.scan_as_of_admissions()
         if lf_as_of is not None:
             try:
+                try:
+                    cutoff_asof = (
+                        datetime.strptime(reference_date[:10], "%Y-%m-%d").date() + timedelta(days=1)
+                    ).isoformat()
+                except ValueError:
+                    cutoff_asof = reference_date
                 avail_snaps = (
                     lf_as_of.filter(
                         (pl.col("target") == target)
-                        & (pl.col("as_of") <= reference_date)
+                        & (pl.col("as_of") <= cutoff_asof)
                     )
                     .select("as_of")
                     .unique()
@@ -2345,10 +2427,13 @@ class SandboxDataLoader:
         def per_100k(val: Optional[float], pop: int) -> Optional[float]:
             return round((val / pop) * 100000, 2) if not is_rate_target and val is not None and pop > 1 else None
 
-        # Parse horizon integer if given
+        # Parse horizon integer if given (supports negative horizons like -1)
         h_int = 1
-        if horizon is not None and str(horizon).isdigit():
-            h_int = int(horizon)
+        if horizon is not None and str(horizon).strip():
+            try:
+                h_int = int(str(horizon).strip())
+            except ValueError:
+                pass
 
         # -------------------------------------------------------------
         # Axis Resolution & Transpose Mapping
@@ -2966,12 +3051,23 @@ class SandboxDataLoader:
                         if tdf_m is not None:
                             model_task_dfs[mid] = tdf_m
 
+            # Same rule as the leaderboard (EvaluationEngine): negative (hindcast) horizons are excluded by
+            # default when the target declares a non-negative horizon or any model scored one
+            from viz.core.evaluation import EvaluationEngine
+
+            if horizons_int is None and model_task_dfs and (
+                EvaluationEngine._target_has_non_negative_horizon(self.config.get_target_metadata(target))
+                or EvaluationEngine._has_non_negative_horizon(model_task_dfs.values())
+            ):
+                EvaluationEngine._restrict_frames_non_negative(model_task_dfs)
+            # Models with nothing left in scope (e.g. nowcast-only) drop out instead of blanking fair mode
+            for mid in [m for m, tdf in model_task_dfs.items() if tdf is None or tdf.is_empty()]:
+                del model_task_dfs[mid]
+
             if fair and len(cand_mids) >= 2:
-                present_tdfs = [model_task_dfs.get(m) for m in cand_mids]
-                if any(tdf is None or tdf.is_empty() for tdf in present_tdfs):
-                    for mid in list(model_task_dfs.keys()):
-                        model_task_dfs[mid] = model_task_dfs[mid].head(0)
-                else:
+                present_mids = [m for m in cand_mids if m in model_task_dfs]
+                present_tdfs = [model_task_dfs[m] for m in present_mids]
+                if len(present_tdfs) >= 2:
                     extra_dim_cols = [
                         c for c in self.config.get_extra_task_ids(target)
                         if all(c in tdf.columns for tdf in present_tdfs)
@@ -2980,7 +3076,7 @@ class SandboxDataLoader:
                     common = present_tdfs[0].select(join_cols).unique()
                     for tdf in present_tdfs[1:]:
                         common = common.join(tdf.select(join_cols).unique(), on=join_cols, how="inner")
-                    for mid in cand_mids:
+                    for mid in present_mids:
                         model_task_dfs[mid] = model_task_dfs[mid].join(common, on=join_cols, how="inner")
 
             y_keys = cand_mids
@@ -3345,11 +3441,17 @@ class SandboxDataLoader:
         if cell_meta:
             valid_y_set = set(y_keys)
             valid_x_set = set(x_keys)
-            cell_meta = {
-                k: v
-                for k, v in cell_meta.items()
-                if ":" in k and (parts := k.split(":", 1)) and parts[0] in valid_y_set and parts[1] in valid_x_set
-            }
+            pruned_meta = {}
+            for k, v in cell_meta.items():
+                r_key = v.get("row") if isinstance(v, dict) else None
+                c_key = v.get("col") if isinstance(v, dict) else None
+                if r_key is None or c_key is None:
+                    if ":" not in k:
+                        continue
+                    r_key, c_key = k.rsplit(":", 1)
+                if r_key in valid_y_set and c_key in valid_x_set:
+                    pruned_meta[k] = v
+            cell_meta = pruned_meta
 
         # -------------------------------------------------------------
         # Normalization (Vectorized NumPy)
@@ -3820,15 +3922,26 @@ class SandboxDataLoader:
         meta_file = next((c for c in candidates if c.exists()), None)
 
         if meta_file is not None:
+            file_sig: Optional[Tuple[int, int]] = None
             try:
-                file_mtime = meta_file.stat().st_mtime
-                cached_entry = self._model_metadata_cache.get(raw_id)
-                if cached_entry is not None and cached_entry[0] == meta_file and cached_entry[1] == file_mtime:
-                    return dict(cached_entry[2])
+                st_meta = meta_file.stat()
+                file_sig = (st_meta.st_mtime_ns, st_meta.st_size)
             except OSError:
-                file_mtime = -1.0
+                pass
+            cached_entry = self._model_metadata_cache.get(raw_id) if file_sig is not None else None
+            if cached_entry is not None and cached_entry[0] == meta_file and cached_entry[1] == file_sig:
+                if cached_entry[2] is not None:
+                    return dict(cached_entry[2])
+                meta_file = None  # known oversized (already warned once): use inferred metadata below
+            elif file_sig is not None and file_sig[1] > 65536:
+                # Cache the rejection too, so listings don't re-read or re-warn until the file changes
+                logger.warning("Skipping oversized model metadata file %s (%d bytes)", meta_file, file_sig[1])
+                self._model_metadata_cache[raw_id] = (meta_file, file_sig, None)
+                meta_file = None
+
+        if meta_file is not None:
             try:
-                raw_text = meta_file.read_text(encoding="utf-8")
+                raw_text = meta_file.read_text(encoding="utf-8-sig")
                 data = self._parse_simple_yaml(raw_text)
 
                 data["has_metadata_file"] = True
@@ -3849,7 +3962,8 @@ class SandboxDataLoader:
                 for key in ["methods", "methods_long", "data_inputs", "team_name", "model_name", "license"]:
                     if isinstance(data.get(key), str):
                         data[key] = data[key].strip()
-                self._model_metadata_cache[raw_id] = (meta_file, file_mtime, dict(data))
+                if file_sig is not None:
+                    self._model_metadata_cache[raw_id] = (meta_file, file_sig, dict(data))
                 return data
             except Exception as exc:
                 logger.warning("Error parsing %s: %s", meta_file, exc)
@@ -3876,387 +3990,12 @@ class SandboxDataLoader:
             "ensemble_of_hub_models": False,
         }
 
-    _YAML_KEY_RE = re.compile(
-        r'^(?:"([A-Za-z0-9_.-]+)"|\'([A-Za-z0-9_.-]+)\'|([A-Za-z0-9_.-]+))\s*:(?:\s+(.*))?$'
-    )
-
-    @classmethod
-    def _match_yaml_key_val(cls, s: str) -> Optional[Tuple[str, str]]:
-        m = cls._YAML_KEY_RE.match(s)
-        if not m:
-            return None
-        key = m.group(1) or m.group(2) or m.group(3)
-        rest = m.group(4) if m.group(4) is not None else ""
-        return key, rest
-
-    @staticmethod
-    def _strip_yaml_inline_comment(s: str) -> str:
-        in_sq = False
-        in_dq = False
-        esc = False
-        for i, ch in enumerate(s):
-            if esc:
-                esc = False
-                continue
-            if ch == "\\" and in_dq:
-                esc = True
-                continue
-            if ch == "'" and not in_dq:
-                in_sq = not in_sq
-            elif ch == '"' and not in_sq:
-                in_dq = not in_dq
-            elif ch == "#" and not in_sq and not in_dq:
-                if i == 0 or s[i - 1].isspace():
-                    return s[:i].rstrip()
-        return s.rstrip()
-
-    @staticmethod
-    def _has_unclosed_yaml_quote(s: str) -> bool:
-        t = s.lstrip()
-        if not t or t[0] not in ('"', "'"):
-            return False
-        q = t[0]
-        esc = False
-        i = 1
-        while i < len(t):
-            ch = t[i]
-            if esc:
-                esc = False
-                i += 1
-                continue
-            if ch == "\\" and q == '"':
-                esc = True
-                i += 1
-                continue
-            if ch == "'" and q == "'" and i + 1 < len(t) and t[i + 1] == "'":
-                i += 2
-                continue
-            if ch == q:
-                return False
-            i += 1
-        return True
-
-    @classmethod
-    def _parse_yaml_scalar(cls, val: str) -> Any:
-        v = cls._strip_yaml_inline_comment(val.strip())
-        if not v:
-            return None
-        if v.startswith('"') and v.endswith('"') and len(v) >= 2:
-            inner = v[1:-1]
-            inner_norm = re.sub(r"\\\s+\\\s*", " ", inner)
-            try:
-                return json.loads('"' + inner_norm + '"')
-            except Exception:
-                return (
-                    inner_norm.replace('\\"', '"')
-                    .replace("\\n", "\n")
-                    .replace("\\t", "\t")
-                    .replace("\\ ", " ")
-                    .replace("\\\\", "\\")
-                )
-        if v.startswith("'") and v.endswith("'") and len(v) >= 2:
-            return v[1:-1].replace("''", "'")
-        low = v.lower()
-        if low in ("true", "yes"):
-            return True
-        if low in ("false", "no"):
-            return False
-        if low in ("null", "~"):
-            return None
-        if re.fullmatch(r"-?\d+", v):
-            if len(v.lstrip("-")) > 1 and v.lstrip("-").startswith("0"):
-                return v
-            return int(v)
-        if re.fullmatch(r"-?\d+\.\d+", v):
-            try:
-                return float(v)
-            except ValueError:
-                pass
-        return v
-
-    @classmethod
-    def _parse_yaml_flow(cls, text: str) -> Any:
-        cleaned = re.sub(r",\s*([\]\}])", r"\1", text.strip())
-        for candidate in (
-            cleaned,
-            re.sub(r'([{\s,])([A-Za-z_][A-Za-z0-9_.-]*)\s*:(?=\s)', r'\1"\2":', cleaned),
-        ):
-            try:
-                return json.loads(candidate)
-            except Exception:
-                pass
-        s = cleaned.strip()
-        if s.startswith("[") and s.endswith("]"):
-            inner = s[1:-1].strip()
-            if not inner:
-                return []
-            if "{" not in inner and "[" not in inner:
-                return [cls._parse_yaml_scalar(p.strip()) for p in inner.split(",") if p.strip()]
-        return s
-
     @classmethod
     def _parse_simple_yaml(cls, text: str) -> Dict[str, Any]:
-        """Self-contained YAML/JSON parser for Hubverse model metadata schemas."""
-        stripped_all = text.strip()
-        if stripped_all.startswith("{"):
-            parsed_flow = cls._parse_yaml_flow(stripped_all)
-            if isinstance(parsed_flow, dict):
-                return parsed_flow
+        """Self-contained O(N) YAML/JSON parser for Hubverse model metadata schemas."""
+        from viz.core.yaml_lite import parse_yaml_mapping
 
-        raw_lines = text.splitlines()
-        non_empty = [
-            (len(l) - len(l.lstrip(" ")), l)
-            for l in raw_lines
-            if l.strip() and not l.lstrip().startswith("#") and l.strip() not in ("---", "...")
-        ]
-        if not non_empty:
-            return {}
-        key_indents = [
-            ind for ind, l in non_empty
-            if not l.lstrip().startswith("-") and cls._match_yaml_key_val(l.lstrip()) is not None
-        ]
-        base_indent = min(key_indents) if key_indents else 0
-
-        result: Dict[str, Any] = {}
-        n = len(raw_lines)
-        i = 0
-
-        def is_top_key(line: str) -> bool:
-            s = line.lstrip(" ")
-            ind = len(line) - len(s)
-            if ind != base_indent or s.startswith("-") or s.startswith("#"):
-                return False
-            return cls._match_yaml_key_val(s) is not None
-
-        def consume_flow(first_chunk: str, idx: int) -> Tuple[Any, int]:
-            open_ch = first_chunk[0]
-            close_ch = "]" if open_ch == "[" else "}"
-            buf = [first_chunk]
-            depth = 0
-            in_sq = in_dq = esc = False
-
-            def scan_depth(chunk: str, d: int, sq: bool, dq: bool, es: bool) -> Tuple[int, bool, bool, bool]:
-                for ch in chunk:
-                    if es:
-                        es = False
-                        continue
-                    if ch == "\\" and dq:
-                        es = True
-                        continue
-                    if ch == "'" and not dq:
-                        sq = not sq
-                    elif ch == '"' and not sq:
-                        dq = not dq
-                    elif not sq and not dq:
-                        if ch == open_ch:
-                            d += 1
-                        elif ch == close_ch:
-                            d -= 1
-                return d, sq, dq, es
-
-            depth, in_sq, in_dq, esc = scan_depth(first_chunk, depth, in_sq, in_dq, esc)
-            while depth > 0 and idx < n:
-                nl = cls._strip_yaml_inline_comment(raw_lines[idx])
-                buf.append(nl)
-                depth, in_sq, in_dq, esc = scan_depth(nl, depth, in_sq, in_dq, esc)
-                idx += 1
-            return cls._parse_yaml_flow("\n".join(buf)), idx
-
-        def consume_scalar_lines(first_val: str, idx: int, min_cont_indent: int) -> Tuple[Any, int]:
-            parts = [first_val]
-            while idx < n:
-                cur_joined = " ".join(p for p in parts if p)
-                unclosed = cls._has_unclosed_yaml_quote(cur_joined)
-                nl = raw_lines[idx]
-                if not nl.strip():
-                    if unclosed:
-                        parts.append("")
-                        idx += 1
-                        continue
-                    k = idx + 1
-                    while k < n and not raw_lines[k].strip():
-                        k += 1
-                    if (
-                        k < n
-                        and not is_top_key(raw_lines[k])
-                        and (len(raw_lines[k]) - len(raw_lines[k].lstrip(" "))) > min_cont_indent
-                        and not raw_lines[k].lstrip().startswith("#")
-                        and not raw_lines[k].lstrip().startswith("- ")
-                    ):
-                        idx += 1
-                        continue
-                    break
-                if not unclosed and nl.lstrip().startswith("#"):
-                    idx += 1
-                    continue
-                if not unclosed and is_top_key(nl):
-                    break
-                ns = nl.lstrip(" ")
-                nind = len(nl) - len(ns)
-                if not unclosed and nind <= min_cont_indent:
-                    break
-                if not unclosed and (ns.startswith("- ") or ns == "-" or cls._match_yaml_key_val(ns) is not None):
-                    if min_cont_indent > base_indent:
-                        break
-                parts.append(ns.rstrip() if unclosed else cls._strip_yaml_inline_comment(ns))
-                idx += 1
-            joined = " ".join(p for p in parts if p != "")
-            return cls._parse_yaml_scalar(joined), idx
-
-        while i < n:
-            line = raw_lines[i]
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or stripped in ("---", "..."):
-                i += 1
-                continue
-            if not is_top_key(line):
-                i += 1
-                continue
-
-            s = line.lstrip(" ")
-            kv = cls._match_yaml_key_val(s)
-            if kv is None:
-                i += 1
-                continue
-            key, rest = kv
-            val = cls._strip_yaml_inline_comment(rest.strip()) if not cls._has_unclosed_yaml_quote(rest.strip()) else rest.strip()
-            i += 1
-
-            # Case 1: Block scalar | or >
-            if re.match(r"^[|>][-+]?\d*$", val):
-                style = val[0]
-                block_lines: List[str] = []
-                block_indent: Optional[int] = None
-                while i < n:
-                    nl = raw_lines[i]
-                    if not nl.strip():
-                        block_lines.append("")
-                        i += 1
-                        continue
-                    ind = len(nl) - len(nl.lstrip(" "))
-                    if ind <= base_indent and (is_top_key(nl) or nl.lstrip().startswith("#")):
-                        if is_top_key(nl):
-                            break
-                        i += 1
-                        continue
-                    if ind <= base_indent:
-                        break
-                    if block_indent is None:
-                        block_indent = ind
-                    block_lines.append(nl[min(len(nl), block_indent):].rstrip())
-                    i += 1
-                while block_lines and not block_lines[-1]:
-                    block_lines.pop()
-                if style == "|":
-                    result[key] = "\n".join(block_lines)
-                else:
-                    paras: List[str] = []
-                    cur: List[str] = []
-                    for bl in block_lines:
-                        if not bl:
-                            if cur:
-                                paras.append(" ".join(cur))
-                                cur = []
-                            paras.append("")
-                        else:
-                            cur.append(bl.strip())
-                    if cur:
-                        paras.append(" ".join(cur))
-                    result[key] = "\n".join(paras)
-                continue
-
-            # Case 2: Flow array [...] or object {...} on key line
-            if val.startswith("[") or val.startswith("{"):
-                result[key], i = consume_flow(val, i)
-                continue
-
-            # Case 3: Empty val on key line
-            if not val:
-                j = i
-                while j < n and (not raw_lines[j].strip() or raw_lines[j].lstrip().startswith("#")):
-                    j += 1
-                if j >= n or is_top_key(raw_lines[j]):
-                    result[key] = None
-                    i = j
-                    continue
-                next_line = raw_lines[j]
-                next_s = next_line.lstrip(" ")
-                next_ind = len(next_line) - len(next_s)
-
-                if next_s.startswith("[") or next_s.startswith("{"):
-                    first_flow = cls._strip_yaml_inline_comment(next_s)
-                    result[key], i = consume_flow(first_flow, j + 1)
-                    continue
-
-                if next_s.startswith("- ") or next_s == "-":
-                    items: List[Any] = []
-                    i = j
-                    list_indent = next_ind
-                    while i < n:
-                        nl = raw_lines[i]
-                        if not nl.strip() or nl.lstrip().startswith("#"):
-                            i += 1
-                            continue
-                        if is_top_key(nl):
-                            break
-                        ns = nl.lstrip(" ")
-                        nind = len(nl) - len(ns)
-                        if nind < list_indent or not (ns.startswith("- ") or ns == "-"):
-                            break
-                        after_dash = ns[1:].strip()
-                        i += 1
-                        sub_kv = cls._match_yaml_key_val(after_dash)
-                        item_is_dict = sub_kv is not None
-                        if not after_dash:
-                            k = i
-                            while k < n and (not raw_lines[k].strip() or raw_lines[k].lstrip().startswith("#")):
-                                k += 1
-                            if k < n and not is_top_key(raw_lines[k]):
-                                ks = raw_lines[k].lstrip(" ")
-                                kind = len(raw_lines[k]) - len(ks)
-                                if kind > list_indent and cls._match_yaml_key_val(ks) is not None:
-                                    item_is_dict = True
-                        if item_is_dict:
-                            obj: Dict[str, Any] = {}
-                            if sub_kv is not None:
-                                sk, sv = sub_kv
-                                sv_clean = cls._strip_yaml_inline_comment(sv.strip()) if not cls._has_unclosed_yaml_quote(sv.strip()) else sv.strip()
-                                obj[sk], i = consume_scalar_lines(sv_clean, i, list_indent + 1)
-                            while i < n:
-                                sl = raw_lines[i]
-                                if not sl.strip() or sl.lstrip().startswith("#"):
-                                    i += 1
-                                    continue
-                                if is_top_key(sl):
-                                    break
-                                ss = sl.lstrip(" ")
-                                sind = len(sl) - len(ss)
-                                if sind <= list_indent:
-                                    break
-                                skv = cls._match_yaml_key_val(ss)
-                                if skv is not None:
-                                    sk, sv = skv
-                                    sv_clean = cls._strip_yaml_inline_comment(sv.strip()) if not cls._has_unclosed_yaml_quote(sv.strip()) else sv.strip()
-                                    i += 1
-                                    obj[sk], i = consume_scalar_lines(sv_clean, i, sind)
-                                else:
-                                    i += 1
-                            items.append(obj)
-                        else:
-                            sv_clean = cls._strip_yaml_inline_comment(after_dash) if not cls._has_unclosed_yaml_quote(after_dash) else after_dash
-                            item_val, i = consume_scalar_lines(sv_clean, i, list_indent)
-                            items.append(item_val)
-                    result[key] = items
-                    continue
-                elif next_ind > base_indent:
-                    sv_clean = cls._strip_yaml_inline_comment(next_s) if not cls._has_unclosed_yaml_quote(next_s) else next_s
-                    result[key], i = consume_scalar_lines(sv_clean, j + 1, base_indent)
-                    continue
-
-            # Case 4: Inline scalar on key line
-            result[key], i = consume_scalar_lines(val, i, base_indent)
-
-        return result
+        return parse_yaml_mapping(text)
 
     def get_model_details(self, model_id: str) -> Optional[Dict[str, Any]]:
         """Construct comprehensive dossier for a model including schema, schedule, specs, and team info."""
