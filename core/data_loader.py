@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Dict, List, Optional, Any, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 import polars as pl
