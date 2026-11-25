@@ -131,6 +131,34 @@ export function onThemeChange(fn) {
 /** @returns {boolean} the OS asks for reduced motion */
 export const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+/**
+ * Validate an external or app URL before assigning it to an anchor `href`.
+ * Permits `http:` / `https:` (and normalized single-slash relative paths when `allowRelative` is true).
+ * Rejects `javascript:`, `data:`, `vbscript:`, protocol-relative `//`, and control characters.
+ * @param {any} raw
+ * @param {{ allowRelative?: boolean }} [opts]
+ * @returns {string | null}
+ */
+export function safeHref(raw, { allowRelative = false } = {}) {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed.charCodeAt(i) < 32) return null;
+  }
+  if (trimmed.startsWith("//") || trimmed.includes("\\")) return null;
+  if (trimmed.startsWith("/")) {
+    return allowRelative ? trimmed : null;
+  }
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
 /** localStorage as JSON. Never throws (private mode, quota, bad JSON). */
 export const storage = {
   /** @returns {any} the stored value, or fallback when absent or unreadable */

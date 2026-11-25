@@ -4,7 +4,7 @@
  *   - Flow: calm diverging figure-ground stream anchored on midpoint category (e.g. Stable)
  *   - Bars: discrete 5-bin / K-bin probability histograms with 50% dashed rule */
 import { h, on, cssColor, onThemeChange } from "../lib/dom.js";
-import { apiUrl, loadPmf, registerCacheClear } from "../lib/api.js";
+import { apiUrl, hubFetch, loadPmf, registerCacheClear } from "../lib/api.js";
 import { horizonText } from "../lib/format.js";
 import { seriesColor } from "../chart/layout.js";
 import { slotOf } from "./selection.js";
@@ -461,7 +461,7 @@ export function mountPmfView(host, ctx) {
     allScopeLoading = true;
     allScopeErr = false;
     renderTable();
-    fetch(apiUrl(`/api/next/metrics?${q}`))
+    hubFetch(apiUrl(`/api/next/metrics?${q}`))
       .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
       .then((j) => {
         if (destroyed) return;

@@ -20,6 +20,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
@@ -41,11 +42,17 @@ from viz.web.auth import (
     hash_identity,
     is_https_request,
     make_session_cookie_header,
+    make_user_cookie_header,
+    make_user_cookie_value,
+    resolve_proxy_header_user,
+    safe_local_redirect,
     resolve_request_identity,
 )
 from viz.web.bundle import (
     RateLimitExceededError,
+    StorageBudgetExceededError,
     UploadIncompatibleError,
+    UploadTimeoutError,
     UploadTooLargeError,
     UploadValidationError,
     extract_vzb1_stream,
@@ -126,7 +133,20 @@ def init_hub_manager(
     return HUB_MANAGER
 
 
-HUB_MANAGER = _build_default_hub_manager()
+# Built lazily (first request or `run_server`) rather than at import, so importing this module never
+# touches the filesystem and a bad VIZ_* setting is reported by `run_server` as a clean error.
+_HUB_MANAGER_INIT_LOCK = threading.Lock()
+
+
+def _ensure_hub_manager() -> HubManager:
+    global HUB_MANAGER
+    if HUB_MANAGER is not None:
+        return HUB_MANAGER
+    with _HUB_MANAGER_INIT_LOCK:
+        if HUB_MANAGER is None:
+            HUB_MANAGER = _build_default_hub_manager()
+            SandboxRequestHandler.hub_manager = HUB_MANAGER
+    return HUB_MANAGER
 
 
 class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -148,7 +168,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def setup(self):
         try:
-            self.request.settimeout(60.0)
+            self.request.settimeout(15.0)
         except Exception:
             pass
         super().setup()
@@ -156,7 +176,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _mgr(self) -> HubManager:
         mgr = self.hub_manager or HUB_MANAGER
         if mgr is None:
-            mgr = init_hub_manager()
+            mgr = _ensure_hub_manager()
         return mgr
 
     def _server_config(self) -> dict:
@@ -171,10 +191,13 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
     def _client_ip(self) -> str:
         mgr = self._mgr()
         wcfg = getattr(mgr, "web_config", None)
-        if mgr.mode == "web" and wcfg is not None and wcfg.trust_proxy_auth:
+        hops = wcfg.trusted_proxy_hops if (mgr.mode == "web" and wcfg is not None) else 0
+        if hops > 0:
             xff = (self.headers.get("X-Forwarded-For") or "").strip()
             if xff:
-                return xff.split(",", 1)[0].strip()
+                parts = [p.strip() for p in xff.split(",") if p.strip()]
+                if parts:
+                    return parts[-hops] if len(parts) >= hops else parts[0]
             xri = (self.headers.get("X-Real-IP") or "").strip()
             if xri:
                 return xri
@@ -248,6 +271,19 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        req_path = urllib.parse.urlparse(self.path).path
+        srv = getattr(self, "server", None)
+        # Probes and static files (the app shell and its ES modules) are cheap and must keep working
+        # under API load, so only /api/* requests go through admission control.
+        is_light = req_path in ("/healthz", "/readyz") or not req_path.startswith("/api/")
+        acquired = True
+        client_key = None
+        if not is_light and hasattr(srv, "acquire_api_slot"):
+            client_key = self._admission_client_key()
+            acquired = srv.acquire_api_slot(timeout=0.5, client_key=client_key)
+            if not acquired:
+                self._send_busy()
+                return
         try:
             self._route_get()
         except Exception as exc:
@@ -256,8 +292,20 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 {"error": "Internal server error", "detail": "An internal error occurred while processing the request."},
                 status=500,
             )
+        finally:
+            if not is_light and acquired and hasattr(srv, "release_api_slot"):
+                srv.release_api_slot(client_key=client_key)
 
     def do_POST(self):
+        srv = getattr(self, "server", None)
+        acquired = True
+        client_key = None
+        if hasattr(srv, "acquire_api_slot"):
+            client_key = self._admission_client_key()
+            acquired = srv.acquire_api_slot(timeout=0.5, client_key=client_key)
+            if not acquired:
+                self._send_busy()
+                return
         try:
             self._route_post()
         except _BodyTooLargeError as exc:
@@ -268,6 +316,39 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 {"error": "Internal server error", "detail": "An internal error occurred while processing the POST request."},
                 status=500,
             )
+        finally:
+            if acquired and hasattr(srv, "release_api_slot"):
+                srv.release_api_slot(client_key=client_key)
+
+    def _admission_client_key(self) -> Optional[str]:
+        """Per-client admission key (web mode only): the trusted client IP."""
+        try:
+            mgr = self._mgr()
+            if mgr.mode != "web":
+                return None
+            return self._client_ip()
+        except Exception:
+            return None
+
+    def _send_busy(self):
+        body = json.dumps({"error": "Server busy; please retry shortly."}).encode("utf-8")
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", "1")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _refresh_ephem_cookie(self, identity: RequestIdentity, mgr: HubManager) -> None:
+        if self._set_cookies or not identity.sid or mgr.web_config is None:
+            return
+        self._add_set_cookie(
+            make_session_cookie_header(
+                identity.sid,
+                secure=is_https_request(self.headers, mgr.web_config),
+                max_age=mgr.web_config.ephem_ttl_seconds,
+            )
+        )
 
     def _require_local_mutation(self, action: str) -> bool:
         """Gate persistent/server-mutating endpoints to local mode unless an authenticated session allows them."""
@@ -301,6 +382,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 return None
             rec, storage_root = res
             self._is_private_response = True
+            if req_id.startswith("ephem_"):
+                self._refresh_ephem_cookie(identity, mgr)
             return mgr.get_private_context(rec, storage_root)
         return mgr.get_context(req_id)
 
@@ -308,8 +391,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         req_id = self._requested_hub_id(query, allow_hub_param=allow_hub_param)
         ctx = self._resolve_ctx(query, allow_hub_param=allow_hub_param)
         if ctx is None:
-            msg = f"Unknown workspace hub '{req_id}'" if req_id else "No hub configured"
-            self._send_json({"error": msg}, status=404)
+            self._send_hub_not_found(req_id)
             return None
         return ctx
 
@@ -365,7 +447,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             req_id = self._requested_hub_id(query, allow_hub_param=False)
             ctx = mgr.get_context(req_id)
             if req_id and ctx is None:
-                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                self._send_hub_not_found(req_id)
                 return
             remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
             self._route_remote_post(remote_mgr, path)
@@ -424,6 +506,10 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_readyz(mgr)
         elif path == "/api/web/status":
             self._handle_web_status(mgr)
+        elif path == "/auth/login":
+            self._handle_auth_login(mgr, query)
+        elif path == "/auth/logout":
+            self._handle_auth_logout(mgr)
         # Static frontend
         elif path == "/next" or path.startswith("/next/"):
             self._serve_dir(path, "/next", NEXT_DIR)
@@ -496,7 +582,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             req_id = self._requested_hub_id(query, allow_hub_param=False)
             ctx = mgr.get_context(req_id)
             if req_id and ctx is None:
-                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                self._send_hub_not_found(req_id)
                 return
             remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
             self._send_json({
@@ -512,7 +598,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             req_id = self._requested_hub_id(query, allow_hub_param=False)
             ctx = mgr.get_context(req_id)
             if req_id and ctx is None:
-                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                self._send_hub_not_found(req_id)
                 return
             remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
             hub_id = query.get("hub", [""])[0]
@@ -525,7 +611,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             req_id = self._requested_hub_id(query, allow_hub_param=False)
             ctx = mgr.get_context(req_id)
             if req_id and ctx is None:
-                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                self._send_hub_not_found(req_id)
                 return
             remote_mgr = ctx.remote_mgr if ctx is not None else mgr.shared_remote_mgr
             hub_id = query.get("hub", [""])[0]
@@ -655,7 +741,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 ctx = self._resolve_ctx({"workspace": [newest]})
 
             if req_id and ctx is None:
-                self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+                self._send_hub_not_found(req_id)
                 return
 
             ws_hubs = mgr.workspace_hubs_brief()
@@ -856,6 +942,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         etag: Optional[str] = None,
         allow_gzip: bool = True,
         cache_control: Optional[str] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
     ):
         cc = cache_control or "no-cache"
         eff_etag = None if self._is_private_response else etag
@@ -879,6 +966,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         if eff_etag is not None and status == 200:
             self.send_header("ETag", eff_etag)
         if use_gzip:
@@ -888,12 +978,34 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, data: Any, status: int = 200, *, etag: Optional[str] = None):
-        self._send_bytes(json.dumps(data).encode("utf-8"), "application/json", status=status, etag=etag)
+    def _send_json(
+        self,
+        data: Any,
+        status: int = 200,
+        *,
+        etag: Optional[str] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ):
+        self._send_bytes(
+            json.dumps(data).encode("utf-8"),
+            "application/json",
+            status=status,
+            etag=etag,
+            extra_headers=extra_headers,
+        )
+
+    def _send_hub_not_found(self, req_id: Optional[str]):
+        msg = f"Unknown workspace hub '{req_id}'" if req_id else "No hub configured"
+        hdrs = {"X-Viz-Hub-Gone": "1"} if req_id else None
+        self._send_json({"error": msg}, status=404, extra_headers=hdrs)
 
     def _handle_readyz(self, mgr: HubManager):
         synced = mgr.remote_store.synced_hub_ids()
-        require_hub = _env_truthy("VIZ_READYZ_REQUIRE_HUB")
+        require_hub = (
+            mgr.web_config.readyz_require_hub
+            if (mgr.mode == "web" and mgr.web_config is not None)
+            else _env_truthy("VIZ_READYZ_REQUIRE_HUB")
+        )
         if mgr.mode == "web" and require_hub and not synced:
             self._send_json({"ready": False, "mode": mgr.mode, "hubs_synced": 0}, status=503)
             return
@@ -910,6 +1022,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         self._is_private_response = True
         identity = self._request_identity()
         cfg = mgr.web_config
+        workspaces = mgr.web_store.list_for_identity(identity)
+        if workspaces.get("ephemeral") and identity.sid:
+            self._refresh_ephem_cookie(identity, mgr)
         self._send_json({
             "mode": "web",
             "auth": auth_public_info(identity.user, cfg),
@@ -923,7 +1038,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 "user_max_hubs": cfg.user_max_hubs,
                 "user_cold_after_seconds": cfg.user_cold_after_seconds,
             },
-            "workspaces": mgr.web_store.list_for_identity(identity),
+            "workspaces": workspaces,
             "scheduler": mgr.web_scheduler.get_telemetry(),
             "briefings": mgr.briefing_feeds.get_status(),
         })
@@ -985,8 +1100,9 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             return
 
+        client_ip = self._client_ip()
         try:
-            limiter.acquire(self._client_ip())
+            limiter.acquire(client_ip)
         except RateLimitExceededError as exc:
             self._send_json({"error": str(exc)}, status=429)
             return
@@ -1001,16 +1117,31 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
 
         staging_base = (mgr.data_dir / ".staging") if tier == "persistent" else (cfg.scratch_dir / ".staging")
-        staging_base.mkdir(parents=True, exist_ok=True, mode=0o700)
-        staging_dir = Path(tempfile.mkdtemp(prefix="viz-up-", dir=str(staging_base)))
+        staging_dir: Optional[Path] = None
         is_gzip = "gzip" in (self.headers.get("Content-Encoding") or "").lower()
         raw_name = (self.headers.get("X-Viz-Hub-Name") or "").strip()
         hub_name = urllib.parse.unquote(raw_name)[:80] if raw_name else ""
 
         try:
-            stats = extract_vzb1_stream(self.rfile, content_length, staging_dir, cfg, is_gzip=is_gzip)
+            try:
+                self.request.settimeout(60.0)
+            except Exception:
+                pass
+            staging_base.mkdir(parents=True, exist_ok=True, mode=0o700)
+            staging_dir = Path(tempfile.mkdtemp(prefix="viz-up-", dir=str(staging_base)))
+            stats = extract_vzb1_stream(
+                self.rfile, content_length, staging_dir, cfg, is_gzip=is_gzip, sock=self.request
+            )
             info = validate_extracted_hub(staging_dir)
-            summary = store.save_uploaded_hub(staging_dir, hub_name, info, stats, identity, tier=tier)
+            summary = store.save_uploaded_hub(
+                staging_dir,
+                hub_name,
+                info,
+                stats,
+                identity,
+                tier=tier,
+                client_ip_hash=hash_identity(f"ip:{client_ip}"),
+            )
             if minted_sid is not None:
                 self._add_set_cookie(
                     make_session_cookie_header(
@@ -1036,18 +1167,75 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 },
                 status=201,
             )
+        except StorageBudgetExceededError as exc:
+            self.close_connection = True
+            self._send_json({"error": str(exc)}, status=507)
+        except RateLimitExceededError as exc:
+            self.close_connection = True
+            self._send_json({"error": str(exc)}, status=429)
         except UploadTooLargeError as exc:
             self.close_connection = True
             self._send_json({"error": str(exc)}, status=413)
+        except UploadTimeoutError as exc:
+            self.close_connection = True
+            self._send_json({"error": str(exc)}, status=408)
         except UploadValidationError as exc:
             self.close_connection = True
             self._send_json({"error": str(exc)}, status=400)
         except UploadIncompatibleError as exc:
             self._send_json({"error": str(exc)}, status=422)
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                self.close_connection = True
+                self._send_json({"error": "Insufficient upload storage space available on server."}, status=507)
+            else:
+                logger.exception("OS error during web upload: %s", exc)
+                self._send_json({"error": "Upload failed due to a server storage error."}, status=500)
         finally:
             limiter.release()
-            if staging_dir.exists():
+            if staging_dir is not None and staging_dir.exists():
                 shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _send_redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_auth_login(self, mgr: HubManager, query: dict):
+        """
+        Exchange a proxy-authenticated request for the signed `viz_user` session cookie.
+
+        Only this path is placed behind oauth2-proxy (`auth-url`), which adds the shared proxy secret to
+        authenticated requests. Every other path stays anonymous-friendly and recognizes signed-in users
+        by the cookie, which is how "browse anonymously, sign in to save hubs" works behind ingress-nginx.
+        """
+        self._is_private_response = True
+        cfg = mgr.web_config
+        if mgr.mode != "web" or cfg is None or not (cfg.trust_proxy_auth and cfg.proxy_secret):
+            self._send_json({"error": "Sign-in is not configured on this server"}, status=404)
+            return
+        user = resolve_proxy_header_user(self.headers, cfg)
+        if user is None:
+            self._send_json({"error": "Sign-in did not complete; please try again."}, status=401)
+            return
+        value = make_user_cookie_value(user, cfg)
+        if value is None:
+            self._send_json({"error": "Sign-in is not configured on this server"}, status=404)
+            return
+        self._add_set_cookie(
+            make_user_cookie_header(value, secure=is_https_request(self.headers, cfg), max_age=cfg.user_session_seconds)
+        )
+        self._send_redirect(safe_local_redirect((query.get("rd") or [""])[0]))
+
+    def _handle_auth_logout(self, mgr: HubManager):
+        self._is_private_response = True
+        cfg = mgr.web_config
+        if mgr.mode != "web" or cfg is None:
+            self._send_redirect("/next/")
+            return
+        self._add_set_cookie(make_user_cookie_header("", secure=is_https_request(self.headers, cfg), max_age=0))
+        self._send_redirect(cfg.sso_logout_url or "/next/")
 
     def _handle_web_delete(self, mgr: HubManager):
         body = self._read_json_body()
@@ -1097,7 +1285,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         req_id = self._requested_hub_id(query)
         ctx = self._resolve_ctx(query)
         if req_id and ctx is None:
-            self._send_json({"error": f"Unknown workspace hub '{req_id}'"}, status=404)
+            self._send_hub_not_found(req_id)
             return
         if ctx is None:
             self._send_json({
@@ -1427,7 +1615,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(heatmap_data)
         except Exception as exc:
             logger.exception("Heatmap API generation error: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            self._send_json({"error": "Internal server error"}, status=500)
 
     @staticmethod
     def _heatmap_scope(query: dict) -> dict:
@@ -1510,8 +1698,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:
-            logger.warning("Metrics evaluation error: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            logger.exception("Metrics evaluation error: %s", exc)
+            self._send_json({"error": "Internal server error"}, status=500)
 
     def _handle_sample_scores(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
         params = self._parse_eval_params(ctx, query, horizons=horizons)
@@ -1520,8 +1708,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:
-            logger.warning("Sample scores evaluation error: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            logger.exception("Sample scores evaluation error: %s", exc)
+            self._send_json({"error": "Internal server error"}, status=500)
 
     def _handle_model_locations(self, ctx: HubContext, query: dict, horizons: Optional[List[int]] = None):
         model_id = query.get("model", [""])[0].strip()
@@ -1540,8 +1728,8 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:
-            logger.warning("Model locations evaluation error: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            logger.exception("Model locations evaluation error: %s", exc)
+            self._send_json({"error": "Internal server error"}, status=500)
 
     def _route_remote_post(self, remote_mgr: Any, path: str):
         """Hub sync endpoints. Only these (user-initiated) calls ever reach the network."""
@@ -1609,9 +1797,11 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             cfg = SyntheticEnsembleConfig.from_dict(body)
             preview = ctx.loader.ensemble_mgr.preview_ensemble(cfg)
             self._send_json(preview)
+        except ValueError as exc:
+            self._send_json({"valid": False, "error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("Error during ensemble preview: %s", exc)
-            self._send_json({"valid": False, "error": str(exc)}, status=400)
+            self._send_json({"valid": False, "error": "Unable to preview ensemble configuration."}, status=400)
 
     def _handle_ensemble_create(self, ctx: HubContext):
         """Register a new session synthetic ensemble."""
@@ -1673,7 +1863,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
         except Exception as exc:
             logger.exception("Error creating synthetic ensemble: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            self._send_json({"error": "Internal server error"}, status=500)
 
     def _handle_ensemble_save(self, ctx: HubContext):
         """Persist a registered synthetic ensemble to local-output/synthetic/<id>/."""
@@ -1689,7 +1879,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(res)
         except Exception as exc:
             logger.exception("Error persisting synthetic ensemble: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            self._send_json({"error": "Internal server error"}, status=500)
 
     def _handle_ensemble_delete(self, ctx: HubContext):
         """Remove a synthetic ensemble from active registry and disk."""
@@ -1708,7 +1898,7 @@ class SandboxRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"error": f"Ensemble '{ensemble_id}' not found"}, status=404)
         except Exception as exc:
             logger.exception("Error deleting synthetic ensemble: %s", exc)
-            self._send_json({"error": str(exc)}, status=500)
+            self._send_json({"error": "Internal server error"}, status=500)
 
 
 def _port_is_free(host: str, port: int) -> bool:
@@ -1728,11 +1918,76 @@ def _next_free_port(host: str, start: int) -> Optional[int]:
 
 
 class BoundedThreadingTCPServer(socketserver.ThreadingTCPServer):
-    """ThreadingTCPServer backed by a bounded worker pool to protect host CPU/threads."""
+    """ThreadingTCPServer with reserved health-probe headroom and API admission control."""
 
-    def __init__(self, server_address, RequestHandlerClass, *, max_workers: int = 32):
-        self._executor = ThreadPoolExecutor(max_workers=max(4, int(max_workers)), thread_name_prefix="viz-http")
+    request_queue_size = 64
+
+    def __init__(
+        self,
+        server_address,
+        RequestHandlerClass,
+        *,
+        max_workers: int = 32,
+        max_per_client: int = 0,
+    ):
+        api_cap = max(4, int(max_workers))
+        self._api_max = api_cap
+        # 0 disables the per-client cap; otherwise one client (IP) may hold at most this many API slots,
+        # so a single caller issuing expensive queries cannot make the API return 503 for everyone.
+        self._per_client_max = max(0, int(max_per_client))
+        self._client_active: Dict[str, int] = {}
+        self._api_max_waiting = 4
+        self._api_active = 0
+        self._api_waiting = 0
+        self._api_cond = threading.Condition()
+        # Keep 12 threads beyond api_cap + wait queue so /healthz and /readyz never starve
+        self._executor = ThreadPoolExecutor(max_workers=api_cap + 12, thread_name_prefix="viz-http")
         super().__init__(server_address, RequestHandlerClass)
+
+    def acquire_api_slot(self, *, timeout: float = 0.5, client_key: Optional[str] = None) -> bool:
+        with self._api_cond:
+            if client_key is not None and self._per_client_max > 0:
+                if self._client_active.get(client_key, 0) >= self._per_client_max:
+                    return False
+            if self._api_active < self._api_max:
+                self._api_active += 1
+                self._note_client(client_key, +1)
+                return True
+            if self._api_waiting >= self._api_max_waiting:
+                return False
+            self._api_waiting += 1
+            end = time.monotonic() + max(0.0, timeout)
+            try:
+                while self._api_active >= self._api_max:
+                    rem = end - time.monotonic()
+                    if rem <= 0:
+                        return False
+                    self._api_cond.wait(timeout=rem)
+                if client_key is not None and self._per_client_max > 0:
+                    if self._client_active.get(client_key, 0) >= self._per_client_max:
+                        return False
+                self._api_active += 1
+                self._note_client(client_key, +1)
+                return True
+            finally:
+                self._api_waiting -= 1
+
+    def _note_client(self, client_key: Optional[str], delta: int) -> None:
+        # Caller holds self._api_cond.
+        if client_key is None or self._per_client_max <= 0:
+            return
+        n = self._client_active.get(client_key, 0) + delta
+        if n > 0:
+            self._client_active[client_key] = n
+        else:
+            self._client_active.pop(client_key, None)
+
+    def release_api_slot(self, *, client_key: Optional[str] = None) -> None:
+        with self._api_cond:
+            if self._api_active > 0:
+                self._api_active -= 1
+            self._note_client(client_key, -1)
+            self._api_cond.notify()
 
     def process_request(self, request, client_address):
         try:
@@ -1760,8 +2015,8 @@ def run_server(
     effective_verbose = VERBOSE_LOGGING if verbose is None else bool(verbose)
     SandboxRequestHandler.log_requests = effective_verbose
     logging.getLogger().setLevel(logging.INFO if effective_verbose else logging.ERROR)
-    if hubs or mode is not None or data_dir is not None or no_auto_hub or HUB_MANAGER is None:
-        try:
+    try:
+        if hubs or mode is not None or data_dir is not None or no_auto_hub:
             cli_paths = [Path(h) for h in hubs] if hubs else None
             d_dir = Path(data_dir).expanduser().resolve() if data_dir else None
             init_hub_manager(
@@ -1770,9 +2025,12 @@ def run_server(
                 cli_hubs=cli_paths,
                 include_enclosing=not no_auto_hub,
             )
-        except ValueError as exc:
-            sys.stderr.write(f"\nERROR: {exc}\n\n")
-            sys.exit(1)
+        else:
+            _ensure_hub_manager()
+    except ValueError as exc:
+        # Invalid configuration (e.g. a malformed VIZ_* environment variable): one clear line, no traceback.
+        sys.stderr.write(f"\nERROR: {exc}\n\n")
+        sys.exit(1)
 
     mgr = HUB_MANAGER
     assert mgr is not None
@@ -1788,10 +2046,17 @@ def run_server(
     env_host = os.environ.get("VIZ_HOST", "").strip()
     final_port = port if port is not None else (int(env_port) if env_port.isdigit() else server_cfg["port"])
     final_host = host if host is not None else (env_host or ("0.0.0.0" if mgr.mode == "web" else server_cfg["host"]))
-    max_workers = mgr.web_config.max_workers if (mgr.mode == "web" and mgr.web_config is not None) else 32
+    web_mode = mgr.mode == "web" and mgr.web_config is not None
+    max_workers = mgr.web_config.max_workers if web_mode else 32
+    max_per_client = mgr.web_config.max_concurrent_per_client if web_mode else 0
 
     try:
-        httpd = BoundedThreadingTCPServer((final_host, final_port), SandboxRequestHandler, max_workers=max_workers)
+        httpd = BoundedThreadingTCPServer(
+            (final_host, final_port),
+            SandboxRequestHandler,
+            max_workers=max_workers,
+            max_per_client=max_per_client,
+        )
     except OSError as exc:
         if exc.errno not in (errno.EADDRINUSE, 10048):  # 10048 = WSAEADDRINUSE
             raise

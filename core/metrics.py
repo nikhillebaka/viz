@@ -13,6 +13,7 @@ Implements Hubverse & FluSight evaluation methodology (Bracher et al. 2021, Cram
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import functools
 import math
 import threading
@@ -244,9 +245,38 @@ def _prepare_oracle(
     return o, join_keys
 
 
-_ORACLE_MEMO: Dict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]] = {}
+# Small LRU memos keyed by the identity of the caller's oracle frame. Each entry pins its source
+# frame (so the id can't be recycled), so the cap bounds how many full oracle frames stay alive;
+# stale frames from a truth refresh age out after a few lookups instead of accumulating.
+_ORACLE_MEMO: "OrderedDict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]]" = OrderedDict()
 _ORACLE_MEMO_LOCK = threading.Lock()
-_ORACLE_MEMO_MAX = 16
+_ORACLE_MEMO_MAX = 4
+
+
+def _memo_get(
+    memo: "OrderedDict[Any, Any]", lock: threading.Lock, key: Any, o: pl.DataFrame
+) -> Optional[Tuple[pl.DataFrame, List[str]]]:
+    with lock:
+        hit = memo.get(key)
+        if hit is None or hit[0] is not o:
+            return None
+        memo.move_to_end(key)
+    return hit[1], list(hit[2])
+
+
+def _memo_put(
+    memo: "OrderedDict[Any, Any]",
+    lock: threading.Lock,
+    key: Any,
+    o: pl.DataFrame,
+    prepared: pl.DataFrame,
+    join_keys: List[str],
+) -> None:
+    with lock:
+        memo[key] = (o, prepared, list(join_keys))
+        memo.move_to_end(key)
+        while len(memo) > _ORACLE_MEMO_MAX:
+            memo.popitem(last=False)
 
 
 def _prepared_oracle(
@@ -256,19 +286,15 @@ def _prepared_oracle(
 ) -> Tuple[pl.DataFrame, List[str]]:
     extra_key = tuple(sorted(str(c) for c in (extra_task_ids or ()) if c in o.columns))
     key = (id(o), target, extra_key)
-    with _ORACLE_MEMO_LOCK:
-        hit = _ORACLE_MEMO.get(key)
-    if hit is not None and hit[0] is o:
-        return hit[1], list(hit[2])
+    hit = _memo_get(_ORACLE_MEMO, _ORACLE_MEMO_LOCK, key, o)
+    if hit is not None:
+        return hit
     prepared, join_keys = _prepare_oracle(o, target, extra_task_ids=extra_key)
-    with _ORACLE_MEMO_LOCK:
-        if len(_ORACLE_MEMO) >= _ORACLE_MEMO_MAX:
-            _ORACLE_MEMO.clear()
-        _ORACLE_MEMO[key] = (o, prepared, list(join_keys))
+    _memo_put(_ORACLE_MEMO, _ORACLE_MEMO_LOCK, key, o, prepared, join_keys)
     return prepared, join_keys
 
 
-_PMF_ORACLE_MEMO: Dict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]] = {}
+_PMF_ORACLE_MEMO: "OrderedDict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]]" = OrderedDict()
 _PMF_ORACLE_MEMO_LOCK = threading.Lock()
 
 
@@ -323,15 +349,11 @@ def _prepared_pmf_oracle(
 ) -> Tuple[pl.DataFrame, List[str]]:
     extra_key = tuple(sorted(str(c) for c in (extra_task_ids or ()) if c in o.columns))
     key = (id(o), target, extra_key)
-    with _PMF_ORACLE_MEMO_LOCK:
-        hit = _PMF_ORACLE_MEMO.get(key)
-    if hit is not None and hit[0] is o:
-        return hit[1], list(hit[2])
+    hit = _memo_get(_PMF_ORACLE_MEMO, _PMF_ORACLE_MEMO_LOCK, key, o)
+    if hit is not None:
+        return hit
     prepared, join_keys = _prepare_pmf_oracle(o, target, extra_task_ids=extra_key)
-    with _PMF_ORACLE_MEMO_LOCK:
-        if len(_PMF_ORACLE_MEMO) >= _ORACLE_MEMO_MAX:
-            _PMF_ORACLE_MEMO.clear()
-        _PMF_ORACLE_MEMO[key] = (o, prepared, list(join_keys))
+    _memo_put(_PMF_ORACLE_MEMO, _PMF_ORACLE_MEMO_LOCK, key, o, prepared, join_keys)
     return prepared, join_keys
 
 
@@ -1058,11 +1080,15 @@ def crps_ensemble_1d(samples: np.ndarray, y: float) -> float:
         CRPS = mean(|x_i - y|) - (1 / (2 M^2)) * sum_{i,j} |x_i - x_j|
     where sum_{i,j} |x_i - x_j| = 2 * sum_{i=0}^{M-1} (2*i - M + 1) * x_(i).
     """
-    x = np.sort(np.asarray(samples, dtype=np.float64))
+    y_val = float(y)
+    if not np.isfinite(y_val):
+        return float("nan")
+    x = np.asarray(samples, dtype=np.float64).ravel()
+    x = np.sort(x[np.isfinite(x)])
     m = x.size
     if m == 0:
         return float("nan")
-    term1 = float(np.mean(np.abs(x - float(y))))
+    term1 = float(np.mean(np.abs(x - y_val)))
     if m == 1:
         return term1
     weights = (2.0 * np.arange(m, dtype=np.float64) - m + 1.0)
@@ -1083,6 +1109,9 @@ def energy_score(trajectories: np.ndarray, y_vec: np.ndarray) -> float:
     """
     X = np.asarray(trajectories, dtype=np.float64)
     y = np.asarray(y_vec, dtype=np.float64)
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0 or y.shape != (X.shape[1],) or not np.all(np.isfinite(y)):
+        return float("nan")
+    X = X[np.all(np.isfinite(X), axis=1)]
     m = X.shape[0]
     if m == 0:
         return float("nan")

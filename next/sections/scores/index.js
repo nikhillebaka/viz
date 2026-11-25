@@ -7,7 +7,7 @@
  * a quick selected-only one fills the table first (relative WIS waits for the pool) and is also the pool
  * "Wins" counts in. */
 import { h } from "../../lib/dom.js";
-import { apiUrl } from "../../lib/api.js";
+import { apiUrl, hubFetch } from "../../lib/api.js";
 import { openMenu, openPopover, tooltip } from "../../ui/floating.js";
 import { icon, toast, slideText } from "../../ui/controls.js";
 import { seriesColor } from "../../chart/layout.js";
@@ -17,7 +17,7 @@ import { scopeOf, setScope, targetHorizons } from "../scope.js";
 import { horizonUnit } from "../../lib/format.js";
 import { guideLink } from "../shared.js";
 import {
-  metricsRequest, rowsFrom, sortRows, SORTS, DEFAULT_SORT, relLevel, coverageLevel, SMALL, DASH,
+  metricsRequest, rowsFrom, sortRows, sortSpecFor, SORTS, DEFAULT_SORT, relLevel, coverageLevel, SMALL, DASH,
   fmtScore, fmtRel, fmtPct, fmtCount, fmtDelta, datesLabel, horizonsLabel, exportRows, delimited, exportName, cliCommand,
 } from "./model.js";
 import { loadMetrics, loadQuick, hasMetrics } from "./data.js";
@@ -56,8 +56,9 @@ const COLUMNS = {
 };
 const BASE_COLS = ["rel", "wis", "mae", "cov50", "cov95", "n"];
 const PMF_BASE_COLS = ["rel", "rps", "logScore", "brier", "hitMode", "n"];
-const PMF_OPTIONAL_COLS = ["delta", "h0", "h1", "h2", "h3", "h4"];
-export const OPTIONAL_COLS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"];
+const QUANT_BASE_OPTIONAL = ["delta", "wins", "per100k", "sharp", "cov80"];
+const PMF_BASE_OPTIONAL = ["delta"];
+const optionalColsFor = (cat, hs) => [...(cat ? PMF_BASE_OPTIONAL : QUANT_BASE_OPTIONAL), ...(hs || []).map((h) => `h${h}`)];
 const DEFAULT_UI = Object.freeze({ sort: DEFAULT_SORT, rev: false, cols: [], open: [] });
 const uiOf = (st) => ({ ...DEFAULT_UI, ...(st.scores || {}) });
 
@@ -265,11 +266,12 @@ export function mount(el, ctx) {
   const isCatMode = (st, s = shown) => !!s?.is_categorical || !!manifest.targetById.get(st?.target)?.is_categorical;
   const activeColsFor = (st, ui) => {
     const hs = availH();
-    if (isCatMode(st)) {
-      const base = shown?.ordinal === false ? PMF_BASE_COLS.filter((c) => c !== "rps") : PMF_BASE_COLS;
-      return [...base, ...PMF_OPTIONAL_COLS.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
-    }
-    return [...BASE_COLS, ...OPTIONAL_COLS.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
+    const cat = isCatMode(st);
+    const base = cat
+      ? (shown?.ordinal === false ? PMF_BASE_COLS.filter((c) => c !== "rps") : PMF_BASE_COLS)
+      : BASE_COLS;
+    const opts = optionalColsFor(cat, hs);
+    return [...base, ...opts.filter((c) => ui.cols.includes(c) && colAvailable(c, hs))];
   };
 
   function renderScope(st, sc) {
@@ -445,16 +447,19 @@ export function mount(el, ctx) {
     const cat = isCatMode(st);
     const colLabel = (key) => {
       if (key === "rel" && cat) return shown?.ordinal === false ? "Rel. Log" : "Rel. RPS";
-      if (/^h\d+$/.test(key)) return `${key.slice(1)} ${u}`;
+      const hm = /^h(-?\d+)$/.exec(key);
+      if (hm) return `${hm[1]} ${u}`;
       return COLUMNS[key].label;
     };
     const colTip = (key) => {
       if (key === "rel" && cat) return shown?.ordinal === false ? "Relative Log loss · pairwise vs the baseline · lower is better" : "Relative RPS · pairwise vs the baseline · lower is better";
+      const hm = /^h(-?\d+)$/.exec(key);
+      if (hm && !COLUMNS[key]) return `Relative score at horizon ${hm[1]} · vs baseline, ratio of means`;
       return COLUMNS[key]?.tip;
     };
     const head = (key, text, cls = "") => {
       const active = ui.sort === key;
-      const asc = (SORTS[key]?.asc ?? true) !== ui.rev;
+      const asc = (sortSpecFor(key)?.asc ?? true) !== ui.rev;
       const b = h("button", {
         type: "button", class: ["sc-head", cls, active && "is-active"], role: "columnheader",
         "aria-sort": active ? (asc ? "ascending" : "descending") : "none",
@@ -587,16 +592,19 @@ export function mount(el, ctx) {
   function columnsMenu(a) {
     const st = store.get(), ui = uiOf(st), hs = availH(), cat = isCatMode(st);
     const u = hUnit(st);
-    const opts = cat ? PMF_OPTIONAL_COLS : OPTIONAL_COLS;
+    const opts = optionalColsFor(cat, hs);
     const relPrefix = cat ? (shown?.ordinal === false ? "Rel. Log · " : "Rel. RPS · ") : "Rel. WIS · ";
     openMenu(a, {
       label: "Columns",
-      items: opts.filter((c) => colAvailable(c, hs)).map((c) => ({
-        label: /^h\d+$/.test(c) ? `${relPrefix}${c.slice(1)} ${u}` : COLUMNS[c].tip.split(" · ")[0],
-        toggle: true,
-        checked: ui.cols.includes(c),
-        onSelect: () => { const cur = uiOf(store.get()).cols; setUi({ cols: cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c] }); },
-      })),
+      items: opts.filter((c) => colAvailable(c, hs)).map((c) => {
+        const hm = /^h(-?\d+)$/.exec(c);
+        return {
+          label: hm ? `${relPrefix}${hm[1]} ${u}` : COLUMNS[c].tip.split(" · ")[0],
+          toggle: true,
+          checked: ui.cols.includes(c),
+          onSelect: () => { const cur = uiOf(store.get()).cols; setUi({ cols: cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c] }); },
+        };
+      }),
     });
   }
   function exportMenu(a) {
@@ -657,7 +665,11 @@ export function mount(el, ctx) {
   const sheetCache = new Map();
   const getJ = (q) => {
     const reqUrl = apiUrl(`/api/next/metrics?${q}`);
-    if (!sheetCache.has(reqUrl)) sheetCache.set(reqUrl, fetch(reqUrl).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); }));
+    if (!sheetCache.has(reqUrl)) {
+      const p = hubFetch(reqUrl).then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+      p.catch(() => { if (sheetCache.get(reqUrl) === p) sheetCache.delete(reqUrl); });
+      sheetCache.set(reqUrl, p);
+    }
     return sheetCache.get(reqUrl);
   };
   ctx.scores = {

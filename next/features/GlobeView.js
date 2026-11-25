@@ -14,11 +14,9 @@ import { pill, icon } from "../ui/controls.js";
 import { openMenu } from "../ui/floating.js";
 import { linkStyle, fitCanvas, onDprChange } from "../sections/shared.js";
 import {
-  arcsToUnitSphere,
   clipPolygonToHemisphere,
   clipPolylineToHemisphere,
   coneVisibleInViewport,
-  decodeArcs,
   extractPolygons,
   lonLatToXYZ,
   makeRotationMatrix,
@@ -30,6 +28,7 @@ import {
 } from "../geo/topo.js";
 import { EU_META, ISO_NUM_TO_ALPHA2, US_STATE_META } from "../geo/eu_tiles.js";
 import { classifyHubGeo, loadUsGeoCache, loadRegionGeo } from "../geo/picker_geo.js";
+import { loadWorldTopo } from "../geo/world_topo.js";
 
 /** Camera and layer-transition zoom thresholds for the unified Globe view. */
 export const GLOBE_ZOOM = Object.freeze({
@@ -110,11 +109,8 @@ function parseRgbCss(str, fallback = [245, 245, 245]) {
 let worldGeoPromise = null;
 function loadWorldCountries() {
   if (!worldGeoPromise) {
-    const worldUrl = new URL("../geo/world-countries-50m.json", import.meta.url).href;
-    worldGeoPromise = fetch(worldUrl)
-      .then((r) => { if (!r.ok) throw new Error(`world-countries: ${r.status}`); return r.json(); })
-      .then((worldTopo) => {
-        const worldArcs = arcsToUnitSphere(decodeArcs(worldTopo));
+    worldGeoPromise = loadWorldTopo()
+      .then(({ topo: worldTopo, unitArcs: worldArcs }) => {
         const raw = extractPolygons(worldTopo, "countries", worldArcs).map((f) => ({
           ...f,
           iso2: ISO_NUM_TO_ALPHA2[String(f.id).padStart(3, "0")] || ISO_NUM_TO_ALPHA2[String(f.id)] || null,

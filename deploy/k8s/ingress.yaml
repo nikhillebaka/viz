@@ -1,23 +1,89 @@
+# Two Ingress objects for one host:
+#
+#  1. `hub-viz`        — the app and oauth2-proxy's public /oauth2/start, /oauth2/callback, and
+#                        /oauth2/sign_out endpoints (/oauth2/auth stays ClusterIP-internal only).
+#                        No auth annotations: anonymous visitors can browse public hubs and make
+#                        temporary uploads.
+#  2. `hub-viz-login`  — ONLY the exact path /auth/login, gated by oauth2-proxy (`auth-url`). On success
+#                        oauth2-proxy returns the user's identity headers plus X-Viz-Proxy-Secret, nginx copies
+#                        them onto the request (overwriting anything the client sent), and the app exchanges
+#                        them for a signed `viz_user` session cookie used on every other path.
+#
+# Skip `hub-viz-login` (and keep VIZ_TRUST_PROXY_AUTH=0) for an anonymous-only deployment.
+# Replace hub.viz.example.edu, the TLS secret, and the `hub-viz` namespace in auth-url below.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: hub-viz
   annotations:
-    # Allow compressed folder uploads up to 105 MB
+    # Compressed folder uploads up to 100 MB (app limit) plus framing headroom. Request buffering stays ON
+    # (the ingress-nginx default) so slow clients are absorbed by nginx instead of holding app upload slots.
     nginx.ingress.kubernetes.io/proxy-body-size: "105m"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
-    # Optional SSO sidecar / oauth2-proxy annotations (enable VIZ_TRUST_PROXY_AUTH=1 on deployment):
-    # nginx.ingress.kubernetes.io/auth-url: "https://$host/oauth2/auth"
-    # nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
-    # nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Preferred-Username"
+    # If you use cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt
 spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - hub.viz.example.edu
+      secretName: hub-viz-tls
   rules:
     - host: hub.viz.example.edu
       http:
         paths:
+          # Public oauth2-proxy endpoints only (/oauth2/auth remains ClusterIP-internal so X-Viz-Proxy-Secret cannot leak)
+          - path: /oauth2/start
+            pathType: Exact
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  number: 4180
+          - path: /oauth2/callback
+            pathType: Exact
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  number: 4180
+          - path: /oauth2/sign_out
+            pathType: Exact
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  number: 4180
           - path: /
             pathType: Prefix
+            backend:
+              service:
+                name: hub-viz
+                port:
+                  number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub-viz-login
+  annotations:
+    nginx.ingress.kubernetes.io/auth-url: "http://oauth2-proxy.hub-viz.svc.cluster.local:4180/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://$host/oauth2/start?rd=$escaped_request_uri"
+    # Copied from oauth2-proxy's auth response onto the upstream request, replacing client-supplied values.
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Preferred-Username,X-Viz-Proxy-Secret"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - hub.viz.example.edu
+      secretName: hub-viz-tls
+  rules:
+    - host: hub.viz.example.edu
+      http:
+        paths:
+          - path: /auth/login
+            pathType: Exact
             backend:
               service:
                 name: hub-viz

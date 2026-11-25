@@ -13,7 +13,7 @@
  *
  * parseUrl() and writeUrl() are pure (node tests run them); readUrl() and syncUrl() add the browser. */
 import { parseIso } from "../lib/scale.js";
-import { targetHorizons } from "../sections/scope.js";
+import { targetHorizons, hasUsLocation } from "../sections/scope.js";
 import { create, fromLists, chartedBySlot } from "./selection.js";
 import { parseLayers } from "./chart/layers.js";
 
@@ -254,9 +254,46 @@ function writeViews(p, v) {
 }
 
 const list = (q, k) => (q.get(k) || "").split(",").map((s) => s.trim()).filter(Boolean);
-const SORT_KEYS = ["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name", "h0", "h1", "h2", "h3", "h4"];
-const COL_KEYS = ["delta", "wins", "per100k", "sharp", "cov80", "h0", "h1", "h2", "h3", "h4"];
+export const isHorizonKey = (k) => /^h-?\d+$/.test(String(k || ""));
+export { hasUsLocation };
 
+const VALID_SCORE_COLS = new Set(["delta", "wins", "per100k", "sharp", "cov80"]);
+const QUANT_SORTS = new Set(["rel", "wis", "mae", "cov50", "cov80", "cov95", "delta", "per100k", "sharp", "wins", "n", "name"]);
+const CAT_SORTS = new Set(["rel", "rps", "logScore", "brier", "hitMode", "n", "name"]);
+/** @returns {boolean} `c` is a leaderboard optional column (a fixed one or an `h<n>` horizon) */
+export const isValidScoreCol = (c) => VALID_SCORE_COLS.has(c) || isHorizonKey(c);
+
+/* every horizon the target declares (negative ones included), else the scores' default set */
+function horizonsOfTarget(manifest, targetId) {
+  const hMeta = manifest?.targetById?.get?.(targetId)?.horizons;
+  const declared = hMeta ? [...(hMeta.required || []), ...(hMeta.optional || [])].map(Number).filter(Number.isInteger) : [];
+  return new Set(declared.length ? declared : targetHorizons(manifest, targetId));
+}
+
+/**
+ * The leaderboard view (`state.scores`) made valid for a target: unknown columns are dropped, and a sort
+ * the target can't use (another kind of target's metric, or a horizon it doesn't have) goes back to "rel".
+ * @param {object | undefined} scores
+ * @param {object} manifest an indexed manifest
+ * @param {string} targetId
+ * @returns {object | undefined}
+ */
+export function sanitizeScoresForTarget(scores, manifest, targetId) {
+  if (!scores) return undefined;
+  const cols = Array.isArray(scores.cols) ? scores.cols.filter((c) => isValidScoreCol(c)) : [];
+  const tMeta = manifest?.targetById?.get?.(targetId);
+  const allowedSorts = isCategoricalTarget(tMeta) ? CAT_SORTS : QUANT_SORTS;
+  const sort = typeof scores.sort === "string" ? scores.sort : "";
+  const keepSort = allowedSorts.has(sort)
+    || (isHorizonKey(sort) && horizonsOfTarget(manifest, targetId).has(Number(sort.slice(1))));
+  return {
+    ...scores,
+    sort: keepSort ? sort : "rel",
+    rev: keepSort ? !!scores.rev : false,
+    cols,
+    open: Array.isArray(scores.open) ? scores.open : [],
+  };
+}
 /* the evaluation scope (sections/scope.js), only what differs from its defaults */
 function parseScope(q, manifest, targetId) {
   const sc = {};
@@ -268,7 +305,8 @@ function parseScope(q, manifest, targetId) {
   const defH = targetHorizons(manifest, targetId);
   const hz = [...new Set(list(q, "hz").map(Number))].filter((h) => Number.isInteger(h) && h >= -4 && h <= 53).sort((a, b) => a - b);
   if (hz.length && !sameList(hz, defH)) sc.horizons = hz;
-  if (["US", "current"].includes(q.get("pl"))) sc.place = q.get("pl");
+  const pl = q.get("pl");
+  if (pl === "current" || (pl === "US" && hasUsLocation(manifest))) sc.place = pl;
   if (q.get("fair") === "1") sc.fair = true;
   if (q.get("bl") && manifest.modelById.has(q.get("bl"))) sc.baseline = q.get("bl");
   if (q.get("rk") === "sel") sc.rank = "selected";
@@ -280,8 +318,12 @@ function parseScope(q, manifest, targetId) {
 function parseScores(q, manifest) {
   const o = {};
   const sort = q.get("sort") || "";
-  if (SORT_KEYS.includes(sort.replace(/^-/, ""))) { o.sort = sort.replace(/^-/, ""); o.rev = sort.startsWith("-"); }
-  const cols = list(q, "cols").filter((c) => COL_KEYS.includes(c));
+  const bareSort = sort.replace(/^-/, "");
+  if (QUANT_SORTS.has(bareSort) || CAT_SORTS.has(bareSort) || isHorizonKey(bareSort)) {
+    o.sort = bareSort;
+    o.rev = sort.startsWith("-");
+  }
+  const cols = list(q, "cols").filter((c) => isValidScoreCol(c));
   if (cols.length) o.cols = cols;
   const open = list(q, "open").filter((id) => manifest.modelById.has(id));
   if (open.length) o.open = open;
@@ -295,7 +337,7 @@ function writeScope(p, sc, manifest, targetId) {
   if (sc.phase) p.push(["ph", sc.phase]);
   const defH = targetHorizons(manifest, targetId);
   if (Array.isArray(sc.horizons) && sc.horizons.length && !sameList(sc.horizons, defH)) p.push(["hz", sc.horizons.join(",")]);
-  if (sc.place === "US" || sc.place === "current") p.push(["pl", sc.place]);
+  if (sc.place === "current" || (sc.place === "US" && hasUsLocation(manifest))) p.push(["pl", sc.place]);
   if (sc.fair) p.push(["fair", "1"]);
   const base = manifest.baselineFor?.(targetId) ?? manifest.baseline;
   if (sc.baseline && sc.baseline !== base) p.push(["bl", sc.baseline]); // the target's own is the default

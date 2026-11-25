@@ -18,7 +18,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from viz.core.paths import inspect_local_hub, slug_for_hub
 from viz.core.workspace import LocalHubRecord
 from viz.web.auth import RequestIdentity
-from viz.web.bundle import BundleStats, UploadTooLargeError, validate_hubverse_relpath
+from viz.web.bundle import (
+    BundleStats,
+    RateLimitExceededError,
+    StorageBudgetExceededError,
+    UploadTooLargeError,
+    validate_hubverse_relpath,
+)
 from viz.web.config import WebConfig
 
 logger = logging.getLogger("viz.web.sessions")
@@ -159,6 +165,9 @@ def _unpack_tar_gz(archive_path: Path, dest_dir: Path, cfg: WebConfig) -> None:
                 pass
 
 
+# Another session's temporary hub may be reclaimed for a new upload only after this much idle time.
+EPHEM_RECLAIM_IDLE_SECONDS = 10 * 60
+
 class WebWorkspaceStore:
     """
     Manages private uploaded Hubverse workspaces for Tier 1 (30-min ephemeral) and
@@ -177,6 +186,7 @@ class WebWorkspaceStore:
         self.users_root = (self.data_dir / "users").resolve()
         self._on_evict = on_evict
         self._global_lock = threading.RLock()
+        self._meta_lock = threading.Lock()
         self._item_locks: Dict[str, threading.Lock] = {}
         self._last_touch: Dict[str, float] = {}
         self._stop_event = threading.Event()
@@ -184,18 +194,101 @@ class WebWorkspaceStore:
         self._last_cold_sweep = 0.0
 
     def _lock_for(self, hub_id: str) -> threading.Lock:
-        with self._global_lock:
+        with self._meta_lock:
             lk = self._item_locks.get(hub_id)
             if lk is None:
                 lk = threading.Lock()
                 self._item_locks[hub_id] = lk
             return lk
 
+    def _untrack_hub(self, hub_id: Optional[str]) -> None:
+        if not hub_id:
+            return
+        with self._meta_lock:
+            self._last_touch.pop(hub_id, None)
+            lk = self._item_locks.get(hub_id)
+            if lk is not None and lk.acquire(blocking=False):
+                try:
+                    self._item_locks.pop(hub_id, None)
+                finally:
+                    lk.release()
+
+    def _prune_bookkeeping(self) -> None:
+        with self._meta_lock:
+            if len(self._item_locks) <= 512 and len(self._last_touch) <= 512:
+                return
+            live_ids: set[str] = set()
+            for root in (self.ephem_root, self.users_root):
+                if not root.is_dir():
+                    continue
+                try:
+                    for owner_dir in root.iterdir():
+                        if owner_dir.is_dir():
+                            for ws_dir in owner_dir.iterdir():
+                                if ws_dir.is_dir():
+                                    meta = _read_json(ws_dir / "meta.json")
+                                    if meta and meta.get("hub_id"):
+                                        live_ids.add(str(meta["hub_id"]))
+                except OSError:
+                    pass
+            for hid in list(self._last_touch):
+                if hid not in live_ids:
+                    self._last_touch.pop(hid, None)
+            for hid in list(self._item_locks):
+                if hid not in live_ids:
+                    lk = self._item_locks.get(hid)
+                    if lk is not None and lk.acquire(blocking=False):
+                        try:
+                            self._item_locks.pop(hid, None)
+                        finally:
+                            lk.release()
+
+    def cleanup_leftovers(self, *, max_age_seconds: float = 900.0, now: Optional[float] = None) -> int:
+        """Remove abandoned `.staging/*`, `hub.wake.*`, and temp files older than `max_age_seconds`."""
+        ts = time.time() if now is None else now
+        cleaned = 0
+        for base in (self.cfg.scratch_dir / ".staging", self.data_dir / ".staging"):
+            if not base.is_dir():
+                continue
+            for ent in list(base.iterdir()):
+                try:
+                    age = ts - ent.stat().st_mtime
+                except OSError:
+                    continue
+                if max_age_seconds <= 0.0 or age >= max_age_seconds:
+                    shutil.rmtree(ent, ignore_errors=True) if ent.is_dir() else ent.unlink(missing_ok=True)
+                    cleaned += 1
+        for root in (self.ephem_root, self.users_root):
+            if not root.is_dir():
+                continue
+            for owner_dir in list(root.iterdir()):
+                if not owner_dir.is_dir():
+                    continue
+                for ws_dir in list(owner_dir.iterdir()):
+                    if not ws_dir.is_dir():
+                        continue
+                    for ent in list(ws_dir.iterdir()):
+                        name = ent.name
+                        if not (name.startswith("hub.wake.") or ".tmp." in name):
+                            continue
+                        try:
+                            age = ts - ent.stat().st_mtime
+                        except OSError:
+                            continue
+                        if max_age_seconds <= 0.0 or age >= max_age_seconds:
+                            shutil.rmtree(ent, ignore_errors=True) if ent.is_dir() else ent.unlink(missing_ok=True)
+                            cleaned += 1
+        return cleaned
+
     def start(self) -> None:
         """Start the background TTL reaper and cold archival maintenance thread."""
         with self._global_lock:
             if self._reaper_thread is not None and self._reaper_thread.is_alive():
                 return
+            try:
+                self.cleanup_leftovers(max_age_seconds=0.0)
+            except Exception as exc:
+                logger.warning("Startup leftover cleanup warning: %s", exc)
             self._stop_event.clear()
             t = threading.Thread(target=self._maintenance_loop, name="web-reaper", daemon=True)
             self._reaper_thread = t
@@ -213,6 +306,8 @@ class WebWorkspaceStore:
             now = time.time()
             try:
                 self.reap_expired(now=now)
+                self.cleanup_leftovers(max_age_seconds=900.0, now=now)
+                self._prune_bookkeeping()
             except Exception as exc:
                 logger.warning("Ephemeral workspace reaper error: %s", exc)
             if now - self._last_cold_sweep >= 600.0:
@@ -233,6 +328,7 @@ class WebWorkspaceStore:
         identity: RequestIdentity,
         *,
         tier: str = "ephem",
+        client_ip_hash: Optional[str] = None,
         now: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Promote a validated `staging_dir` into an owned Tier 1 or Tier 2 private workspace."""
@@ -256,19 +352,19 @@ class WebWorkspaceStore:
             if clean_tier == "persistent":
                 self._enforce_user_quota(owner_dir, stats.extracted_bytes)
             else:
-                self._enforce_ephem_limits(owner_dir, stats.extracted_bytes)
+                self._enforce_ephem_limits(
+                    owner_dir,
+                    stats.extracted_bytes,
+                    client_ip_hash=client_ip_hash,
+                    exclude_staging_dir=staging_dir,
+                    now=ts,
+                )
 
             owner_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             existing_tails = [p.name for p in owner_dir.iterdir() if p.is_dir()]
             tail = _short_slug(clean_name, existing_tails)
             hub_id = f"{prefix}{owner_hash[:12]}_{tail}"
             ws_dir = (owner_dir / tail).resolve()
-            ws_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-            hub_dest = ws_dir / "hub"
-            if hub_dest.exists():
-                shutil.rmtree(hub_dest, ignore_errors=True)
-            shutil.move(str(staging_dir), str(hub_dest))
 
             meta: Dict[str, Any] = {
                 "version": 1,
@@ -287,37 +383,109 @@ class WebWorkspaceStore:
                 "model_count": int(info.get("model_count") or 0),
                 "targets_count": len(info.get("targets") or []),
             }
-            _atomic_write_json(ws_dir / "meta.json", meta)
-            self._last_touch[hub_id] = ts
+            if clean_tier == "ephem" and client_ip_hash:
+                meta["client_ip_hash"] = client_ip_hash
+
+            # Assemble meta.json and hub/ inside a staging container first so ws_dir never appears
+            # in owner_dir without a valid meta.json (prevents reaper races).
+            staged_ws = staging_dir.parent / f"ws.tmp.{os.getpid()}.{threading.get_ident()}"
+            if staged_ws.exists():
+                shutil.rmtree(staged_ws, ignore_errors=True)
+            staged_ws.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                shutil.move(str(staging_dir), str(staged_ws / "hub"))
+                _atomic_write_json(staged_ws / "meta.json", meta)
+                if ws_dir.exists():
+                    shutil.rmtree(ws_dir, ignore_errors=True)
+                shutil.move(str(staged_ws), str(ws_dir))
+            finally:
+                if staged_ws.exists():
+                    shutil.rmtree(staged_ws, ignore_errors=True)
+
+            with self._meta_lock:
+                self._last_touch[hub_id] = ts
 
         return self._public_summary(meta, ws_dir, now=ts)
 
-    def _enforce_ephem_limits(self, owner_dir: Path, incoming_bytes: int) -> None:
+    def _enforce_ephem_limits(
+        self,
+        owner_dir: Path,
+        incoming_bytes: int,
+        *,
+        client_ip_hash: Optional[str] = None,
+        exclude_staging_dir: Optional[Path] = None,
+        now: Optional[float] = None,
+    ) -> None:
+        self.reap_expired(now=now)
+        ts = time.time() if now is None else float(now)
+
+        # 1. Plan (but do not yet perform) eviction of this session's own oldest hubs beyond its cap.
+        #    Budgets are checked against the post-eviction state, and nothing is deleted unless the
+        #    upload is going to be accepted, so a rejected upload never costs the user a hub.
+        own_evict: List[Tuple[Path, Dict[str, Any], int]] = []
         if owner_dir.is_dir():
             own = self._scan_owner_dirs(owner_dir)
             while len(own) >= self.cfg.ephem_max_hubs_per_session:
-                oldest_dir, oldest_meta = own.pop(0)
-                self._drop_workspace_dir(oldest_dir, oldest_meta.get("hub_id"))
+                d, m = own.pop(0)
+                own_evict.append((d, m, _dir_bytes(d)))
+        own_evict_dirs = {d for d, _, _ in own_evict}
 
-        # Enforce global scratch budget via LRU eviction across all ephemeral workspaces
-        total = self._ephem_total_bytes()
-        if total + incoming_bytes > self.cfg.ephem_max_total_bytes and self.ephem_root.is_dir():
-            all_ws = []
+        # 2. Per-client-IP cap (excluding hubs this upload would replace).
+        all_ws: List[Tuple[Path, Dict[str, Any], int]] = []
+        if self.ephem_root.is_dir():
             for sess_dir in self.ephem_root.iterdir():
-                if sess_dir.is_dir():
-                    for ws_dir in sess_dir.iterdir():
-                        if ws_dir.is_dir():
-                            meta = _read_json(ws_dir / "meta.json") or {}
-                            all_ws.append((float(meta.get("last_accessed_at") or 0.0), ws_dir, meta))
-            all_ws.sort(key=lambda item: item[0])
-            for _, ws_dir, meta in all_ws:
+                if not sess_dir.is_dir():
+                    continue
+                for ws_dir in sess_dir.iterdir():
+                    if ws_dir.is_dir() and ws_dir not in own_evict_dirs:
+                        all_ws.append((ws_dir, _read_json(ws_dir / "meta.json") or {}, _dir_bytes(ws_dir)))
+        if client_ip_hash:
+            ip_used = sum(b for _, m, b in all_ws if m.get("client_ip_hash") == client_ip_hash)
+            if ip_used + incoming_bytes > self.cfg.ephem_max_bytes_per_ip:
+                raise RateLimitExceededError(
+                    "Temporary upload storage quota reached for your address; delete an existing temporary hub or wait for it to expire."
+                )
+
+        # 3. Global scratch budget. Other sessions' hubs are only reclaimed once they have been idle
+        #    for a while (oldest first); recently used hubs are never evicted for someone else.
+        staging_bytes = self._staging_bytes(exclude=exclude_staging_dir)
+        total = sum(b for _, _, b in all_ws) + staging_bytes
+        reclaim: List[Tuple[Path, Dict[str, Any], int]] = []
+        if total + incoming_bytes > self.cfg.ephem_max_total_bytes:
+            idle_cutoff = ts - EPHEM_RECLAIM_IDLE_SECONDS
+            candidates = sorted(
+                (
+                    item for item in all_ws
+                    if float(item[1].get("last_accessed_at") or item[1].get("created_at") or ts) <= idle_cutoff
+                ),
+                key=lambda item: float(item[1].get("last_accessed_at") or item[1].get("created_at") or 0.0),
+            )
+            for item in candidates:
                 if total + incoming_bytes <= self.cfg.ephem_max_total_bytes:
                     break
-                sz = _dir_bytes(ws_dir)
-                self._drop_workspace_dir(ws_dir, meta.get("hub_id"))
-                total = max(0, total - sz)
+                reclaim.append(item)
+                total -= item[2]
+            if total + incoming_bytes > self.cfg.ephem_max_total_bytes:
+                raise StorageBudgetExceededError(
+                    "Temporary upload scratch storage is currently full; please try again shortly."
+                )
+
+        # 4. Accepted: now perform the planned evictions.
+        for d, m, _ in own_evict + reclaim:
+            hid = m.get("hub_id")
+            if hid:
+                with self._lock_for(str(hid)):
+                    self._drop_workspace_dir(d, str(hid))
+            else:
+                self._drop_workspace_dir(d, None)
 
     def _enforce_user_quota(self, owner_dir: Path, incoming_bytes: int) -> None:
+        if self.users_root.is_dir():
+            total_users_bytes = _dir_bytes(self.users_root)
+            if total_users_bytes + incoming_bytes > self.cfg.users_max_total_bytes:
+                raise StorageBudgetExceededError(
+                    "Server persistent hub storage is full; please contact an administrator or use temporary storage."
+                )
         if not owner_dir.is_dir():
             if incoming_bytes > self.cfg.user_quota_bytes:
                 raise UploadTooLargeError(
@@ -349,6 +517,18 @@ class WebWorkspaceStore:
         items.sort(key=lambda item: float(item[1].get("last_accessed_at") or item[1].get("created_at") or 0.0))
         return items
 
+    def _staging_bytes(self, exclude: Optional[Path] = None) -> int:
+        staging_dir = (self.cfg.scratch_dir / ".staging").resolve()
+        if not staging_dir.is_dir():
+            return 0
+        ex = exclude.resolve() if exclude is not None else None
+        total = 0
+        for ent in staging_dir.iterdir():
+            if ex is not None and ent.resolve() == ex:
+                continue
+            total += _dir_bytes(ent) if ent.is_dir() else (ent.stat().st_size if ent.is_file() else 0)
+        return total
+
     def _ephem_total_bytes(self) -> int:
         return _dir_bytes(self.ephem_root) if self.ephem_root.is_dir() else 0
 
@@ -359,6 +539,7 @@ class WebWorkspaceStore:
             except Exception:
                 pass
         shutil.rmtree(ws_dir, ignore_errors=True)
+        self._untrack_hub(hub_id)
         parent = ws_dir.parent
         try:
             if parent.is_dir() and not any(parent.iterdir()):
@@ -439,7 +620,8 @@ class WebWorkspaceStore:
                 if meta.get("tier") == "ephem":
                     meta["expires_at"] = ts + self.cfg.ephem_ttl_seconds
                 _atomic_write_json(ws_dir / "meta.json", meta)
-                self._last_touch[hub_id] = ts
+                with self._meta_lock:
+                    self._last_touch[hub_id] = ts
 
             rec = LocalHubRecord(
                 id=hub_id,
@@ -467,7 +649,10 @@ class WebWorkspaceStore:
             os.replace(tmp_hub, hub_dir)
             meta["state"] = "hot"
             meta["last_accessed_at"] = ts
+            meta["archive_bytes"] = 0
             _atomic_write_json(ws_dir / "meta.json", meta)
+            # Remove compressed archive once hot hub/ is restored so quota doesn't double-count
+            archive_path.unlink(missing_ok=True)
         finally:
             if tmp_hub.exists():
                 shutil.rmtree(tmp_hub, ignore_errors=True)
@@ -547,7 +732,6 @@ class WebWorkspaceStore:
         ws_dir, _, _ = located
         with self._lock_for(hub_id):
             self._drop_workspace_dir(ws_dir, hub_id)
-            self._last_touch.pop(hub_id, None)
         return True
 
     # ---- maintenance ------------------------------------------------------------------------------
@@ -558,28 +742,39 @@ class WebWorkspaceStore:
         if not self.ephem_root.is_dir():
             return 0
         deleted = 0
-        for sess_dir in list(self.ephem_root.iterdir()):
-            if not sess_dir.is_dir():
-                continue
-            for ws_dir in list(sess_dir.iterdir()):
-                if not ws_dir.is_dir():
+        with self._global_lock:
+            for sess_dir in list(self.ephem_root.iterdir()):
+                if not sess_dir.is_dir():
                     continue
-                meta = _read_json(ws_dir / "meta.json")
-                if not meta:
-                    self._drop_workspace_dir(ws_dir, None)
-                    deleted += 1
-                    continue
-                exp = float(meta.get("expires_at") or 0.0)
-                if exp and ts >= exp:
-                    hid = meta.get("hub_id")
-                    with self._lock_for(str(hid or ws_dir)):
-                        self._drop_workspace_dir(ws_dir, hid)
-                    deleted += 1
-            try:
-                if sess_dir.is_dir() and not any(sess_dir.iterdir()):
-                    sess_dir.rmdir()
-            except OSError:
-                pass
+                for ws_dir in list(sess_dir.iterdir()):
+                    if not ws_dir.is_dir():
+                        continue
+                    meta = _read_json(ws_dir / "meta.json")
+                    if not meta:
+                        try:
+                            age = ts - ws_dir.stat().st_mtime
+                        except OSError:
+                            age = 0.0
+                        if age >= 60.0:
+                            self._drop_workspace_dir(ws_dir, None)
+                            deleted += 1
+                        continue
+                    exp = float(meta.get("expires_at") or 0.0)
+                    if exp and ts >= exp:
+                        hid = meta.get("hub_id")
+                        with self._lock_for(str(hid or ws_dir)):
+                            meta_fresh = _read_json(ws_dir / "meta.json")
+                            if not meta_fresh:
+                                continue
+                            fresh_exp = float(meta_fresh.get("expires_at") or 0.0)
+                            if fresh_exp and ts >= fresh_exp:
+                                self._drop_workspace_dir(ws_dir, meta_fresh.get("hub_id"))
+                                deleted += 1
+                try:
+                    if sess_dir.is_dir() and not any(sess_dir.iterdir()):
+                        sess_dir.rmdir()
+                except OSError:
+                    pass
         return deleted
 
     def archive_cold_workspaces(self, *, now: Optional[float] = None) -> int:
@@ -627,6 +822,9 @@ class WebWorkspaceStore:
                         p = ws_dir / sub
                         if p.exists():
                             shutil.rmtree(p, ignore_errors=True)
+                    for ent in list(ws_dir.iterdir()):
+                        if ent.name.startswith("hub.wake."):
+                            shutil.rmtree(ent, ignore_errors=True)
                     meta_fresh["state"] = "cold"
                     meta_fresh["archive_bytes"] = arch_size
                     meta_fresh["archived_at"] = ts

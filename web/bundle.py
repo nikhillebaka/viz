@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import struct
+import socket
 import threading
 import time
 from typing import Any, BinaryIO, Deque, Dict, Optional, Set
@@ -20,9 +22,12 @@ from viz.core.paths import inspect_local_hub, is_hub_dir
 from viz.remote.hubs import assess_compatibility
 from viz.web.config import WebConfig
 
+logger = logging.getLogger("viz.web.bundle")
+
 VZB1_MAGIC = b"VZB1"
 _MAX_PATH_LEN = 240
 _CHUNK_SIZE = 65536
+MAX_METADATA_FILE_BYTES = 64 * 1024
 _SAFE_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _RESERVED_MODEL_NAMES = frozenset({"synthetic", "remote"})
 
@@ -39,8 +44,16 @@ class UploadIncompatibleError(Exception):
     """Raised with HTTP 422 when an uploaded directory is not a compatible Hubverse hub."""
 
 
+class UploadTimeoutError(UploadValidationError):
+    """Raised with HTTP 408 when an upload body arrives too slowly (wall-clock deadline exceeded)."""
+
+
 class RateLimitExceededError(Exception):
-    """Raised with HTTP 429 when an IP exceeds upload frequency limits or server concurrency is saturated."""
+    """Raised with HTTP 429 when an IP exceeds upload frequency/storage limits or server concurrency is saturated."""
+
+
+class StorageBudgetExceededError(Exception):
+    """Raised with HTTP 507 when server ephemeral scratch or global persistent storage is full."""
 
 
 @dataclass(frozen=True)
@@ -77,8 +90,6 @@ def validate_hubverse_relpath(raw_path: Any) -> Optional[str]:
             return None
 
     norm = "/".join(parts)
-    if norm == "viz.config.json":
-        return norm
 
     top = parts[0]
     ext = Path(parts[-1]).suffix.lower()
@@ -110,8 +121,12 @@ class _BoundedDecompressStream:
         is_gzip: bool,
         max_compressed: int,
         max_uncompressed: int,
+        deadline: Optional[float] = None,
+        sock: Any = None,
     ):
         self._rfile = rfile
+        self._deadline = deadline
+        self._sock = sock
         self._remaining = content_length
         self._is_gzip = is_gzip
         self._max_compressed = max_compressed
@@ -122,6 +137,24 @@ class _BoundedDecompressStream:
         self.compressed_bytes = 0
         self.uncompressed_bytes = 0
         self._eof = False
+
+    def _read_with_deadline(self, n: int) -> bytes:
+        """Read from the socket, failing once the upload's overall wall-clock deadline has passed."""
+        if self._deadline is not None:
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                raise UploadTimeoutError("Upload timed out: the request body arrived too slowly")
+            if self._sock is not None:
+                try:
+                    self._sock.settimeout(max(0.1, min(60.0, left)))
+                except OSError:
+                    pass
+        try:
+            if hasattr(self._rfile, "read1"):
+                return self._rfile.read1(n)
+            return self._rfile.read(n)
+        except (TimeoutError, socket.timeout) as exc:
+            raise UploadTimeoutError("Upload timed out: the request body arrived too slowly") from exc
 
     def _fill(self) -> bool:
         if self._pos >= len(self._buf):
@@ -140,7 +173,7 @@ class _BoundedDecompressStream:
                 try:
                     out = self._decomp.decompress(self._decomp.unconsumed_tail, max_length=cap)
                 except zlib.error as exc:
-                    raise UploadValidationError(f"Invalid gzip upload stream: {exc}") from exc
+                    raise UploadValidationError("Invalid gzip upload stream") from exc
                 if out:
                     self._account_uncompressed(len(out))
                     self._buf.extend(out)
@@ -152,14 +185,14 @@ class _BoundedDecompressStream:
                     try:
                         tail = self._decomp.flush(cap)
                     except zlib.error as exc:
-                        raise UploadValidationError(f"Corrupt gzip upload stream: {exc}") from exc
+                        raise UploadValidationError("Corrupt gzip upload stream") from exc
                     if tail:
                         self._account_uncompressed(len(tail))
                         self._buf.extend(tail)
                 self._eof = True
                 return len(self._buf) > self._pos
 
-            chunk = self._rfile.read(min(_CHUNK_SIZE, self._remaining))
+            chunk = self._read_with_deadline(min(_CHUNK_SIZE, self._remaining))
             if not chunk:
                 raise UploadValidationError("Unexpected end of upload stream")
             self._remaining -= len(chunk)
@@ -174,7 +207,7 @@ class _BoundedDecompressStream:
                 try:
                     out = self._decomp.decompress(chunk, max_length=cap)
                 except zlib.error as exc:
-                    raise UploadValidationError(f"Invalid gzip upload stream: {exc}") from exc
+                    raise UploadValidationError("Invalid gzip upload stream") from exc
                 if out:
                     self._account_uncompressed(len(out))
                     self._buf.extend(out)
@@ -252,6 +285,7 @@ def extract_vzb1_stream(
     cfg: WebConfig,
     *,
     is_gzip: bool = True,
+    sock: Any = None,
 ) -> BundleStats:
     """
     Stream-parse a VZB1 archive (optionally gzipped) directly to `dest_dir` with strict security caps.
@@ -268,12 +302,18 @@ def extract_vzb1_stream(
 
     dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     dest_root = dest_dir.resolve()
+    # Whole-body deadline: at least 2 minutes, otherwise sized for the minimum accepted throughput, so a
+    # client trickling bytes cannot hold one of the few upload slots indefinitely.
+    min_rate = max(1, int(getattr(cfg, "upload_min_bytes_per_sec", 128 * 1024)))
+    deadline = time.monotonic() + max(120.0, content_length / float(min_rate))
     stream = _BoundedDecompressStream(
         rfile,
         content_length,
         is_gzip=is_gzip,
         max_compressed=cfg.max_compressed_bytes,
         max_uncompressed=cfg.max_uncompressed_bytes,
+        deadline=deadline,
+        sock=sock,
     )
 
     magic = stream.read_exact(4)
@@ -312,6 +352,10 @@ def extract_vzb1_stream(
         seen_paths.add(rel)
 
         file_len = struct.unpack("<Q", stream.read_exact(8))[0]
+        if rel.startswith("model-metadata/") and file_len > MAX_METADATA_FILE_BYTES:
+            raise UploadTooLargeError(
+                f"Model metadata file '{rel}' exceeds {MAX_METADATA_FILE_BYTES // 1024} KB limit"
+            )
         if file_len > cfg.max_uncompressed_bytes or (extracted_bytes + file_len) > cfg.max_uncompressed_bytes:
             raise UploadTooLargeError(
                 f"Extracted upload size exceeds {cfg.max_uncompressed_bytes // (1024 * 1024)} MB limit"
@@ -362,9 +406,9 @@ def validate_extracted_hub(staging_dir: Path) -> Dict[str, Any]:
         [p for p in truth_dir.rglob("*") if p.is_file() and p.suffix.lower() in (".parquet", ".csv")]
         if truth_dir.is_dir() else []
     )
-    if not forecast_files and not truth_files:
+    if not forecast_files:
         raise UploadIncompatibleError(
-            "Hub folder contains no forecast or target-data tables (.parquet or .csv)."
+            "Hub folder contains no forecast tables under model-output/ or local-output/."
         )
 
     tasks_file = staging_dir / "hub-config" / "tasks.json"
@@ -373,16 +417,25 @@ def validate_extracted_hub(staging_dir: Path) -> Dict[str, Any]:
         try:
             tasks = json.loads(tasks_file.read_text(encoding="utf-8"))
         except Exception as exc:
-            raise UploadIncompatibleError(f"Unreadable hub-config/tasks.json: {exc}") from exc
+            logger.debug("Invalid tasks.json in uploaded hub: %s", exc)
+            raise UploadIncompatibleError("Unreadable or invalid hub-config/tasks.json") from exc
+        if not isinstance(tasks, dict):
+            raise UploadIncompatibleError("hub-config/tasks.json must contain a JSON object")
         admin: Dict[str, Any] = {}
         if admin_file.is_file():
             try:
                 loaded_admin = json.loads(admin_file.read_text(encoding="utf-8"))
-                if isinstance(loaded_admin, dict):
-                    admin = loaded_admin
             except Exception as exc:
-                raise UploadIncompatibleError(f"Unreadable hub-config/admin.json: {exc}") from exc
-        compat = assess_compatibility(admin, tasks)
+                logger.debug("Invalid admin.json in uploaded hub: %s", exc)
+                raise UploadIncompatibleError("Unreadable or invalid hub-config/admin.json") from exc
+            if not isinstance(loaded_admin, dict):
+                raise UploadIncompatibleError("hub-config/admin.json must contain a JSON object")
+            admin = loaded_admin
+        try:
+            compat = assess_compatibility(admin, tasks)
+        except Exception as exc:
+            logger.debug("Incompatible schema in uploaded hub: %s", exc)
+            raise UploadIncompatibleError("Malformed hub-config/tasks.json structure") from exc
         if not compat.get("supported"):
             raise UploadIncompatibleError(str(compat.get("reason") or "Hub schema is not compatible with viz."))
 
@@ -391,11 +444,16 @@ def validate_extracted_hub(staging_dir: Path) -> Dict[str, Any]:
         try:
             _probe_readable_table(sample_file)
         except Exception as exc:
+            logger.debug("Table probe failed for %s: %s", sample_file, exc)
             raise UploadIncompatibleError(
-                f"Could not read Hubverse table '{sample_file.relative_to(staging_dir)}': {exc}"
+                f"Could not read Hubverse table '{sample_file.relative_to(staging_dir)}'"
             ) from exc
 
-    info = inspect_local_hub(staging_dir)
+    try:
+        info = inspect_local_hub(staging_dir)
+    except Exception as exc:
+        logger.debug("Hub indexing failed for uploaded staging dir: %s", exc)
+        raise UploadIncompatibleError("Uploaded directory could not be indexed as a Hubverse hub.") from exc
     if not info.get("valid"):
         raise UploadIncompatibleError("Uploaded directory could not be indexed as a Hubverse hub.")
     return info
@@ -408,7 +466,21 @@ class UploadRateLimiter:
         self._rate = max(1, int(rate_per_min))
         self._lock = threading.Lock()
         self._hits: Dict[str, Deque[float]] = {}
+        self._last_prune = 0.0
         self._sem = threading.Semaphore(max(1, int(max_concurrent)))
+
+    def _prune_stale_unlocked(self, cutoff: float, ts: float) -> None:
+        if len(self._hits) <= 256 and abs(ts - self._last_prune) < 60.0:
+            return
+        self._last_prune = ts
+        stale_keys = []
+        for ip_key, q in self._hits.items():
+            while q and q[0] <= cutoff:
+                q.popleft()
+            if not q:
+                stale_keys.append(ip_key)
+        for ip_key in stale_keys:
+            del self._hits[ip_key]
 
     def acquire(self, client_ip: str, *, now: Optional[float] = None) -> None:
         """Reserve an upload slot or raise RateLimitExceededError."""
@@ -416,12 +488,17 @@ class UploadRateLimiter:
         cutoff = ts - 60.0
         key = (client_ip or "unknown").strip() or "unknown"
         with self._lock:
+            self._prune_stale_unlocked(cutoff, ts)
             q = self._hits.setdefault(key, deque())
             while q and q[0] <= cutoff:
                 q.popleft()
             if len(q) >= self._rate:
+                if not q:
+                    self._hits.pop(key, None)
                 raise RateLimitExceededError("Too many uploads from your address; please wait a minute and try again.")
             if not self._sem.acquire(blocking=False):
+                if not q:
+                    self._hits.pop(key, None)
                 raise RateLimitExceededError("Server is busy processing other hub uploads; please retry shortly.")
             q.append(ts)
 

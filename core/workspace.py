@@ -68,14 +68,41 @@ def _concise_hub_meta(raw_label: str, info: Dict[str, Any]) -> tuple[str, Option
 
 def _atomic_write_json(path: Path, data: Any):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
+        if os.name == "posix":
+            try:
+                dfd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
     finally:
         if tmp.exists():
             tmp.unlink(missing_ok=True)
+
+
+def _quarantine_corrupt_workspace(path: Path, reason: str) -> None:
+    if not path.is_file():
+        return
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = path.with_name(f"{path.stem}.corrupt.{stamp}{path.suffix}")
+    n = 1
+    while backup.exists():
+        n += 1
+        backup = path.with_name(f"{path.stem}.corrupt.{stamp}.{n}{path.suffix}")
+    try:
+        os.replace(path, backup)
+        logger.error("Corrupt JSON in %s (%s); quarantined backup at %s", path, reason, backup)
+    except OSError as exc:
+        logger.error("Corrupt JSON in %s (%s); backup quarantine failed: %s", path, reason, exc)
 
 
 def _peek_oracle_targets(base_dir: Path) -> List[str]:
@@ -144,27 +171,41 @@ class WorkspaceRegistry:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            if not isinstance(raw, dict):
-                return default
-            hubs = raw.get("hubs")
-            if not isinstance(hubs, list):
-                hubs = []
-            raw_aliases = raw.get("target_aliases")
-            aliases: Dict[str, Dict[str, str]] = {}
-            if isinstance(raw_aliases, dict):
-                for hid, mapping in raw_aliases.items():
-                    if isinstance(hid, str) and isinstance(mapping, dict):
-                        clean = {str(k): str(v).strip() for k, v in mapping.items() if isinstance(k, str) and str(v or "").strip()}
-                        if clean:
-                            aliases[hid] = clean
-            return {
-                "version": int(raw.get("version", 1)),
-                "active_hub": raw.get("active_hub") if isinstance(raw.get("active_hub"), str) else None,
-                "hubs": hubs,
-                "target_aliases": aliases,
-            }
-        except (OSError, ValueError):
+        except FileNotFoundError:
             return default
+        except (ValueError, UnicodeDecodeError) as exc:
+            _quarantine_corrupt_workspace(self.path, str(exc))
+            return default
+        except OSError as exc:
+            logger.warning("Could not read %s: %s", self.path, exc)
+            return default
+
+        if not isinstance(raw, dict):
+            _quarantine_corrupt_workspace(self.path, f"expected JSON object, got {type(raw).__name__}")
+            return default
+
+        hubs = raw.get("hubs")
+        if not isinstance(hubs, list):
+            hubs = []
+        raw_aliases = raw.get("target_aliases")
+        aliases: Dict[str, Dict[str, str]] = {}
+        if isinstance(raw_aliases, dict):
+            for hid, mapping in raw_aliases.items():
+                if isinstance(hid, str) and isinstance(mapping, dict):
+                    clean = {str(k): str(v).strip() for k, v in mapping.items() if isinstance(k, str) and str(v or "").strip()}
+                    if clean:
+                        aliases[hid] = clean
+        raw_ver = raw.get("version", 1)
+        try:
+            version = int(raw_ver) if not isinstance(raw_ver, bool) else 1
+        except (ValueError, TypeError):
+            version = 1
+        return {
+            "version": version,
+            "active_hub": raw.get("active_hub") if isinstance(raw.get("active_hub"), str) else None,
+            "hubs": hubs,
+            "target_aliases": aliases,
+        }
 
     def get_target_aliases(self) -> Dict[str, Dict[str, str]]:
         """Return persistent per-hub `{target_id: concept_id}` overrides."""
@@ -332,6 +373,8 @@ def resolve_hub_storage(
     data_dir: Path,
     hub_id: Optional[str] = None,
     cli_fallback: bool = False,
+    *,
+    mode: str = "local",
 ) -> Dict[str, Any]:
     """Resolve isolated cache, surveillance, seed, and synthetic directories for a hub."""
     resolved_base = Path(base_dir).resolve()
@@ -367,9 +410,13 @@ def resolve_hub_storage(
         )
 
     app_surv = APP_DIR / "data" / "surveillance"
+    data_surv = resolved_data / "surveillance"
     app_seed = APP_DIR / "data" / "seed"
     if uses_flu_surv and app_surv.is_dir():
         surveillance_dir = app_surv
+        seed_dir = app_seed if app_seed.is_dir() else (cache_dir / "seed")
+    elif uses_flu_surv and (data_surv.is_dir() or mode == "web"):
+        surveillance_dir = data_surv
         seed_dir = app_seed if app_seed.is_dir() else (cache_dir / "seed")
     elif uses_flu_surv:
         surveillance_dir = cache_dir / "surveillance"
@@ -487,16 +534,22 @@ class HubContext:
             sroot = Path(storage_root).resolve()
             uses_flu_surv = _hub_uses_flu_surveillance(self.base_dir, info)
             app_surv = APP_DIR / "data" / "surveillance"
+            data_surv = self.data_dir / "surveillance"
             app_seed = APP_DIR / "data" / "seed"
             self.is_enclosing_default = False
             self.cache_dir = (sroot / "cache").resolve()
             self.remote_dir = (self.data_dir / "remote").resolve()
             self.hub_models_cache_dir = (sroot / "hub_models").resolve()
             self.synthetic_dir = (sroot / "synthetic").resolve()
-            self.surveillance_dir = app_surv if (uses_flu_surv and app_surv.is_dir()) else (self.cache_dir / "surveillance")
+            if uses_flu_surv and app_surv.is_dir():
+                self.surveillance_dir = app_surv
+            elif uses_flu_surv and (data_surv.is_dir() or mode == "web"):
+                self.surveillance_dir = data_surv
+            else:
+                self.surveillance_dir = self.cache_dir / "surveillance"
             self.seed_dir = app_seed if (uses_flu_surv and app_seed.is_dir()) else (self.cache_dir / "seed")
         else:
-            storage = resolve_hub_storage(self.base_dir, self.data_dir, hub_id=self.hub_id)
+            storage = resolve_hub_storage(self.base_dir, self.data_dir, hub_id=self.hub_id, mode=self.mode)
             self.is_enclosing_default = storage["is_enclosing_default"]
             self.cache_dir = storage["cache_dir"]
             self.remote_dir = storage["remote_dir"]
@@ -570,6 +623,35 @@ class HubContext:
             self.eval_engine.prescore.invalidate()
         self.next_data.invalidate()
 
+    def release_memory(self):
+        """
+        Drop this context's in-memory caches when it is evicted from the LRU.
+
+        Unlike `invalidate_all`, this never deletes on-disk caches (prescore score tables, model
+        parquets): the data has not changed, so the next load of this hub can reuse them, and a
+        request still holding this context never loses files mid-flight.
+        """
+        try:
+            self.loader.ensemble_mgr.clear_cached_forecasts()
+        except Exception:
+            pass
+        try:
+            self.eval_engine.clear_cache()
+        except Exception:
+            pass
+        prescore = getattr(self.eval_engine, "prescore", None)
+        if prescore is not None and hasattr(prescore, "_mem_cache"):
+            lock = getattr(prescore, "_mem_lock", None)
+            if lock is not None:
+                with lock:
+                    prescore._mem_cache.clear()
+            else:
+                prescore._mem_cache.clear()
+        try:
+            self.next_data.invalidate()
+        except Exception:
+            pass
+
     def _on_hub_inventory_change(self, hub_id: str, changed_models: List[str], *, propagate: bool = True):
         """Invalidate every in-memory cache for this workspace hub after a remote sync/toggle/remove."""
         self.invalidate_all()
@@ -606,6 +688,7 @@ class HubManager:
         cli_hubs: Optional[List[Path]] = None,
         include_enclosing: bool = True,
         max_loaded: int = 12,
+        max_private_loaded: Optional[int] = None,
     ):
         clean_mode = (mode or "local").strip().lower()
         if clean_mode not in ("local", "web"):
@@ -684,6 +767,11 @@ class HubManager:
             from viz.web.sessions import WebWorkspaceStore
 
             self.web_config = WebConfig.from_env(self.data_dir)
+            self._max_private_loaded = (
+                max(1, int(max_private_loaded))
+                if max_private_loaded is not None
+                else self.web_config.max_private_loaded
+            )
             self.web_store = WebWorkspaceStore(
                 self.data_dir,
                 self.web_config,
@@ -802,11 +890,18 @@ class HubManager:
                 shared_remote_store=self.remote_store,
                 shared_remote_mgr=self.shared_remote_mgr,
             )
+            evicted_ctxs: List[HubContext] = []
             with self._lock:
                 self._contexts[target_id] = ctx
                 self._contexts.move_to_end(target_id)
                 while len(self._contexts) > self.max_loaded:
-                    self._contexts.popitem(last=False)
+                    _, old_ctx = self._contexts.popitem(last=False)
+                    evicted_ctxs.append(old_ctx)
+            for old_ctx in evicted_ctxs:
+                try:
+                    old_ctx.release_memory()
+                except Exception:
+                    pass
             if hub_id is None or target_id == self.default_hub_id():
                 with self._server_config_lock:
                     self._cached_server_cfg = ctx.config.get_server_config()
@@ -846,17 +941,30 @@ class HubManager:
                 shared_remote_mgr=self.shared_remote_mgr,
                 storage_root=storage_root,
             )
+            evicted_ctxs: List[HubContext] = []
             with self._lock:
                 self._private_contexts[hub_id] = ctx
                 self._private_contexts.move_to_end(hub_id)
                 while len(self._private_contexts) > self._max_private_loaded:
-                    self._private_contexts.popitem(last=False)
+                    _, old_ctx = self._private_contexts.popitem(last=False)
+                    evicted_ctxs.append(old_ctx)
+            for old_ctx in evicted_ctxs:
+                try:
+                    old_ctx.release_memory()
+                except Exception:
+                    pass
             return ctx
 
     def evict_private_context(self, hub_id: str) -> None:
         """Drop a cached private uploaded hub context (called on TTL expiry, delete, or cold archival)."""
-        with self._lock:
-            self._private_contexts.pop(hub_id, None)
+        with self._ctx_locks.get(hub_id):
+            with self._lock:
+                popped = self._private_contexts.pop(hub_id, None)
+            if popped is not None:
+                try:
+                    popped.invalidate_all()
+                except Exception:
+                    pass
 
     def get_server_config(self) -> Optional[Dict[str, Any]]:
         """Cached server CORS/host config for fast response headers without loading hubs under lock."""
@@ -895,13 +1003,14 @@ class HubManager:
         return VizConfig(APP_DIR, app_dir=APP_DIR).is_target_non_negative(target)
 
     def _shared_local_as_of_max(self) -> Optional[str]:
-        path = APP_DIR / "data" / "surveillance" / "as-of-hospital-admissions.parquet"
-        if not path.is_file():
-            return None
-        try:
-            return pl.scan_parquet(path).select(pl.col("as_of").max()).collect().item()
-        except Exception:
-            return None
+        for root in (APP_DIR / "data" / "surveillance", self.data_dir / "surveillance"):
+            path = root / "as-of-hospital-admissions.parquet"
+            if path.is_file():
+                try:
+                    return pl.scan_parquet(path).select(pl.col("as_of").max()).collect().item()
+                except Exception:
+                    continue
+        return None
 
     def _peek_active_context(self) -> Optional[HubContext]:
         default_id = self.default_hub_id()

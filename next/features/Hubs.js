@@ -4,14 +4,14 @@
  * Nothing reaches the network until a button is pressed (Check, Sync, Add). A finished sync, a toggle or a
  * removal changes the model inventory, so the page reloads (after a toast) to read the new manifest.
  * Sync state lives in this module, so a sync keeps being followed when the panel closes. */
-import { h } from "../lib/dom.js";
+import { h, safeHref } from "../lib/dom.js";
 import { openPopover } from "../ui/floating.js";
 import { icon, toast } from "../ui/controls.js";
-import { clearAllCaches, loadCatalog, loadWebStatus } from "../lib/api.js";
+import { clearAllCaches, forgetManifest, isPrivateHubId, loadCatalog, loadWebStatus } from "../lib/api.js";
 import { fmtDay } from "../lib/format.js";
 import { parseIso } from "../lib/scale.js";
 import { getJSON, postJSON, fmtBytes, fmtAgo, reloadSoon, loadWarningSummary } from "./More.js";
-import { renderWebUploadSection } from "./WebUpload.js";
+import { isUploadBusy, renderWebUploadSection } from "./WebUpload.js";
 
 const POLL_MS = 700;
 const ARM_MS = 3500;
@@ -158,10 +158,23 @@ async function setStartupHub(wsId) {
   try { await postJSON("/api/workspace/activate", { id: wsId }); } catch { /* same-tab ?hub= works directly */ }
 }
 
-async function openHubById(wsId) {
+function hubTitleNode(label, repoUrl) {
+  const href = safeHref(repoUrl);
+  return href ? h("a", { href, target: "_blank", rel: "noopener noreferrer" }, label) : label;
+}
+
+async function openHubById(wsId, onSwitchError) {
   await setStartupHub(wsId);
+  // an uploaded hub can expire while its manifest sits in the cache: always ask the server again
+  if (isPrivateHubId(wsId)) forgetManifest(wsId);
   if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
-    activeCtx.switchContext({ hub: wsId });
+    try {
+      await activeCtx.switchContext({ hub: wsId });
+    } catch (err) {
+      // an expired upload already has its one message (app.js onHubGone)
+      if (!err?.hubGone) toast(err?.message || "Could not open hub", { tone: "error" });
+      await onSwitchError?.();
+    }
     return;
   }
   location.assign(`/next/?hub=${encodeURIComponent(wsId)}`);
@@ -231,7 +244,11 @@ async function loadBrowse(path = "") {
 async function openLocalHub(id) {
   await setStartupHub(id);
   if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id) {
-    activeCtx.switchContext({ hub: id });
+    try {
+      await activeCtx.switchContext({ hub: id });
+    } catch (err) {
+      toast(err?.message || "Could not open local hub", { tone: "error" });
+    }
     return;
   }
   location.assign(`/next/?hub=${encodeURIComponent(id)}`);
@@ -318,7 +335,13 @@ export async function openHubs(anchor, ctx = {}) {
       clearAllCaches();
       await activeCtx?.reloadCatalog?.().catch(() => {});
       if (activeCtx?.switchContext && activeCtx?.manifest?.hub_id && hub?.id) {
-        activeCtx.switchContext({ hub: hub.id });
+        try {
+          await activeCtx.switchContext({ hub: hub.id });
+        } catch (err) {
+          localNoteText = err?.message || "Connected hub, but could not load it";
+          if (noteEl) noteEl.textContent = localNoteText;
+          toast(localNoteText, { tone: "error" });
+        }
         return;
       }
       location.assign(`/next/?hub=${encodeURIComponent(hub.id)}`);
@@ -360,21 +383,33 @@ export async function openHubs(anchor, ctx = {}) {
         localBox.replaceChildren(h("div", { class: "mo-note" }, "Loading workspace…"));
         return;
       }
+      // keep the uploader (its progress and Cancel) in place while an upload runs; it redraws itself
+      if (isUploadBusy() && localBox.querySelector(".mo-upload-wrap")) return;
+      const refreshWeb = async () => {
+        webStatus = await loadWebStatus().catch(() => webStatus);
+        render?.();
+      };
       localBox.replaceChildren(renderWebUploadSection({
         webStatus,
         currentHubId,
-        onOpenHub: (id) => openHubById(id),
-        onUploaded: async (res) => {
+        onOpenHub: (id) => openHubById(id, refreshWeb),
+        onUploaded: async (res, meta) => {
           const id = res?.hub?.id;
-          toast(`${res?.hub?.label || "Hub"} · ready`);
           clearAllCaches();
           await activeCtx?.reloadCatalog?.().catch(() => {});
-          if (id) {
-            openHubById(id);
+          if (meta?.detached || !render) {
+            toast(`${res?.hub?.label || "Hub"} · ready`, {
+              duration: 8000,
+              action: id ? { label: "Open", onClick: () => openHubById(id) } : undefined,
+            });
             return;
           }
-          webStatus = await loadWebStatus().catch(() => webStatus);
-          render?.();
+          toast(`${res?.hub?.label || "Hub"} · ready`);
+          if (id) {
+            await openHubById(id, refreshWeb);
+            return;
+          }
+          await refreshWeb();
         },
         onDeleteHub: async (id) => {
           const r = await postJSON("/api/web/workspaces/delete", { id });
@@ -388,6 +423,10 @@ export async function openHubs(anchor, ctx = {}) {
           if (webStatus && r?.workspaces) webStatus = { ...webStatus, workspaces: r.workspaces };
           else webStatus = await loadWebStatus().catch(() => webStatus);
           render?.();
+        },
+        onCancelled: async () => {
+          await refreshWeb();
+          await activeCtx?.reloadCatalog?.().catch(() => {});
         },
       }));
       return;
@@ -486,7 +525,7 @@ export async function openHubs(anchor, ctx = {}) {
         : null;
       return h("div", { class: "mo-src", "data-local-hub": lh.id },
         h("div", { class: "mo-src-head" },
-          h("span", { class: "mo-src-name", title: lh.description || undefined }, lh.repo_url ? h("a", { href: lh.repo_url, target: "_blank", rel: "noopener" }, lh.label) : lh.label),
+          h("span", { class: "mo-src-name", title: lh.description || undefined }, hubTitleNode(lh.label, lh.repo_url)),
           h("span", { class: ["mo-src-state", badgeCls] }, badgeText)),
         h("div", { class: "mo-src-meta" }, meta),
         lh.path ? h("div", { class: "mo-src-path", title: lh.path }, lh.path) : null,
@@ -836,7 +875,7 @@ function hubBlock(x, { isWeb = false } = {}) {
     return h("div", { class: "mo-src mo-web-row", "data-hub": x.id },
       h("div", { class: "mo-web-main" },
         h("div", { class: "mo-src-head" },
-          h("span", { class: "mo-src-name", title: x.description || undefined }, x.repo_url ? h("a", { href: x.repo_url, target: "_blank", rel: "noopener" }, x.label) : x.label),
+          h("span", { class: "mo-src-name", title: x.description || undefined }, hubTitleNode(x.label, x.repo_url)),
           state ? h("span", { class: ["mo-src-state", stateCls] }, state) : null),
         h("div", { class: "mo-src-meta" }, meta)),
       openLink ? h("div", { class: "mo-web-acts" }, openLink) : null);
@@ -928,7 +967,7 @@ function hubBlock(x, { isWeb = false } = {}) {
 
   return h("div", { class: "mo-src", "data-hub": x.id },
     h("div", { class: "mo-src-head" },
-      h("span", { class: "mo-src-name", title: x.description || undefined }, x.repo_url ? h("a", { href: x.repo_url, target: "_blank", rel: "noopener" }, x.label) : x.label),
+      h("span", { class: "mo-src-name", title: x.description || undefined }, hubTitleNode(x.label, x.repo_url)),
       h("span", { class: ["mo-src-state", stateCls] }, state),
       shown),
     h("div", { class: "mo-src-meta" }, meta),

@@ -491,6 +491,9 @@ export function mount(el, ctx) {
     if (geoCls.kind === "us-metrocast" && mcView === "state" && mcFips) {
       const box = mapHost.querySelector(".mp-hsa-box");
       if (box && usGeo) {
+        const focusedLoc = document.activeElement && box.contains(document.activeElement)
+          ? document.activeElement.getAttribute?.("data-loc")
+          : null;
         const hsas = geoCls.hsasByStateFips.get(mcFips) || [];
         const svg = renderHsaStateSvg(usGeo, mcFips, hsas, {
           width: 580,
@@ -499,6 +502,7 @@ export function mount(el, ctx) {
           bgClass: "mp-hsa-bg",
           polyClass: "mp-hsa-poly",
           activeId: hereId,
+          isInteractive: (id) => manifest.locationById.has(id),
           fillFor: (id) => {
             const v = valueAt(id, L.id);
             return fin(v) ? colorFor(L, v, max) : "";
@@ -509,17 +513,25 @@ export function mount(el, ctx) {
         if (svg) {
           svg.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
           box.replaceChildren(svg);
+          if (focusedLoc) {
+            const match = [...svg.querySelectorAll("[data-loc]")].find((el) => el.getAttribute("data-loc") === focusedLoc);
+            match?.focus?.({ preventScroll: true });
+          }
         }
       }
     } else if (REGION_GEO_KINDS.has(geoCls.kind)) {
       const box = mapHost.querySelector(".mp-hsa-box");
       if (box && regionGeo && regionGeo.kind === geoCls.kind) {
+        const focusedLoc = document.activeElement && box.contains(document.activeElement)
+          ? document.activeElement.getAttribute?.("data-loc")
+          : null;
         const svg = renderRegionSvg(regionGeo, manifest.locationById, {
           width: 580,
           height: 340,
           className: "mp-hsa-svg",
           polyClass: "mp-hsa-poly",
           activeId: hereId,
+          isInteractive: (id) => manifest.locationById.has(id),
           fillFor: (id) => {
             const v = valueAt(id, L.id);
             return fin(v) ? colorFor(L, v, max) : "";
@@ -530,6 +542,10 @@ export function mount(el, ctx) {
         if (svg) {
           svg.addEventListener("pointerleave", () => { hoverId = null; inspect(); });
           box.replaceChildren(svg);
+          if (focusedLoc) {
+            const match = [...svg.querySelectorAll("[data-loc]")].find((el) => el.getAttribute("data-loc") === focusedLoc);
+            match?.focus?.({ preventScroll: true });
+          }
         }
       }
     }

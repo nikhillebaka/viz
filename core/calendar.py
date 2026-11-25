@@ -17,6 +17,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 import functools
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 
@@ -225,16 +226,24 @@ def _collect_task_dates(tasks_config: Optional[Dict[str, Any]]) -> Tuple[str, Li
     if not isinstance(tasks_config, dict):
         return round_id_col, ref_dates, ted_dates, triples, horizons
 
-    for rnd in tasks_config.get("rounds") or []:
+    rounds = tasks_config.get("rounds")
+    if not isinstance(rounds, list):
+        return round_id_col, ref_dates, ted_dates, triples, horizons
+    for rnd in rounds:
         if not isinstance(rnd, dict):
             continue
         rid = rnd.get("round_id")
         if isinstance(rid, str) and rid.strip():
             round_id_col = rid.strip()
-        for mt in rnd.get("model_tasks") or []:
+        mts = rnd.get("model_tasks")
+        if not isinstance(mts, list):
+            continue
+        for mt in mts:
             if not isinstance(mt, dict):
                 continue
-            tids = mt.get("task_ids") or {}
+            tids = mt.get("task_ids")
+            if not isinstance(tids, dict):
+                continue
             ref_spec = tids.get(round_id_col) or tids.get("reference_date") or tids.get("origin_date") or {}
             ted_spec = tids.get("target_end_date") or {}
             h_spec = tids.get("horizon") or {}
@@ -269,6 +278,20 @@ def _collect_task_dates(tasks_config: Optional[Dict[str, Any]]) -> Tuple[str, Li
                 if mt_refs and mt_teds:
                     triples.append((min(mt_refs), min(mt_hs), min(mt_teds)))
     return round_id_col, ref_dates, ted_dates, triples, horizons
+
+
+_TARGET_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+_MONTHLY_TARGET_RE = re.compile(r"(?:^mo(?![a-z0-9])|(?<![a-z0-9])month(?:s|ly)?(?![a-z0-9]))")
+
+
+def target_tokens(target: str) -> set[str]:
+    """Lower-cased alphanumeric tokens of a target name (`"wk inc ili_ed"` -> {wk, inc, ili, ed})."""
+    return {tok for tok in _TARGET_TOKEN_SPLIT_RE.split(str(target).lower()) if tok}
+
+
+def target_name_implies_monthly(target: str) -> bool:
+    """Name-based fallback for monthly targets (`mo inc ...`, `... month(s) ...`, `monthly cases`)."""
+    return bool(_MONTHLY_TARGET_RE.search(str(target).strip().lower()))
 
 
 def infer_calendar(
@@ -362,7 +385,8 @@ def infer_calendar(
         ("bdbv" in t or "ebola" in t or "dengue" in t or "confirmed cases" in t or "wk r_t" in t or t == "r_t")
         for t in target_list
     ) and not any(
-        ("flu" in t or "influenza" in t or "rsv" in t or "ili" in t or "ari" in t)
+        # ILI / ARI are whole tokens: substrings would match words like "variant" or "mobility"
+        ("flu" in t or "influenza" in t or "rsv" in t or not {"ili", "ari"}.isdisjoint(target_tokens(t)))
         for t in target_list
     )
 

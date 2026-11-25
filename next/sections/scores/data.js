@@ -1,6 +1,6 @@
 /* The scores' data: /api/next/metrics, /api/next/model-locations, /api/model-details and /api/season-curves.
  * Responses are cached (FIFO); a metrics request supersedes the one in flight. */
-import { apiUrl, getActiveHub, registerCacheClear } from "../../lib/api.js";
+import { apiUrl, getActiveHub, hubFetch, registerCacheClear } from "../../lib/api.js";
 
 const LIMIT = 50;
 const caches = { metrics: new Map(), details: new Map(), curves: new Map(), places: new Map() };
@@ -14,7 +14,7 @@ function remember(map, key, value) {
 }
 
 async function getJson(url, signal) {
-  const r = await fetch(apiUrl(url), { signal });
+  const r = await hubFetch(apiUrl(url), { signal });
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(j?.error || `${r.status}`);
   return j;

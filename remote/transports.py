@@ -6,6 +6,8 @@ Standard library only (`urllib` + `xml.etree.ElementTree` + `json`).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import http.client
 import json
 import logging
 import os
@@ -118,6 +120,25 @@ class _BaseHTTPTransport:
         if self.cancel_event is not None and self.cancel_event.is_set():
             raise SyncCancelled()
 
+    def _sleep_retry(self, seconds: float) -> None:
+        if self.cancel_event is not None:
+            if self.cancel_event.wait(timeout=max(0.0, seconds)):
+                raise SyncCancelled("Sync cancelled by user")
+        else:
+            time.sleep(max(0.0, seconds))
+
+    @staticmethod
+    def _parse_retry_after(headers: Any) -> Optional[float]:
+        if not headers:
+            return None
+        raw = headers.get("Retry-After")
+        if not raw:
+            return None
+        try:
+            return max(0.5, min(float(str(raw).strip()), 30.0))
+        except ValueError:
+            return None
+
     def _http_get(
         self,
         url: str,
@@ -125,6 +146,7 @@ class _BaseHTTPTransport:
         headers: Optional[Dict[str, str]] = None,
         service_label: str = "remote",
         denied_msg: Optional[str] = None,
+        rate_limit_msg: Optional[str] = None,
     ) -> bytes:
         delay = 0.5
         req_headers = {"User-Agent": USER_AGENT}
@@ -139,17 +161,43 @@ class _BaseHTTPTransport:
             except urllib.error.HTTPError as exc:
                 if exc.code == 404:
                     raise TransportNotFound(f"Not found: {url}") from exc
-                if exc.code in (401, 403):
-                    msg = denied_msg or f"Access denied from {service_label} (HTTP {exc.code}) for {url}"
-                    raise TransportError(msg) from exc
-                if exc.code == 429:
-                    if attempt < self.retries:
-                        time.sleep(min(delay * 2, 8.0))
+                if exc.code in (401, 403, 429):
+                    retry_after = self._parse_retry_after(exc.headers)
+                    remaining = str(exc.headers.get("X-RateLimit-Remaining", "") if exc.headers else "").strip()
+                    reset_raw = str(exc.headers.get("X-RateLimit-Reset", "") if exc.headers else "").strip()
+                    body_low = ""
+                    try:
+                        body_low = exc.read(4096).decode("utf-8", errors="ignore").lower()
+                    except Exception:
+                        pass
+
+                    is_secondary = exc.code == 403 and (
+                        retry_after is not None or "secondary rate limit" in body_low or "abuse" in body_low
+                    )
+                    is_primary_rl = exc.code == 403 and (
+                        remaining == "0" or ("rate limit" in body_low and "secondary" not in body_low)
+                    )
+                    if (exc.code == 429 or is_secondary) and attempt < self.retries:
+                        wait_s = retry_after if retry_after is not None else min(delay * 2, 8.0)
+                        self._sleep_retry(wait_s)
                         delay *= 2
                         continue
-                    raise TransportError(denied_msg or f"Rate limited by {service_label} (HTTP 429) for {url}") from exc
+
+                    if exc.code == 429 or is_secondary or is_primary_rl:
+                        reset_note = ""
+                        if reset_raw.isdigit():
+                            try:
+                                dt = datetime.fromtimestamp(int(reset_raw), tz=timezone.utc).strftime("%H:%M:%S UTC")
+                                reset_note = f" (resets at {dt})"
+                            except (OverflowError, OSError, ValueError):
+                                pass
+                        msg = rate_limit_msg or f"Rate limited by {service_label} (HTTP {exc.code}) for {url}"
+                        raise TransportError(f"{msg}{reset_note}") from exc
+
+                    msg = denied_msg or f"Access denied from {service_label} (HTTP {exc.code}) for {url}"
+                    raise TransportError(msg) from exc
                 if exc.code in (500, 502, 503, 504) and attempt < self.retries:
-                    time.sleep(delay)
+                    self._sleep_retry(delay)
                     delay *= 2
                     continue
                 raise TransportError(f"HTTP {exc.code} from {service_label} for {url}") from exc
@@ -158,16 +206,27 @@ class _BaseHTTPTransport:
                 if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(reason):
                     raise TransportError(SSL_HINT) from exc
                 if attempt < self.retries:
-                    time.sleep(delay)
+                    self._sleep_retry(delay)
                     delay *= 2
                     continue
                 raise TransportError(f"Network error reaching {service_label}: {reason}") from exc
-            except (TimeoutError, socket.timeout) as exc:
+            except ssl.SSLCertVerificationError as exc:
+                raise TransportError(SSL_HINT) from exc
+            except (
+                TimeoutError,
+                socket.timeout,
+                http.client.IncompleteRead,
+                http.client.RemoteDisconnected,
+                ConnectionResetError,
+                ConnectionAbortedError,
+                BrokenPipeError,
+                ssl.SSLError,
+            ) as exc:
                 if attempt < self.retries:
-                    time.sleep(delay)
+                    self._sleep_retry(delay)
                     delay *= 2
                     continue
-                raise TransportError(f"Timed out reaching {service_label} ({url})") from exc
+                raise TransportError(f"Connection interrupted reaching {service_label} ({url}): {exc}") from exc
         raise TransportError(f"Failed to fetch {url}")
 
 
@@ -231,7 +290,9 @@ class S3Transport(_BaseHTTPTransport):
             if (root.findtext(f"{_S3_NS}IsTruncated") or "false").lower() == "true":
                 token = root.findtext(f"{_S3_NS}NextContinuationToken")
                 if not token:
-                    break
+                    raise TransportError(
+                        f"S3 listing truncated without continuation token for '{self.bucket}/{prefix}'"
+                    )
             else:
                 break
         return objects
@@ -267,6 +328,7 @@ class GitHubTransport(_BaseHTTPTransport):
         self.source_name = f"github:{self.repo}"
         self._tree_lock = threading.Lock()
         self._tree: Optional[List[RemoteObject]] = None
+        self.last_listing_truncated = False
 
     def _api_headers(self) -> Dict[str, str]:
         hdrs = {"Accept": "application/vnd.github+json"}
@@ -278,16 +340,24 @@ class GitHubTransport(_BaseHTTPTransport):
         with self._tree_lock:
             if self._tree is not None:
                 return self._tree
+            self.last_listing_truncated = False
             url = f"{self.api_base}/repos/{self.repo}/git/trees/{urllib.parse.quote(self.branch)}?recursive=1"
             rate_msg = (
-                f"GitHub API rate limit or access error for '{self.repo}'. "
-                "Set GITHUB_TOKEN to raise the limit from 60 to 5,000 requests/hour."
+                f"GitHub API rate limit exceeded for '{self.repo}'."
+                if self.token
+                else f"GitHub API rate limit exceeded for '{self.repo}'. Set GITHUB_TOKEN to raise the limit from 60 to 5,000 requests/hour."
+            )
+            denied_msg = (
+                f"Access denied from GitHub API for '{self.repo}' (check GITHUB_TOKEN permissions or repo visibility)."
+                if self.token
+                else f"Access denied from GitHub API for '{self.repo}' (repository may be private)."
             )
             body = self._http_get(
                 url,
                 headers=self._api_headers(),
                 service_label="GitHub API",
-                denied_msg=rate_msg,
+                denied_msg=denied_msg,
+                rate_limit_msg=rate_msg,
             )
             try:
                 payload = json.loads(body.decode("utf-8"))
@@ -295,6 +365,7 @@ class GitHubTransport(_BaseHTTPTransport):
                 raise TransportError(f"Unexpected GitHub tree response for '{self.repo}'") from exc
 
             if payload.get("truncated"):
+                self.last_listing_truncated = True
                 logger.warning("GitHub tree listing for %s (%s) was truncated; some files may not appear", self.repo, self.branch)
 
             objs: List[RemoteObject] = []
@@ -333,6 +404,7 @@ class GitHubTransport(_BaseHTTPTransport):
             headers=hdrs,
             service_label="GitHub Raw",
             denied_msg=f"Access denied fetching '{clean_key}' from GitHub repo '{self.repo}'",
+            rate_limit_msg=f"Rate limited fetching '{clean_key}' from GitHub Raw for '{self.repo}'",
         )
 
 

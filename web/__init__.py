@@ -2,6 +2,9 @@
 
 from viz.web.auth import AuthUser, RequestIdentity, parse_session_cookie, resolve_request_user
 from viz.web.bundle import (
+    MAX_METADATA_FILE_BYTES,
+    RateLimitExceededError,
+    StorageBudgetExceededError,
     UploadIncompatibleError,
     UploadRateLimiter,
     UploadTooLargeError,
@@ -16,7 +19,10 @@ from viz.web.sessions import WebWorkspaceStore
 
 __all__ = [
     "AuthUser",
+    "MAX_METADATA_FILE_BYTES",
+    "RateLimitExceededError",
     "RequestIdentity",
+    "StorageBudgetExceededError",
     "UploadIncompatibleError",
     "UploadRateLimiter",
     "UploadTooLargeError",

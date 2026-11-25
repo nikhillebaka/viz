@@ -1,6 +1,6 @@
 /* Place-First Live Briefing view — multi-hub forecasts + live external surveillance & virology. */
 
-import { h } from "../lib/dom.js";
+import { h, safeHref } from "../lib/dom.js";
 import {
   invalidateBriefingCache,
   loadBriefing,
@@ -574,6 +574,7 @@ export function mountBriefing(
   let drcDonTab = "summary";
   let loadToken = 0;
   let pollTimer = null;
+  let destroyed = false; // set by destroy(): every await below checks it before touching state or the DOM
   let refreshing = false;
   let errorMsg = null;
   const isWeb = (ctx?.manifest?.mode || "local") === "web";
@@ -587,9 +588,13 @@ export function mountBriefing(
 
   function startPoll() {
     stopPoll();
+    if (destroyed) return;
     pollTimer = setTimeout(async () => {
+      pollTimer = null;
+      if (destroyed) return;
       try {
         const st = await loadBriefingStatus();
+        if (destroyed) return;
         refreshing = !!st?.refreshing;
         if (refreshing) {
           startPoll();
@@ -598,6 +603,7 @@ export function mountBriefing(
         invalidateBriefingCache();
         await fetchAndRender(currentPlace, { bust: true, preserveTabs: true });
       } catch {
+        if (destroyed) return;
         refreshing = false;
         render();
       }
@@ -610,6 +616,7 @@ export function mountBriefing(
     render();
     try {
       const res = await refreshBriefingFeeds({ force: true });
+      if (destroyed) return;
       refreshing = !!res?.status?.refreshing;
       if (refreshing) {
         startPoll();
@@ -618,6 +625,7 @@ export function mountBriefing(
         await fetchAndRender(currentPlace, { bust: true, preserveTabs: true });
       }
     } catch (e) {
+      if (destroyed) return;
       refreshing = false;
       errorMsg = e?.message || "Failed to start feed refresh";
       render();
@@ -625,12 +633,13 @@ export function mountBriefing(
   }
 
   async function fetchAndRender(targetPlace, { bust = false, preserveTabs = false } = {}) {
+    if (destroyed) return;
     const token = ++loadToken;
     errorMsg = null;
     if (!data) renderLoading();
     try {
       const res = await loadBriefing(targetPlace || "", { bust });
-      if (token !== loadToken) return;
+      if (destroyed || token !== loadToken) return;
       const prevSigId = preserveTabs ? data?.signals?.[activeSignalIdx]?.signal_id : null;
       const prevSubtype = preserveTabs ? data?.virology?.clades?.[activeCladeIdx]?.subtype : null;
       data = res;
@@ -655,7 +664,7 @@ export function mountBriefing(
       onPlaceChange?.(currentPlace);
       render();
     } catch (e) {
-      if (token !== loadToken) return;
+      if (destroyed || token !== loadToken) return;
       errorMsg = e?.message || "Failed to load briefing";
       render();
     }
@@ -919,14 +928,15 @@ export function mountBriefing(
         const activeTab = donSections.find(([k]) => k === drcDonTab) || donSections[0];
         const activeParas = (activeTab?.[2] || "").split("\n").map((s) => s.trim()).filter(Boolean);
 
+        const donUrl = safeHref(don.url);
         drcSec.appendChild(h("article", { class: "br-don-card", "aria-label": "WHO Disease Outbreak News" },
           h("div", { class: "br-don-head" },
             h("div", { class: "br-don-meta" },
               h("span", { class: "br-don-kicker" }, "WHO Disease Outbreak News"),
               h("span", { class: "br-mono" }, `${don.don_id} · ${formatIsoShort(don.date, true)}`),
             ),
-            don.url ? h("a", {
-              href: don.url,
+            donUrl ? h("a", {
+              href: donUrl,
               target: "_blank",
               rel: "noopener noreferrer",
               class: "br-link-btn is-accent",
@@ -964,12 +974,15 @@ export function mountBriefing(
                     h("th", null, "Report Title"),
                     h("th", { class: "num" }, "Link"),
                   )),
-                  h("tbody", null, drc.who_timeline.map((item) => h("tr", null,
-                    h("td", { class: "br-mono" }, formatIsoShort(item.date, true)),
-                    h("td", { class: "br-mono" }, item.don_id),
-                    h("td", null, item.title),
-                    h("td", { class: "num" }, item.url ? h("a", { href: item.url, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, "Open ↗") : "—"),
-                  ))),
+                  h("tbody", null, drc.who_timeline.map((item) => {
+                    const itemUrl = safeHref(item.url);
+                    return h("tr", null,
+                      h("td", { class: "br-mono" }, formatIsoShort(item.date, true)),
+                      h("td", { class: "br-mono" }, item.don_id),
+                      h("td", null, item.title),
+                      h("td", { class: "num" }, itemUrl ? h("a", { href: itemUrl, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, "Open ↗") : "—"),
+                    );
+                  })),
                 ),
               ) : null,
             ),
@@ -1067,11 +1080,14 @@ export function mountBriefing(
         ));
       }
 
-      if (drc.external_links?.length) {
+      const drcLinks = (drc.external_links || [])
+        .map((lk) => ({ lk, url: safeHref(lk?.url) }))
+        .filter((x) => Boolean(x.url));
+      if (drcLinks.length) {
         drcSec.appendChild(h("div", { class: "br-links-bar" },
           h("span", { class: "br-scope-note" }, "Official DRC & Outbreak References:"),
-          drc.external_links.map((lk) => h("a", {
-            href: lk.url,
+          drcLinks.map(({ lk, url }) => h("a", {
+            href: url,
             target: "_blank",
             rel: "noopener noreferrer",
             class: "br-btn",
@@ -1474,13 +1490,16 @@ export function mountBriefing(
             h("th", null, "Cell / Recombinant"),
             h("th", null, "Source"),
           )),
-          h("tbody", null, rows.map((r) => h("tr", null,
-            h("td", { class: "br-mono" }, r.season),
-            h("td", null, `${r.pathogen} · ${r.subtype}`),
-            h("td", null, r.egg_strain),
-            h("td", null, r.cell_strain),
-            h("td", null, h("a", { href: r.url, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, r.authority, " ↗")),
-          ))),
+          h("tbody", null, rows.map((r) => {
+            const refUrl = safeHref(r.url);
+            return h("tr", null,
+              h("td", { class: "br-mono" }, r.season),
+              h("td", null, `${r.pathogen} · ${r.subtype}`),
+              h("td", null, r.egg_strain),
+              h("td", null, r.cell_strain),
+              h("td", null, refUrl ? h("a", { href: refUrl, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, r.authority, " ↗") : (r.authority || "—")),
+            );
+          })),
         ),
       );
       virSec.appendChild(h("details", { class: "br-details" },
@@ -1524,18 +1543,23 @@ export function mountBriefing(
               h("td", { class: "br-mono" }, hb.latest_ref_date ? `Ref ${hb.latest_ref_date}` : "Synced"),
               h("td", null, "Ready"),
             )),
-            ...feedList.map((f) => h("tr", null,
-              h("td", null,
-                h("a", { href: f.source_url, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, f.label, " ↗"),
-              ),
-              h("td", null, f.scope),
-              h("td", { class: "br-mono" }, f.latest_week || "—"),
-              h("td", { class: "num br-mono" }, f.cached ? String(f.rows ?? 0) : "0"),
-              h("td", { class: "br-mono" }, f.fetched_at ? formatTimeAgo(f.fetched_at) : "not fetched"),
-              h("td", { style: f.error ? { color: "var(--status-error)" } : null },
-                f.error ? `Error: ${f.error}` : (f.cached ? (f.stale ? "Stale" : "Ready") : "Uncached"),
-              ),
-            )),
+            ...feedList.map((f) => {
+              const srcUrl = safeHref(f.source_url);
+              return h("tr", null,
+                h("td", null,
+                  srcUrl
+                    ? h("a", { href: srcUrl, target: "_blank", rel: "noopener noreferrer", class: "br-link-btn" }, f.label, " ↗")
+                    : (f.label || "—"),
+                ),
+                h("td", null, f.scope),
+                h("td", { class: "br-mono" }, f.latest_week || "—"),
+                h("td", { class: "num br-mono" }, f.cached ? String(f.rows ?? 0) : "0"),
+                h("td", { class: "br-mono" }, f.fetched_at ? formatTimeAgo(f.fetched_at) : "not fetched"),
+                h("td", { style: f.error ? { color: "var(--status-error)" } : null },
+                  f.error ? `Error: ${f.error}` : (f.cached ? (f.stale ? "Stale" : "Ready") : "Uncached"),
+                ),
+              );
+            }),
           ),
         ),
       ),
@@ -1563,6 +1587,7 @@ export function mountBriefing(
       return fetchAndRender(currentPlace, { bust: true, preserveTabs: true });
     },
     destroy() {
+      destroyed = true;
       stopPoll();
       loadToken += 1;
       host.replaceChildren();

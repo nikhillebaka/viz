@@ -469,13 +469,22 @@ def _tasks_locations(tasks_config: Optional[Dict[str, Any]]) -> List[str]:
         return []
     seen: List[str] = []
     seen_set: Set[str] = set()
-    for rnd in tasks_config.get("rounds") or []:
+    rounds = tasks_config.get("rounds")
+    if not isinstance(rounds, list):
+        return []
+    for rnd in rounds:
         if not isinstance(rnd, dict):
             continue
-        for mt in rnd.get("model_tasks") or []:
+        mts = rnd.get("model_tasks")
+        if not isinstance(mts, list):
+            continue
+        for mt in mts:
             if not isinstance(mt, dict):
                 continue
-            spec = (mt.get("task_ids") or {}).get("location") or {}
+            tids = mt.get("task_ids")
+            if not isinstance(tids, dict):
+                continue
+            spec = tids.get("location") or {}
             if not isinstance(spec, dict):
                 continue
             for k in ("required", "optional"):

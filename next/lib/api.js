@@ -192,6 +192,139 @@ const manifestCache = new Map();
 let catalogP = null;
 let globeP = null;
 
+/* ================================================================ private (uploaded) hubs
+ * Web mode serves per-session (`ephem_…`) and per-account (`user_…`) uploaded hubs (web/sessions.py
+ * `is_private_hub_id`). When one expires or the session cookie is lost, every request for it answers
+ * 404 (or 403). The shared fetch path reports that once, drops its cached manifest, and tells the app. */
+
+const PRIVATE_HUB_RE = /^(ephem|user)_[a-f0-9]{12}_[a-z][a-z0-9_-]{0,23}$/;
+export const HUB_GONE_MESSAGE = "This uploaded hub expired or is no longer available";
+
+/** @returns {boolean} `id` is an uploaded (session or account) web-mode hub */
+export function isPrivateHubId(id) {
+  return typeof id === "string" && PRIVATE_HUB_RE.test(id.trim());
+}
+
+/** @returns {string | null} the `workspace=` hub id a request URL names, if any */
+export function workspaceOfUrl(url) {
+  if (typeof url !== "string") return null;
+  const qi = url.indexOf("?");
+  if (qi < 0) return null;
+  return new URLSearchParams(url.slice(qi + 1).split("#")[0]).get("workspace") || null;
+}
+
+/**
+ * Which private hub (if any) a failed response says is gone. Pure.
+ * @param {number} status HTTP status
+ * @param {string} url the request URL
+ * @returns {string | null} the hub id when `status` is 404/403 for a private hub, else null
+ */
+export function goneHubOf(status, url) {
+  if (status !== 404 && status !== 403) return null;
+  const id = workspaceOfUrl(url);
+  return isPrivateHubId(id) ? id : null;
+}
+
+const goneHubs = new Set();          // reported once each, until the hub loads again
+const hubGoneListeners = new Set();
+
+/** Follow private hubs going away (called once per hub). @returns {() => void} stops */
+export function onHubGone(fn) {
+  if (typeof fn === "function") hubGoneListeners.add(fn);
+  return () => hubGoneListeners.delete(fn);
+}
+
+/** Drop a hub's cached manifest (and any alias, e.g. the default one, that resolved to it). */
+export function forgetManifest(hubId) {
+  if (!hubId) return;
+  const p = manifestCache.get(hubId);
+  for (const [k, v] of [...manifestCache]) if (k === hubId || (p && v === p)) manifestCache.delete(k);
+}
+
+function reportHubGone(hubId) {
+  forgetManifest(hubId);
+  if (goneHubs.has(hubId)) return;
+  goneHubs.add(hubId);
+  for (const fn of hubGoneListeners) {
+    try { fn(hubId); } catch { /* a listener's failure must not break the caller */ }
+  }
+}
+
+function hubGoneError(hubId, status) {
+  const e = new Error(HUB_GONE_MESSAGE);
+  e.status = status;
+  e.hubGone = hubId;
+  return e;
+}
+
+const BUSY_RETRIES = 3;
+const BUSY_WAIT_CAP_MS = 4000;
+
+/**
+ * How long to wait before retrying a 503 ("Server busy"): `Retry-After` seconds (default 1 s; an HTTP
+ * date or junk counts as the default) plus up to 250 ms of jitter, capped at 4 s. Pure.
+ * @param {string | null | undefined} retryAfter the header value
+ * @param {() => number} [rand]
+ * @returns {number} ms
+ */
+export function busyRetryDelayMs(retryAfter, rand = Math.random) {
+  const s = retryAfter == null || String(retryAfter).trim() === "" ? NaN : Number(retryAfter);
+  const base = Number.isFinite(s) && s >= 0 ? s * 1000 : 1000;
+  return Math.min(BUSY_WAIT_CAP_MS, base + rand() * 250);
+}
+
+function abortReason(signal) {
+  return signal?.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
+
+function waitUnlessAborted(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(abortReason(signal)); return; }
+    const onAbort = () => { clearTimeout(timer); reject(abortReason(signal)); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * fetch() for API calls. A GET answered 503 (the server's admission limit) is retried up to 3 times,
+ * honouring `Retry-After` and the request's AbortSignal; after that the 503 is returned as usual.
+ * A 404/403 for a private hub is reported (see onHubGone) and rejects with a readable error instead
+ * of the server's "Unknown workspace hub '…'".
+ * @param {string} url @param {RequestInit} [init]
+ * @returns {Promise<Response>}
+ */
+async function isHubGoneResponse(r) {
+  if (r.headers?.get?.("X-Viz-Hub-Gone") === "1") return true;
+  if (typeof r.clone !== "function") return false;
+  try {
+    const body = await r.clone().json();
+    return typeof body?.error === "string"
+      && /^(Unknown workspace hub\b|Uploaded hub\b.*not found)/i.test(body.error);
+  } catch {
+    return false;
+  }
+}
+
+export async function hubFetch(url, init) {
+  const isGet = String(init?.method || "GET").toUpperCase() === "GET";
+  let r;
+  for (let attempt = 0; ; attempt++) {
+    r = await fetch(url, init);
+    if (r.status !== 503 || !isGet || attempt >= BUSY_RETRIES) break;
+    try { r.body?.cancel?.()?.catch?.(() => {}); } catch { /* nothing to release */ }
+    await waitUnlessAborted(busyRetryDelayMs(r.headers?.get?.("Retry-After")), init?.signal);
+  }
+  if (!r.ok) {
+    const gone = goneHubOf(r.status, url);
+    if (gone && await isHubGoneResponse(r)) {
+      reportHubGone(gone);
+      throw hubGoneError(gone, r.status);
+    }
+  }
+  return r;
+}
+
 /**
  * GET /api/next/manifest, indexed and cached per hub id for instant cross-hub switching.
  * @param {string | null} [hubId=activeHubId]
@@ -204,6 +337,8 @@ export function loadManifest(hubId = activeHubId) {
   const url = hubId ? `/api/next/manifest?workspace=${encodeURIComponent(hubId)}` : "/api/next/manifest";
   const p = getJsonRaw(url).then((json) => {
     if (!activeHubId && json?.hub_id) activeHubId = json.hub_id;
+    if (hubId) goneHubs.delete(hubId);
+    if (json?.hub_id) goneHubs.delete(json.hub_id);
     const indexed = indexManifest(json);
     if (json?.hub_id && !manifestCache.has(json.hub_id)) manifestCache.set(json.hub_id, p);
     return indexed;
@@ -231,7 +366,7 @@ export function loadGlobe(force = false) {
 }
 
 async function getJsonRaw(targetUrl) {
-  const r = await fetch(targetUrl);
+  const r = await hubFetch(targetUrl);
   if (!r.ok) {
     const e = new Error(`${targetUrl}: ${r.status}`);
     e.status = r.status;
@@ -299,15 +434,24 @@ export class Fan {
     this.#roundMs = rt;
     const t0 = rt[0];
     if (this.timeUnit === "month" && rt.length) {
+      // one slot per actual round date (so two rounds in one month are both reachable and markers sit
+      // on the real dates), plus a month step for each month without a round to keep the axis continuous
       const d0 = new Date(t0), dN = new Date(rt.at(-1));
-      const N = Math.max(1, (dN.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (dN.getUTCMonth() - d0.getUTCMonth()) + 1);
-      this.dates = Object.freeze(Array.from({ length: N }, (_, i) => addMonthsUtc(t0, i)));
-      this.roundAt = new Int16Array(N).fill(-1);
+      const monthOf = (t) => { const d = new Date(t); return (d.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (d.getUTCMonth() - d0.getUTCMonth()); };
+      const N = Math.max(1, monthOf(dN.getTime()) + 1);
+      const byMonth = Array.from({ length: N }, () => new Map()); // month → round ms → first round index
       rt.forEach((t, r) => {
-        const dt = new Date(t);
-        const di = Math.max(0, Math.min(N - 1, (dt.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (dt.getUTCMonth() - d0.getUTCMonth())));
-        if (this.roundAt[di] < 0) this.roundAt[di] = r;
+        if (!Number.isFinite(t)) return;
+        const slot = byMonth[Math.max(0, Math.min(N - 1, monthOf(t)))];
+        if (!slot.has(t)) slot.set(t, r);
       });
+      const dates = [], at = [];
+      byMonth.forEach((slot, i) => {
+        if (!slot.size) { dates.push(addMonthsUtc(t0, i)); at.push(-1); return; }
+        for (const [t, r] of [...slot].sort((a, b) => a[0] - b[0])) { dates.push(t); at.push(r); }
+      });
+      this.dates = Object.freeze(dates);
+      this.roundAt = Int16Array.from(at);
     } else {
       const N = rt.length ? Math.round((rt.at(-1) - t0) / WEEK) + 1 : 0;
       this.dates = Object.freeze(Array.from({ length: N }, (_, i) => t0 + i * WEEK));
@@ -372,9 +516,14 @@ export class Fan {
     const t = parseIso(iso);
     if (!Number.isFinite(t) || !this.dates.length) return -1;
     if (this.timeUnit === "month") {
-      const d0 = new Date(this.dates[0]), dt = new Date(t);
-      const i = (dt.getUTCFullYear() - d0.getUTCFullYear()) * 12 + (dt.getUTCMonth() - d0.getUTCMonth());
-      return i >= 0 && i < this.dates.length && Math.abs(t - this.dates[i]) < 16 * DAY ? i : -1;
+      // the exact slot (a round's own date), else the nearest one within half a month
+      let best = -1, bd = 16 * DAY;
+      for (let i = 0; i < this.dates.length; i++) {
+        const d = Math.abs(t - this.dates[i]);
+        if (d === 0) return i;
+        if (d < bd) { bd = d; best = i; }
+      }
+      return best;
     }
     const i = Math.round((t - this.dates[0]) / WEEK);
     return i >= 0 && i < this.dates.length && Math.abs(t - this.dates[i]) < WEEK / 2 ? i : -1;
@@ -521,7 +670,7 @@ export function loadFan(target, season, location, opts = {}) {
   const q = new URLSearchParams({ target, season, location });
   if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));
   if (opts.version) q.set("v", String(opts.version));
-  const p = fetch(apiUrl(`/api/next/fan?${q}`))
+  const p = hubFetch(apiUrl(`/api/next/fan?${q}`))
     .then((r) => { if (!r.ok) throw new Error(`fan ${season} ${location}: ${r.status}`); return r.arrayBuffer(); })
     .then(decodeFan);
   p.catch(() => { if (fans.get(key) === p) fans.delete(key); });
@@ -534,7 +683,7 @@ export function loadTrajectories(target, season, location, date, opts = {}) {
   const q = new URLSearchParams({ target, season, location, date });
   if (opts.models?.length) q.set("models", opts.models.join(","));
   if (opts.dims) for (const [k, v] of Object.entries(opts.dims)) if (v != null && v !== "") q.set(k, String(v));
-  return fetch(apiUrl(`/api/next/trajectories?${q}`))
+  return hubFetch(apiUrl(`/api/next/trajectories?${q}`))
     .then((r) => { if (!r.ok) throw new Error(`trajectories ${date} ${location}: ${r.status}`); return r.arrayBuffer(); })
     .then(decodeTrajectories);
 }
@@ -557,7 +706,7 @@ export function loadSampleScores(query, { signal } = {}) {
   const key = `${activeHubId || ""}|${query}`;
   const hit = sampleScoreCache.get(key);
   if (hit) return hit;
-  const p = fetch(apiUrl(`/api/next/sample-scores?${query}`), { signal })
+  const p = hubFetch(apiUrl(`/api/next/sample-scores?${query}`), { signal })
     .then((r) => {
       if (!r.ok) {
         const e = new Error(`sample-scores ${r.status}`);

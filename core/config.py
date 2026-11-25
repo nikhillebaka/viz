@@ -7,10 +7,18 @@ Provides zero-hardcoding defaults across any Hubverse or FluSight compatible rep
 import json
 import logging
 from pathlib import Path
+import re
 import sys
 from typing import Dict, List, Optional, Any, Set
 
-from viz.core.calendar import CalendarSpec, infer_calendar
+from viz.core.calendar import CalendarSpec, infer_calendar, target_name_implies_monthly
+
+# "r_t" as a whole token ("wk inc r_t", "r_t"), never inside words like "per_thousand"
+_RT_TOKEN_RE = re.compile(r"(?<![a-z0-9])r_t(?![a-z0-9])")
+
+
+def _mentions_rt(text: str) -> bool:
+    return bool(_RT_TOKEN_RE.search(text))
 
 try:
     import tomllib
@@ -88,13 +96,22 @@ class VizConfig:
                 "compound_taskid_set": None,
             })
 
-        for rnd in tasks.get("rounds") or []:
+        rounds = tasks.get("rounds")
+        if not isinstance(rounds, list):
+            self._target_specs_cache = specs
+            return specs
+        for rnd in rounds:
             if not isinstance(rnd, dict):
                 continue
-            for mt in rnd.get("model_tasks") or []:
+            model_tasks = rnd.get("model_tasks")
+            if not isinstance(model_tasks, list):
+                continue
+            for mt in model_tasks:
                 if not isinstance(mt, dict):
                     continue
-                tids = mt.get("task_ids") or {}
+                tids = mt.get("task_ids")
+                if not isinstance(tids, dict):
+                    continue
                 tgts = [str(x).strip() for x in self._task_list(tids.get("target")) if str(x).strip()]
                 if not tgts:
                     continue
@@ -105,7 +122,8 @@ class VizConfig:
                         tloc_map.setdefault(t, set()).update(loc_vals)
                     self._target_locations_cache = tloc_map
 
-                ot_map = mt.get("output_type") or {}
+                raw_ot = mt.get("output_type")
+                ot_map = raw_ot if isinstance(raw_ot, dict) else {}
                 ot_names = [str(k).strip() for k in ot_map.keys() if isinstance(k, str)]
                 req_h, opt_h = [], []
                 h_spec = tids.get("horizon") or {}
@@ -147,12 +165,13 @@ class VizConfig:
                             mx = float(val_cfg["maximum"])
                             val_max = mx if val_max is None else max(val_max, mx)
                     if ot_name == "sample":
-                        params = ot_cfg.get("output_type_id_params") or {}
-                        cset = params.get("compound_taskid_set")
+                        params = ot_cfg.get("output_type_id_params")
+                        cset = params.get("compound_taskid_set") if isinstance(params, dict) else None
                         if isinstance(cset, list) and cset:
                             compound_set = [str(c).strip() for c in cset]
 
-                tmeta_list = mt.get("target_metadata") or []
+                raw_tmeta = mt.get("target_metadata")
+                tmeta_list = raw_tmeta if isinstance(raw_tmeta, list) else []
                 tmeta_by_id: Dict[str, Dict[str, Any]] = {}
                 for tm in tmeta_list:
                     if isinstance(tm, dict) and tm.get("target_id"):
@@ -311,10 +330,21 @@ class VizConfig:
         if tasks_file.exists():
             try:
                 with open(tasks_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+                    logger.warning("Ignoring non-object hub-config/tasks.json")
             except Exception as exc:
                 logger.warning("Failed to parse hub-config/tasks.json: %s", exc)
         return None
+
+    def reload_tasks(self) -> Optional[Dict[str, Any]]:
+        """Reload hub-config/tasks.json and invalidate derived target/calendar caches."""
+        self._tasks_config = self._load_tasks_config()
+        self._target_specs_cache = None
+        self._target_locations_cache = None
+        self._calendar_cache = None
+        return self._tasks_config
 
     def get_targets(self, discovered_targets: Optional[List[str]] = None) -> List[str]:
         """
@@ -328,21 +358,35 @@ class VizConfig:
         if "targets" in self._user_config and isinstance(self._user_config["targets"], list):
             return [str(t).strip() for t in self._user_config["targets"] if str(t).strip()]
 
-        if self._tasks_config:
+        if isinstance(self._tasks_config, dict):
             targets_set: Set[str] = set()
-            for r in self._tasks_config.get("rounds", []):
-                for mt in r.get("model_tasks", []):
-                    target_spec = mt.get("task_ids", {}).get("target", {})
-                    req = target_spec.get("required") or []
-                    opt = target_spec.get("optional") or []
-                    if isinstance(req, list):
-                        targets_set.update(req)
-                    elif isinstance(req, str):
-                        targets_set.add(req)
-                    if isinstance(opt, list):
-                        targets_set.update(opt)
-                    elif isinstance(opt, str):
-                        targets_set.add(opt)
+            rounds = self._tasks_config.get("rounds")
+            if isinstance(rounds, list):
+                for r in rounds:
+                    if not isinstance(r, dict):
+                        continue
+                    mts = r.get("model_tasks")
+                    if not isinstance(mts, list):
+                        continue
+                    for mt in mts:
+                        if not isinstance(mt, dict):
+                            continue
+                        tids = mt.get("task_ids")
+                        if not isinstance(tids, dict):
+                            continue
+                        target_spec = tids.get("target")
+                        if not isinstance(target_spec, dict):
+                            continue
+                        req = target_spec.get("required") or []
+                        opt = target_spec.get("optional") or []
+                        if isinstance(req, list):
+                            targets_set.update(str(x).strip() for x in req if x is not None and str(x).strip())
+                        elif isinstance(req, str) and req.strip():
+                            targets_set.add(req.strip())
+                        if isinstance(opt, list):
+                            targets_set.update(str(x).strip() for x in opt if x is not None and str(x).strip())
+                        elif isinstance(opt, str) and opt.strip():
+                            targets_set.add(opt.strip())
             if targets_set:
                 return sorted(list(targets_set))
 
@@ -411,7 +455,9 @@ class VizConfig:
             if spec.get("value_min") is not None:
                 return float(spec["value_min"]) >= 0.0
 
-        return any(k in t_lower for k in ["hosp", "inc", "count", "prop", "visit", "death", "case", "admiss", "pct", "rate", "r_t", "reproduction"])
+        return _mentions_rt(t_lower) or any(
+            k in t_lower for k in ["hosp", "inc", "count", "prop", "visit", "death", "case", "admiss", "pct", "rate", "reproduction"]
+        )
 
     @staticmethod
     def _clean_short_target(target: str, scale: str, tmeta_name: Optional[str]) -> str:
@@ -419,7 +465,7 @@ class VizConfig:
         name_low = (tmeta_name or "").lower()
         if "flu hosp rate change" in t_low:
             return "Rate change"
-        if "r_t" in t_low or "reproduction" in t_low or "reproduction" in name_low:
+        if _mentions_rt(t_low) or "reproduction" in t_low or "reproduction" in name_low:
             return "Effective R\u209c"
         if "lab det" in t_low:
             if "flu" in t_low:
@@ -464,6 +510,17 @@ class VizConfig:
             return "Hospital beds" if is_bed_occ else "Hospital admissions"
         return target if len(target) <= 22 else (tmeta_name or target)[:22]
 
+    def get_target_time_unit(self, target: str) -> str:
+        """
+        Step unit of a target's horizons ('week' | 'month' | ...): `target_metadata.<target>.time_unit`
+        override, then the hub task's `time_unit`, then a name heuristic (`mo ...`, `monthly ...`).
+        """
+        target_overrides = self._user_config.get("target_metadata", {}).get(target, {})
+        spec = self._parse_target_specs().get(target) or {}
+        explicit = target_overrides.get("time_unit") or spec.get("time_unit")
+        unit = str(explicit or ("month" if target_name_implies_monthly(target) else "week")).strip().lower()
+        return unit or "week"
+
     def get_target_metadata(self, target: str) -> Dict[str, Any]:
         """
         Get rich, dynamic metadata for a given target variable: display_name, short_name, unit,
@@ -501,7 +558,7 @@ class VizConfig:
             is_categorical = True
             default_display = str(spec.get("target_name") or "").strip() or ("Flu Hosp Rate Change" if "rate change" in t_lower else target)
             default_unit = "Category (PMF)"
-        elif "r_t" in t_lower or "reproduction" in t_lower or "reproduction" in t_name_low:
+        elif _mentions_rt(t_lower) or "reproduction" in t_lower or "reproduction" in t_name_low:
             scale = "rate"
             is_rate = True
             is_categorical = False
@@ -539,7 +596,11 @@ class VizConfig:
                 default_display = "Incident Flu Admissions"
             else:
                 default_display = "Hospital Admissions"
-            default_unit = "Patients / Wk" if ("hosp" in t_lower or "admit" in t_lower) else ("Visits / Wk" if "visit" in t_lower else "Count")
+            default_unit = (
+                "Occupied Beds"
+                if ("bed occupancy" in t_name_low or "beds" in t_name_low)
+                else ("Patients / Wk" if ("hosp" in t_lower or "admit" in t_lower) else ("Visits / Wk" if "visit" in t_lower else "Count"))
+            )
         else:
             scale = "count"
             is_rate = False
@@ -551,7 +612,6 @@ class VizConfig:
         final_is_rate = bool(target_overrides.get("is_rate", is_rate or final_scale in ("proportion", "percentage", "rate")))
         final_short = str(target_overrides.get("short_name") or self._clean_short_target(target, final_scale, spec.get("target_name")))
         dims = self.get_extra_task_ids(target)
-        raw_time_unit = str(target_overrides.get("time_unit") or spec.get("time_unit") or ("month" if t_lower.startswith("mo ") else "week")).strip().lower()
 
         return {
             "target": target,
@@ -566,7 +626,7 @@ class VizConfig:
             "output_types": output_types,
             "categories": categories,
             "dimensions": dims,
-            "time_unit": raw_time_unit or "week",
+            "time_unit": self.get_target_time_unit(target),
             "horizons": {
                 "required": list(spec.get("required_horizons") or []),
                 "optional": list(spec.get("optional_horizons") or []),

@@ -45,6 +45,9 @@ from viz.core.geo import (
 logger = logging.getLogger("viz.briefing_feeds")
 
 DEFAULT_HTTP_TIMEOUT_SEC = 25
+# A refresh that shrinks a cached feed of >= this many rows below this fraction is treated as a schema break
+_SHRINK_GUARD_MIN_ROWS = 100
+_SHRINK_GUARD_RATIO = 0.5
 USER_AGENT = "RespiViz-Briefings/1.0 (+https://github.com/cdcepi)"
 
 # Two-digit US FIPS -> HHS Region number (1..10)
@@ -1070,11 +1073,12 @@ _UKHSA_METRICS: List[Tuple[str, str, str]] = [
 ]
 
 
-def fetch_ukhsa_resp(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+def _fetch_ukhsa_resp_checked(http_get: Callable[[str, int], bytes]) -> Tuple[pl.DataFrame, Optional[str]]:
     rows: List[Dict[str, Any]] = []
     cur_year = date.today().year
     years = (cur_year - 1, cur_year)
     success_count = 0
+    failed_count = 0
     last_err: Optional[Exception] = None
     for norm_path, topic, metric in _UKHSA_METRICS:
         for yr in years:
@@ -1092,6 +1096,7 @@ def fetch_ukhsa_resp(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
                 success_count += 1
             except Exception as exc:
                 logger.warning("UKHSA metric %s (%s) fetch failed: %s", metric, yr, exc)
+                failed_count += 1
                 last_err = exc
                 continue
             results = payload.get("results") if isinstance(payload, dict) else None
@@ -1114,11 +1119,17 @@ def fetch_ukhsa_resp(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
                 })
     if success_count == 0 and last_err is not None:
         raise last_err
+    partial_err = f"Partial UKHSA fetch ({failed_count} metric request(s) failed)" if failed_count > 0 else None
     if not rows:
-        return _empty_df("ukhsa_resp")
-    return pl.DataFrame(rows, schema=FEED_SCHEMAS["ukhsa_resp"]).sort(
+        return _empty_df("ukhsa_resp"), partial_err
+    df = pl.DataFrame(rows, schema=FEED_SCHEMAS["ukhsa_resp"]).sort(
         ["pathogen", "week_end"], descending=[False, True]
     )
+    return df, partial_err
+
+
+def fetch_ukhsa_resp(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    return _fetch_ukhsa_resp_checked(http_get)[0]
 
 
 _NEXTSTRAIN_SPECS: List[Dict[str, Any]] = [
@@ -1266,9 +1277,10 @@ def _aggregate_nextstrain_dataset(
     return out
 
 
-def fetch_nextstrain_clades(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+def _fetch_nextstrain_clades_checked(http_get: Callable[[str, int], bytes]) -> Tuple[pl.DataFrame, Optional[str]]:
     all_rows: List[Dict[str, Any]] = []
     success_count = 0
+    failed_count = 0
     last_err: Optional[Exception] = None
     for spec in _NEXTSTRAIN_SPECS:
         try:
@@ -1283,17 +1295,24 @@ def fetch_nextstrain_clades(http_get: Callable[[str, int], bytes]) -> pl.DataFra
             success_count += 1
         except Exception as exc:
             logger.warning("Nextstrain fetch failed for %s: %s", spec["subtype"], exc)
+            failed_count += 1
             last_err = exc
             continue
         all_rows.extend(_aggregate_nextstrain_dataset(spec, tree_data, freq_data))
     if success_count == 0 and last_err is not None:
         raise last_err
+    partial_err = f"Partial Nextstrain fetch ({failed_count} tree(s) failed)" if failed_count > 0 else None
     if not all_rows:
-        return _empty_df("nextstrain_clades")
-    return pl.DataFrame(all_rows, schema=FEED_SCHEMAS["nextstrain_clades"]).sort(
+        return _empty_df("nextstrain_clades"), partial_err
+    df = pl.DataFrame(all_rows, schema=FEED_SCHEMAS["nextstrain_clades"]).sort(
         ["pathogen", "subtype", "region", "date", "frequency"],
         descending=[False, False, False, True, True],
     )
+    return df, partial_err
+
+
+def fetch_nextstrain_clades(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    return _fetch_nextstrain_clades_checked(http_get)[0]
 
 
 _ECDC_RAW_BASE = "https://raw.githubusercontent.com/EU-ECDC/Respiratory_viruses_weekly_data/main/data"
@@ -1304,11 +1323,12 @@ _ECDC_FILES: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def fetch_ecdc_erviss(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+def _fetch_ecdc_erviss_checked(http_get: Callable[[str, int], bytes]) -> Tuple[pl.DataFrame, Optional[str]]:
     """Fetch weekly European respiratory surveillance CSVs from ECDC ERVISS."""
     cutoff = _cutoff_date_str(540)
     dedup: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
     success_count = 0
+    failed_count = 0
     last_err: Optional[Exception] = None
 
     def _loc_for(country_name: Any) -> Optional[Tuple[str, str]]:
@@ -1329,6 +1349,7 @@ def fetch_ecdc_erviss(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
             success_count += 1
         except Exception as exc:
             logger.warning("ECDC ERVISS fetch failed for %s: %s", kind, exc)
+            failed_count += 1
             last_err = exc
             continue
 
@@ -1390,12 +1411,34 @@ def fetch_ecdc_erviss(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
 
     if success_count == 0 and last_err is not None:
         raise last_err
+    partial_err = f"Partial ECDC ERVISS fetch ({failed_count} CSV file(s) failed)" if failed_count > 0 else None
     if not dedup:
-        return _empty_df("ecdc_erviss")
-    return pl.DataFrame(list(dedup.values()), schema=FEED_SCHEMAS["ecdc_erviss"]).sort(
+        return _empty_df("ecdc_erviss"), partial_err
+    df = pl.DataFrame(list(dedup.values()), schema=FEED_SCHEMAS["ecdc_erviss"]).sort(
         ["location_id", "indicator", "pathogen", "week_end"],
         descending=[False, False, False, True],
     )
+    return df, partial_err
+
+
+def fetch_ecdc_erviss(http_get: Callable[[str, int], bytes]) -> pl.DataFrame:
+    return _fetch_ecdc_erviss_checked(http_get)[0]
+
+
+_FEED_CHECKED_FETCHERS: Dict[str, Callable[[Callable[[str, int], bytes]], Tuple[pl.DataFrame, Optional[str]]]] = {
+    "cdc_nwss": lambda g: (fetch_cdc_nwss(g), None),
+    "cdc_cfa_rt": lambda g: (fetch_cdc_cfa_rt(g), None),
+    "cdc_nssp_ed": lambda g: (fetch_cdc_nssp_ed(g), None),
+    "cdc_nrevss": lambda g: (fetch_cdc_nrevss(g), None),
+    "delphi_fluview": lambda g: (fetch_delphi_fluview(g), None),
+    "who_flunet": lambda g: (fetch_who_flunet(g), None),
+    "ukhsa_resp": _fetch_ukhsa_resp_checked,
+    "nextstrain_clades": _fetch_nextstrain_clades_checked,
+    "ecdc_erviss": _fetch_ecdc_erviss_checked,
+    "drc_ebola_ocha": lambda g: (fetch_drc_ebola_ocha(g), None),
+    "who_don_drc": lambda g: (fetch_who_don_drc(g), None),
+    "bdbv_delays": lambda g: (fetch_bdbv_delays(g), None),
+}
 
 
 _FEED_FETCHERS: Dict[str, Callable[[Callable[[str, int], bytes]], pl.DataFrame]] = {
@@ -1500,17 +1543,26 @@ class BriefingFeedStore:
             self._mem_cache[feed_id] = (mtime_ns, df)
         return df
 
-    def _is_entry_stale(self, feed_id: str, entry: Dict[str, Any], now_ts: float) -> bool:
+    def _is_entry_stale(
+        self,
+        feed_id: str,
+        entry: Dict[str, Any],
+        now_ts: float,
+        *,
+        max_age_hours: Optional[float] = None,
+    ) -> bool:
         pq_path = self.feed_path(feed_id)
         if not pq_path.is_file():
             return True
         fetched_ts = entry.get("fetched_epoch")
         if not isinstance(fetched_ts, (int, float)):
             return True
-        ttl_sec = float(FEED_SPECS[feed_id]["ttl_hours"]) * 3600.0
+        spec_ttl = float(FEED_SPECS[feed_id]["ttl_hours"])
+        eff_ttl = min(spec_ttl, float(max_age_hours)) if max_age_hours is not None else spec_ttl
+        ttl_sec = max(60.0, eff_ttl * 3600.0)
         return (now_ts - float(fetched_ts)) > ttl_sec
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self, *, max_age_hours: Optional[float] = None) -> Dict[str, Any]:
         with self._lock:
             meta = self._load_meta_unlocked()
             refreshing = self._refreshing
@@ -1535,7 +1587,7 @@ class BriefingFeedStore:
                 "description": spec["description"],
                 "ttl_hours": spec["ttl_hours"],
                 "cached": cached,
-                "stale": self._is_entry_stale(feed_id, entry, now_ts),
+                "stale": self._is_entry_stale(feed_id, entry, now_ts, max_age_hours=max_age_hours),
                 "fetched_at": entry.get("fetched_at"),
                 "rows": entry.get("rows", 0),
                 "latest_week": entry.get("latest_week"),
@@ -1553,6 +1605,7 @@ class BriefingFeedStore:
         self,
         feed_ids: Optional[Sequence[str]] = None,
         force: bool = False,
+        max_age_hours: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Synchronously refresh requested feeds (or all feeds) and return status."""
         requested = list(feed_ids) if feed_ids else list(FEED_SPECS.keys())
@@ -1566,17 +1619,18 @@ class BriefingFeedStore:
             self._last_refresh_started = datetime.now(timezone.utc).isoformat()
         try:
             with self._refresh_lock:
-                self._run_refresh_locked(requested, force=force)
+                self._run_refresh_locked(requested, force=force, max_age_hours=max_age_hours)
         finally:
             with self._lock:
                 self._active_refreshes = max(0, self._active_refreshes - 1)
                 self._refreshing = self._active_refreshes > 0
-        return self.get_status()
+        return self.get_status(max_age_hours=max_age_hours)
 
     def _run_refresh_locked(
         self,
         requested: List[str],
         force: bool = False,
+        max_age_hours: Optional[float] = None,
     ) -> Dict[str, Any]:
         started_iso = datetime.now(timezone.utc).isoformat()
         with self._lock:
@@ -1588,37 +1642,74 @@ class BriefingFeedStore:
         to_fetch: List[str] = []
         for fid in requested:
             entry = feeds_meta.get(fid) or {}
-            if force or self._is_entry_stale(fid, entry, now_ts):
+            if force or self._is_entry_stale(fid, entry, now_ts, max_age_hours=max_age_hours):
                 to_fetch.append(fid)
 
-        results: Dict[str, Tuple[Optional[pl.DataFrame], Optional[str]]] = {}
+        results: Dict[str, Tuple[Optional[pl.DataFrame], Optional[str], Optional[str]]] = {}
         if to_fetch:
             workers = min(4, len(to_fetch))
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 fut_map = {
-                    pool.submit(_FEED_FETCHERS[fid], self._fetcher): fid
+                    pool.submit(_FEED_CHECKED_FETCHERS[fid], self._fetcher): fid
                     for fid in to_fetch
                 }
                 for fut in as_completed(fut_map):
                     fid = fut_map[fut]
                     try:
-                        df = fut.result()
-                        results[fid] = (df, None)
+                        df, partial_err = fut.result()
+                        results[fid] = (df, None, partial_err)
                     except Exception as exc:
                         logger.warning("Briefing feed %s refresh failed: %s", fid, exc)
-                        results[fid] = (None, str(exc))
+                        results[fid] = (None, str(exc), None)
 
         finished_iso = datetime.now(timezone.utc).isoformat()
         finished_epoch = time.time()
 
-        # Persist Parquet files and update metadata cleanly
+        # Persist Parquet files and update metadata cleanly without overwriting valid cache with empty/partial data
         with self._lock:
             meta = self._load_meta_unlocked()
             feeds_meta = dict(meta.get("feeds") or {})
-            for fid, (df, err) in results.items():
+            for fid, (df, err, partial_err) in results.items():
                 prev = dict(feeds_meta.get(fid) or {})
+                pq_path = self.feed_path(fid)
+                has_existing_good = pq_path.is_file() and int(prev.get("rows") or 0) > 0
+                has_existing_complete = has_existing_good and prev.get("fetched_epoch") is not None
                 if err is None and df is not None:
-                    pq_path = self.feed_path(fid)
+                    if df.height == 0:
+                        if has_existing_good:
+                            prev["error"] = partial_err or "Upstream feed returned 0 rows; retaining cached data."
+                            prev["last_attempt_at"] = finished_iso
+                            feeds_meta[fid] = prev
+                        else:
+                            feeds_meta[fid] = {
+                                **prev,
+                                "rows": int(prev.get("rows") or 0),
+                                "error": partial_err or "Upstream feed returned 0 rows.",
+                                "last_attempt_at": finished_iso,
+                            }
+                        continue
+                    if partial_err and has_existing_complete:
+                        prev["error"] = f"{partial_err}; retaining complete cached data."
+                        prev["last_attempt_at"] = finished_iso
+                        feeds_meta[fid] = prev
+                        continue
+                    prev_rows = int(prev.get("rows") or 0)
+                    if (
+                        has_existing_good
+                        and prev_rows >= _SHRINK_GUARD_MIN_ROWS
+                        and df.height < prev_rows * _SHRINK_GUARD_RATIO
+                    ):
+                        # A sharp drop with no HTTP error usually means an upstream schema change broke parsing:
+                        # keep the good cache (fetched_epoch unchanged, so the next cycle retries)
+                        msg = (
+                            f"Upstream feed returned {df.height} rows (previously {prev_rows}); "
+                            "suspected schema change, retaining cached data."
+                        )
+                        logger.warning("Briefing feed %s: %s", fid, msg)
+                        prev["error"] = msg
+                        prev["last_attempt_at"] = finished_iso
+                        feeds_meta[fid] = prev
+                        continue
                     _atomic_write_parquet(df, pq_path)
                     try:
                         mtime_ns = pq_path.stat().st_mtime_ns
@@ -1627,10 +1718,10 @@ class BriefingFeedStore:
                         self._mem_cache.pop(fid, None)
                     feeds_meta[fid] = {
                         "fetched_at": finished_iso,
-                        "fetched_epoch": finished_epoch,
+                        "fetched_epoch": finished_epoch if not partial_err else None,
                         "rows": int(df.height),
                         "latest_week": _extract_latest_week(df),
-                        "error": None,
+                        "error": partial_err,
                     }
                 else:
                     prev["error"] = err or "Unknown error"
@@ -1643,7 +1734,7 @@ class BriefingFeedStore:
             self._save_meta_unlocked(meta)
             self._last_refresh_finished = finished_iso
 
-        return self.get_status()
+        return self.get_status(max_age_hours=max_age_hours)
 
     def start_refresh(
         self,

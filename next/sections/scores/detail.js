@@ -1,6 +1,6 @@
 /* An expanded leaderboard row: one model's detail. Anatomy by horizon, coverage curve against the baseline's, a state tile grid in the score
  * colors, one tick per round, and facts from /api/model-details. Paper, not a panel. */
-import { h } from "../../lib/dom.js";
+import { h, safeHref } from "../../lib/dom.js";
 import { horizonText } from "../../lib/format.js";
 import { linear } from "../../lib/scale.js";
 import { tooltip } from "../../ui/floating.js";
@@ -214,9 +214,10 @@ function renderFacts(el, d, row, manifest) {
     (md.designated_model ?? d.designated) ? "designated" : null,
   ].filter(Boolean);
   const methods = md.methods || md.methods_long;
+  const siteUrl = safeHref(md.website_url);
   el.replaceChildren(...[
     h("div", { class: "sc-fact-line" }, line.join(" · ")),
     methods ? h("p", { class: "sc-methods" }, methods) : null,
-    md.website_url ? h("a", { class: "c-link sc-fact-link", href: md.website_url, target: "_blank", rel: "noopener" }, "Website") : null,
+    siteUrl ? h("a", { class: "c-link sc-fact-link", href: siteUrl, target: "_blank", rel: "noopener noreferrer" }, "Website") : null,
   ].filter(Boolean));
 }

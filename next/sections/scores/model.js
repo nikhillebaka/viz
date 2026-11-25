@@ -210,6 +210,20 @@ export const SORTS = Object.freeze({
 export const DEFAULT_SORT = "rel";
 
 /**
+ * Look up sort spec for a leaderboard column, supporting dynamic `h<n>` horizon keys (including negative/extended horizons).
+ * @param {string} key
+ */
+export function sortSpecFor(key) {
+  if (Object.prototype.hasOwnProperty.call(SORTS, key)) return SORTS[key];
+  const m = /^h(-?\d+)$/.exec(String(key || ""));
+  if (m) {
+    const h = Number(m[1]);
+    return { get: (r) => r.byH?.[h]?.rel ?? null, asc: true, score: true };
+  }
+  return SORTS[DEFAULT_SORT];
+}
+
+/**
  * Rows in table order: ranked rows by the sort (nulls last whatever the direction, ties by name), then
  * the unranked (no forecasts in scope) by name. Ranks only when the sort is a score; ties share one.
  * @param {object[]} rows from rowsFrom
@@ -218,7 +232,7 @@ export const DEFAULT_SORT = "rel";
  * @returns {{ ranked: object[], unranked: object[], ranks: Map<string, number> }}
  */
 export function sortRows(rows, key = DEFAULT_SORT, reversed = false) {
-  const s = SORTS[key] || SORTS[DEFAULT_SORT];
+  const s = sortSpecFor(key);
   const asc = s.asc !== reversed;
   const byName = (a, b) => a.label.localeCompare(b.label);
   const ranked = rows.filter((r) => r.active), unranked = rows.filter((r) => !r.active).sort(byName);
@@ -341,10 +355,14 @@ export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sour
   const log = scope.scale === "log";
   const allH = full ? new Map((full.rankings || []).map((r) => [r.model_id, r])) : byId;
   const r2 = (v, d) => (typeof v === "number" && Number.isFinite(v) ? +v.toFixed(d) : null);
+  const extraHorizons = [...new Set(
+    [...allH.values()].flatMap((row) => Object.keys(row?.by_horizon || {}).map(Number)),
+  )].filter((h) => Number.isInteger(h) && (h < 0 || h > 3)).sort((a, b) => a - b);
   return order.map((id) => {
     const r = byId.get(id) || {};
     if (isCat) {
       const bhCat = (h) => r2(allH.get(id)?.by_horizon?.[h]?.[rankMetric], 3);
+      const extraCat = Object.fromEntries(extraHorizons.map((h) => [`h${h}_score`, bhCat(h)]));
       return {
         rank: ranks.get(id) ?? null, model_id: id, model_type: sourceOf(id),
         tasks_evaluated: r.count ?? 0,
@@ -356,6 +374,7 @@ export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sour
         pct_diff_vs_baseline: r2(r.pct_diff_vs_baseline, 1),
         baseline_model: resp?.baseline_model ?? scope.baseline,
         h0_score: bhCat(0), h1_score: bhCat(1), h2_score: bhCat(2), h3_score: bhCat(3),
+        ...extraCat,
         target, evaluation_location: scope.location, evaluation_scope: scopeLabel,
         seasons: scope.seasons.join(","), weeks: scope.weeks ? scope.weeks.join("-") : "", phase: scope.phase || "",
         horizons: scope.horizons ? scope.horizons.join(",") : "", rank_among: scope.rank,
@@ -363,6 +382,7 @@ export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sour
       };
     }
     const bh = (h) => r2(allH.get(id)?.by_horizon?.[h]?.wis, 2);
+    const extraWis = Object.fromEntries(extraHorizons.map((h) => [`h${h}_wis`, bh(h)]));
     const w = winsById.get(id) || {};
     return {
       rank: ranks.get(id) ?? null, model_id: id, model_type: sourceOf(id), quantiles: r.quantile_count ?? null,
@@ -373,6 +393,7 @@ export function exportRows(resp, { order, ranks, scope, target, scopeLabel, sour
       baseline_model: resp?.baseline_model ?? scope.baseline, mae: r2(r.mae, 2),
       coverage_95_pct: r2(r.cov95, 1), coverage_50_pct: r2(r.cov50, 1), sharpness: r2(r.sharpness, 1),
       h0_wis_nowcast: bh(0), h1_wis_1wk: bh(1), h2_wis_2wk: bh(2), h3_wis_3wk: bh(3),
+      ...extraWis,
       target, evaluation_location: scope.location, evaluation_scope: scopeLabel,
       seasons: scope.seasons.join(","), weeks: scope.weeks ? scope.weeks.join("-") : "", phase: scope.phase || "",
       horizons: scope.horizons ? scope.horizons.join(",") : "", rank_among: scope.rank, scale: scope.scale,

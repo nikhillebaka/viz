@@ -42,14 +42,17 @@ PATHOGEN_LABELS: Dict[str, Tuple[str, str]] = {
 CONCEPT_LABELS: Dict[str, str] = {
     "flu_ed_share": "Influenza ED visits share",
     "flu_hosp": "Influenza hospital admissions",
+    "flu_hosp_beds": "Influenza hospital bed occupancy",
     "flu_hosp_rate_change": "Influenza hospital admissions rate change",
     "ili_ed_share": "ILI ED visits share",
     "ili_ed_visits": "ILI ED visits",
     "ili_incidence": "ILI incidence",
     "ari_incidence": "ARI incidence",
     "covid_hosp": "COVID-19 hospital admissions",
+    "covid_hosp_beds": "COVID-19 hospital bed occupancy",
     "covid_ed_share": "COVID-19 ED visits share",
     "rsv_hosp": "RSV hospital admissions",
+    "rsv_hosp_beds": "RSV hospital bed occupancy",
     "rsv_ed_share": "RSV ED visits share",
     "flu_lab_positivity": "Influenza lab positivity",
     "covid19_lab_positivity": "COVID-19 lab positivity",
@@ -65,6 +68,7 @@ CONCEPT_LABELS: Dict[str, str] = {
 }
 
 _RE_ED = re.compile(r"\bed\b|ed_|_ed|emergency")
+_RE_BED_OCC = re.compile(r"\bbeds?\b|occupancy|census")
 _RE_HOSP = re.compile(r"hosp|admit|admission|nhsn")
 _RE_SHARE = re.compile(r"\bproportion\b|\bpercentage\b|\bpct\b|\bprop\b|\bshare\b|%")
 _RE_ILI = re.compile(r"\bili\b|influenza-like|influenza like")
@@ -107,6 +111,7 @@ def canonical_target_concept(
 
     is_share = scale in ("proportion", "percentage") or bool(_RE_SHARE.search(text))
     is_ed = bool(_RE_ED.search(text))
+    is_bed_occ = bool(_RE_BED_OCC.search(text))
     is_hosp = bool(_RE_HOSP.search(text))
     is_ili = bool(_RE_ILI.search(text))
     is_ari = bool(_RE_ARI.search(text))
@@ -142,6 +147,13 @@ def canonical_target_concept(
         cid = by_p.get(pathogen)
         if cid:
             return (cid, CONCEPT_LABELS[cid], False)
+
+    if is_bed_occ and is_hosp:
+        by_p = {"influenza": "flu_hosp_beds", "covid19": "covid_hosp_beds", "rsv": "rsv_hosp_beds"}
+        cid = by_p.get(pathogen)
+        if cid:
+            return (cid, CONCEPT_LABELS[cid], False)
+        return ("hosp_beds", "Hospital bed occupancy", False)
 
     if is_hosp:
         by_p = {"influenza": "flu_hosp", "covid19": "covid_hosp", "rsv": "rsv_hosp"}
