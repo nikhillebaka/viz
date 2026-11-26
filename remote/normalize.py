@@ -53,6 +53,7 @@ def normalize_forecast(
     *,
     calendar: Optional[CalendarSpec] = None,
     geo: Any = None,
+    time_unit_for: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[pl.DataFrame, Dict[str, Any]]:
     """
     Coerce one model-output file into canonical quantile/sample/pmf/peak tables and collect
@@ -67,6 +68,7 @@ def normalize_forecast(
         geo=geo,
         known_locations=known_locations,
         is_non_negative=is_non_negative,
+        time_unit_for=time_unit_for,
     )
     info = dict(res.info)
     info["samples"] = res.samples

@@ -243,19 +243,43 @@ class WebWorkspaceStore:
                         finally:
                             lk.release()
 
-    def cleanup_leftovers(self, *, max_age_seconds: float = 900.0, now: Optional[float] = None) -> int:
+    @staticmethod
+    def _tree_latest_mtime(path: Path) -> float:
+        latest = 0.0
+        try:
+            latest = path.stat().st_mtime
+        except OSError:
+            return latest
+        if path.is_dir():
+            for root, _dirs, files in os.walk(path):
+                rp = Path(root)
+                try:
+                    latest = max(latest, rp.stat().st_mtime)
+                except OSError:
+                    pass
+                for name in files:
+                    try:
+                        latest = max(latest, (rp / name).stat().st_mtime)
+                    except OSError:
+                        pass
+        return latest
+
+    def cleanup_leftovers(self, *, max_age_seconds: Optional[float] = None, now: Optional[float] = None) -> int:
         """Remove abandoned `.staging/*`, `hub.wake.*`, and temp files older than `max_age_seconds`."""
         ts = time.time() if now is None else now
+        if max_age_seconds is None:
+            min_rate = max(1, int(getattr(self.cfg, "upload_min_bytes_per_sec", 128 * 1024)))
+            max_bytes = int(getattr(self.cfg, "max_compressed_bytes", 100 * 1024 * 1024))
+            eff_age = max(900.0, max(120.0, max_bytes / float(min_rate)) + 120.0)
+        else:
+            eff_age = float(max_age_seconds)
         cleaned = 0
         for base in (self.cfg.scratch_dir / ".staging", self.data_dir / ".staging"):
             if not base.is_dir():
                 continue
             for ent in list(base.iterdir()):
-                try:
-                    age = ts - ent.stat().st_mtime
-                except OSError:
-                    continue
-                if max_age_seconds <= 0.0 or age >= max_age_seconds:
+                age = ts - self._tree_latest_mtime(ent)
+                if eff_age <= 0.0 or age >= eff_age:
                     shutil.rmtree(ent, ignore_errors=True) if ent.is_dir() else ent.unlink(missing_ok=True)
                     cleaned += 1
         for root in (self.ephem_root, self.users_root):
@@ -523,10 +547,13 @@ class WebWorkspaceStore:
             return 0
         ex = exclude.resolve() if exclude is not None else None
         total = 0
-        for ent in staging_dir.iterdir():
-            if ex is not None and ent.resolve() == ex:
+        for ent in list(staging_dir.iterdir()):
+            try:
+                if ex is not None and ent.resolve() == ex:
+                    continue
+                total += _dir_bytes(ent) if ent.is_dir() else (ent.stat().st_size if ent.is_file() else 0)
+            except OSError:
                 continue
-            total += _dir_bytes(ent) if ent.is_dir() else (ent.stat().st_size if ent.is_file() else 0)
         return total
 
     def _ephem_total_bytes(self) -> int:
@@ -699,8 +726,18 @@ class WebWorkspaceStore:
                         continue
                     exp = float(meta.get("expires_at") or 0.0)
                     if exp and ts >= exp:
-                        self._drop_workspace_dir(ws_dir, hid)
-                        continue
+                        with self._lock_for(str(hid)):
+                            meta_fresh = _read_json(ws_dir / "meta.json")
+                            if not meta_fresh or not hmac.compare_digest(
+                                str(meta_fresh.get("owner_hash") or ""), identity.sid_hash
+                            ):
+                                self._drop_workspace_dir(ws_dir, hid)
+                                continue
+                            fresh_exp = float(meta_fresh.get("expires_at") or 0.0)
+                            if fresh_exp and ts >= fresh_exp:
+                                self._drop_workspace_dir(ws_dir, str(meta_fresh.get("hub_id") or hid))
+                                continue
+                            meta = meta_fresh
                     ephem_items.append(self._public_summary(meta, ws_dir, now=ts))
 
         user_items: List[Dict[str, Any]] = []

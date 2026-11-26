@@ -162,8 +162,8 @@ def _score_wide_column_to_target(col_name: str, t: str) -> int:
     # Reject explicit measure-family mismatches (e.g. flu_pct_positive must never match wk inc flu hosp)
     if col_fam and t_fam and col_fam != t_fam:
         return -1000
-    # A proportion/percentage target only takes a column that says so (influenza_ed_visits is a count)
-    if _indicates_proportion(t_toks, t_low) and not _indicates_proportion(col_toks, col_low):
+    # Proportions/percentages and counts must match symmetrically when comparing wide columns to targets
+    if _indicates_proportion(t_toks, t_low) != _indicates_proportion(col_toks, col_low):
         return -1000
 
     score = 0

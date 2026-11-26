@@ -8,11 +8,16 @@ import json
 import math
 import os
 from pathlib import Path
+import socket
+import socketserver
 import struct
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
+import urllib.error
+import urllib.request
 
 import numpy as np
 import polars as pl
@@ -23,14 +28,24 @@ from viz.core.cache_manager import CACHE_SCHEMA_VERSION, ParquetCacheManager
 from viz.core.calendar import CalendarSpec
 from viz.core.catalog import canonical_target_concept
 from viz.core.ingest import NormalizationError, normalize_forecast_frame
-from viz.core.metrics import crps_ensemble_1d, energy_score
+from viz.core.metrics import (
+    _ORACLE_MEMO,
+    _ORACLE_MEMO_LOCK,
+    _ORACLE_MEMO_MAX,
+    _prepared_oracle,
+    crps_ensemble_1d,
+    energy_score,
+)
 from viz.core.truth import unpivot_wide_truth
+from viz.core.workspace import HubManager
 from viz.core.yaml_lite import parse_yaml_mapping
 from viz.remote.store import RemoteStore
 from viz.web.auth import (
     AuthUser,
+    RequestIdentity,
     _USER_COOKIE_MAX_LEN,
     generate_session_id,
+    hash_identity,
     make_user_cookie_value,
     parse_session_cookie,
     parse_user_cookie,
@@ -41,7 +56,9 @@ from viz.web.bundle import (
     RateLimitExceededError,
     StorageBudgetExceededError,
     UploadIncompatibleError,
+    UploadTimeoutError,
     UploadTooLargeError,
+    _BoundedDecompressStream,
     extract_vzb1_stream,
     validate_extracted_hub,
     validate_hubverse_relpath,
@@ -49,6 +66,11 @@ from viz.web.bundle import (
 from viz.web.config import WebConfig, _sanitize_redirect_url
 from viz.web.scheduler import WebSyncScheduler
 from viz.web.sessions import WebWorkspaceStore
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 def _pack_vzb1(entries: list[tuple[str, bytes]]) -> bytes:
@@ -85,6 +107,10 @@ class TestWebAndSecurityFixes(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VIZ_SYNC_INTERVAL_HOURS": "bad"}):
             with self.assertRaises(ValueError):
                 WebConfig.from_env(self.data_dir)
+        for bad_float in ("nan", "inf", "-inf"):
+            with mock.patch.dict(os.environ, {"VIZ_SYNC_INTERVAL_HOURS": bad_float}):
+                with self.assertRaises(ValueError):
+                    WebConfig.from_env(self.data_dir)
         with mock.patch.dict(os.environ, {"VIZ_COOKIE_SECURE": "sometimes"}):
             with self.assertRaises(ValueError):
                 WebConfig.from_env(self.data_dir)
@@ -191,11 +217,11 @@ class TestWebAndSecurityFixes(unittest.TestCase):
         (ws1 / "hub" / "data.bin").write_bytes(b"x" * 2200)
         (ws1 / "meta.json").write_text(
             json.dumps({
-                "id": "ephem_s1",
+                "hub_id": "ephem_s1",
                 "tier": "ephem",
                 "owner_hash": "sess1",
                 "client_ip_hash": "ip1",
-                "last_seen": time.time(),
+                "last_accessed_at": time.time(),
             }),
             encoding="utf-8",
         )
@@ -298,6 +324,193 @@ class TestWebAndSecurityFixes(unittest.TestCase):
         store_synced.add("flusight")
         self.assertAlmostEqual(sched._next_sleep_seconds(sync_sec, sync_sec, now=1000.0), sync_sec)
 
+    def test_staging_leftover_nested_mtime_and_locked_list_expiry(self):
+        with mock.patch.dict(
+            os.environ,
+            {"VIZ_MODE": "web", "VIZ_SCRATCH_DIR": str(self.scratch_dir), "VIZ_UPLOAD_MIN_KBPS": "128"},
+        ):
+            cfg = WebConfig.from_env(self.data_dir)
+        store = WebWorkspaceStore(self.data_dir, cfg)
+
+        # Nested activity keeps a staging directory alive past top-level dir mtime
+        staging_dir = self.scratch_dir / ".staging" / "viz-up-slow"
+        sub = staging_dir / "nested"
+        sub.mkdir(parents=True)
+        payload = sub / "chunk.bin"
+        payload.write_bytes(b"abc")
+        old_t = 1_000_000.0
+        os.utime(sub, (old_t, old_t))
+        os.utime(staging_dir, (old_t, old_t))
+        recent_t = old_t + 950.0
+        os.utime(payload, (recent_t, recent_t))
+        self.assertEqual(store.cleanup_leftovers(max_age_seconds=900.0, now=recent_t + 100.0), 0)
+        self.assertTrue(staging_dir.exists())
+        self.assertEqual(store.cleanup_leftovers(max_age_seconds=900.0, now=recent_t + 901.0), 1)
+        self.assertFalse(staging_dir.exists())
+
+        # Double-checked lock in list_for_identity respects concurrent expiration bump
+        sid = "session-renewed-id-1234567890"
+        sid_hash = hash_identity(f"sid:{sid}")
+        hid = "ephem_0123456789ab_renew"
+        ws_dir = store.ephem_root / sid_hash / hid
+        (ws_dir / "hub").mkdir(parents=True)
+        meta_path = ws_dir / "meta.json"
+        meta_path.write_text(
+            json.dumps({
+                "hub_id": hid,
+                "tier": "ephem",
+                "owner_hash": sid_hash,
+                "expires_at": 1000.0,
+                "last_accessed_at": 900.0,
+            }),
+            encoding="utf-8",
+        )
+        # Re-read under lock returns a renewed expiry -> item must stay alive
+        from viz.web import sessions as sess_mod
+        orig_read = sess_mod._read_json
+        calls = {"n": 0}
+
+        def _fake_read(p):
+            calls["n"] += 1
+            res = orig_read(p)
+            if p == meta_path and calls["n"] >= 2 and isinstance(res, dict):
+                res = dict(res, expires_at=5000.0)
+            return res
+
+        with mock.patch.object(sess_mod, "_read_json", side_effect=_fake_read):
+            listed = store.list_for_identity(RequestIdentity(sid=sid, sid_hash=sid_hash, user=None), now=2000.0)
+        self.assertEqual([w["id"] for w in listed["ephemeral"]], [hid])
+        self.assertTrue(ws_dir.exists())
+
+    def test_auth_login_logout_cookies_and_upload_timeout_408(self):
+        # Unit check for _BoundedVzb1Stream calling read1() and raising UploadTimeoutError
+        class _TrickleReader:
+            def __init__(self):
+                self.used_read1 = False
+
+            def read1(self, n):
+                self.used_read1 = True
+                time.sleep(0.06)
+                return b"a"
+
+            def read(self, n):
+                raise AssertionError("read() should not be preferred over read1()")
+
+        tr = _TrickleReader()
+        stream = _BoundedDecompressStream(
+            tr,
+            100,
+            is_gzip=False,
+            max_compressed=1024,
+            max_uncompressed=1024,
+            deadline=time.monotonic() + 0.03,
+        )
+        with self.assertRaises(UploadTimeoutError):
+            stream._read_with_deadline(64)
+            stream._read_with_deadline(64)
+        self.assertTrue(tr.used_read1)
+
+        prev_mgr = server.HUB_MANAGER
+        prev_handler_mgr = getattr(server.SandboxRequestHandler, "hub_manager", None)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "VIZ_MODE": "web",
+                "VIZ_DATA_DIR": str(self.data_dir),
+                "VIZ_SCRATCH_DIR": str(self.scratch_dir),
+                "VIZ_AUTO_SYNC": "0",
+                "VIZ_TRUST_PROXY_AUTH": "1",
+                "VIZ_PROXY_SECRET": "login-secret",
+                "VIZ_SSO_LOGOUT_URL": "/oauth2/sign_out",
+            },
+            clear=False,
+        ):
+            mgr = HubManager(data_dir=self.data_dir, mode="web", include_enclosing=False)
+            server.HUB_MANAGER = mgr
+            server.SandboxRequestHandler.hub_manager = mgr
+            socketserver.ThreadingTCPServer.allow_reuse_address = True
+            httpd = server.BoundedThreadingTCPServer(("127.0.0.1", 0), server.SandboxRequestHandler, max_workers=4)
+            port = httpd.server_address[1]
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            opener = urllib.request.build_opener(_NoRedirect())
+            try:
+                # /auth/login exchanges proxy headers for signed viz_user cookie with private cache headers
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/auth/login?rd=/next/%3Ftab%3Dscores")
+                req.add_header("X-Auth-Request-Email", "alice@umass.edu")
+                req.add_header("X-Auth-Request-Preferred-Username", "Alice")
+                req.add_header("X-Viz-Proxy-Secret", "login-secret")
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    opener.open(req, timeout=5)
+                err_resp = ctx.exception
+                try:
+                    self.assertEqual(err_resp.code, 302)
+                    self.assertEqual(err_resp.headers.get("Location"), "/next/?tab=scores")
+                    self.assertIn("private", (err_resp.headers.get("Cache-Control") or "").lower())
+                    self.assertIn("Cookie", err_resp.headers.get("Vary") or "")
+                    set_cookies = err_resp.headers.get_all("Set-Cookie") or []
+                    user_cookie_hdr = next((c for c in set_cookies if c.startswith("viz_user=")), "")
+                    self.assertTrue(user_cookie_hdr)
+                    cookie_pair = user_cookie_hdr.split(";", 1)[0]
+                finally:
+                    err_resp.close()
+
+                # Signed viz_user cookie authenticates subsequent requests without proxy headers
+                with urllib.request.urlopen(
+                    urllib.request.Request(f"http://127.0.0.1:{port}/api/web/status", headers={"Cookie": cookie_pair}),
+                    timeout=5,
+                ) as st_resp:
+                    st_data = json.loads(st_resp.read().decode("utf-8"))
+                    self.assertTrue(st_data["auth"]["authenticated"])
+                    self.assertEqual(st_data["auth"]["email"], "alice@umass.edu")
+
+                # /auth/logout clears viz_user cookie (Max-Age=0) and sets private cache headers
+                with self.assertRaises(urllib.error.HTTPError) as lo_ctx:
+                    opener.open(urllib.request.Request(f"http://127.0.0.1:{port}/auth/logout"), timeout=5)
+                lo_resp = lo_ctx.exception
+                try:
+                    self.assertEqual(lo_resp.code, 302)
+                    self.assertEqual(lo_resp.headers.get("Location"), "/oauth2/sign_out")
+                    self.assertIn("private", (lo_resp.headers.get("Cache-Control") or "").lower())
+                    lo_cookies = lo_resp.headers.get_all("Set-Cookie") or []
+                    self.assertTrue(any(c.startswith("viz_user=") and "Max-Age=0" in c for c in lo_cookies))
+                finally:
+                    lo_resp.close()
+
+                # Live upload hitting wall-clock deadline returns HTTP 408 Request Timeout
+                from viz.web import bundle as bundle_mod
+                orig_stream_cls = bundle_mod._BoundedDecompressStream
+
+                def _short_deadline_stream(*args, **kwargs):
+                    kwargs["deadline"] = time.monotonic() + 0.05
+                    return orig_stream_cls(*args, **kwargs)
+
+                with mock.patch.object(bundle_mod, "_BoundedDecompressStream", side_effect=_short_deadline_stream):
+                    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                        sock.sendall(
+                            (
+                                f"POST /api/web/upload HTTP/1.1\r\n"
+                                f"Host: 127.0.0.1:{port}\r\n"
+                                f"Content-Type: application/octet-stream\r\n"
+                                f"Content-Length: 4096\r\n"
+                                f"X-Viz-Upload: 1\r\n"
+                                f"Connection: close\r\n\r\n"
+                                f"VZB1"
+                            ).encode("ascii")
+                        )
+                        time.sleep(0.1)
+                        raw_http = b""
+                        while True:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            raw_http += chunk
+                        self.assertIn(b" 408 Request Timeout", raw_http)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                server.HUB_MANAGER = prev_mgr
+                server.SandboxRequestHandler.hub_manager = prev_handler_mgr
+
 
 class TestCoreAndSyncAuditFixes(unittest.TestCase):
     def setUp(self):
@@ -367,17 +580,25 @@ class TestCoreAndSyncAuditFixes(unittest.TestCase):
         })
         self.assertIsNone(unpivot_wide_truth(df_wide, ["wk inc flu hosp"]))
 
-        # Monthly forecast target derives integer horizon & calendar-month target_end_date (with Feb clamping)
+        # Proportion column must never map onto a count target even in the same ED family
+        df_wide_ed = pl.DataFrame({
+            "target_end_date": ["2025-11-22"],
+            "location": ["US"],
+            "influenza_pct_ed_visits": [4.2],
+        })
+        self.assertIsNone(unpivot_wide_truth(df_wide_ed, ["wk inc flu ed visits"]))
+
+        # Monthly forecast target derives integer horizon & month-start / month-end target_end_date
         cal = CalendarSpec()
         mo_df = pl.DataFrame({
-            "reference_date": ["2025-10-01", "2025-10-01", "2026-01-31"],
-            "target": ["mo inc dengue cases", "mo inc dengue cases", "mo inc dengue cases"],
-            "horizon": [None, 2, 1],
-            "target_end_date": ["2025-11-01", None, None],
-            "location": ["CN", "CN", "CN"],
-            "output_type": ["quantile", "quantile", "quantile"],
-            "output_type_id": ["0.5", "0.5", "0.5"],
-            "value": [10.0, 12.0, 15.0],
+            "reference_date": ["2025-10-01", "2025-10-01", "2024-02-29", "2024-04-30"],
+            "target": ["mo inc dengue cases"] * 4,
+            "horizon": [None, 2, 1, 1],
+            "target_end_date": ["2025-11-01", None, None, None],
+            "location": ["CN"] * 4,
+            "output_type": ["quantile"] * 4,
+            "output_type_id": ["0.5"] * 4,
+            "value": [10.0, 12.0, 15.0, 18.0],
         })
         norm = normalize_forecast_frame(
             mo_df,
@@ -387,11 +608,12 @@ class TestCoreAndSyncAuditFixes(unittest.TestCase):
             known_locations={"CN"},
         )
         rows = sorted(norm.quantiles.iter_rows(named=True), key=lambda r: (r["reference_date"], r["horizon"]))
-        self.assertEqual(rows[0]["horizon"], 1)
-        self.assertEqual(rows[0]["target_end_date"], "2025-11-01")
-        self.assertEqual(rows[1]["horizon"], 2)
-        self.assertEqual(rows[1]["target_end_date"], "2025-12-01")
-        self.assertEqual(rows[2]["target_end_date"], "2026-02-28")
+        self.assertEqual([(r["reference_date"], r["horizon"], r["target_end_date"]) for r in rows], [
+            ("2024-02-29", 1, "2024-03-31"),
+            ("2024-04-30", 1, "2024-05-31"),
+            ("2025-10-01", 1, "2025-11-01"),
+            ("2025-10-01", 2, "2025-12-01"),
+        ])
 
         # Off-cadence target_end_date (4 days from Saturday reference_date) with null horizon fails derivation loudly
         bad_df = pl.DataFrame({
@@ -461,3 +683,29 @@ class TestCoreAndSyncAuditFixes(unittest.TestCase):
         self.assertEqual(int(sentinel.read_text(encoding="utf-8").strip()), CACHE_SCHEMA_VERSION)
         self.assertFalse(pq2.exists())
         self.assertTrue(csv_path.exists())
+
+    def test_oracle_memo_caches_many_targets_per_frame_and_bounds_frames(self):
+        with _ORACLE_MEMO_LOCK:
+            _ORACLE_MEMO.clear()
+        oracle_a = pl.DataFrame({
+            "location": ["US"] * 6,
+            "target_end_date": ["2025-11-22"] * 6,
+            "target": [f"t{i}" for i in range(6)],
+            "oracle_value": [float(i + 1) for i in range(6)],
+        })
+        for i in range(6):
+            _prepared_oracle(oracle_a, f"t{i}")
+        with _ORACLE_MEMO_LOCK:
+            self.assertEqual(len(_ORACLE_MEMO), 1)
+            self.assertEqual(len(_ORACLE_MEMO[id(oracle_a)][1]), 6)
+
+        # Adding _ORACLE_MEMO_MAX newer distinct oracle frames evicts oracle_a cleanly
+        others = [
+            pl.DataFrame({"location": ["US"], "target_end_date": ["2025-11-22"], "target": ["t0"], "oracle_value": [float(k)]})
+            for k in range(_ORACLE_MEMO_MAX)
+        ]
+        for df in others:
+            _prepared_oracle(df, "t0")
+        with _ORACLE_MEMO_LOCK:
+            self.assertEqual(len(_ORACLE_MEMO), _ORACLE_MEMO_MAX)
+            self.assertNotIn(id(oracle_a), _ORACLE_MEMO)

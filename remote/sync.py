@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 import polars as pl
 
 from viz.core.calendar import CalendarSpec, DEFAULT_FLUSIGHT_CALENDAR, infer_calendar
+from viz.core.config import VizConfig
 from viz.core.geo import GeoGraph, build_geo_graph
 from viz.remote.hubs import HUB_ID_RE, HubSpec, hub_id_from_source, inspect_hub
 from viz.remote.normalize import (
@@ -909,6 +910,9 @@ class RemoteManager:
         cfg_dir.mkdir(parents=True, exist_ok=True)
         for name in ("admin", "tasks"):
             _atomic_write_json(info[name], cfg_dir / f"{name}.json")
+        hub_cfg = VizConfig(hub_dir)
+        hub_cfg._parse_target_specs()  # warm cached target metadata before worker threads read it
+        time_unit_for = hub_cfg.get_target_time_unit
         cal = infer_calendar(info.get("tasks"), targets=info.get("targets"))
         tz_name = info.get("timezone") or "UTC"
         man.update({
@@ -1031,6 +1035,7 @@ class RemoteManager:
                     known_locations,
                     cal,
                     hub_geo,
+                    time_unit_for=time_unit_for,
                     cancel_event=job.cancel_event,
                 ): o
                 for o, src_tag, src_client in to_fetch
@@ -1194,6 +1199,7 @@ class RemoteManager:
         calendar: CalendarSpec,
         geo: GeoGraph,
         *,
+        time_unit_for: Optional[Callable[[str], Optional[str]]] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> Dict[str, Any]:
         if cancel_event is not None and cancel_event.is_set():
@@ -1217,6 +1223,7 @@ class RemoteManager:
             self._is_non_negative,
             calendar=calendar,
             geo=geo,
+            time_unit_for=time_unit_for,
         )
         if cancel_event is not None and cancel_event.is_set():
             raise SyncCancelled("Sync cancelled by user")

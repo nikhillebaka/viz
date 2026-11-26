@@ -429,7 +429,7 @@ export class FanChart {
       this.hooks.onReady?.();
     } else {
       const old = this.fan.dates;
-      const same = old.length === fan.dates.length && old[0] === fan.dates[0];
+      const same = old.length === fan.dates.length && old.every((d, i) => d === fan.dates[i]);
       // another season: the old one slides out the way time went; anything else is a plain cut
       const dir = fan.season === this.fan.season ? 0 : fan.season > this.fan.season ? 1 : -1;
       this.#cut(dir, () => {

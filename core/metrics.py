@@ -245,36 +245,50 @@ def _prepare_oracle(
     return o, join_keys
 
 
-# Small LRU memos keyed by the identity of the caller's oracle frame. Each entry pins its source
-# frame (so the id can't be recycled), so the cap bounds how many full oracle frames stay alive;
-# stale frames from a truth refresh age out after a few lookups instead of accumulating.
-_ORACLE_MEMO: "OrderedDict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]]" = OrderedDict()
+# Small LRU memos keyed by `id(o)` of the caller's oracle DataFrame. Each entry pins its source
+# frame and caches all prepared `(target, extra_key)` slices for that frame so multi-target hubs
+# (>= 5 targets sharing one oracle table) never thrash the 4-frame ceiling.
+_ORACLE_MEMO: "OrderedDict[int, Tuple[pl.DataFrame, Dict[Tuple[str, Tuple[str, ...]], Tuple[pl.DataFrame, List[str]]]]]" = OrderedDict()
 _ORACLE_MEMO_LOCK = threading.Lock()
 _ORACLE_MEMO_MAX = 4
 
 
 def _memo_get(
-    memo: "OrderedDict[Any, Any]", lock: threading.Lock, key: Any, o: pl.DataFrame
+    memo: "OrderedDict[int, Tuple[pl.DataFrame, Dict[Any, Any]]]",
+    lock: threading.Lock,
+    subkey: Any,
+    o: pl.DataFrame,
 ) -> Optional[Tuple[pl.DataFrame, List[str]]]:
+    oid = id(o)
     with lock:
-        hit = memo.get(key)
-        if hit is None or hit[0] is not o:
+        entry = memo.get(oid)
+        if entry is None or entry[0] is not o:
             return None
-        memo.move_to_end(key)
-    return hit[1], list(hit[2])
+        memo.move_to_end(oid)
+        hit = entry[1].get(subkey)
+        if hit is None:
+            return None
+        return hit[0], list(hit[1])
 
 
 def _memo_put(
-    memo: "OrderedDict[Any, Any]",
+    memo: "OrderedDict[int, Tuple[pl.DataFrame, Dict[Any, Any]]]",
     lock: threading.Lock,
-    key: Any,
+    subkey: Any,
     o: pl.DataFrame,
     prepared: pl.DataFrame,
     join_keys: List[str],
 ) -> None:
+    oid = id(o)
     with lock:
-        memo[key] = (o, prepared, list(join_keys))
-        memo.move_to_end(key)
+        entry = memo.get(oid)
+        if entry is None or entry[0] is not o:
+            inner: Dict[Any, Any] = {}
+            memo[oid] = (o, inner)
+        else:
+            inner = entry[1]
+        inner[subkey] = (prepared, list(join_keys))
+        memo.move_to_end(oid)
         while len(memo) > _ORACLE_MEMO_MAX:
             memo.popitem(last=False)
 
@@ -285,16 +299,16 @@ def _prepared_oracle(
     extra_task_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[pl.DataFrame, List[str]]:
     extra_key = tuple(sorted(str(c) for c in (extra_task_ids or ()) if c in o.columns))
-    key = (id(o), target, extra_key)
-    hit = _memo_get(_ORACLE_MEMO, _ORACLE_MEMO_LOCK, key, o)
+    subkey = (target, extra_key)
+    hit = _memo_get(_ORACLE_MEMO, _ORACLE_MEMO_LOCK, subkey, o)
     if hit is not None:
         return hit
     prepared, join_keys = _prepare_oracle(o, target, extra_task_ids=extra_key)
-    _memo_put(_ORACLE_MEMO, _ORACLE_MEMO_LOCK, key, o, prepared, join_keys)
+    _memo_put(_ORACLE_MEMO, _ORACLE_MEMO_LOCK, subkey, o, prepared, join_keys)
     return prepared, join_keys
 
 
-_PMF_ORACLE_MEMO: "OrderedDict[Tuple[int, str, Tuple[str, ...]], Tuple[pl.DataFrame, pl.DataFrame, List[str]]]" = OrderedDict()
+_PMF_ORACLE_MEMO: "OrderedDict[int, Tuple[pl.DataFrame, Dict[Tuple[str, Tuple[str, ...]], Tuple[pl.DataFrame, List[str]]]]]" = OrderedDict()
 _PMF_ORACLE_MEMO_LOCK = threading.Lock()
 
 
@@ -348,12 +362,12 @@ def _prepared_pmf_oracle(
     extra_task_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[pl.DataFrame, List[str]]:
     extra_key = tuple(sorted(str(c) for c in (extra_task_ids or ()) if c in o.columns))
-    key = (id(o), target, extra_key)
-    hit = _memo_get(_PMF_ORACLE_MEMO, _PMF_ORACLE_MEMO_LOCK, key, o)
+    subkey = (target, extra_key)
+    hit = _memo_get(_PMF_ORACLE_MEMO, _PMF_ORACLE_MEMO_LOCK, subkey, o)
     if hit is not None:
         return hit
     prepared, join_keys = _prepare_pmf_oracle(o, target, extra_task_ids=extra_key)
-    _memo_put(_PMF_ORACLE_MEMO, _PMF_ORACLE_MEMO_LOCK, key, o, prepared, join_keys)
+    _memo_put(_PMF_ORACLE_MEMO, _PMF_ORACLE_MEMO_LOCK, subkey, o, prepared, join_keys)
     return prepared, join_keys
 
 

@@ -369,7 +369,8 @@ def normalize_forecast_frame(
             tgt_y = (ym0 // 12)
             tgt_m = (ym0 % 12) + 1
             last_d = pl.date(tgt_y, tgt_m, 1).dt.month_end().dt.day().cast(pl.Int32)
-            tgt_d = pl.min_horizontal(ref_base.dt.day().cast(pl.Int32), last_d)
+            ref_is_eom = (ref_base + pl.duration(days=1)).dt.day() == 1
+            tgt_d = pl.when(ref_is_eom).then(last_d).otherwise(pl.min_horizontal(ref_base.dt.day().cast(pl.Int32), last_d))
             monthly_ted = pl.date(tgt_y, tgt_m, tgt_d).dt.strftime("%Y-%m-%d")
             derived_ted = pl.when(is_monthly_target).then(monthly_ted).otherwise(weekly_ted)
             weekly_raw = weekly_raw.with_columns(

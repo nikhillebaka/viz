@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -41,6 +42,8 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
         val = float(raw.strip())
     except ValueError as exc:
         raise ValueError(f"Invalid numeric value for {name}: {raw!r}") from exc
+    if not math.isfinite(val):
+        raise ValueError(f"Invalid non-finite value for {name}: {raw!r}")
     return max(minimum, val)
 
 
@@ -55,7 +58,7 @@ def _env_csv(name: str, default: Tuple[str, ...] = ()) -> Tuple[str, ...]:
 def _sanitize_redirect_url(raw: str) -> str:
     """Allow only safe relative paths, https URLs, or http localhost/loopback URLs for SSO links."""
     val = (raw or "").strip()
-    if not val or any(ord(c) < 32 for c in val) or "\\" in val:
+    if not val or any(ord(c) < 32 or ord(c) == 127 for c in val) or "\\" in val:
         return ""
     if val.startswith("/"):
         return "" if val.startswith("//") else val

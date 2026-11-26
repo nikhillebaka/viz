@@ -412,7 +412,7 @@ def resolve_hub_storage(
     app_surv = APP_DIR / "data" / "surveillance"
     data_surv = resolved_data / "surveillance"
     app_seed = APP_DIR / "data" / "seed"
-    if uses_flu_surv and app_surv.is_dir():
+    if uses_flu_surv and (app_surv / "target-hospital-admissions.csv").is_file():
         surveillance_dir = app_surv
         seed_dir = app_seed if app_seed.is_dir() else (cache_dir / "seed")
     elif uses_flu_surv and (data_surv.is_dir() or mode == "web"):
@@ -541,7 +541,7 @@ class HubContext:
             self.remote_dir = (self.data_dir / "remote").resolve()
             self.hub_models_cache_dir = (sroot / "hub_models").resolve()
             self.synthetic_dir = (sroot / "synthetic").resolve()
-            if uses_flu_surv and app_surv.is_dir():
+            if uses_flu_surv and (app_surv / "target-hospital-admissions.csv").is_file():
                 self.surveillance_dir = app_surv
             elif uses_flu_surv and (data_surv.is_dir() or mode == "web"):
                 self.surveillance_dir = data_surv
