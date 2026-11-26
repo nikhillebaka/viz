@@ -246,3 +246,21 @@
 .mb-pv-facts dt { color: var(--ink-tertiary); }
 .mb-pv-facts dd { margin: 0; color: var(--ink-secondary); font-variant-numeric: tabular-nums; }
 .mb-pv-acts { display: flex; flex-wrap: wrap; gap: var(--space-12); margin-top: var(--space-12); }
+
+/* ---------- responsive layout (strictly <= 960px) ---------- */
+@media (max-width: 960px) {
+  .mb-body { grid-template-columns: 168px minmax(0, 1fr); gap: var(--space-12); }
+  .mb-preview { display: none; }
+}
+@media (max-width: 600px) {
+  .mb-head { flex-wrap: wrap; gap: var(--space-8); padding-right: 0; }
+  .mb-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 136px) minmax(0, 1fr); gap: var(--space-8); }
+  .mb-rail { border-bottom: var(--stroke-hairline) solid var(--fill-selected); padding: 0 0 var(--space-8); }
+  .pk-foot-line { flex-wrap: wrap; height: auto; gap: var(--space-6) var(--space-12); }
+}
+@media (max-width: 440px) {
+  .lp-map { padding: var(--space-6) var(--space-4) var(--space-8); }
+  .lp-tiles .c-tile { min-width: 0; padding: 0 2px; font-size: var(--text-axis); }
+  .lp-eu-tiles { --eu-tile: minmax(0, 1fr); width: 100%; }
+  .lp-eu-tiles .c-tile { aspect-ratio: 1; }
+}

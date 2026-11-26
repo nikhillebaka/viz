@@ -276,3 +276,14 @@
   max-height: var(--sc-fig-h); overflow-y: auto; overscroll-behavior: contain;
   scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
 }
+
+@media (max-width: 1080px) {
+  .sc-board { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent; }
+}
+@media (max-width: 900px) {
+  .sc-scope { height: auto; min-height: var(--peek); padding-bottom: var(--space-8); flex-wrap: wrap; gap: var(--space-8) var(--space-16); }
+  .sc-figs { grid-template-columns: minmax(0, 1fr); gap: var(--space-32); margin-top: var(--space-32); }
+}
+@media (max-width: 640px) {
+  .sc { --sc-name-min: 132px; --sc-name-max: 196px; --sc-rel: 168px; }
+}

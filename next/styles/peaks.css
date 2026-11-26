@@ -86,3 +86,16 @@ button.pe-name:hover, .pe-row.is-focus .pe-name { color: var(--ink-primary); }
   scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent;
 }
 .pe-skill-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-paper); }
+
+@media (max-width: 1080px) {
+  .pe-fig { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent; }
+}
+@media (max-width: 960px) {
+  .pe-lower { flex-direction: column; gap: var(--space-32); margin-top: var(--space-24); }
+  .pe-skill-col { width: 100%; }
+  .pe-map-col { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent; }
+}
+@media (max-width: 640px) {
+  .pe-map { --tile: clamp(24px, calc((100vw - 32px - (var(--cols) - 1) * 4px) / var(--cols)), 42px); }
+  .pe-key:has(.pe-key-ramp) { flex-wrap: wrap; }
+}

@@ -631,8 +631,10 @@ export class FanChart {
     o.settle = nav.week;
     o.domain = nav.domain();
     o.ymax = this.y.v / nav.heightZoom;
-    o.pad.l = 64 + this.inset.v;
-    o.pad.r = 168 + (56 - 168) * nav.mix;
+    const baseL = w < 640 ? 44 : 64;
+    const baseR = w < 640 ? Math.max(84, Math.round(w * 0.24)) : 168;
+    o.pad.l = baseL + this.inset.v;
+    o.pad.r = baseR + (Math.min(56, baseR) - baseR) * nav.mix;
     o.pad.t = this.top + 24;
     o.pad.b = this.bottom + 48;
     o.topClear = this.top;

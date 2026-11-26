@@ -34,8 +34,13 @@ export function computePosition(a, f, { placement = "bottom-start", offset = 8, 
 
   let x, y;
   const vertical = side === "top" || side === "bottom";
+  const availH = Math.max(80, boundary.height - padding * 2);
+  const maxHeight = vertical ? Math.min(availH, Math.max(120, space[side])) : availH;
+  const maxWidth = vertical ? boundary.width - padding * 2 : Math.max(160, space[side]);
   if (vertical) {
-    y = side === "bottom" ? a.bottom + offset : a.top - offset - Math.min(f.height, space.top);
+    const hUsed = Math.min(f.height, maxHeight);
+    y = side === "bottom" ? a.bottom + offset : a.top - offset - hUsed;
+    y = Math.max(boundary.top + padding, Math.min(boundary.bottom - padding - hUsed, y));
     x = align === "start" ? a.left : align === "end" ? a.right - f.width : a.left + a.width / 2 - f.width / 2;
     x = Math.max(boundary.left + padding, Math.min(boundary.right - padding - f.width, x));
   } else {
@@ -43,8 +48,6 @@ export function computePosition(a, f, { placement = "bottom-start", offset = 8, 
     y = align === "start" ? a.top : align === "end" ? a.bottom - f.height : a.top + a.height / 2 - f.height / 2;
     y = Math.max(boundary.top + padding, Math.min(boundary.bottom - padding - f.height, y));
   }
-  const maxHeight = vertical ? Math.max(120, space[side]) : boundary.height - padding * 2;
-  const maxWidth = vertical ? boundary.width - padding * 2 : Math.max(160, space[side]);
   // the point of the floating box nearest the anchor's centre
   const ox = Math.max(0, Math.min(f.width, a.left + a.width / 2 - x));
   const oy = Math.max(0, Math.min(f.height, a.top + a.height / 2 - y));

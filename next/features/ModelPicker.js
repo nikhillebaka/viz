@@ -335,7 +335,9 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   let season = seasonNow(), query = "", g = null, hover = null, roundKey = "", lastClicked = null, order = [];
   const offs = [];
   let els = null;
-  const width = () => Math.round(Math.min(innerWidth * 0.64, 1060));
+  const isCompact = () => innerWidth <= 960;
+  const width = () => (isCompact() ? Math.round(Math.min(innerWidth - 2 * inset(), 760)) : Math.round(Math.min(innerWidth * 0.64, 1060)));
+  const chartInset = () => (isCompact() ? 0 : inset() + width() + tokenNum("--space-24", 24));
 
   function roundNow() {
     const st = store.get(), fan = chart?.fan, week = chart?.week?.();
@@ -384,7 +386,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
   });
   if (!layer) return null;
   chart?.preview(true);
-  chart?.setInset(inset() + width() + tokenNum("--space-24", 24));
+  chart?.setInset(chartInset());
   return layer;
 
   /* ---------------- rendering ---------------- */
@@ -635,7 +637,7 @@ export function openModelPicker(anchor, { manifest, store, chart = null }) {
       store.select(["target"], () => render(true)),
       store.select(["date"], () => { const now = seasonNow(); if (now !== season) { season = now; render(); } else if (roundNow().key !== roundKey) render(); }),
       chart?.onWeekChange ? chart.onWeekChange(() => { const now = seasonNow(); if (now !== season) season = now; if (roundNow().key !== roundKey) render(); }) : () => {},
-      on(window, "resize", () => { panel.style.width = `${width()}px`; chart?.setInset(inset() + width() + tokenNum("--space-24", 24)); }),
+      on(window, "resize", () => { panel.style.width = `${width()}px`; chart?.setInset(chartInset()); }),
     );
     input.addEventListener("input", () => { query = input.value.trim(); render(true); renderSuggest(); });
     input.addEventListener("keydown", (e) => {

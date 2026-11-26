@@ -39,3 +39,10 @@
 .ms-members { margin: var(--space-6) 0 0; display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-12); font-size: var(--text-small); }
 /* the old row's facts line repeats About: not shown here */
 .ms-blocks .sc-block:has(> .sc-facts) { display: none; }
+
+@media (max-width: 680px) {
+  .ms-scroll { padding: 0 var(--space-16) var(--space-24); }
+  .ms-about { grid-template-columns: minmax(0, 1fr); gap: var(--space-16); }
+  .ms-blocks .sc-detail { overflow-x: auto; }
+  .ms-num-row { gap: var(--space-8) var(--space-16); }
+}

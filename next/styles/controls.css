@@ -307,3 +307,18 @@ button.c-section-title:hover { color: var(--ink-secondary); }
 .c-slide.is-sliding { mask-image: linear-gradient(to right, transparent, #000 var(--fade)); }
 .c-slide.is-sliding > .c-slide-in { transform: translateX(var(--slide)); }
 @media (prefers-reduced-motion: reduce) { .c-slide-in { transition: none; } }
+
+@media (max-width: 780px) {
+  .app-fixed { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tl tr"; }
+  .app-fixed .c-zone[data-zone="tl"] { flex-wrap: wrap; }
+  .fc-chrome {
+    grid-template-columns: 1fr auto;
+    grid-template-rows: 1fr auto auto;
+    grid-template-areas: ". ." "bl br" "bc bc";
+  }
+}
+@media (max-width: 560px) {
+  :root { --inset: 10px; --gap: 6px; }
+  .c-pill { padding: 0 var(--space-12); max-width: min(var(--menu-max-width), 46vw); }
+  .c-pill.icon, .c-pill.sm.icon { padding: 0; max-width: none; }
+}

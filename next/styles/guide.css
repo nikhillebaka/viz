@@ -126,3 +126,14 @@
 /* a reading surface: the frost alone lets chart lines show through long text, so the sheet is
    (nearly) solid paper-raised; the rim and shadow still mark it as a floating layer */
 .gd-sheet { background-color: color-mix(in srgb, var(--surface-raised) 94%, transparent); }
+
+@media (max-width: 680px) {
+  .gd-cols { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 148px) minmax(0, 1fr); }
+  .gd-nav {
+    border-right: 0;
+    border-bottom: var(--stroke-hairline) solid var(--fill-selected);
+    padding: var(--space-4) var(--space-4) var(--space-8);
+  }
+  .gd-read { padding: var(--space-12) var(--space-16) var(--space-24); }
+  .gd-gloss { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+}

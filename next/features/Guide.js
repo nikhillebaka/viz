@@ -147,22 +147,20 @@ const FIG = "<!--fig-->";
 const PARTS = [
   { title: "Start here", topics: [
     { id: "start", title: "What viz is",
-      body: `<p>viz is a multi-hub workspace to inspect respiratory infectious-disease forecasts and see how accurate they turned out to be across FluSight, COVID-19 Forecast Hub, RSV Forecast Hub, Flu MetroCast, and European RespiCast hubs. Every week, modeling teams submit probabilistic forecasts — quantiles, categorical rate-change probabilities, or sample trajectories — which viz draws against what actually happened and scores fairly.</p>
+      body: `<p>viz is a multi-hub workspace to inspect infectious-disease forecasts and see how accurate they turned out to be across ten built-in repositories — US FluSight, Flu MetroCast, US COVID-19, US RSV, European RespiCast Syndromic &amp; COVID-19, China ID, Canada RVDSS, Ontario Hospitalizations, and DRC BDBV Ebola — alongside your own Hubverse folders (${L("web-workspaces", "uploaded in web mode")} or opened locally). Every round, modeling teams submit probabilistic forecasts — quantiles, categorical rate-change probabilities, or sample trajectories — which viz draws against what actually happened and scores fairly.</p>
 <p>A short tour, top to bottom:</p>
 <ol>
-<li><b>The top rail.</b> Choose models (${K("/")}), switch place or open the 3D ${L("globe", "Globe")}, switch targets across connected hubs, open a place-first ${L("briefings", "Briefing")} (${K("B")}), toggle theme (${K("T")}), or open Data sources in ⋯.</li>
-<li><b>The primary chart.</b> Quantile targets draw the ${L("fan-chart", "fan chart")}; categorical targets draw ${L("pmf", "Rate-change PMFs")} (Matrix, Flow, Bars).</li>
-<li><b>Scores.</b> Ranks models by ${L("relative-wis", "Relative WIS")} for quantile targets or ${L("pmf", "Relative RPS / Log loss")} for categorical targets. See ${L("scores", "Reading Scores")}.</li>
-<li><b>Heatmap & Map.</b> Grids and state/country/sub-state maps of values and scores. See ${L("heatmap", "Heatmap")} and ${L("map", "Map")}.</li>
-<li><b>Peaks, Trajectories & Rate change.</b> ${L("peaks", "Peaks")} tracks season timing/height, ${L("trajectories", "Trajectories")} plots joint sample paths with conditioning gates and CRPS / Energy Score, and companion rate-change PMFs summarize week-on-week direction odds.</li>
+<li><b>The top bar.</b> Choose models (${K("/")}), switch place or open the 3D ${L("globe", "Globe")}, switch targets across connected hubs, open a place-first ${L("briefings", "Briefing")} (${K("B")}), toggle theme (${K("T")}), or open Data sources in ⋯.</li>
+<li><b>The primary chart.</b> Quantile and sample-derived targets draw the ${L("fan-chart", "fan chart")}; categorical targets draw ${L("pmf", "Rate-change PMFs")} (Matrix, Flow, Bars).</li>
+<li><b>Adaptive tabs below.</b> Only the sections relevant to the current hub and target are shown: ${L("scores", "Scores")}, ${L("heatmap", "Heatmap")}, ${L("map", "Map")} (hidden on single-location hubs), ${L("peaks", "Peaks")}, ${L("trajectories", "Trajectories")}, and ${L("pmf", "Rate change")}.</li>
 </ol>
 <p>Under the hood, viz reads Hubverse-format repositories and synced remote hubs (<code>model-output/</code>, <code>model-metadata/</code>, <code>hub-config/</code>, <code>target-data/</code>, plus <code>local-output/</code>). Everything you set lives in the URL (<code>#guide/&lt;topic&gt;</code> links to this Guide; <code>#briefing/&lt;place&gt;</code> links to a place briefing; <code>#globe</code> opens the 3D globe).</p>` },
     { id: "forecast-hubs", title: "Forecast hubs, rounds and targets",
-      body: `<p>A forecast hub collects forecasts from many teams in one shared format, so they can be compared and combined. FluSight, run by CDC, is the flu hub: each week of the season, teams forecast weekly flu hospital admissions for every state, DC, Puerto Rico and the US.</p>
-<p>One week's set of forecasts is a <b>round</b>, named by its <b>reference date</b>, a Saturday. A forecast is not one number but a range of outcomes with probabilities, given as <b>quantiles</b>: "a 10% chance of fewer than 400 admissions, 50% of fewer than 520, 90% of fewer than 700." What actually happened, the <b>target data</b>, comes from hospitals reporting to CDC's NHSN. When a hub has more than one target, the Target bubble switches between them.</p>
-<p>Hubverse rows are keyed by <code>reference_date</code>, <code>location</code> (FIPS; <code>US</code> national), <code>horizon</code>, <code>target</code>, <code>target_end_date</code>, <code>output_type</code>, <code>output_type_id</code>, <code>value</code>. Quantile forecasts use 23 levels:</p>
+      body: `<p>A forecast hub collects forecasts from many teams in one shared format, so they can be compared and combined. viz handles weekly hubs (US FluSight, COVID-19, RSV, MetroCast, RespiCast, Canada RVDSS, Ontario Hospitalizations, DRC BDBV Ebola) and monthly hubs (such as China ID for COVID-19, ILI, and Dengue) across national, state/provincial, health-service-area, and health-zone geographies.</p>
+<p>One time step's set of forecasts is a <b>round</b>, named by its <b>reference date</b>. A forecast is not one number but a range of outcomes with probabilities, given as <b>quantiles</b>: "a 10% chance of fewer than 400 admissions, 50% of fewer than 520, 90% of fewer than 700." What actually happened, the <b>target data</b>, comes from each hub's surveillance reports (for example CDC NHSN admissions in the US, or hospital bed occupancy census counts in Ontario, which are kept separate from incident admissions). When a hub has more than one target, or extra task dimensions such as <code>age_group</code> in US RSV, selectors in the top bar and chart switch between them.</p>
+<p>Hubverse rows are keyed by <code>reference_date</code>, <code>location</code>, <code>horizon</code>, <code>target</code>, <code>target_end_date</code>, <code>output_type</code>, <code>output_type_id</code>, <code>value</code> (plus any extra dimension columns). Quantile forecasts typically use 23 levels:</p>
 ${EQ("τ ∈ {0.01, 0.025, 0.05, 0.10, 0.15, …, 0.90, 0.95, 0.975, 0.99}")}
-<p>Some models (and local <code>--short_run</code> runs) submit 7: 0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975. Each model is scored on what it submitted. A <b>task</b> is one round × location × horizon (per target). ${F("target_end_date = reference_date + 7·horizon")} days. Season-level peak targets (<code>peak week inc flu hosp</code>, a pmf over weeks; <code>peak inc flu hosp</code>, quantiles) have no horizon and live in the ${L("peaks", "Peaks")} section. The national forecast is its own model output, not a sum of states. Numbers format per target: counts, or percent for proportion targets.</p>` },
+<p>Some models (and local <code>--short_run</code> runs) submit 7: 0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975, while sample-only hubs derive 23 marginal quantiles for the fan chart. Each model is scored on what it submitted. A <b>task</b> is one round × location × horizon (and slice dimension, per target). Season-level peak targets have no horizon and live in the ${L("peaks", "Peaks")} section. Aggregate locations (like <code>US</code>) are their own model outputs, not sums of sub-regions. Numbers format per target: counts, hospital beds, percentages/proportions, or rates.</p>` },
   ] },
 
   { title: "The fan chart", topics: [
@@ -174,10 +172,10 @@ ${FIG}
 <p>The y-axis is fixed per season and place (observed data and charted medians, rounded up to a round value) and eases when either changes; a season with fewer than 4 observed weeks takes the larger of its own maximum and half of last season's. Gaps in the observed data break the line; it never bridges a missing week.</p>`,
       fig: fanFigure, caption: "One model's forecast: the median through its horizons, with 50%, 80% and 95% bands widening further ahead. The observed line continues past the cutoff." },
     { id: "dates-horizons", title: "Data cutoff, reference date and horizons",
-      body: `<p>Hospital and syndromic surveillance data arrives late. On a round's reference date that week's counts aren't published yet, so a model's newest data ends a week earlier: the <b>data cutoff</b>, labelled on the axis beside the reference date.</p>
+      body: `<p>Hospital and syndromic surveillance data arrives late. On a round's reference date that period's counts aren't published yet, so a model's newest data ends earlier: the <b>data cutoff</b>, labelled on the axis beside the reference date.</p>
 ${FIG}
-<p>The weeks a model forecasts are its <b>horizons</b>, counted from the reference date (or shifted by the hub's horizon offset). <b>0 wk</b> is typically the current nowcast week; <b>1–4 wk</b> look ahead; <b>−1 wk</b> is the prior reporting week when present. Further ahead is harder, so expect wider bands and higher scores at later horizons.</p>
-<p>For US hubs (FluSight, COVID-19, RSV, MetroCast), rounds fall on Saturdays and ${F("target_end_date = T + 7h")}. For European RespiCast hubs, rounds submit mid-week on an <code>origin_date</code> while truth falls on Sundays, so viz aligns <code>Reference date</code> to the 0-horizon target week alongside a quiet <code>Origin date</code> tick showing when forecasts were submitted (${F("target_end_date = origin_date + offset + 7h")}).</p>
+<p>The steps a model forecasts are its <b>horizons</b>, counted from the reference date (or shifted by the hub's horizon offset). <b>0 wk</b> is typically the current nowcast week; <b>1–4 wk</b> look ahead; <b>−1 wk</b> is the prior reporting week when present. Further ahead is harder, so expect wider bands and higher scores at later horizons.</p>
+<p>For US hubs (FluSight, COVID-19, RSV, MetroCast) and Canadian/DRC weekly hubs, weekly rounds step by 7 days (${F("target_end_date = T + 7h")}). For European RespiCast hubs, rounds submit mid-week on an <code>origin_date</code> while truth falls on Sundays, so viz aligns <code>Reference date</code> to the 0-horizon target week alongside a quiet <code>Origin date</code> tick showing when forecasts were submitted (${F("target_end_date = origin_date + offset + 7h")}). For monthly-horizon hubs (such as China ID), horizons step in calendar months and every actual round date remains individually reachable even if two rounds fall within the same month; outbreak hubs like DRC BDBV can also track reporting-delay weeks.</p>
 <p>The score views (Scores, heatmap, map) use scored horizons (typically 0–3 or 1–4); the Horizon figure under Scores shows relative performance by lead time.</p>`,
       fig: horizonFigure, caption: "Weeks around a reference date. Horizons count from it; the cutoff week is −1." },
     { id: "intervals", title: "Intervals, medians and misses",
@@ -299,21 +297,22 @@ ${FIG}
 ${EQ("RPS = Σ<sub>w</sub> (F(w) − 1(w ≥ w*))²", "log score = −ln max(P(w*), 0.001)")}
 <p>RPS is in weeks: a forecast certain of one week scores its absolute error, so near misses earn credit. Weeks tied at the maximum all count for the log score. Size is scored as WIS as a percentage of the observed peak (so states pool), median % error, and 50% / 90% coverage. Chance the peak is past is the probability a forecast put on weeks up to its own data cutoff. The size axis ignores the widest fifth of 90% upper ends so one wild model can't flatten the rest; whiskers past it end in a caret.</p>` },
     { id: "briefings", title: "Place-First Briefings & surveillance",
-      body: `<p>Open <b>Briefing</b> in the top-right bar (or press ${K("B")}) for a self-contained situational report for any country, US state, territory, or MetroCast health service area. Briefings unify every connected hub forecasting that place into a single deduplicated outlook alongside live external surveillance and virology streams.</p>
+      body: `<p>Open <b>Briefing</b> in the top bar (or press ${K("B")}) for a self-contained situational report for any country, US state, territory, Canadian province/Ontario region, DRC province/health zone, or MetroCast health service area. Briefings unify every connected hub forecasting that place into a single deduplicated outlook alongside live external surveillance, outbreak reports, and virology streams.</p>
 <p>What a Briefing pulls together:</p>
 <ul>
-<li><b>Forecast outlook:</b> Selects each hub's official ensemble (such as <code>FluSight-ensemble</code>, <code>CovidHub-ensemble</code>, <code>RSVHub-ensemble</code>, <code>epiENGAGE-ensemble_short</code>, or <code>respicast-hubEnsemble</code>), shows recent observed values beside 1–4 week intervals and optional prior-season overlay, plus season peak timing/height and rate-change odds where submitted. Click any KPI card or <b>Open in Chart</b> / <b>Scores</b> to jump directly to the workbench.</li>
-<li><b>Sub-regions:</b> US shows states (and states covered by Flu MetroCast show their sub-state cities/regions) sorted by current activity, with one-click navigation or chart launch.</li>
+<li><b>Forecast outlook:</b> Ranks and selects each hub's official ensemble (such as <code>FluSight-ensemble</code>, <code>CovidHub-ensemble</code>, <code>RSVHub-ensemble</code>, <code>epiENGAGE-ensemble_short</code>, <code>respicast-hubEnsemble</code>, hub/team ensembles, or a consensus median across active models), showing recent observed values beside 1–4 step intervals and optional prior-season overlay, plus season peak timing/height and rate-change odds where submitted. Click any KPI card or <b>Open in Chart</b> / <b>Scores</b> to jump directly to the workbench.</li>
+<li><b>Sub-regions:</b> Aggregate places (US states, MetroCast HSAs, Canada provinces &amp; Ontario regions, DRC provinces/health zones) include sortable tables with one-click navigation or chart launch.</li>
 <li><b>US surveillance feeds:</b> CDC NWSS wastewater viral activity levels (WVAL), CDC CFA R<sub>t</sub> epidemic growth estimates, CDC NSSP ED visit shares, CDC NREVSS positivity, and Delphi FluView regional subtypes.</li>
-<li><b>European surveillance & genomic clades:</b> ECDC ERVISS weekly sentinel test positivity (Influenza, SARS-CoV-2, RSV), primary-care ILI/ARI consultation rates, SARI hospitalization rates, WHO FluNet Influenza A(H1N1)pdm09 / A(H3N2) / B subtyping, UKHSA PCR positivity (England), and Nextstrain North America / Europe variant frequencies, plus Northern Hemisphere WHO/FDA vaccine reference strains.</li>
+<li><b>European surveillance &amp; genomic clades:</b> ECDC ERVISS weekly sentinel test positivity (Influenza, SARS-CoV-2, RSV), primary-care ILI/ARI consultation rates, SARI hospitalization rates, UKHSA PCR positivity (England), and Nextstrain North America / Europe variant frequencies, plus Northern Hemisphere WHO/FDA vaccine reference strains.</li>
+<li><b>DRC Ebola (BDBV), Canada &amp; China feeds:</b> Consolidated DRC Ministry of Health / INRB-UMIE situation report series via <b>OCHA HDX</b> (national and health-zone cases, deaths, and contacts), official <b>WHO Disease Outbreak News (DON)</b> situation assessments and cross-border advisories, DRC BDBV reporting delays, and <b>WHO RespiMart FluNet</b> influenza subtyping covering Europe, US, Canada, China, and DRC alongside Canada RVDSS, Ontario bed occupancy, and China ID monthly outlooks.</li>
 </ul>
 <p>Use <b>Print / PDF</b> in the briefing masthead to export a crisp standalone report: interactive controls and the underlying workbench are automatically hidden in print layout.</p>` },
     { id: "globe", title: "Multi-hub workspace & 3D Globe",
-      body: `<p>Click the place pill and choose <b>Globe</b> (or visit <code>#globe</code>) to browse every forecastable jurisdiction on an interactive orthographic 3D sphere. Colors reflect normalized seasonal intensity, latest rate/value, or week-over-week change.</p>
-<p>Zooming controls geographic detail progressively: global/continental view renders high-resolution 1:50m country polygons (detaching distant overseas territories like French Guiana so camera focus stays clean), mid-zoom into the US reveals states and DC/PR, and deep zoom inside covered states reveals dissolved 95-region Flu MetroCast health service areas and NYC boroughs. Clicking any jurisdiction opens its forecast card with direct jumps into the workbench chart or its Place Briefing.</p>
-<p>When switching targets or locations across connected hubs, viz automatically maps semantic equivalents (for example <code>US</code> ↔ state FIPS ↔ MetroCast regions) and carries over dates within ±21 days and active visual settings.</p>` },
+      body: `<p>Click the place pill and choose <b>Globe</b> (or visit <code>#globe</code>) to browse every forecastable jurisdiction on an interactive orthographic 3D sphere. Colors reflect normalized seasonal intensity, latest rate/value, or period-over-period change.</p>
+<p>Zooming controls geographic detail progressively: global/continental view renders high-resolution 1:50m country polygons (detaching distant overseas territories like French Guiana so camera focus stays clean) covering Europe, China, Canada, the US, and DRC; mid-zoom reveals US states, DC/PR, Canadian provinces/Ontario regions, and DRC provinces/health zones; and deep zoom inside covered US states reveals dissolved 95-region Flu MetroCast health service areas and NYC boroughs. Single-location hubs (like national-only China ID) automatically hide the 2D Map tab. Clicking any jurisdiction opens its forecast card with direct jumps into the workbench chart or its Place Briefing.</p>
+<p>When switching targets or locations across connected hubs, viz automatically maps semantic equivalents (for example <code>US</code> ↔ state FIPS ↔ MetroCast regions, or Canada <code>on</code> ↔ Ontario <code>CA-ON</code>) and carries over dates within ±21 days and active visual settings.</p>` },
     { id: "trajectories", title: "Sample trajectories, CRPS & Energy score",
-      body: `<p>While quantiles capture marginal uncertainty week by week, <b>sample trajectories</b> preserve correlation across future weeks: whether a surge rises and peaks early or grows slowly later. Models submitting Hubverse <code>output_type = "sample"</code> trajectories appear in the <b>Trajectories</b> section below the chart.</p>
+      body: `<p>While quantiles capture marginal uncertainty week by week, <b>sample trajectories</b> preserve correlation across future weeks: whether a surge rises and peaks early or grows slowly later. Models submitting Hubverse <code>output_type = "sample"</code> trajectories appear in the <b>Trajectories</b> section below the chart, while sample-only hubs (such as DRC BDBV) also derive 23 marginal quantiles for the primary fan chart so fan bands stay clear without overlapping hairlines.</p>
 <p>Draw paths for one model (with optional second-model overlay, derived 50/80/95% ribbon, and aligned Peak Cloud), hover or click paths to pin individual sample IDs, and <b>drag vertically across any future week</b> to apply a conditioning gate showing peak timing and height conditional on paths passing through that window.</p>
 <p>Trajectories are scored two ways across the live season (both per location and pooled across all places in the <b>Sample Leaderboard</b>):</p>
 ${EQ("CRPS(F, y) = (1/M)·Σ<sub>i</sub> |x<sub>i</sub> − y| − (1/(2M²))·Σ<sub>i,j</sub> |x<sub>i</sub> − x<sub>j</sub>|", "ES(X, y) = (1/M)·Σ<sub>i</sub> ||X<sub>i</sub> − y||₂ − (1/(2M²))·Σ<sub>i,j</sub> ||X<sub>i</sub> − X<sub>j</sub>||₂")}
@@ -340,8 +339,16 @@ ${EQ("RPS = Σ<sub>k=1..K−1</sub> (F(k) − 1(y ≤ k))²", "Log loss = −ln 
       body: `<p>Combining models usually beats most of the models on their own, because their errors partly cancel. Select two or more models, then choose <b>Combine</b> in the Models picker: pick median or mean, and what to do when a member skipped a forecast. The preview shows how many forecasts the members share. The ensemble is saved and behaves like any other model, on the chart and in Scores.</p>
 <p>The combination is quantile averaging (Vincentization): for each task and level τ, ${F("q<sub>ens</sub>(τ) = median or mean of q<sub>m</sub>(τ)")} over members, then sorted so quantiles never cross. A task keeps only the levels every present member submitted. <b>Pool present</b> combines whoever forecast the task; <b>All or none</b> drops tasks where any member is missing. The median resists one wild member; the mean is smoother. FluSight's own ensemble is a median of designated models.</p>` },
     { id: "data-sources", title: "Data sources, syncing and warnings",
-      body: `<p>viz manages a multi-hub workspace: local hubs, <code>local-output/</code> runs, synthetic ensembles, and built-in public repositories (<b>FluSight</b>, <b>Flu MetroCast</b>, <b>COVID-19 Forecast Hub</b>, <b>RSV Forecast Hub</b>, <b>RespiCast Syndromic</b>, and <b>RespiCast COVID-19</b>). Open ⋯ → <b>Data sources</b> to connect hubs, enable/disable providers, or sync additional seasons.</p>
-<p>Every synced file is validated for schema drift, crossing quantiles, negative counts, unknown locations, and duplicate rows. External surveillance and genomic feeds for Briefings (CDC NWSS, CFA R<sub>t</sub>, NSSP, NREVSS, Delphi FluView, ECDC ERVISS, WHO FluNet, UKHSA, Nextstrain) cache locally as Parquet files under <code>briefings/</code> and refresh asynchronously on demand via <b>Refresh feeds</b>.</p>` },
+      body: `<p>viz manages a multi-hub workspace: local hubs, <code>local-output/</code> runs, synthetic ensembles, uploaded web folders, and all ten built-in public repositories (<b>CDC FluSight</b>, <b>Flu MetroCast</b>, <b>US COVID-19 Forecast Hub</b>, <b>US RSV Forecast Hub</b>, <b>RespiCast Syndromic</b> with 2023–24 Flu/ARI archives, <b>RespiCast COVID-19</b>, <b>China ID Forecast Hub</b>, <b>Canada RVDSS</b>, <b>Ontario Hospitalizations</b>, and <b>DRC BDBV Hub</b>). Open ⋯ → <b>Data sources</b> to connect hubs, enable/disable providers, sync additional seasons, or use <b>Download all</b> and the local <b>Auto-update daily</b> toggle.</p>
+<p>Every synced file is validated for schema drift, crossing quantiles, negative counts, unknown locations, and duplicate rows. External surveillance and outbreak feeds for Briefings (CDC NWSS, CFA R<sub>t</sub>, NSSP, NREVSS, Delphi FluView, ECDC ERVISS, WHO RespiMart FluNet, UKHSA, Nextstrain, OCHA HDX DRC Ebola, and WHO DON) cache locally as Parquet files under <code>briefings/</code> and refresh asynchronously on demand via <b>Refresh feeds</b>. See also ${L("web-workspaces", "Web uploads and saved workspaces")}.</p>` },
+    { id: "web-workspaces", title: "Web uploads and saved workspaces",
+      body: `<p>When hosted in web mode, public hubs sync automatically on a schedule so you can explore right away — and you can inspect your own local Hubverse folder via <b>Choose folder…</b> or drag-and-drop without modifying anything on disk.</p>
+<ul>
+<li><b>Browser-side packing:</b> Only valid Hubverse folders and allowlisted files (<code>hub-config/*.json</code>, <code>model-metadata/*.yml|.yaml|.json</code>, <code>model-output/</code>, <code>local-output/</code>, <code>target-data/</code>, and <code>auxiliary-data/</code>) are read, skipping dotfiles and noise like <code>.git/</code>, streamed as compressed <code>VZB1</code> archives with progress and <b>Cancel</b>.</li>
+<li><b>Size safety caps:</b> By default, uploads accept up to 100 MB compressed, 400 MB uncompressed, 2,500 files, and 64 KB per metadata file.</li>
+<li><b>30-min private sessions:</b> Anonymous uploads stay isolated to your browser session cookie, refresh their 30-minute idle timer automatically while in use, and clean up automatically on expiry or via <b>Remove</b>.</li>
+<li><b>Save to account:</b> Where single sign-on is enabled, signed-in users can save hubs persistently under their account quota; idle saved workspaces compress to archive storage after 24 hours and wake transparently the next time you open them.</li>
+</ul>` },
   ] },
 
   { title: "Reference", topics: [
@@ -358,7 +365,7 @@ const GLOSSARY = [
   ["Anatomy", "WIS split into dispersion, over- and underprediction.", "wis-anatomy"],
   ["As reported", "The target data as published on the round, before revisions.", "as-reported"],
   ["Baseline", "The plain reference forecast; relative scores divide by it.", "focus-baseline"],
-  ["Briefing", "Place-first multi-hub report combining ensemble outlooks with external surveillance.", "briefings"],
+  ["Briefing", "Place-first multi-hub report combining ensemble outlooks with external surveillance and outbreak feeds.", "briefings"],
   ["Brier score", "Mean squared probability error across discrete PMF categories.", "pmf"],
   ["Calibration", "Whether intervals contain the truth as often as they claim.", "coverage"],
   ["Combine", "Make an ensemble from the selected models.", "ensembles"],
@@ -374,9 +381,9 @@ const GLOSSARY = [
   ["FluSurv-NET", "Lab-confirmed flu hospitalizations per 100k in a surveillance network.", "surveillance"],
   ["Focus", "One model highlighted, with its misses marked.", "focus-baseline"],
   ["Forecast hub", "A shared repository of forecasts in one format.", "forecast-hubs"],
-  ["Globe", "Interactive 3D sphere covering US states, MetroCast HSAs, and Europe.", "globe"],
+  ["Globe", "Interactive 3D sphere covering US states, MetroCast HSAs, Europe, Canada, China, and DRC.", "globe"],
   ["Heatmap", "A grid of places, weeks, models or horizons, colored by a value or score.", "heatmap"],
-  ["Horizon", "How many weeks after the reference date a forecast is for.", "dates-horizons"],
+  ["Horizon", "How many weeks or months after the reference date a forecast is for.", "dates-horizons"],
   ["ILINet", "Outpatient visits for influenza-like illness, adjusted by lab positivity.", "surveillance"],
   ["Interval", "A range expected to contain the truth with a stated probability.", "intervals"],
   ["Log loss", "Negative natural log probability assigned to the realized category.", "pmf"],
@@ -386,9 +393,11 @@ const GLOSSARY = [
   ["Miss", "An observed week outside the focused model's interval.", "intervals"],
   ["MMWR week", "CDC's epidemiological week, Sunday to Saturday.", "past-seasons"],
   ["Mode hit", "Percentage of PMF forecasts whose highest-probability bin matched truth.", "pmf"],
+  ["Monthly target", "Target indexed in calendar months (such as China ID) rather than weekly steps.", "dates-horizons"],
   ["N", "The number of forecasts scored.", "sample-size"],
   ["NHSN", "CDC's network whose hospital reports are the target data.", "forecast-hubs"],
   ["NSSP", "The share of emergency department visits diagnosed as flu.", "surveillance"],
+  ["OCHA HDX", "Consolidated DRC Ministry of Health / INRB-UMIE Ebola situation report series.", "briefings"],
   ["Origin date", "Submission date shown on RespiCast rounds alongside the aligned reference date.", "dates-horizons"],
   ["Outcome", "Shows or hides what was observed after the data cutoff.", "intervals"],
   ["Overprediction", "The part of WIS from forecasts above the truth.", "wis-anatomy"],
@@ -400,20 +409,23 @@ const GLOSSARY = [
   ["Pool present", "Combine uses whichever members forecast a task.", "ensembles"],
   ["Provisional peak", "The highest week so far, which may still be beaten.", "peaks"],
   ["Quantile", "A value the outcome should fall below with a given probability.", "forecast-hubs"],
-  ["Reference date", "The week anchoring horizons in the chart.", "dates-horizons"],
+  ["Reference date", "The week or month anchoring horizons in the chart.", "dates-horizons"],
   ["Relative WIS", "WIS relative to the baseline over shared tasks; below 1 is better.", "relative-wis"],
   ["Revision", "A change to data that was already published.", "as-reported"],
-  ["Round", "One week's set of forecasts.", "forecast-hubs"],
+  ["Round", "One period's set of forecasts.", "forecast-hubs"],
   ["RPS", "Ranked probability score for ordered categories or peak weeks.", "pmf"],
+  ["Saved workspace", "Persistent account-backed uploaded hub in web mode (archived after idle timeout).", "web-workspaces"],
   ["Season week", "Week of the season, aligned so seasons line up.", "past-seasons"],
   ["Shared only", "Score only the forecasts every compared model made.", "shared-tasks"],
   ["Show all", "Draws the rest of the selection as grey medians.", "focus-baseline"],
   ["Small sample", "Fewer than 10 forecasts scored.", "sample-size"],
-  ["Target", "What is forecast, such as weekly flu admissions.", "forecast-hubs"],
+  ["Target", "What is forecast, such as weekly flu admissions or bed occupancy.", "forecast-hubs"],
   ["Task", "One round × place × horizon.", "forecast-hubs"],
   ["Trajectories", "Joint multi-week sample paths preserving temporal correlation.", "trajectories"],
   ["Underprediction", "The part of WIS from forecasts below the truth.", "wis-anatomy"],
   ["vs base", "Percent difference from the baseline's WIS on shared tasks.", "mae-width"],
+  ["VZB1", "Streaming gzipped binary Hubverse bundle format used by in-browser web uploads.", "web-workspaces"],
+  ["WHO DON", "World Health Organization Disease Outbreak News situation reports for DRC Ebola.", "briefings"],
   ["Width", "Mean width of the 95% interval (sharpness).", "mae-width"],
   ["Width rulers", "Each model's last-week intervals side by side.", "intervals"],
   ["Wins", "Rounds in which a model had the lowest WIS.", "scores"],

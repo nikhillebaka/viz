@@ -55,3 +55,15 @@
 .mp-row dd { margin: 0; text-align: right; font-family: var(--font-mono); font-size: var(--text-small); font-variant-numeric: tabular-nums; color: var(--ink-primary); }
 .mp-row dd small { display: block; margin-top: var(--space-2); font-size: var(--text-axis); color: var(--ink-tertiary); }
 .mp-row.is-quiet dd { color: var(--ink-tertiary); }
+
+@media (max-width: 960px) {
+  .mp-wrap { flex-direction: column; gap: var(--space-24); }
+  .mp-map { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--ink-faint) transparent; }
+  .mp-aside { max-width: 100%; min-width: 0; width: 100%; }
+}
+@media (max-width: 640px) {
+  .mp-grid { --tile: clamp(24px, calc((100vw - 32px - (var(--cols) - 1) * 4px) / var(--cols)), 44px); }
+  .mp-tile { padding: var(--space-4); }
+  .mp-val { font-size: 9px; }
+  .mp-legend { flex-wrap: wrap; }
+}

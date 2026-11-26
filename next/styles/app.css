@@ -107,7 +107,7 @@
 .dp-foot { display: flex; justify-content: flex-end; margin-top: var(--space-8); font-size: var(--text-small); }
 
 /* ---------- the page below the chart ---------- */
-.app-sections { position: relative; z-index: var(--z-chart); }
+.app-sections { position: relative; z-index: var(--z-chart); max-width: 1760px; margin-inline: auto; }
 .app-sec-nav {
   display: flex; align-items: baseline; gap: var(--space-20); flex-wrap: wrap;
   margin: var(--space-24) var(--space-24) 0;
@@ -201,4 +201,17 @@
   padding: var(--space-6) var(--space-8); border-radius: var(--radius-tag);
   background: var(--fill-field); font-family: var(--font-mono); font-size: var(--text-small);
   color: var(--ink-secondary); user-select: all;
+}
+
+/* ---------- responsive layout (strictly outside 1150-1760px laptop benchmark) ---------- */
+@media (max-height: 600px) {
+  .app-view { height: max(320px, calc(100svh - var(--peek))); }
+}
+@media (max-width: 600px) {
+  .app-sec-nav { margin: var(--space-16) var(--space-12) 0; gap: var(--space-12); }
+  .app-section { padding: 0 var(--space-12) var(--space-40); }
+}
+@media (max-width: 440px) {
+  .dp .c-float-body { overflow-x: auto; }
+  .dp-row .c-tile { width: var(--space-32); }
 }
